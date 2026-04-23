@@ -1,0 +1,10 @@
+* text=auto eol=lf
+
+scripts/*.sh text eol=lf diff=bash
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.pdf binary

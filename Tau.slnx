@@ -1,0 +1,18 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Tau.Agent/Tau.Agent.csproj" />
+    <Project Path="src/Tau.Ai/Tau.Ai.csproj" />
+    <Project Path="src/Tau.CodingAgent/Tau.CodingAgent.csproj" />
+    <Project Path="src/Tau.Mom/Tau.Mom.csproj" />
+    <Project Path="src/Tau.Pods/Tau.Pods.csproj" />
+    <Project Path="src/Tau.Tui/Tau.Tui.csproj" />
+    <Project Path="src/Tau.WebUi/Tau.WebUi.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Tau.Agent.Tests/Tau.Agent.Tests.csproj" />
+    <Project Path="tests/Tau.Ai.Tests/Tau.Ai.Tests.csproj" />
+    <Project Path="tests/Tau.CodingAgent.Tests/Tau.CodingAgent.Tests.csproj" />
+    <Project Path="tests/Tau.Pods.Tests/Tau.Pods.Tests.csproj" />
+    <Project Path="tests/Tau.Tui.Tests/Tau.Tui.Tests.csproj" />
+  </Folder>
+</Solution>

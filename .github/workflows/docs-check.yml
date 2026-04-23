@@ -1,0 +1,16 @@
+name: 文档检查
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  docs-check:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: 校验文档骨架
+        run: bash scripts/check-docs.sh

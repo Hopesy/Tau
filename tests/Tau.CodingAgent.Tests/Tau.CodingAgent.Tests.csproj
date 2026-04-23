@@ -1,0 +1,40 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" Version="6.0.4" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="Tau.CodingAgent">
+      <HintPath>..\..\src\Tau.CodingAgent\bin\$(Configuration)\$(TargetFramework)\Tau.CodingAgent.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="Tau.Ai">
+      <HintPath>..\..\src\Tau.Ai\bin\$(Configuration)\$(TargetFramework)\Tau.Ai.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="Tau.Agent">
+      <HintPath>..\..\src\Tau.Agent\bin\$(Configuration)\$(TargetFramework)\Tau.Agent.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="Tau.Tui">
+      <HintPath>..\..\src\Tau.Tui\bin\$(Configuration)\$(TargetFramework)\Tau.Tui.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>
