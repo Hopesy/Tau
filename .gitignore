@@ -3,6 +3,12 @@
 Thumbs.db
 .idea/
 .vscode/
+.vs/
+*.suo
+*.user
+*.userosscache
+*.rsuser
+*.sln.docstates
 
 # Logs and temp files
 *.log
@@ -31,6 +37,17 @@ target/
 bin/
 obj/
 .cache/
+artifacts/
+TestResults/
+output/
+
+# .NET local SDK / CLI caches
+.dotnet/
+.dotnet_cli/
+.nuget/
+packages/
+*.trx
+*.binlog
 
 # Python
 __pycache__/

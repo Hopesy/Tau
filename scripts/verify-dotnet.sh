@@ -5,6 +5,13 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${repo_root}"
 
+export DOTNET_CLI_HOME="${DOTNET_CLI_HOME:-${repo_root}/.dotnet}"
+export DOTNET_SKIP_FIRST_TIME_EXPERIENCE="${DOTNET_SKIP_FIRST_TIME_EXPERIENCE:-1}"
+export DOTNET_CLI_TELEMETRY_OPTOUT="${DOTNET_CLI_TELEMETRY_OPTOUT:-1}"
+export DOTNET_NOLOGO="${DOTNET_NOLOGO:-1}"
+
+mkdir -p "${DOTNET_CLI_HOME}"
+
 skip_restore=false
 
 for arg in "$@"; do
