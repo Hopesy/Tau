@@ -18,6 +18,9 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner
         _config = config;
     }
 
+    public IReadOnlyList<ChatMessage> Messages => _runtime.State.Messages;
+    public Model Model => _config.Model;
+
     public IAsyncEnumerable<AgentEvent> RunAsync(string input, CancellationToken cancellationToken = default)
     {
         _runtime.AddMessage(new UserMessage(input));
@@ -26,49 +29,49 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner
 
     public static RuntimeCodingAgentRunner CreateDefault()
     {
+        return Create();
+    }
+
+    public static RuntimeCodingAgentRunner Create(
+        string? providerId = null,
+        string? modelId = null,
+        IReadOnlyList<ChatMessage>? initialMessages = null)
+    {
         var registry = new ProviderRegistry();
         BuiltInProviders.RegisterAll(registry);
+
         var modelCatalog = new ModelCatalog();
-        var providerId = Environment.GetEnvironmentVariable("TAU_PROVIDER") ?? "openai";
-        var modelId = Environment.GetEnvironmentVariable("TAU_MODEL") ?? GetDefaultModelId(providerId);
-        var model = modelCatalog.GetModel(providerId, modelId);
+        var resolvedProvider = string.IsNullOrWhiteSpace(providerId)
+            ? (Environment.GetEnvironmentVariable("TAU_PROVIDER") ?? "openai")
+            : providerId.Trim();
+        var resolvedModel = string.IsNullOrWhiteSpace(modelId)
+            ? (Environment.GetEnvironmentVariable("TAU_MODEL") ?? GetDefaultModelId(resolvedProvider))
+            : modelId.Trim();
 
-        IAgentTool[] tools =
-        [
-            new ReadFileTool(),
-            new WriteFileTool(),
-            new EditFileTool(),
-            new ShellTool(),
-            new GlobTool(),
-            new GrepTool(),
-            new ListDirectoryTool()
-        ];
-
-        var systemPrompt = $"""
-            You are Tau, a coding assistant. You help users with software engineering tasks.
-
-            Working directory: {Directory.GetCurrentDirectory()}
-            Platform: {Environment.OSVersion}
-
-            Available tools: {string.Join(", ", tools.Select(t => t.Name))}
-
-            Use tools to explore the codebase, read files, make edits, and run commands.
-            Be concise. Think step by step.
-            """;
-
+        var model = modelCatalog.GetModel(resolvedProvider, resolvedModel);
+        var tools = CreateDefaultTools();
         var config = new AgentLoopConfig
         {
             Model = model,
             ProviderRegistry = registry,
             Tools = tools,
-            SystemPrompt = systemPrompt,
+            SystemPrompt = BuildSystemPrompt(tools),
             StreamOptions = new SimpleStreamOptions { MaxTokens = 16_384 }
         };
 
-        return new RuntimeCodingAgentRunner(new AgentRuntime(), config);
+        var runtime = new AgentRuntime();
+        if (initialMessages is not null)
+        {
+            foreach (var message in initialMessages)
+            {
+                runtime.AddMessage(message);
+            }
+        }
+
+        return new RuntimeCodingAgentRunner(runtime, config);
     }
 
-    private static string GetDefaultModelId(string providerId)
+    public static string GetDefaultModelId(string providerId)
     {
         return providerId.ToLowerInvariant() switch
         {
@@ -85,5 +88,34 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner
             "amazon-bedrock" => "us.anthropic.claude-opus-4-6-v1",
             _ => "gpt-5.4"
         };
+    }
+
+    private static IAgentTool[] CreateDefaultTools()
+    {
+        return
+        [
+            new ReadFileTool(),
+            new WriteFileTool(),
+            new EditFileTool(),
+            new ShellTool(),
+            new GlobTool(),
+            new GrepTool(),
+            new ListDirectoryTool()
+        ];
+    }
+
+    private static string BuildSystemPrompt(IReadOnlyList<IAgentTool> tools)
+    {
+        return $"""
+            You are Tau, a coding assistant. You help users with software engineering tasks.
+
+            Working directory: {Directory.GetCurrentDirectory()}
+            Platform: {Environment.OSVersion}
+
+            Available tools: {string.Join(", ", tools.Select(t => t.Name))}
+
+            Use tools to explore the codebase, read files, make edits, and run commands.
+            Be concise. Think step by step.
+            """;
     }
 }

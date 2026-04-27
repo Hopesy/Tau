@@ -183,4 +183,18 @@ public sealed class GoogleProvider : IStreamProvider
 [System.Text.Json.Serialization.JsonSourceGenerationOptions(
     DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
 [System.Text.Json.Serialization.JsonSerializable(typeof(Dictionary<string, object>))]
+[System.Text.Json.Serialization.JsonSerializable(typeof(Dictionary<string, string>))]
+[System.Text.Json.Serialization.JsonSerializable(typeof(List<object>))]
+[System.Text.Json.Serialization.JsonSerializable(typeof(JsonElement))]
+[System.Text.Json.Serialization.JsonSerializable(typeof(string))]
+[System.Text.Json.Serialization.JsonSerializable(typeof(bool))]
+[System.Text.Json.Serialization.JsonSerializable(typeof(object))]
+[System.Text.Json.Serialization.JsonSerializable(typeof(int))]
+[System.Text.Json.Serialization.JsonSerializable(typeof(int?))]
+[System.Text.Json.Serialization.JsonSerializable(typeof(float))]
+[System.Text.Json.Serialization.JsonSerializable(typeof(float?))]
+[System.Text.Json.Serialization.JsonSerializable(typeof(decimal))]
+[System.Text.Json.Serialization.JsonSerializable(typeof(decimal?))]
+[System.Text.Json.Serialization.JsonSerializable(typeof(TimeSpan))]
+[System.Text.Json.Serialization.JsonSerializable(typeof(TimeSpan?))]
 internal partial class GoogleRequestJsonContext : System.Text.Json.Serialization.JsonSerializerContext;

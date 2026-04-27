@@ -1,0 +1,10 @@
+{
+  "prompt": "hello from tau mom structured",
+  "provider": "openai",
+  "model": "gpt-5.4",
+  "workingDirectory": ".",
+  "metadata": {
+    "channel": "smoke",
+    "requestId": "smoke-001"
+  }
+}

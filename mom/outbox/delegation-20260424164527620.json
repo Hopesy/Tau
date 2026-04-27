@@ -1,0 +1,16 @@
+{
+  "requestFile": "delegation-20260424164527620.json",
+  "prompt": "hello from tau mom structured",
+  "response": "",
+  "toolEvents": [],
+  "error": "\u4EE5\u4E00\u79CD\u8BBF\u95EE\u6743\u9650\u4E0D\u5141\u8BB8\u7684\u65B9\u5F0F\u505A\u4E86\u4E00\u4E2A\u8BBF\u95EE\u5957\u63A5\u5B57\u7684\u5C1D\u8BD5\u3002 (api.openai.com:443)",
+  "provider": "openai",
+  "model": "gpt-5.4",
+  "workingDirectory": "C:\\Users\\zhouh\\Desktop\\Tau",
+  "metadata": {
+    "channel": "smoke",
+    "requestId": "smoke-001"
+  },
+  "processedAt": "2026-04-24T08:45:28.7732712+00:00",
+  "duration": "00:00:00.1243367"
+}

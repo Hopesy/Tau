@@ -1,0 +1,9 @@
+{
+  "requestFile": "sample.txt",
+  "prompt": "hello from tau mom",
+  "response": "",
+  "toolEvents": [],
+  "error": "Unable to cast object of type \u0027System.Collections.Generic.List\u00601[System.Collections.Generic.Dictionary\u00602[System.String,System.Object]]\u0027 to type \u0027System.Collections.Generic.List\u00601[System.Object]\u0027.",
+  "processedAt": "2026-04-24T05:57:23.661728+00:00",
+  "duration": "00:00:00.0017265"
+}

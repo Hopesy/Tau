@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
@@ -33,6 +33,10 @@
     </Reference>
     <Reference Include="Tau.Tui">
       <HintPath>..\..\src\Tau.Tui\bin\$(Configuration)\$(TargetFramework)\Tau.Tui.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="Tau.WebUi">
+      <HintPath>..\..\src\Tau.WebUi\bin\$(Configuration)\$(TargetFramework)\Tau.WebUi.dll</HintPath>
       <Private>true</Private>
     </Reference>
   </ItemGroup>

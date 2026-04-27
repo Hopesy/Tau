@@ -73,16 +73,22 @@ internal static class OpenAiMessageConverter
 
         if (toolCalls.Count > 0)
         {
-            result["tool_calls"] = toolCalls.Select(tc => new Dictionary<string, object>
+            var serializedToolCalls = new List<object>();
+            foreach (var tc in toolCalls)
             {
-                ["id"] = tc.Id,
-                ["type"] = "function",
-                ["function"] = new Dictionary<string, string>
+                serializedToolCalls.Add(new Dictionary<string, object>
                 {
-                    ["name"] = tc.Name,
-                    ["arguments"] = tc.Arguments
-                }
-            }).ToList();
+                    ["id"] = tc.Id,
+                    ["type"] = "function",
+                    ["function"] = new Dictionary<string, string>
+                    {
+                        ["name"] = tc.Name,
+                        ["arguments"] = tc.Arguments
+                    }
+                });
+            }
+
+            result["tool_calls"] = serializedToolCalls;
         }
 
         return result;
@@ -101,16 +107,21 @@ internal static class OpenAiMessageConverter
 
     public static JsonElement ConvertTools(IReadOnlyList<Tool> tools)
     {
-        var array = tools.Select(t => new Dictionary<string, object>
+        var array = new List<object>();
+        foreach (var tool in tools)
         {
-            ["type"] = "function",
-            ["function"] = new Dictionary<string, object>
+            array.Add(new Dictionary<string, object>
             {
-                ["name"] = t.Name,
-                ["description"] = t.Description,
-                ["parameters"] = t.ParameterSchema
-            }
-        }).ToList();
+                ["type"] = "function",
+                ["function"] = new Dictionary<string, object>
+                {
+                    ["name"] = tool.Name,
+                    ["description"] = tool.Description,
+                    ["parameters"] = tool.ParameterSchema
+                }
+            });
+        }
+
         return JsonSerializer.SerializeToElement(array, OpenAiJsonContext.Default.ListObject);
     }
 }
