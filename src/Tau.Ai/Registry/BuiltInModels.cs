@@ -32,15 +32,27 @@ public static class BuiltInModels
             },
             ["openai-codex"] = new Dictionary<string, Model>(StringComparer.OrdinalIgnoreCase)
             {
-                ["gpt-5-codex"] = Create("gpt-5-codex", "GPT-5 Codex", "openai-codex-responses", "openai-codex", "https://api.openai.com/v1", true, 400_000, 32_768, 1.25m, 10.0m),
-                ["gpt-5.2-codex"] = Create("gpt-5.2-codex", "GPT-5.2 Codex", "openai-codex-responses", "openai-codex", "https://api.openai.com/v1", true, 400_000, 32_768, 1.25m, 10.0m),
-                ["gpt-5.4"] = Create("gpt-5.4", "GPT-5.4 (Codex)", "openai-codex-responses", "openai-codex", "https://api.openai.com/v1", true, 400_000, 128_000, 1.25m, 10.0m)
+                ["gpt-5-codex"] = Create("gpt-5-codex", "GPT-5 Codex", "openai-codex-responses", "openai-codex", "https://chatgpt.com/backend-api", true, 400_000, 32_768, 1.25m, 10.0m),
+                ["gpt-5.2-codex"] = Create("gpt-5.2-codex", "GPT-5.2 Codex", "openai-codex-responses", "openai-codex", "https://chatgpt.com/backend-api", true, 400_000, 32_768, 1.25m, 10.0m),
+                ["gpt-5.4"] = Create("gpt-5.4", "GPT-5.4 (Codex)", "openai-codex-responses", "openai-codex", "https://chatgpt.com/backend-api", true, 400_000, 128_000, 1.25m, 10.0m)
             },
             ["github-copilot"] = new Dictionary<string, Model>(StringComparer.OrdinalIgnoreCase)
             {
-                ["gpt-4o"] = Create("gpt-4o", "GPT-4o (GitHub Copilot)", "openai-responses", "github-copilot", "https://api.individual.githubcopilot.com", false, 128_000, 16_384, 0m, 0m),
-                ["claude-sonnet-4"] = Create("claude-sonnet-4", "Claude Sonnet 4 (GitHub Copilot)", "openai-responses", "github-copilot", "https://api.individual.githubcopilot.com", true, 200_000, 8_192, 0m, 0m),
-                ["gpt-5.3-codex"] = Create("gpt-5.3-codex", "GPT-5.3 Codex (GitHub Copilot)", "openai-responses", "github-copilot", "https://api.individual.githubcopilot.com", true, 400_000, 32_768, 0m, 0m)
+                ["gpt-4o"] = Create("gpt-4o", "GPT-4o (GitHub Copilot)", "openai-responses", "github-copilot", "https://api.individual.githubcopilot.com", false, 128_000, 16_384, 0m, 0m) with
+                {
+                    Headers = Tau.Ai.Providers.GitHubCopilotHeaders.CreateStaticHeaders(),
+                    InputModalities = ["text", "image"]
+                },
+                ["claude-sonnet-4"] = Create("claude-sonnet-4", "Claude Sonnet 4 (GitHub Copilot)", "openai-responses", "github-copilot", "https://api.individual.githubcopilot.com", true, 200_000, 8_192, 0m, 0m) with
+                {
+                    Headers = Tau.Ai.Providers.GitHubCopilotHeaders.CreateStaticHeaders(),
+                    InputModalities = ["text", "image"]
+                },
+                ["gpt-5.3-codex"] = Create("gpt-5.3-codex", "GPT-5.3 Codex (GitHub Copilot)", "openai-responses", "github-copilot", "https://api.individual.githubcopilot.com", true, 400_000, 32_768, 0m, 0m) with
+                {
+                    Headers = Tau.Ai.Providers.GitHubCopilotHeaders.CreateStaticHeaders(),
+                    InputModalities = ["text", "image"]
+                }
             },
             ["mistral"] = new Dictionary<string, Model>(StringComparer.OrdinalIgnoreCase)
             {
@@ -60,8 +72,8 @@ public static class BuiltInModels
             },
             ["google-antigravity"] = new Dictionary<string, Model>(StringComparer.OrdinalIgnoreCase)
             {
-                ["gemini-2.5-pro"] = Create("gemini-2.5-pro", "Gemini 2.5 Pro (Antigravity)", "google-gemini-cli", "google-antigravity", "https://cloudcode-pa.googleapis.com", true, 1_048_576, 65_536, 0m, 0m),
-                ["gemini-3.1-pro-high"] = Create("gemini-3.1-pro-high", "Gemini 3.1 Pro High (Antigravity)", "google-gemini-cli", "google-antigravity", "https://cloudcode-pa.googleapis.com", true, 1_048_576, 65_536, 0m, 0m)
+                ["gemini-2.5-pro"] = Create("gemini-2.5-pro", "Gemini 2.5 Pro (Antigravity)", "google-gemini-cli", "google-antigravity", string.Empty, true, 1_048_576, 65_536, 0m, 0m),
+                ["gemini-3.1-pro-high"] = Create("gemini-3.1-pro-high", "Gemini 3.1 Pro High (Antigravity)", "google-gemini-cli", "google-antigravity", string.Empty, true, 1_048_576, 65_536, 0m, 0m)
             },
             ["amazon-bedrock"] = new Dictionary<string, Model>(StringComparer.OrdinalIgnoreCase)
             {

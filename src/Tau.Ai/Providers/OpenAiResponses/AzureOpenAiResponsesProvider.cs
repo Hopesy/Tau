@@ -1,0 +1,266 @@
+using System.Net.Http.Headers;
+using System.Text;
+using System.Text.Json;
+using Tau.Ai.Auth;
+using Tau.Ai.Streaming;
+
+namespace Tau.Ai.Providers.OpenAiResponses;
+
+public sealed class AzureOpenAiResponsesProvider : IStreamProvider
+{
+    private const string DefaultAzureApiVersion = "v1";
+    private readonly HttpClient _httpClient;
+
+    public AzureOpenAiResponsesProvider(HttpClient? httpClient = null)
+    {
+        _httpClient = httpClient ?? new HttpClient();
+    }
+
+    public string Api => "azure-openai-responses";
+
+    public AssistantMessageStream Stream(Model model, LlmContext context, StreamOptions options)
+    {
+        var stream = new AssistantMessageStream();
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await StreamInternalAsync(model, context, options, stream).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                stream.Push(new ErrorEvent(ex.Message));
+            }
+        });
+        return stream;
+    }
+
+    public AssistantMessageStream StreamSimple(Model model, LlmContext context, SimpleStreamOptions options)
+    {
+        var reasoningEffort = OpenAiResponsesShared.MapReasoningEffort(options.Reasoning, model);
+        var azureOptions = new AzureOpenAiResponsesOptions
+        {
+            Temperature = options.Temperature,
+            MaxTokens = options.MaxTokens ?? model.MaxOutputTokens,
+            TopP = options.TopP,
+            ApiKey = options.ApiKey,
+            CacheRetention = options.CacheRetention,
+            SessionId = options.SessionId,
+            Headers = options.Headers,
+            MaxRetryDelay = options.MaxRetryDelay,
+            Metadata = options.Metadata,
+            ReasoningEffort = reasoningEffort
+        };
+        return Stream(model, context, azureOptions);
+    }
+
+    private async Task StreamInternalAsync(
+        Model model,
+        LlmContext context,
+        StreamOptions options,
+        AssistantMessageStream stream)
+    {
+        var azureOptions = options as AzureOpenAiResponsesOptions;
+        var deploymentName = ResolveDeploymentName(model, azureOptions);
+        var config = ResolveAzureConfig(model, azureOptions);
+        var url = $"{config.BaseUrl}/responses?api-version={Uri.EscapeDataString(config.ApiVersion)}";
+        var body = BuildRequestBody(model, context, options, deploymentName);
+        var json = JsonSerializer.Serialize(body, OpenAiResponsesJsonContext.Default.DictionaryStringObject);
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, url)
+        {
+            Content = new StringContent(json, Encoding.UTF8, "application/json")
+        };
+        ApplyAuthHeader(request, ResolveApiKey(options.ApiKey));
+        ApplyHeaders(request, model.Headers);
+        ApplyHeaders(request, options.Headers);
+        request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
+
+        using var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead).ConfigureAwait(false);
+        if (!response.IsSuccessStatusCode)
+        {
+            var errorBody = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+            stream.Push(new ErrorEvent($"{Api} error {(int)response.StatusCode}: {errorBody}"));
+            return;
+        }
+
+        var partial = new AssistantMessage
+        {
+            Api = Api,
+            Provider = model.Provider,
+            Model = model.Id,
+            Content = []
+        };
+        stream.Push(new StartEvent(partial));
+
+        await using var responseStream = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
+        await OpenAiResponsesShared.ProcessResponsesStreamAsync(responseStream, partial, stream).ConfigureAwait(false);
+    }
+
+    private static Dictionary<string, object> BuildRequestBody(
+        Model model,
+        LlmContext context,
+        StreamOptions options,
+        string deploymentName)
+    {
+        var body = new Dictionary<string, object>
+        {
+            ["model"] = deploymentName,
+            ["input"] = OpenAiResponsesShared.ConvertResponsesMessages(model, context),
+            ["stream"] = true
+        };
+
+        if (options.MaxTokens.HasValue)
+        {
+            body["max_output_tokens"] = options.MaxTokens.Value;
+        }
+
+        if (options.Temperature.HasValue)
+        {
+            body["temperature"] = options.Temperature.Value;
+        }
+
+        if (options.TopP.HasValue)
+        {
+            body["top_p"] = options.TopP.Value;
+        }
+
+        if (!string.IsNullOrWhiteSpace(options.SessionId))
+        {
+            body["prompt_cache_key"] = options.SessionId!;
+        }
+
+        var tools = OpenAiResponsesShared.ConvertResponsesTools(context.Tools);
+        if (tools.Count > 0)
+        {
+            body["tools"] = tools;
+        }
+
+        if (model.Reasoning)
+        {
+            AddReasoning(body, options as AzureOpenAiResponsesOptions);
+        }
+
+        return body;
+    }
+
+    private static void AddReasoning(Dictionary<string, object> body, AzureOpenAiResponsesOptions? options)
+    {
+        if (!string.IsNullOrWhiteSpace(options?.ReasoningEffort) ||
+            !string.IsNullOrWhiteSpace(options?.ReasoningSummary))
+        {
+            body["reasoning"] = new Dictionary<string, object>
+            {
+                ["effort"] = string.IsNullOrWhiteSpace(options?.ReasoningEffort) ? "medium" : options!.ReasoningEffort!,
+                ["summary"] = string.IsNullOrWhiteSpace(options?.ReasoningSummary) ? "auto" : options!.ReasoningSummary!
+            };
+            body["include"] = new List<object> { "reasoning.encrypted_content" };
+            return;
+        }
+
+        body["reasoning"] = new Dictionary<string, object> { ["effort"] = "none" };
+    }
+
+    private static AzureConfig ResolveAzureConfig(Model model, AzureOpenAiResponsesOptions? options)
+    {
+        var apiVersion = FirstNonEmpty(
+            options?.AzureApiVersion,
+            Environment.GetEnvironmentVariable("AZURE_OPENAI_API_VERSION"),
+            DefaultAzureApiVersion)!;
+
+        var baseUrl = FirstNonEmpty(
+            options?.AzureBaseUrl,
+            Environment.GetEnvironmentVariable("AZURE_OPENAI_BASE_URL"));
+        var resourceName = FirstNonEmpty(
+            options?.AzureResourceName,
+            Environment.GetEnvironmentVariable("AZURE_OPENAI_RESOURCE_NAME"));
+
+        if (string.IsNullOrWhiteSpace(baseUrl) && !string.IsNullOrWhiteSpace(resourceName))
+        {
+            baseUrl = $"https://{resourceName}.openai.azure.com/openai/v1";
+        }
+
+        if (string.IsNullOrWhiteSpace(baseUrl))
+        {
+            baseUrl = model.BaseUrl;
+        }
+
+        if (string.IsNullOrWhiteSpace(baseUrl))
+        {
+            throw new InvalidOperationException(
+                "Azure OpenAI base URL is required. Set AZURE_OPENAI_BASE_URL or AZURE_OPENAI_RESOURCE_NAME, or pass AzureBaseUrl, AzureResourceName, or model.BaseUrl.");
+        }
+
+        return new AzureConfig(baseUrl.TrimEnd('/'), apiVersion);
+    }
+
+    private static string ResolveDeploymentName(Model model, AzureOpenAiResponsesOptions? options)
+    {
+        if (!string.IsNullOrWhiteSpace(options?.AzureDeploymentName))
+        {
+            return options.AzureDeploymentName!;
+        }
+
+        var map = ParseDeploymentNameMap(Environment.GetEnvironmentVariable("AZURE_OPENAI_DEPLOYMENT_NAME_MAP"));
+        return map.TryGetValue(model.Id, out var deploymentName) ? deploymentName : model.Id;
+    }
+
+    private static Dictionary<string, string> ParseDeploymentNameMap(string? value)
+    {
+        var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return map;
+        }
+
+        foreach (var entry in value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var parts = entry.Split('=', 2, StringSplitOptions.TrimEntries);
+            if (parts.Length != 2 ||
+                string.IsNullOrWhiteSpace(parts[0]) ||
+                string.IsNullOrWhiteSpace(parts[1]))
+            {
+                continue;
+            }
+
+            map[parts[0]] = parts[1];
+        }
+
+        return map;
+    }
+
+    private static string? ResolveApiKey(string? apiKey) =>
+        string.IsNullOrWhiteSpace(apiKey)
+            ? Environment.GetEnvironmentVariable("AZURE_OPENAI_API_KEY")
+            : apiKey;
+
+    private static void ApplyAuthHeader(HttpRequestMessage request, string? apiKey)
+    {
+        if (string.IsNullOrWhiteSpace(apiKey) || EnvironmentApiKeyResolver.IsAuthenticatedMarker(apiKey))
+        {
+            throw new InvalidOperationException(
+                "Azure OpenAI API key is required. Set AZURE_OPENAI_API_KEY environment variable or pass it as an argument.");
+        }
+
+        request.Headers.TryAddWithoutValidation("api-key", apiKey);
+    }
+
+    private static void ApplyHeaders(HttpRequestMessage request, IDictionary<string, string>? headers)
+    {
+        if (headers is null)
+        {
+            return;
+        }
+
+        foreach (var (key, value) in headers)
+        {
+            request.Headers.Remove(key);
+            request.Headers.TryAddWithoutValidation(key, value);
+        }
+    }
+
+    private static string? FirstNonEmpty(params string?[] values) =>
+        values.FirstOrDefault(value => !string.IsNullOrWhiteSpace(value))?.Trim();
+
+    private sealed record AzureConfig(string BaseUrl, string ApiVersion);
+}

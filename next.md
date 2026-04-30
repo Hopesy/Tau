@@ -8,11 +8,15 @@
 
 #### Provider / API fidelity
 
-- [ ] `Amazon Bedrock` 真实实现 SigV4 / bearer token 调用，而不是当前 placeholder
-- [ ] `openai-responses` 与 `openai-codex-responses` 提高协议保真度，补齐和上游更一致的 payload / stream 语义
-- [ ] `Mistral` 从 OpenAI-compatible 过渡到更接近原生 conversations 行为
-- [ ] `Google Vertex` 从 API key 模式扩到真正 ADC token exchange
-- [ ] `Google Gemini CLI / Antigravity` 从当前简化版凭证载荷扩到更完整的请求/响应细节
+- [x] `Amazon Bedrock` 真实实现 SigV4 / bearer token / shared credentials profile 调用，不再返回 placeholder
+- [x] `openai-responses` 与 `openai-codex-responses` 提高协议保真度，补齐和上游更一致的 payload / stream 语义（SSE 路径）
+- [x] `Mistral` 从 OpenAI-compatible 过渡到更接近原生 conversations 行为
+- [x] `Google Vertex` 从 API key 模式扩到真正 ADC token exchange
+- [x] `Google Gemini CLI / Antigravity` 从当前简化版凭证载荷扩到更完整的请求/响应细节
+- [x] Codex WebSocket transport / 会话级 socket 缓存
+- [x] OpenAI Responses service-tier cost / pricing multiplier
+- [x] GitHub Copilot dynamic headers / vision behavior 的完整 Responses 路径
+- [x] Azure dedicated `azure-openai-responses` provider，不再继续走 OpenAI-compatible 兜底
 
 #### Model registry / generated models
 
@@ -34,6 +38,7 @@
 - [ ] auth.json schema 明文化
 - [ ] secret 持久化边界和脱敏规则
 - [ ] provider-specific headers / dynamic auth header 支持
+- [ ] Bedrock AWS SSO / AssumeRole / credential_process / IMDS / ECS / web identity credential chain
 - [ ] 自定义 provider / custom model 配置入口
 
 ### Tau.CodingAgent
@@ -91,7 +96,7 @@
 
 - [ ] release 产物改为真实 Tau 可执行产物
 - [ ] solution build 的环境异常诊断文档化
-- [ ] provider e2e 测试
+- [ ] provider e2e 测试（当前 Bedrock 已有 StubHandler 级 bearer/SigV4/shared profile/eventstream 回归，Vertex 已有 ADC token/SSE 回归，Gemini CLI/Antigravity 已有 headers/fallback/retry/empty-stream 回归，仍缺真实云端 e2e）
 - [ ] coding-agent 默认路径的更高层回归测试
 - [ ] 可观测性：provider 调用、auth、tool execution、session / delegation / pod probe 的最小日志
 - [ ] `scripts/verify-dotnet.sh` 对运行态 smoke 的进一步自动化

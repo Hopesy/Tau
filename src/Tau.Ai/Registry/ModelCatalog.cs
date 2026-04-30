@@ -85,11 +85,35 @@ public sealed class ModelCatalog
             return default;
         }
 
-        return new UsageCost(
+        var cost = new UsageCost(
             Input: usage.InputTokens / 1_000_000m * model.Cost.Value.InputPerMillion,
             Output: usage.OutputTokens / 1_000_000m * model.Cost.Value.OutputPerMillion,
             CacheRead: usage.CacheReadTokens.GetValueOrDefault() / 1_000_000m * model.Cost.Value.CacheReadPerMillion.GetValueOrDefault(),
             CacheWrite: usage.CacheWriteTokens.GetValueOrDefault() / 1_000_000m * model.Cost.Value.CacheWritePerMillion.GetValueOrDefault());
+        return ApplyServiceTierMultiplier(cost, usage.ServiceTier);
+    }
+
+    public static UsageCost CalculateCost(Model model, Usage usage, string? serviceTier) =>
+        CalculateCost(model, usage with { ServiceTier = serviceTier });
+
+    public static decimal GetServiceTierCostMultiplier(string? serviceTier) =>
+        serviceTier?.Trim().ToLowerInvariant() switch
+        {
+            "flex" => 0.5m,
+            "priority" => 2m,
+            _ => 1m
+        };
+
+    private static UsageCost ApplyServiceTierMultiplier(UsageCost cost, string? serviceTier)
+    {
+        var multiplier = GetServiceTierCostMultiplier(serviceTier);
+        return multiplier == 1m
+            ? cost
+            : new UsageCost(
+                Input: cost.Input * multiplier,
+                Output: cost.Output * multiplier,
+                CacheRead: cost.CacheRead * multiplier,
+                CacheWrite: cost.CacheWrite * multiplier);
     }
 
     public static bool SupportsXhigh(Model model)

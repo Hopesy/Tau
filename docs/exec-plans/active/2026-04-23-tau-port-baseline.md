@@ -159,6 +159,15 @@
 - [x] `Tau.Ai` 第一轮 provider / auth / registry 收口
 - [x] `Tau.WebUi / Tau.Mom / Tau.Pods` 第一层真实产品切片
 - [x] `Tau.WebUi` 第二层：持久化 session + provider/model 选择 + runtime history rehydrate
+- [x] `Tau.Ai` OpenAI Responses / Codex Responses 专用 SSE provider
+- [x] `Tau.Ai` Mistral 专用 provider
+- [x] `Tau.Ai` Bedrock ConverseStream provider（bearer / SigV4 / shared profile / binary eventstream）
+- [x] `Tau.Ai` Google Vertex ADC token exchange（service account / authorized user）
+- [x] `Tau.Ai` Google Gemini CLI / Antigravity provider fidelity（headers / fallback / retry / empty-stream）
+- [x] `Tau.Ai` Azure OpenAI Responses 专用 provider（base URL/resource/deployment/api-version/api-key）
+- [x] `Tau.Ai` OpenAI Codex Responses WebSocket transport（WebSocket/auto / session socket cache）
+- [x] `Tau.Ai` OpenAI Responses service-tier pricing multiplier（flex/priority cost multiplier / Codex default->requested tier）
+- [x] `Tau.Ai` GitHub Copilot Responses 动态 headers / vision / tool-result image payload
 - [ ] `Tau.WebUi` 流式 UI / richer rendering / attachment
 - [ ] `Tau.Mom` Slack / workspace / sandbox / delegation semantics
 - [ ] `Tau.Pods` SSH / lifecycle / model management
@@ -173,3 +182,12 @@
 - 2026-04-24：决定在 `Tau.WebUi` 内引入持久化 session 与 provider/model 选择，而不是继续依赖全局 `TAU_PROVIDER / TAU_MODEL`。原因是 Web 宿主必须支持会话级配置，不应该把全局环境变量当成 session state。
 - 2026-04-24：决定把 `RuntimeCodingAgentRunner` 提升为显式 `Create(provider, model, history)` 工厂，同时保留 `CreateDefault()`。原因是 CodingAgent、WebUi、Mom 都需要共享同一 runtime 内核，但宿主配置边界不同。
 - 2026-04-24：决定继续保留 `HintPath` workaround，不在本轮产品能力改动里顺手收引用结构。原因是当前 metaproj / workload resolver 异常仍未解除，强行收口风险高于收益。
+
+- 2026-04-29：决定把 Bedrock 单独收口为专用 ConverseStream provider，而不是继续保留 placeholder 或引入 AWS SDK。原因是 Tau.Ai 当前坚持零外部依赖，最小可验证闭环是 HttpClient + SigV4 + AWS event stream parser，并用 StubHandler 固定 bearer/SigV4/body/event 翻译行为。
+- 2026-04-30：决定在不引入 AWS SDK 的前提下补最小 shared credentials/profile 读取。原因是 Bedrock 本地使用高概率依赖 `AWS_PROFILE`，静态 profile 文件解析足以覆盖常见开发路径；SSO、AssumeRole、credential_process、IMDS/ECS/web identity 继续作为后续 credential chain 任务。
+- 2026-04-30：决定把 Vertex ADC 收口为 Tau.Ai 内部最小 resolver，而不是引入 Google auth SDK。原因是当前 provider 层保持 HttpClient + 零 provider SDK 依赖，先覆盖 service account JWT bearer 与 authorized user refresh token 两条常见 ADC 路径即可，external_account/impersonation 留后续 auth chain 切片。
+- 2026-04-30：决定按上游 Gemini CLI provider 做窄范围请求保真移植：补 headers、Antigravity fallback、retry delay、empty SSE retry 与 Claude thinking beta header；OAuth login、image/tool multimodal routing 和 generated model 全量同步继续留作后续切片。
+- 2026-04-30：决定把 `azure-openai-responses` 从 OpenAI-compatible fallback 拆为专用 Responses provider。原因是 Azure Responses 请求使用 `input` 与 deployment name，不应继续走 chat-completions `messages` 语义；本轮继续保持 HttpClient + source-gen JSON，不引入 Azure/OpenAI SDK。
+- 2026-04-30：决定把 Codex WebSocket 先做成可测试 transport seam，而不是直接绑定真实 ChatGPT e2e。原因是当前迁移目标是 provider 协议保真与本地回归闭环；`ClientWebSocket` 默认实现和 Fake WebSocket 测试能先固定 URL/header/frame/session reuse 语义，真实服务漂移留给后续 e2e。
+- 2026-04-30：决定把 Responses service-tier 的 effective tier 存在 `Usage` 上，并在 `ModelCatalog.CalculateCost` 统一应用 `flex/priority` 倍率。原因是 Tau 当前把 usage 事实与 cost 计算分层，provider 不应直接写入成本；Codex `default` -> requested tier 的特殊规则也应作为 usage 归一事实进入后续计算。
+- 2026-04-30：决定把 GitHub Copilot 动态 headers 抽成共享 helper，并在 Responses shared converter 层补 tool-result 图片编码。原因是 `X-Initiator` / `Copilot-Vision-Request` 不是某个单一 request body 字段，而是基于上下文的 provider 语义；图片 tool-result 也属于 Responses message conversion 的共享事实，后续其他 Copilot/OpenAI 路径可直接复用。

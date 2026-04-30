@@ -1,8 +1,9 @@
 using Tau.Ai.Providers.Anthropic;
 using Tau.Ai.Providers.Bedrock;
 using Tau.Ai.Providers.Google;
-using Tau.Ai.Providers.OpenAiCompat;
+using Tau.Ai.Providers.Mistral;
 using Tau.Ai.Providers.OpenAi;
+using Tau.Ai.Providers.OpenAiResponses;
 
 namespace Tau.Ai.Providers;
 
@@ -14,10 +15,10 @@ public static class BuiltInProviders
     public static void RegisterAll(ProviderRegistry registry)
     {
         registry.Register("openai-chat-completions", () => new OpenAiProvider(), sourceId: "builtin");
-        registry.Register("openai-responses", () => new OpenAiCompatibleProvider("openai-responses", "https://api.openai.com/v1"), sourceId: "builtin");
-        registry.Register("openai-codex-responses", () => new OpenAiCompatibleProvider("openai-codex-responses", "https://api.openai.com/v1"), sourceId: "builtin");
-        registry.Register("azure-openai-responses", () => new OpenAiCompatibleProvider("azure-openai-responses", ResolveAzureBaseUrl(), authHeaderName: "api-key", authHeaderPrefix: null), sourceId: "builtin");
-        registry.Register("mistral-conversations", () => new OpenAiCompatibleProvider("mistral-conversations", "https://api.mistral.ai/v1"), sourceId: "builtin");
+        registry.Register("openai-responses", () => new OpenAiResponsesProvider(), sourceId: "builtin");
+        registry.Register("openai-codex-responses", () => new OpenAiCodexResponsesProvider(), sourceId: "builtin");
+        registry.Register("azure-openai-responses", () => new AzureOpenAiResponsesProvider(), sourceId: "builtin");
+        registry.Register("mistral-conversations", () => new MistralProvider(), sourceId: "builtin");
         registry.Register("anthropic-messages", () => new AnthropicProvider(), sourceId: "builtin");
         registry.Register("google-generative-language", () => new GoogleProvider(), sourceId: "builtin");
         registry.Register("google-vertex", () => new GoogleVertexProvider(), sourceId: "builtin");
@@ -40,17 +41,4 @@ public static class BuiltInProviders
         registry.Register("google-generative-language", () => new GoogleProvider(httpClient), sourceId: "builtin");
     }
 
-    private static string ResolveAzureBaseUrl()
-    {
-        var configured = Environment.GetEnvironmentVariable("AZURE_OPENAI_BASE_URL");
-        if (!string.IsNullOrWhiteSpace(configured))
-        {
-            return configured.TrimEnd('/');
-        }
-
-        var resourceName = Environment.GetEnvironmentVariable("AZURE_OPENAI_RESOURCE_NAME");
-        return !string.IsNullOrWhiteSpace(resourceName)
-            ? $"https://{resourceName}.openai.azure.com/openai/v1"
-            : string.Empty;
-    }
 }

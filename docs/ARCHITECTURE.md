@@ -72,12 +72,27 @@ tests/
 - built-in model catalog
 - provider auth resolver / env auth / auth.json
 - OpenAI / Anthropic / Google 主链
-- Azure OpenAI Responses / OpenAI Codex / Mistral / Vertex / Gemini CLI / Bedrock 第一轮接线
+- OpenAI Responses / OpenAI Codex Responses 专用 SSE provider
+- Mistral 专用 provider（tool-call id 归一、x-affinity、reasoning 参数）
+- Amazon Bedrock ConverseStream 专用 provider（bearer token / SigV4、shared credentials/profile、Converse payload、binary eventstream 解析）
+- Google Vertex 专用 provider（API key / service account ADC JWT bearer / authorized user refresh token exchange）
+- Google Gemini CLI / Antigravity provider（Cloud Code Assist headers、Antigravity fallback、retry delay、empty SSE retry、Claude thinking beta header）
+- Azure OpenAI Responses 专用 provider（Azure base URL/resource name、deployment name map、api-version、api-key header、Responses SSE）
+- OpenAI Codex Responses WebSocket transport（`transport=WebSocket/Auto`、`response.create` frame、`session_id` / `x-client-request-id`、会话级 socket cache、SSE fallback）
+- OpenAI Responses / Codex Responses service-tier usage 与 cost multiplier（`flex=0.5`、`priority=2`，Codex `default` -> requested tier 归一）
+- GitHub Copilot Responses 动态 headers / vision 行为（`X-Initiator`、`Openai-Intent`、`Copilot-Vision-Request`、tool-result image payload）
 
 这一轮又补了：
 
-- OpenAI / OpenAI-compatible request body 的 source-gen 元数据收口
-- 避免 `List<Dictionary<string, object>> -> List<object>` 以及 primitive metadata 缺失导致的 runtime serializer 崩溃
+- OpenAI chat-completions / OpenAI-compatible / Responses request body 的 source-gen 元数据收口
+- 避免 `List<Dictionary<string, object>> -> List<object>`、Responses input/tools payload 以及 primitive metadata 缺失导致的 runtime serializer 崩溃
+- Bedrock 从占位错误推进到可本地验证的真实调用路径：`/model/{modelId}/converse-stream`、`AWS_BEARER_TOKEN_BEDROCK` bearer、env/explicit/shared profile credential SigV4、text/tool/thinking/usage 事件翻译
+- Vertex 从 ADC placeholder 推进到真实 token exchange：service account JSON 使用 RS256 JWT bearer grant，authorized user JSON 使用 refresh token grant，最终以 `Authorization: Bearer` 调用 `streamGenerateContent`
+- Gemini CLI / Antigravity 从简化单 endpoint 请求推进到更接近上游：Gemini CLI fingerprint headers、Antigravity sandbox fallback、403/404 cascade、429/5xx retry delay、empty SSE retry、Claude thinking beta header 与 `requestType: agent` payload
+- Azure OpenAI Responses 从 OpenAI-compatible chat-completions fallback 切到专用 Responses provider：请求体使用 `input`，model 参数解析为 deployment name，支持 `AZURE_OPENAI_BASE_URL` / `AZURE_OPENAI_RESOURCE_NAME` / `AZURE_OPENAI_API_VERSION` / `AZURE_OPENAI_DEPLOYMENT_NAME_MAP`，并通过 StubHandler 固定 `api-key` header、URL、reasoning 与 usage 行为
+- Codex Responses 从 SSE-only 扩展到 WebSocket/auto transport：新增 `ClientWebSocket` transport seam，WebSocket frame 使用 `type=response.create`，同 `SessionId` 的空闲连接可复用，`auto` 在 WebSocket 未开始前失败时回退现有 SSE 路径，Fake WebSocket tests 固定 URL/header/frame/reuse 行为
+- Responses service-tier 从“只写 request body”补到 usage/cost 层：`Usage.ServiceTier` 记录 effective tier，`ModelCatalog.CalculateCost` 统一应用 `flex=0.5`、`priority=2` 倍率，Codex 响应 `default` 且请求 `flex/priority` 时按请求 tier 计价
+- GitHub Copilot Responses 从“只有 provider/model 映射”补到更接近上游：内建 model 带上 Copilot Chat 静态 headers 与 image input modality，请求按最后一条消息生成 `X-Initiator`，发送图片时自动加 `Copilot-Vision-Request=true`，并允许 `ToolResultMessage` 以 `function_call_output` 数组携带图片内容
 
 ### Tau.Agent
 
@@ -153,7 +168,7 @@ tests/
 
 当前短板：
 
-- 还没有 SSH command execution / deploy / lifecycle
+- 还没有 deploy / stop / restart / lifecycle
 - 没有模型生命周期和远端 pod 编排能力
 
 ## 核心类型映射
@@ -220,52 +235,5 @@ dotnet run --project src/Tau.Pods/Tau.Pods.csproj --no-build -- probe tau.pods.j
 - `Tau.WebUi` 的 session 已可持久化到 `output/webui-sessions.json`
 - `Tau.Mom --once` 已可真实处理结构化请求并写出带 `provider/model/workingDirectory/metadata` 的 outbox
 - `Tau.Pods probe` 已可对本地 HTTP endpoint 返回真实健康结果
+- `Tau.Pods exec` 已可对 SSH pod 通过系统 `ssh` 客户端执行远程命令
 - `Tau.slnx` 仍有 solution-level metaproj / workload resolver 异常，暂时不是可信门禁入口
-# 架构总览
-
-Tau 是 [pi-mono](https://github.com/badlogic/pi-mono) 的 .NET 10 移植版本。pi-mono 是一个 TypeScript AI Agent 工具集，Tau 用完全自建的 C# 14 抽象重新实现其核心设计。
-
-## 当前阶段实现现实
-
-截至 2026-04-24，Tau 已不再只是 CLI-first 主路径，而是已经把三个应用面从模板壳推进到真实最小产品切片，并开始进入第二层能力：
-
-- `Tau.WebUi`：可持久化 session + provider/model 选择的 Web 宿主
-- `Tau.Mom`：支持结构化委派请求的本地委派宿主
-- `Tau.Pods`：支持主动健康探测和 SSH 远程命令执行的 pod 运维 CLI
-
-但这三个模块都还只完成了 **早期产品切片**，距离上游完整产品形态仍有明显距离。
-
-## 当前各模块边界
-
-### Tau.Pods
-
-当前实现为 pod 运维 CLI 的第二层入口：
-
-- `init [path]`
-- `list [path]`
-- `validate [path]`
-- `status [path]`
-- `probe [path]`
-- `exec [path] <id> <command>`
-- `PodsConfigStore` / `PodsConfigValidator`
-- `PodProbeService`
-- `PodExecService`
-- `System.Text.Json` source-gen 上下文，兼容仓库级 AOT/trim 约束
-
-当前 `probe` 语义：
-
-- 对 `endpoint` 做 HTTP GET 健康探测
-- 对 `sshHost/sshPort` 做 TCP 连通性探测
-- 返回 `ok / transport / latency / target / summary`
-- 探测失败时返回非零 exit code
-
-当前 `exec` 语义：
-
-- 对 SSH pod 通过系统 `ssh` 客户端执行远程命令
-- 返回 `stdout / stderr / exit code / summary`
-- 对 endpoint pod 明确返回 unsupported
-
-当前短板：
-
-- 还没有 deploy / stop / restart / lifecycle
-- 没有模型生命周期和远端 pod 编排能力

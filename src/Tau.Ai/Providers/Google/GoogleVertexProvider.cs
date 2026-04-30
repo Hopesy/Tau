@@ -1,3 +1,4 @@
+using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using Tau.Ai.Auth;
@@ -8,10 +9,12 @@ namespace Tau.Ai.Providers.Google;
 public sealed class GoogleVertexProvider : IStreamProvider
 {
     private readonly HttpClient _httpClient;
+    private readonly GoogleVertexAccessTokenResolver _accessTokenResolver;
 
     public GoogleVertexProvider(HttpClient? httpClient = null)
     {
         _httpClient = httpClient ?? new HttpClient();
+        _accessTokenResolver = new GoogleVertexAccessTokenResolver(_httpClient);
     }
 
     public string Api => "google-vertex";
@@ -58,13 +61,19 @@ public sealed class GoogleVertexProvider : IStreamProvider
         ThinkingLevel? reasoning)
     {
         var apiKey = options.ApiKey;
-        if (EnvironmentApiKeyResolver.IsAuthenticatedMarker(apiKey))
+        string? accessToken = null;
+        if (EnvironmentApiKeyResolver.IsAuthenticatedMarker(apiKey) ||
+            (string.IsNullOrWhiteSpace(apiKey) && GoogleVertexAccessTokenResolver.HasCredentialsFile(options)))
         {
-            stream.Push(new ErrorEvent("Vertex ADC credentials were detected, but ADC token exchange is not yet implemented in Tau. Provide GOOGLE_CLOUD_API_KEY instead."));
-            return;
+            accessToken = await _accessTokenResolver.ResolveAsync(options).ConfigureAwait(false);
+            if (string.IsNullOrWhiteSpace(accessToken) && EnvironmentApiKeyResolver.IsAuthenticatedMarker(apiKey))
+            {
+                stream.Push(new ErrorEvent("Vertex ADC credentials were requested, but no access token could be resolved. Set GOOGLE_APPLICATION_CREDENTIALS or provide GOOGLE_CLOUD_API_KEY."));
+                return;
+            }
         }
 
-        var url = BuildUrl(model);
+        var url = BuildUrl(model, options);
         var body = BuildRequestBody(context, options, model, reasoning);
         var json = JsonSerializer.Serialize(body, GoogleVertexRequestJsonContext.Default.DictionaryStringObject);
 
@@ -73,7 +82,11 @@ public sealed class GoogleVertexProvider : IStreamProvider
             Content = new StringContent(json, Encoding.UTF8, "application/json")
         };
 
-        if (!string.IsNullOrWhiteSpace(apiKey))
+        if (!string.IsNullOrWhiteSpace(accessToken))
+        {
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+        }
+        else if (!string.IsNullOrWhiteSpace(apiKey) && !EnvironmentApiKeyResolver.IsAuthenticatedMarker(apiKey))
         {
             request.Headers.TryAddWithoutValidation("x-goog-api-key", apiKey);
         }
@@ -113,16 +126,18 @@ public sealed class GoogleVertexProvider : IStreamProvider
         parser.EmitDone();
     }
 
-    private static string BuildUrl(Model model)
+    private static string BuildUrl(Model model, StreamOptions options)
     {
         if (!string.IsNullOrWhiteSpace(model.BaseUrl))
         {
             return $"{model.BaseUrl.TrimEnd('/')}/models/{model.Id}:streamGenerateContent?alt=sse";
         }
 
-        var project = Environment.GetEnvironmentVariable("GOOGLE_CLOUD_PROJECT") ??
+        var project = GoogleVertexAccessTokenResolver.ResolveProjectId(options) ??
+                      Environment.GetEnvironmentVariable("GOOGLE_CLOUD_PROJECT") ??
                       Environment.GetEnvironmentVariable("GCLOUD_PROJECT");
-        var location = Environment.GetEnvironmentVariable("GOOGLE_CLOUD_LOCATION");
+        var location = GoogleVertexAccessTokenResolver.ResolveLocation(options) ??
+                       Environment.GetEnvironmentVariable("GOOGLE_CLOUD_LOCATION");
         if (string.IsNullOrWhiteSpace(project) || string.IsNullOrWhiteSpace(location))
         {
             throw new InvalidOperationException("Vertex AI requires GOOGLE_CLOUD_PROJECT/GCLOUD_PROJECT and GOOGLE_CLOUD_LOCATION when model.BaseUrl is not set.");
@@ -210,9 +225,26 @@ public sealed class GoogleVertexProvider : IStreamProvider
 
         foreach (var (key, value) in headers)
         {
+            request.Headers.Remove(key);
             request.Headers.TryAddWithoutValidation(key, value);
         }
     }
+}
+
+public record GoogleVertexOptions : StreamOptions
+{
+    public string? AccessToken { get; init; }
+    public string? CredentialsFile { get; init; }
+    public string? Project { get; init; }
+    public string? Location { get; init; }
+}
+
+public record GoogleVertexSimpleOptions : SimpleStreamOptions
+{
+    public string? AccessToken { get; init; }
+    public string? CredentialsFile { get; init; }
+    public string? Project { get; init; }
+    public string? Location { get; init; }
 }
 
 [System.Text.Json.Serialization.JsonSourceGenerationOptions(
