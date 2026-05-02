@@ -8,7 +8,10 @@ namespace Tau.Ai.Providers.OpenAi;
 /// </summary>
 internal static class OpenAiMessageConverter
 {
-    public static JsonElement ConvertMessages(IReadOnlyList<ChatMessage> messages)
+    public static JsonElement ConvertMessages(
+        IReadOnlyList<ChatMessage> messages,
+        bool supportsImages = true,
+        bool requiresThinkingAsText = false)
     {
         var array = new List<object>();
         foreach (var msg in messages)
@@ -16,10 +19,10 @@ internal static class OpenAiMessageConverter
             switch (msg)
             {
                 case UserMessage user:
-                    array.Add(ConvertUserMessage(user));
+                    array.Add(ConvertUserMessage(user, supportsImages));
                     break;
                 case AssistantMessage assistant:
-                    array.Add(ConvertAssistantMessage(assistant));
+                    array.Add(ConvertAssistantMessage(assistant, requiresThinkingAsText));
                     break;
                 case ToolResultMessage toolResult:
                     array.Add(ConvertToolResultMessage(toolResult));
@@ -29,7 +32,7 @@ internal static class OpenAiMessageConverter
         return JsonSerializer.SerializeToElement(array, OpenAiJsonContext.Default.ListObject);
     }
 
-    private static object ConvertUserMessage(UserMessage msg)
+    private static object ConvertUserMessage(UserMessage msg, bool supportsImages)
     {
         var hasNonText = msg.Content.Any(c => c is not TextContent);
         if (!hasNonText)
@@ -46,7 +49,7 @@ internal static class OpenAiMessageConverter
                 case TextContent text:
                     parts.Add(new Dictionary<string, object> { ["type"] = "text", ["text"] = text.Text });
                     break;
-                case ImageContent image:
+                case ImageContent image when supportsImages:
                     parts.Add(new Dictionary<string, object>
                     {
                         ["type"] = "image_url",
@@ -58,18 +61,27 @@ internal static class OpenAiMessageConverter
                     break;
             }
         }
-        return new Dictionary<string, object> { ["role"] = "user", ["content"] = parts };
+
+        return new Dictionary<string, object>
+        {
+            ["role"] = "user",
+            ["content"] = parts.Count == 0 ? string.Empty : parts
+        };
     }
 
-    private static object ConvertAssistantMessage(AssistantMessage msg)
+    private static object ConvertAssistantMessage(AssistantMessage msg, bool requiresThinkingAsText)
     {
         var result = new Dictionary<string, object> { ["role"] = "assistant" };
 
         var toolCalls = msg.Content.OfType<ToolCallContent>().ToList();
         var textParts = msg.Content.OfType<TextContent>().ToList();
+        var thinkingParts = requiresThinkingAsText
+            ? msg.Content.OfType<ThinkingContent>().Where(t => !string.IsNullOrWhiteSpace(t.Thinking)).ToList()
+            : [];
 
-        if (textParts.Count > 0)
-            result["content"] = string.Join("", textParts.Select(t => t.Text));
+        if (textParts.Count > 0 || thinkingParts.Count > 0)
+            result["content"] = string.Concat(
+                thinkingParts.Select(t => t.Thinking).Concat(textParts.Select(t => t.Text)));
 
         if (toolCalls.Count > 0)
         {
@@ -105,20 +117,26 @@ internal static class OpenAiMessageConverter
         };
     }
 
-    public static JsonElement ConvertTools(IReadOnlyList<Tool> tools)
+    public static JsonElement ConvertTools(IReadOnlyList<Tool> tools, bool supportsStrictMode = false)
     {
         var array = new List<object>();
         foreach (var tool in tools)
         {
+            var function = new Dictionary<string, object>
+            {
+                ["name"] = tool.Name,
+                ["description"] = tool.Description,
+                ["parameters"] = tool.ParameterSchema
+            };
+            if (supportsStrictMode)
+            {
+                function["strict"] = false;
+            }
+
             array.Add(new Dictionary<string, object>
             {
                 ["type"] = "function",
-                ["function"] = new Dictionary<string, object>
-                {
-                    ["name"] = tool.Name,
-                    ["description"] = tool.Description,
-                    ["parameters"] = tool.ParameterSchema
-                }
+                ["function"] = function
             });
         }
 
@@ -132,5 +150,6 @@ internal static class OpenAiMessageConverter
 [JsonSerializable(typeof(List<object>))]
 [JsonSerializable(typeof(Dictionary<string, object>))]
 [JsonSerializable(typeof(Dictionary<string, string>))]
+[JsonSerializable(typeof(bool))]
 [JsonSerializable(typeof(JsonElement))]
 internal partial class OpenAiJsonContext : JsonSerializerContext;

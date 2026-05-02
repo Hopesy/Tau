@@ -2,19 +2,54 @@ using Tau.Ai.Auth;
 
 namespace Tau.Ai.Registry;
 
+public readonly record struct ResolvedModelSelection(string Provider, string ModelId)
+{
+    public string CanonicalReference => $"{Provider}/{ModelId}";
+}
+
 public sealed class ModelCatalog
 {
+    private const string DefaultProviderId = "openai";
+    private static readonly IReadOnlyDictionary<string, string> DefaultModelIds = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+    {
+        ["anthropic"] = "claude-opus-4-6",
+        ["openai"] = "gpt-5.4",
+        ["google"] = "gemini-2.5-pro",
+        ["azure-openai-responses"] = "gpt-5.2",
+        ["openai-codex"] = "gpt-5.4",
+        ["github-copilot"] = "gpt-4o",
+        ["mistral"] = "devstral-medium-latest",
+        ["google-vertex"] = "gemini-3-pro-preview",
+        ["google-gemini-cli"] = "gemini-2.5-pro",
+        ["google-antigravity"] = "gemini-3.1-pro-high",
+        ["amazon-bedrock"] = "us.anthropic.claude-opus-4-6-v1"
+    };
+
     private readonly Dictionary<string, Dictionary<string, Model>> _models = new(StringComparer.OrdinalIgnoreCase);
     private readonly ProviderAuthResolver _authResolver;
 
-    public ModelCatalog(ProviderAuthResolver? authResolver = null)
+    public ModelCatalog(ProviderAuthResolver? authResolver = null, ModelConfigurationStore? configurationStore = null)
     {
         _authResolver = authResolver ?? new ProviderAuthResolver();
 
-        foreach (var (provider, models) in BuiltInModels.Catalog)
+        foreach (var catalog in new[] { BuiltInModels.Catalog, GeneratedBuiltInModels.Catalog })
         {
-            _models[provider] = new Dictionary<string, Model>(models, StringComparer.OrdinalIgnoreCase);
+            foreach (var (provider, models) in catalog)
+            {
+                if (!_models.TryGetValue(provider, out var bucket))
+                {
+                    bucket = new Dictionary<string, Model>(StringComparer.OrdinalIgnoreCase);
+                    _models[provider] = bucket;
+                }
+
+                foreach (var (modelId, model) in models)
+                {
+                    bucket[modelId] = model;
+                }
+            }
         }
+
+        (configurationStore ?? new ModelConfigurationStore()).ApplyTo(_models);
     }
 
     public IReadOnlyList<string> GetProviders() => [.. _models.Keys.Order(StringComparer.OrdinalIgnoreCase)];
@@ -44,6 +79,71 @@ public sealed class ModelCatalog
         return _authResolver.ResolveModel(model);
     }
 
+    public string ResolveProvider(string? providerHint, string? defaultProvider = null)
+    {
+        var provider = NormalizeProviderHint(providerHint, defaultProvider);
+        if (TryGetCanonicalProvider(provider, out var canonicalProvider))
+        {
+            return canonicalProvider;
+        }
+
+        throw new KeyNotFoundException($"Provider '{provider}' is not registered.");
+    }
+
+    public ResolvedModelSelection ResolveSelection(string? providerHint = null, string? modelHint = null, string? defaultProvider = null)
+    {
+        var normalizedModelHint = NormalizeHint(modelHint);
+        var normalizedProviderHint = NormalizeHint(providerHint);
+
+        if (IsDefaultKeyword(normalizedProviderHint))
+        {
+            normalizedProviderHint = null;
+        }
+
+        if (IsDefaultKeyword(normalizedModelHint))
+        {
+            normalizedModelHint = null;
+        }
+
+        if (TryResolveCanonicalReference(normalizedProviderHint, normalizedModelHint, defaultProvider, out var canonicalSelection))
+        {
+            return canonicalSelection;
+        }
+
+        var resolvedProvider = ResolveProvider(normalizedProviderHint, defaultProvider);
+        if (string.IsNullOrWhiteSpace(normalizedModelHint))
+        {
+            return new ResolvedModelSelection(resolvedProvider, GetDefaultModelId(resolvedProvider));
+        }
+
+        if (TryGetModel(resolvedProvider, normalizedModelHint) is not null)
+        {
+            return new ResolvedModelSelection(resolvedProvider, normalizedModelHint);
+        }
+
+        if (string.IsNullOrWhiteSpace(normalizedProviderHint))
+        {
+            var exactMatches = _models
+                .Where(entry => entry.Value.ContainsKey(normalizedModelHint))
+                .Select(entry => entry.Key)
+                .Order(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+
+            if (exactMatches.Length == 1)
+            {
+                return new ResolvedModelSelection(exactMatches[0], normalizedModelHint);
+            }
+
+            if (exactMatches.Length > 1)
+            {
+                throw new InvalidOperationException(
+                    $"Model '{normalizedModelHint}' is ambiguous. Specify provider explicitly: {string.Join(", ", exactMatches.Select(provider => $"{provider}/{normalizedModelHint}"))}.");
+            }
+        }
+
+        throw new KeyNotFoundException($"Model '{resolvedProvider}/{normalizedModelHint}' is not registered.");
+    }
+
     public void RegisterModel(Model model)
     {
         if (!_models.TryGetValue(model.Provider, out var models))
@@ -55,6 +155,18 @@ public sealed class ModelCatalog
         models[model.Id] = model;
     }
 
+    public static string GetDefaultProviderId() => DefaultProviderId;
+
+    public static string GetDefaultModelId(string providerId)
+    {
+        if (DefaultModelIds.TryGetValue(providerId, out var modelId))
+        {
+            return modelId;
+        }
+
+        return DefaultModelIds[DefaultProviderId];
+    }
+
     public static Model CreateOpenAiCompatibleModel(
         string provider,
         string id,
@@ -64,7 +176,8 @@ public sealed class ModelCatalog
         int contextWindow,
         int maxTokens,
         decimal inputCost,
-        decimal outputCost) =>
+        decimal outputCost,
+        ModelCompatibility? compat = null) =>
         new()
         {
             Id = id,
@@ -75,7 +188,8 @@ public sealed class ModelCatalog
             Reasoning = reasoning,
             ContextWindow = contextWindow,
             MaxOutputTokens = maxTokens,
-            Cost = new ModelCost(inputCost, outputCost, inputCost / 10m, inputCost)
+            Cost = new ModelCost(inputCost, outputCost, inputCost / 10m, inputCost),
+            Compat = compat
         };
 
     public static UsageCost CalculateCost(Model model, Usage usage)
@@ -133,5 +247,95 @@ public sealed class ModelCatalog
                right is not null &&
                left.Id.Equals(right.Id, StringComparison.OrdinalIgnoreCase) &&
                left.Provider.Equals(right.Provider, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private bool TryResolveCanonicalReference(
+        string? providerHint,
+        string? modelHint,
+        string? defaultProvider,
+        out ResolvedModelSelection selection)
+    {
+        selection = default;
+        if (string.IsNullOrWhiteSpace(modelHint))
+        {
+            return false;
+        }
+
+        var slashIndex = modelHint.IndexOf('/');
+        if (slashIndex < 0)
+        {
+            return false;
+        }
+
+        var referencedProvider = modelHint[..slashIndex].Trim();
+        var referencedModel = modelHint[(slashIndex + 1)..].Trim();
+        if (string.IsNullOrWhiteSpace(referencedProvider) || string.IsNullOrWhiteSpace(referencedModel))
+        {
+            return false;
+        }
+
+        var canonicalProvider = ResolveProvider(referencedProvider, defaultProvider);
+        if (string.IsNullOrWhiteSpace(providerHint))
+        {
+            if (TryGetModel(canonicalProvider, referencedModel) is null)
+            {
+                return false;
+            }
+
+            selection = new ResolvedModelSelection(canonicalProvider, referencedModel);
+            return true;
+        }
+
+        var resolvedProvider = ResolveProvider(providerHint, defaultProvider);
+        if (!resolvedProvider.Equals(canonicalProvider, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                $"Provider hint '{resolvedProvider}' conflicts with model reference '{canonicalProvider}/{referencedModel}'.");
+        }
+
+        if (TryGetModel(resolvedProvider, referencedModel) is null)
+        {
+            return false;
+        }
+
+        selection = new ResolvedModelSelection(resolvedProvider, referencedModel);
+        return true;
+    }
+
+    private static string NormalizeHint(string? value) => value?.Trim() ?? string.Empty;
+
+    private static bool IsDefaultKeyword(string? value) =>
+        !string.IsNullOrWhiteSpace(value) &&
+        value.Equals("default", StringComparison.OrdinalIgnoreCase);
+
+    private string NormalizeProviderHint(string? providerHint, string? defaultProvider)
+    {
+        var candidate = NormalizeHint(providerHint);
+        if (string.IsNullOrWhiteSpace(candidate) || IsDefaultKeyword(candidate))
+        {
+            candidate = NormalizeHint(defaultProvider);
+        }
+
+        if (string.IsNullOrWhiteSpace(candidate) || IsDefaultKeyword(candidate))
+        {
+            candidate = DefaultProviderId;
+        }
+
+        return candidate;
+    }
+
+    private bool TryGetCanonicalProvider(string providerHint, out string canonicalProvider)
+    {
+        foreach (var provider in _models.Keys)
+        {
+            if (provider.Equals(providerHint, StringComparison.OrdinalIgnoreCase))
+            {
+                canonicalProvider = provider;
+                return true;
+            }
+        }
+
+        canonicalProvider = string.Empty;
+        return false;
     }
 }

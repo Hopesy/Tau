@@ -19,7 +19,7 @@ public class FileDelegationProcessorTests
         {
           "prompt": "inspect project",
           "provider": "google",
-          "model": "gemini-2.5-pro",
+          "model": "google-gemini-cli/gemini-2.5-pro",
           "workingDirectory": ".",
           "metadata": {
             "channel": "local-test",
@@ -46,13 +46,13 @@ public class FileDelegationProcessorTests
         Assert.Equal(1, processed);
         var captured = Assert.Single(runner.Requests);
         Assert.Equal("inspect project", captured.Prompt);
-        Assert.Equal("google", captured.Provider);
+        Assert.Equal("google-gemini-cli", captured.Provider);
         Assert.Equal("gemini-2.5-pro", captured.Model);
         Assert.Equal(Path.GetFullPath(root), captured.WorkingDirectory);
 
         var outboxFile = Assert.Single(Directory.GetFiles(outbox, "*.json"));
         var outboxJson = await File.ReadAllTextAsync(outboxFile);
-        Assert.Contains("\"provider\": \"google\"", outboxJson, StringComparison.Ordinal);
+        Assert.Contains("\"provider\": \"google-gemini-cli\"", outboxJson, StringComparison.Ordinal);
         Assert.Contains("\"model\": \"gemini-2.5-pro\"", outboxJson, StringComparison.Ordinal);
         Assert.Contains("\"workingDirectory\"", outboxJson, StringComparison.Ordinal);
         Assert.Contains("\"requestId\": \"abc-123\"", outboxJson, StringComparison.Ordinal);
@@ -82,7 +82,7 @@ public class FileDelegationProcessorTests
             ArchivePath = archive,
             DefaultWorkingDirectory = root,
             DefaultProvider = "anthropic",
-            DefaultModel = "claude-opus-4-6"
+            DefaultModel = "default"
         };
 
         var runner = new FakeDelegationAgentRunner();

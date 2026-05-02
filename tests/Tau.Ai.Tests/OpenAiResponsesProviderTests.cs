@@ -129,7 +129,8 @@ public sealed class OpenAiResponsesProviderTests
             """));
         using var client = new HttpClient(handler);
         var provider = new OpenAiResponsesProvider(client);
-        var model = new ModelCatalog().GetModel("github-copilot", "gpt-4o");
+        var model = new ModelCatalog(configurationStore: new ModelConfigurationStore([]))
+            .GetModel("github-copilot", "gpt-4o");
         var context = new LlmContext
         {
             Messages =
@@ -161,7 +162,8 @@ public sealed class OpenAiResponsesProviderTests
             """));
         using var client = new HttpClient(handler);
         var provider = new OpenAiResponsesProvider(client);
-        var model = new ModelCatalog().GetModel("github-copilot", "gpt-4o");
+        var model = new ModelCatalog(configurationStore: new ModelConfigurationStore([]))
+            .GetModel("github-copilot", "gpt-4o");
         var context = new LlmContext
         {
             Messages =

@@ -18,6 +18,15 @@ public class RuntimeCodingAgentRunnerTests
     }
 
     [Fact]
+    public void Create_WithCanonicalModelReference_UsesRequestedModel()
+    {
+        var runner = RuntimeCodingAgentRunner.Create("google-antigravity", "google-antigravity/claude-opus-4-6-thinking");
+
+        Assert.Equal("google-antigravity", runner.Model.Provider, ignoreCase: true);
+        Assert.Equal("claude-opus-4-6-thinking", runner.Model.Id, ignoreCase: true);
+    }
+
+    [Fact]
     public void Create_WithInitialMessages_RehydratesConversationState()
     {
         var runner = RuntimeCodingAgentRunner.Create(

@@ -13,6 +13,29 @@ public record Model
     public int? ContextWindow { get; init; }
     public int? MaxOutputTokens { get; init; }
     public IDictionary<string, string>? Headers { get; init; }
+    public ModelCompatibility? Compat { get; init; }
+}
+
+public record ModelCompatibility
+{
+    public bool? SupportsStore { get; init; }
+    public bool? SupportsDeveloperRole { get; init; }
+    public bool? SupportsReasoningEffort { get; init; }
+    public IReadOnlyDictionary<string, string>? ReasoningEffortMap { get; init; }
+    public bool? SupportsUsageInStreaming { get; init; }
+    public string? MaxTokensField { get; init; }
+    public bool? RequiresThinkingAsText { get; init; }
+    public string? ThinkingFormat { get; init; }
+    public IDictionary<string, object>? OpenRouterRouting { get; init; }
+    public VercelGatewayRouting? VercelGatewayRouting { get; init; }
+    public bool? ZaiToolStream { get; init; }
+    public bool? SupportsStrictMode { get; init; }
+}
+
+public record VercelGatewayRouting
+{
+    public IReadOnlyList<string>? Only { get; init; }
+    public IReadOnlyList<string>? Order { get; init; }
 }
 
 public record struct ModelCost(

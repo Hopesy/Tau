@@ -1,5 +1,6 @@
 using Tau.Ai.Streaming;
 using Tau.Ai.Auth;
+using Tau.Ai.Registry;
 
 namespace Tau.Ai.Providers;
 
@@ -18,10 +19,7 @@ public static class StreamFunctions
         StreamOptions options)
     {
         var resolvedModel = AuthResolver.ResolveModel(model);
-        var resolvedOptions = options with
-        {
-            ApiKey = AuthResolver.ResolveApiKey(resolvedModel.Provider, options.ApiKey)
-        };
+        var resolvedOptions = ResolveOptions(resolvedModel, options);
 
         var provider = registry.Get(resolvedModel.Api);
         return provider.Stream(resolvedModel, context, resolvedOptions);
@@ -34,10 +32,7 @@ public static class StreamFunctions
         SimpleStreamOptions options)
     {
         var resolvedModel = AuthResolver.ResolveModel(model);
-        var resolvedOptions = options with
-        {
-            ApiKey = AuthResolver.ResolveApiKey(resolvedModel.Provider, options.ApiKey)
-        };
+        var resolvedOptions = (SimpleStreamOptions)ResolveOptions(resolvedModel, options);
 
         var provider = registry.Get(resolvedModel.Api);
         return provider.StreamSimple(resolvedModel, context, resolvedOptions);
@@ -61,5 +56,46 @@ public static class StreamFunctions
     {
         var stream = StreamSimple(registry, model, context, options);
         return await stream.ResultAsync.ConfigureAwait(false);
+    }
+
+    private static StreamOptions ResolveOptions(Model model, StreamOptions options)
+    {
+        var requestConfig = new ModelConfigurationStore().ResolveRequestConfiguration(model);
+        var apiKey = AuthResolver.ResolveApiKey(model.Provider, options.ApiKey) ?? requestConfig.ApiKey;
+        var headers = MergeHeaders(requestConfig.Headers, options.Headers);
+        if (requestConfig.AuthHeader &&
+            !string.IsNullOrWhiteSpace(apiKey) &&
+            !EnvironmentApiKeyResolver.IsAuthenticatedMarker(apiKey))
+        {
+            headers ??= new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            headers.TryAdd("Authorization", $"Bearer {apiKey}");
+        }
+
+        return options with
+        {
+            ApiKey = apiKey,
+            Headers = headers
+        };
+    }
+
+    private static IDictionary<string, string>? MergeHeaders(
+        IDictionary<string, string>? configuredHeaders,
+        IDictionary<string, string>? explicitHeaders)
+    {
+        if (configuredHeaders is null || configuredHeaders.Count == 0)
+        {
+            return explicitHeaders;
+        }
+
+        var result = new Dictionary<string, string>(configuredHeaders, StringComparer.OrdinalIgnoreCase);
+        if (explicitHeaders is not null)
+        {
+            foreach (var (key, value) in explicitHeaders)
+            {
+                result[key] = value;
+            }
+        }
+
+        return result;
     }
 }

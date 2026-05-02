@@ -168,6 +168,10 @@
 - [x] `Tau.Ai` OpenAI Codex Responses WebSocket transport（WebSocket/auto / session socket cache）
 - [x] `Tau.Ai` OpenAI Responses service-tier pricing multiplier（flex/priority cost multiplier / Codex default->requested tier）
 - [x] `Tau.Ai` GitHub Copilot Responses 动态 headers / vision / tool-result image payload
+- [x] `Tau.Ai` generated model seed / generator / catalog merge
+- [x] `Tau.Ai` typed/default model parsing 与共享默认选择
+- [x] `Tau.Ai` OpenAI-compatible compatibility / routing metadata（`Model.Compat` / generator / request body）
+- [x] `Tau.Ai` custom model/provider 配置入口（`ModelConfigurationStore` / models.json merge / provider 与 model override / request auth headers）
 - [ ] `Tau.WebUi` 流式 UI / richer rendering / attachment
 - [ ] `Tau.Mom` Slack / workspace / sandbox / delegation semantics
 - [ ] `Tau.Pods` SSH / lifecycle / model management
@@ -191,3 +195,9 @@
 - 2026-04-30：决定把 Codex WebSocket 先做成可测试 transport seam，而不是直接绑定真实 ChatGPT e2e。原因是当前迁移目标是 provider 协议保真与本地回归闭环；`ClientWebSocket` 默认实现和 Fake WebSocket 测试能先固定 URL/header/frame/session reuse 语义，真实服务漂移留给后续 e2e。
 - 2026-04-30：决定把 Responses service-tier 的 effective tier 存在 `Usage` 上，并在 `ModelCatalog.CalculateCost` 统一应用 `flex/priority` 倍率。原因是 Tau 当前把 usage 事实与 cost 计算分层，provider 不应直接写入成本；Codex `default` -> requested tier 的特殊规则也应作为 usage 归一事实进入后续计算。
 - 2026-04-30：决定把 GitHub Copilot 动态 headers 抽成共享 helper，并在 Responses shared converter 层补 tool-result 图片编码。原因是 `X-Initiator` / `Copilot-Vision-Request` 不是某个单一 request body 字段，而是基于上下文的 provider 语义；图片 tool-result 也属于 Responses message conversion 的共享事实，后续其他 Copilot/OpenAI 路径可直接复用。
+- 2026-04-30：决定先做 Tau 自己的 generated model seed/generator 接缝，而不是直接同步上游完整 `models.generated.ts` 和 `generate-models.ts`。原因是 Tau 当前 provider/API 支持面还在收口中，先导入“已经能跑的 API 家族”的新增模型，比一次引入大量当前还不支持的模型更稳。
+- 2026-05-01：决定继续扩 generated seed 时仍只纳入 Tau 已具备真实调用路径的 API 家族，并继续排除 `github-copilot` 的 `openai-completions` 模型。原因是 Copilot completions 路径当前还没有移植 Responses 路径之外的特定 header/兼容语义，模型表不能领先于 provider 行为。
+
+- 2026-05-01：决定把 provider/model 默认解析收口到 `ModelCatalog`，而不是继续在 CodingAgent/WebUi/Mom 各自维护一份 switch/default 逻辑。原因是 generated catalog 已经成为模型 source of truth，默认 provider、默认 model、canonical `provider/model` 引用和 `default` 关键字解析都应该共享同一套规则，避免多个宿主各自漂移。
+- 2026-05-02：决定只把 Tau provider 当前能实际消费的 compatibility / routing 元数据接到 `Model.Compat`，而不是先照搬上游全部自定义 provider schema。原因是 OpenAI-compatible provider 现在已经能验证 stream usage、max token field、reasoning format/map、tool stream、strict mode、OpenRouter/Vercel routing；还不能实际消费的字段继续留到 custom model 配置入口和后续 provider 行为切片。
+- 2026-05-02：决定先落地 models.json 的模型目录合并入口，而不是一次性移植上游完整 request auth / dynamic provider 注册。原因是 Tau 当前已经有 `ProviderAuthResolver` 与已注册 API 家族，最小可靠切片是让用户无需改代码即可添加 OpenAI-compatible/custom model，并复用现有 provider 调用路径；`apiKey/authHeader`、shell/env/command value resolution 和 request headers 已在 `StreamFunctions` 层接入；OAuth login 和动态 API 注册继续拆成后续配置/auth 切片。

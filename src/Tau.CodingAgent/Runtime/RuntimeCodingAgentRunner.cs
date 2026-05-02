@@ -41,14 +41,12 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner
         BuiltInProviders.RegisterAll(registry);
 
         var modelCatalog = new ModelCatalog();
-        var resolvedProvider = string.IsNullOrWhiteSpace(providerId)
-            ? (Environment.GetEnvironmentVariable("TAU_PROVIDER") ?? "openai")
-            : providerId.Trim();
-        var resolvedModel = string.IsNullOrWhiteSpace(modelId)
-            ? (Environment.GetEnvironmentVariable("TAU_MODEL") ?? GetDefaultModelId(resolvedProvider))
-            : modelId.Trim();
+        var selection = modelCatalog.ResolveSelection(
+            providerId,
+            modelId,
+            defaultProvider: Environment.GetEnvironmentVariable("TAU_PROVIDER"));
 
-        var model = modelCatalog.GetModel(resolvedProvider, resolvedModel);
+        var model = modelCatalog.GetModel(selection.Provider, selection.ModelId);
         var tools = CreateDefaultTools();
         var config = new AgentLoopConfig
         {
@@ -71,23 +69,11 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner
         return new RuntimeCodingAgentRunner(runtime, config);
     }
 
+    public static string GetDefaultProviderId() => ModelCatalog.GetDefaultProviderId();
+
     public static string GetDefaultModelId(string providerId)
     {
-        return providerId.ToLowerInvariant() switch
-        {
-            "anthropic" => "claude-opus-4-6",
-            "openai" => "gpt-5.4",
-            "google" => "gemini-2.5-pro",
-            "azure-openai-responses" => "gpt-5.2",
-            "openai-codex" => "gpt-5.4",
-            "github-copilot" => "gpt-4o",
-            "mistral" => "devstral-medium-latest",
-            "google-vertex" => "gemini-3-pro-preview",
-            "google-gemini-cli" => "gemini-2.5-pro",
-            "google-antigravity" => "gemini-3.1-pro-high",
-            "amazon-bedrock" => "us.anthropic.claude-opus-4-6-v1",
-            _ => "gpt-5.4"
-        };
+        return ModelCatalog.GetDefaultModelId(providerId);
     }
 
     private static IAgentTool[] CreateDefaultTools()
@@ -106,13 +92,13 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner
 
     private static string BuildSystemPrompt(IReadOnlyList<IAgentTool> tools)
     {
-        return $"""
+        return $$"""
             You are Tau, a coding assistant. You help users with software engineering tasks.
 
-            Working directory: {Directory.GetCurrentDirectory()}
-            Platform: {Environment.OSVersion}
+            Working directory: {{Directory.GetCurrentDirectory()}}
+            Platform: {{Environment.OSVersion}}
 
-            Available tools: {string.Join(", ", tools.Select(t => t.Name))}
+            Available tools: {{string.Join(", ", tools.Select(t => t.Name))}}
 
             Use tools to explore the codebase, read files, make edits, and run commands.
             Be concise. Think step by step.

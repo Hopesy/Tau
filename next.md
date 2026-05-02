@@ -20,10 +20,10 @@
 
 #### Model registry / generated models
 
-- [ ] 建立 generated models 管线，不再只靠手写 `BuiltInModels`
-- [ ] 引入更完整的 provider 列表和模型全集
-- [ ] 支持 typed/default model 解析与更接近上游的 default model 策略
-- [ ] 把 compatibility / capability / routing 元数据补全
+- [x] 建立 generated models 管线，不再只靠手写 `BuiltInModels`
+- [~] 引入更完整的 provider 列表和模型全集（已把当前已支持 API 家族扩到 66 个 generated seed，仍未覆盖全部上游 provider）
+- [x] 支持 typed/default model 解析与更接近上游的 default model 策略
+- [x] 把当前 Tau 可实际消费的 compatibility / capability / routing 元数据补到 `Model` / generator / OpenAI-compatible provider（OpenRouter / Vercel routing、reasoning/max-tokens/tool-stream/strict/stream-usage 兼容字段）
 
 #### OAuth / auth
 
@@ -37,9 +37,10 @@
 
 - [ ] auth.json schema 明文化
 - [ ] secret 持久化边界和脱敏规则
-- [ ] provider-specific headers / dynamic auth header 支持
+- [x] provider-specific headers 支持（models.json 已能合并静态 provider/model headers，并在 StreamFunctions 层解析 provider/model request headers）
 - [ ] Bedrock AWS SSO / AssumeRole / credential_process / IMDS / ECS / web identity credential chain
-- [ ] 自定义 provider / custom model 配置入口
+- [x] 自定义 provider / custom model 配置入口（`TAU_MODELS_FILE`、`./.tau/models.json`、`~/.tau/models.json`，支持 Tau 已注册 API 的 `providers/baseUrl/api/apiKey/authHeader/headers/compat/models/modelOverrides` 子集）
+- [x] models.json 的 `apiKey/authHeader`、shell/env value resolution、运行时 request auth 合并
 
 ### Tau.CodingAgent
 
@@ -48,7 +49,7 @@
 - [ ] auth 管理入口
 - [ ] richer rendering
 - [x] 显式 `Create(provider, model, history)` runner 工厂
-- [ ] 与 `ModelCatalog` 对齐的默认模型解析层继续收口
+- [x] 与 `ModelCatalog` 对齐的默认模型解析层继续收口
 - [ ] 把当前 `Tau.CodingAgent` / `Tau.CodingAgent.Tests` 的 DLL `HintPath` workaround 收回到更正常的 `ProjectReference` 结构
 - [ ] 解决当前本机上 `Tau.slnx` / metaproj / workload resolver 的 build 异常
 

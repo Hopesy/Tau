@@ -20,8 +20,11 @@ public sealed class WebChatService
     {
         _store = store;
         _catalog = new ModelCatalog();
-        _defaultProvider = Environment.GetEnvironmentVariable("TAU_PROVIDER") ?? "openai";
-        _defaultModel = Environment.GetEnvironmentVariable("TAU_MODEL") ?? RuntimeCodingAgentRunner.GetDefaultModelId(_defaultProvider);
+        var selection = _catalog.ResolveSelection(
+            Environment.GetEnvironmentVariable("TAU_PROVIDER"),
+            Environment.GetEnvironmentVariable("TAU_MODEL"));
+        _defaultProvider = selection.Provider;
+        _defaultModel = selection.ModelId;
 
         foreach (var session in _store.Load())
         {
@@ -66,9 +69,8 @@ public sealed class WebChatService
 
     public WebChatSessionDto CreateSession(string? title = null, string? provider = null, string? model = null)
     {
-        var resolvedProvider = ResolveProvider(provider);
-        var resolvedModel = ResolveModel(resolvedProvider, model);
-        var session = new WebChatSession(title, resolvedProvider, resolvedModel);
+        var selection = _catalog.ResolveSelection(provider, model, _defaultProvider);
+        var session = new WebChatSession(title, selection.Provider, selection.ModelId);
         _sessions[session.Id] = session;
         Persist();
         return session.ToDto(persisted: true);
@@ -94,9 +96,11 @@ public sealed class WebChatService
             return null;
         }
 
-        var provider = string.IsNullOrWhiteSpace(request.Provider) ? session.Provider : ResolveProvider(request.Provider);
-        var model = string.IsNullOrWhiteSpace(request.Model) ? session.Model : ResolveModel(provider, request.Model);
-        session.UpdateSettings(request.Title, provider, model);
+        var selection = _catalog.ResolveSelection(
+            request.Provider ?? session.Provider,
+            request.Model ?? session.Model,
+            _defaultProvider);
+        session.UpdateSettings(request.Title, selection.Provider, selection.ModelId);
         Persist();
         return session.ToDto(persisted: true);
     }
@@ -120,27 +124,6 @@ public sealed class WebChatService
             .OrderBy(session => session.CreatedAt)
             .Select(session => session.ToDto(persisted: true))
             .ToArray());
-    }
-
-    private string ResolveProvider(string? provider)
-    {
-        var resolved = string.IsNullOrWhiteSpace(provider) ? _defaultProvider : provider.Trim();
-        if (!_catalog.GetProviders().Contains(resolved, StringComparer.OrdinalIgnoreCase))
-        {
-            throw new KeyNotFoundException($"Provider '{resolved}' is not registered.");
-        }
-
-        return resolved;
-    }
-
-    private string ResolveModel(string provider, string? model)
-    {
-        var resolved = string.IsNullOrWhiteSpace(model)
-            ? RuntimeCodingAgentRunner.GetDefaultModelId(provider)
-            : model.Trim();
-
-        _ = _catalog.GetModel(provider, resolved);
-        return resolved;
     }
 
     private sealed class WebChatSession

@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Tau.Ai.Registry;
 using Tau.CodingAgent.Runtime;
 
 namespace Tau.Mom;
@@ -8,6 +9,7 @@ public sealed class FileDelegationProcessor
     private readonly MomOptions _options;
     private readonly IDelegationAgentRunner _runner;
     private readonly ILogger<FileDelegationProcessor> _logger;
+    private readonly ModelCatalog _catalog = new();
 
     public FileDelegationProcessor(MomOptions options, IDelegationAgentRunner runner, ILogger<FileDelegationProcessor> logger)
     {
@@ -55,8 +57,8 @@ public sealed class FileDelegationProcessor
                 string.Empty,
                 [],
                 ex.Message,
-                ResolveProvider(request.Provider),
-                ResolveModel(request.Provider, request.Model),
+                request.Provider!,
+                request.Model!,
                 ResolveWorkingDirectory(request.WorkingDirectory),
                 request.Metadata);
         }
@@ -94,10 +96,11 @@ public sealed class FileDelegationProcessor
                 throw new InvalidOperationException($"Delegation request '{file}' is invalid.");
             }
 
+            var resolvedSelection = ResolveSelection(request.Provider, request.Model);
             return request with
             {
-                Provider = ResolveProvider(request.Provider),
-                Model = ResolveModel(request.Provider, request.Model),
+                Provider = resolvedSelection.Provider,
+                Model = resolvedSelection.ModelId,
                 WorkingDirectory = ResolveWorkingDirectory(request.WorkingDirectory)
             };
         }
@@ -108,30 +111,43 @@ public sealed class FileDelegationProcessor
             throw new InvalidOperationException($"Delegation request '{file}' is empty.");
         }
 
+        var defaultSelection = ResolveSelection(null, null);
         return new DelegationRequest(
             prompt.Trim(),
-            ResolveProvider(null),
-            ResolveModel(null, null),
+            defaultSelection.Provider,
+            defaultSelection.ModelId,
             ResolveWorkingDirectory(null),
             Path.GetFileNameWithoutExtension(file));
     }
 
-    private string ResolveProvider(string? provider)
+    private ResolvedModelSelection ResolveSelection(string? provider, string? model)
     {
-        return string.IsNullOrWhiteSpace(provider) ? _options.DefaultProvider : provider.Trim();
-    }
+        var defaultProvider = string.IsNullOrWhiteSpace(_options.DefaultProvider)
+            ? RuntimeCodingAgentRunner.GetDefaultProviderId()
+            : _options.DefaultProvider.Trim();
+        var defaultModel = string.IsNullOrWhiteSpace(_options.DefaultModel)
+            ? null
+            : _options.DefaultModel.Trim();
 
-    private string ResolveModel(string? provider, string? model)
-    {
-        if (!string.IsNullOrWhiteSpace(model))
+        if (string.IsNullOrWhiteSpace(provider) && !string.IsNullOrWhiteSpace(defaultModel))
         {
-            return model.Trim();
+            return _catalog.ResolveSelection(defaultProvider, defaultModel, defaultProvider);
         }
 
-        var resolvedProvider = ResolveProvider(provider);
-        return string.IsNullOrWhiteSpace(_options.DefaultModel)
-            ? RuntimeCodingAgentRunner.GetDefaultModelId(resolvedProvider)
-            : _options.DefaultModel!.Trim();
+        if (string.IsNullOrWhiteSpace(provider) && string.IsNullOrWhiteSpace(model))
+        {
+            return _catalog.ResolveSelection(defaultProvider, null, defaultProvider);
+        }
+
+        if (!string.IsNullOrWhiteSpace(provider) && provider.Trim().Equals("google", StringComparison.OrdinalIgnoreCase))
+        {
+            var normalizedModel = string.IsNullOrWhiteSpace(model)
+                ? ModelCatalog.GetDefaultModelId("google-gemini-cli")
+                : model.Trim();
+            return _catalog.ResolveSelection("google-gemini-cli", normalizedModel, defaultProvider);
+        }
+
+        return _catalog.ResolveSelection(provider, model, defaultProvider);
     }
 
     private string ResolveWorkingDirectory(string? workingDirectory)

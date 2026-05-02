@@ -18,6 +18,8 @@ namespace Tau.Ai.Serialization;
 [JsonSerializable(typeof(ToolCallContent))]
 [JsonSerializable(typeof(Tool))]
 [JsonSerializable(typeof(Model))]
+[JsonSerializable(typeof(ModelCompatibility))]
+[JsonSerializable(typeof(VercelGatewayRouting))]
 [JsonSerializable(typeof(Usage))]
 [JsonSerializable(typeof(ModelCost))]
 [JsonSerializable(typeof(StreamOptions))]
@@ -25,5 +27,7 @@ namespace Tau.Ai.Serialization;
 [JsonSerializable(typeof(IReadOnlyList<ChatMessage>))]
 [JsonSerializable(typeof(IReadOnlyList<ContentBlock>))]
 [JsonSerializable(typeof(IReadOnlyList<Tool>))]
+[JsonSerializable(typeof(Dictionary<string, object>))]
+[JsonSerializable(typeof(Dictionary<string, string>))]
 [JsonSerializable(typeof(JsonElement))]
 internal partial class TauAiJsonContext : JsonSerializerContext;

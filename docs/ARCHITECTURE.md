@@ -69,7 +69,7 @@ tests/
 当前已具备：
 
 - provider registry
-- built-in model catalog
+- built-in model catalog + shared default selection resolver
 - provider auth resolver / env auth / auth.json
 - OpenAI / Anthropic / Google 主链
 - OpenAI Responses / OpenAI Codex Responses 专用 SSE provider
@@ -81,6 +81,10 @@ tests/
 - OpenAI Codex Responses WebSocket transport（`transport=WebSocket/Auto`、`response.create` frame、`session_id` / `x-client-request-id`、会话级 socket cache、SSE fallback）
 - OpenAI Responses / Codex Responses service-tier usage 与 cost multiplier（`flex=0.5`、`priority=2`，Codex `default` -> requested tier 归一）
 - GitHub Copilot Responses 动态 headers / vision 行为（`X-Initiator`、`Openai-Intent`、`Copilot-Vision-Request`、tool-result image payload）
+- generated model seed/generator/catalog（`generated-models.seed.json` -> `generate-tau-ai-models.ps1` -> `GeneratedBuiltInModels.g.cs`）
+- shared typed/default model selection（default provider/model、canonical `provider/model` 引用、冲突检测）
+- model compatibility / routing metadata（`Model.Compat`，OpenAI-compatible provider 当前消费 stream usage、max tokens field、reasoning format、tool stream、strict mode、OpenRouter/Vercel routing）
+- custom model/provider 配置入口（`TAU_MODELS_FILE`、`./.tau/models.json`、`~/.tau/models.json`，当前支持 Tau 已注册 API 的 `providers/baseUrl/api/apiKey/authHeader/headers/compat/models/modelOverrides` 子集）
 
 这一轮又补了：
 
@@ -93,6 +97,9 @@ tests/
 - Codex Responses 从 SSE-only 扩展到 WebSocket/auto transport：新增 `ClientWebSocket` transport seam，WebSocket frame 使用 `type=response.create`，同 `SessionId` 的空闲连接可复用，`auto` 在 WebSocket 未开始前失败时回退现有 SSE 路径，Fake WebSocket tests 固定 URL/header/frame/reuse 行为
 - Responses service-tier 从“只写 request body”补到 usage/cost 层：`Usage.ServiceTier` 记录 effective tier，`ModelCatalog.CalculateCost` 统一应用 `flex=0.5`、`priority=2` 倍率，Codex 响应 `default` 且请求 `flex/priority` 时按请求 tier 计价
 - GitHub Copilot Responses 从“只有 provider/model 映射”补到更接近上游：内建 model 带上 Copilot Chat 静态 headers 与 image input modality，请求按最后一条消息生成 `X-Initiator`，发送图片时自动加 `Copilot-Vision-Request=true`，并允许 `ToolResultMessage` 以 `function_call_output` 数组携带图片内容
+- model registry 从“只有手写 `BuiltInModels`”推进到“手写基线 + generated catalog”：新增 seed JSON、generator 脚本和 `GeneratedBuiltInModels.g.cs`，并先把 Azure Responses / OpenAI Codex / GitHub Copilot Responses / Google Gemini CLI / Antigravity 扩到一批更接近上游的已支持模型族覆盖（当前 generated seed 共 66 个模型）
+- model metadata 从“只能描述 id/name/cost/modalities”推进到“可携带 Tau 当前能实际消费的 compatibility/routing”：`Model.Compat` 支持 OpenAI-compatible 的 stream usage、`max_tokens`/`max_completion_tokens`、reasoning format/map、z.ai tool stream、tool strict mode、OpenRouter `provider` routing 与 Vercel AI Gateway `providerOptions.gateway`；generator 会保留 seed 里的 compat 字段。
+- custom model registry 从“必须改代码注册模型”推进到“启动时合并 models.json”：`ModelConfigurationStore` 会从 `TAU_MODELS_FILE`、当前目录 `.tau/models.json`、用户目录 `.tau/models.json` 中取第一个存在文件，按 provider 合并 built-in/generated models、provider-level override、per-model override 和 custom models；`StreamFunctions` 会在请求前解析 models.json 的 `apiKey`、`authHeader` 与 provider/model headers，支持 env/literal/`!command` value resolution。动态 provider API 注册和 OAuth login 仍是后续切片。
 
 ### Tau.Agent
 
@@ -104,7 +111,7 @@ tests/
 
 - 最小 CLI 宿主
 - 基础 coding tools
-- 与 `ModelCatalog` 对齐的 provider / model 默认解析
+- 与 `ModelCatalog` 对齐的 provider / model 默认解析（CodingAgent / WebUi / Mom 复用同一解析器）
 - `RuntimeCodingAgentRunner.Create(provider, model, history)` 显式宿主工厂
 
 这个显式 runner 工厂现在也是 `WebUi / Mom` 继续往宿主化推进的关键共享边界。

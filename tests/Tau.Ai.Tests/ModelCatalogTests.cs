@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Tau.Ai.Registry;
 
 namespace Tau.Ai.Tests;
@@ -7,7 +8,7 @@ public sealed class ModelCatalogTests
     [Fact]
     public void GetProviders_IncludesPortedProviderFamilies()
     {
-        var catalog = new ModelCatalog();
+        var catalog = CreateBuiltInCatalog();
 
         var providers = catalog.GetProviders();
 
@@ -21,9 +22,261 @@ public sealed class ModelCatalogTests
     }
 
     [Fact]
+    public void GetModel_LoadsGeneratedCatalogEntries()
+    {
+        var catalog = CreateBuiltInCatalog();
+
+        var azure = catalog.GetModel("azure-openai-responses", "gpt-5.4-pro");
+        var codex = catalog.GetModel("openai-codex", "gpt-5.1-codex-max");
+        var copilot = catalog.GetModel("github-copilot", "gpt-5.4-mini");
+        var geminiCli = catalog.GetModel("google-gemini-cli", "gemini-3.1-pro-preview");
+        var antigravity = catalog.GetModel("google-antigravity", "claude-opus-4-6-thinking");
+
+        Assert.Equal("azure-openai-responses", azure.Api);
+        Assert.Equal(128_000, azure.MaxOutputTokens);
+        Assert.Equal(1_050_000, azure.ContextWindow);
+        Assert.Equal("openai-codex-responses", codex.Api);
+        Assert.Equal(272_000, codex.ContextWindow);
+        Assert.Equal("openai-responses", copilot.Api);
+        Assert.Contains("image", copilot.InputModalities);
+        Assert.NotNull(copilot.Headers);
+        Assert.Equal("google-gemini-cli", geminiCli.Api);
+        Assert.Equal(65_535, geminiCli.MaxOutputTokens);
+        Assert.Equal("google-gemini-cli", antigravity.Api);
+        Assert.Equal(128_000, antigravity.MaxOutputTokens);
+    }
+
+    [Fact]
+    public void GetModels_MergesHandWrittenAndGeneratedCatalogs()
+    {
+        var catalog = CreateBuiltInCatalog();
+
+        var azureIds = catalog.GetModels("azure-openai-responses").Select(model => model.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var codexIds = catalog.GetModels("openai-codex").Select(model => model.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var copilotIds = catalog.GetModels("github-copilot").Select(model => model.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var geminiCliIds = catalog.GetModels("google-gemini-cli").Select(model => model.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var antigravityIds = catalog.GetModels("google-antigravity").Select(model => model.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        Assert.Contains("gpt-4.1", azureIds);
+        Assert.Contains("gpt-4-turbo", azureIds);
+        Assert.Contains("gpt-5.4-pro", azureIds);
+        Assert.Contains("o4-mini-deep-research", azureIds);
+        Assert.Contains("gpt-5.2-codex", codexIds);
+        Assert.Contains("gpt-5.1-codex-max", codexIds);
+        Assert.Contains("gpt-5.4-mini", codexIds);
+        Assert.Contains("gpt-4o", copilotIds);
+        Assert.Contains("gpt-5.4-mini", copilotIds);
+        Assert.Contains("gemini-2.5-pro", geminiCliIds);
+        Assert.Contains("gemini-3.1-pro-preview", geminiCliIds);
+        Assert.Contains("gemini-3.1-pro-high", antigravityIds);
+        Assert.Contains("claude-opus-4-6-thinking", antigravityIds);
+    }
+
+    [Fact]
+    public void ResolveSelection_UsesCanonicalDefaultsAndModelReferences()
+    {
+        var catalog = CreateBuiltInCatalog();
+
+        var implicitDefault = catalog.ResolveSelection();
+        var explicitDefault = catalog.ResolveSelection("default", "default");
+        var canonicalReference = catalog.ResolveSelection(modelHint: "google-antigravity/claude-opus-4-6-thinking");
+        var exactId = catalog.ResolveSelection(modelHint: "claude-opus-4-6-thinking");
+
+        Assert.Equal("openai", implicitDefault.Provider);
+        Assert.Equal("gpt-5.4", implicitDefault.ModelId);
+        Assert.Equal(implicitDefault, explicitDefault);
+        Assert.Equal("google-antigravity", canonicalReference.Provider);
+        Assert.Equal("claude-opus-4-6-thinking", canonicalReference.ModelId);
+        Assert.Equal(canonicalReference, exactId);
+    }
+
+    [Fact]
+    public void ResolveSelection_PrefersResolvedProviderButRejectsConflictingReferences()
+    {
+        var catalog = CreateBuiltInCatalog();
+
+        var preferred = catalog.ResolveSelection(modelHint: "gpt-5.4");
+        var conflicting = Assert.Throws<InvalidOperationException>(() => catalog.ResolveSelection("openai", "google-antigravity/claude-opus-4-6-thinking"));
+
+        Assert.Equal("openai", preferred.Provider);
+        Assert.Equal("gpt-5.4", preferred.ModelId);
+        Assert.Contains("conflicts", conflicting.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Constructor_LoadsCustomModelsAndProviderOverrides()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), $"tau-models-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+
+        try
+        {
+            var modelsPath = Path.Combine(tempDir, "models.json");
+            File.WriteAllText(modelsPath, """
+                {
+                  "providers": {
+                    "openrouter": {
+                      "baseUrl": "https://openrouter.ai/api/v1",
+                      "api": "openai-completions",
+                      "headers": {
+                        "HTTP-Referer": "https://tau.local"
+                      },
+                      "compat": {
+                        "supportsDeveloperRole": false,
+                        "supportsUsageInStreaming": false,
+                        "maxTokensField": "max_completion_tokens",
+                        "thinkingFormat": "openrouter"
+                      },
+                      "models": [
+                        {
+                          "id": "anthropic/claude-sonnet-4",
+                          "name": "Claude Sonnet 4 via OpenRouter",
+                          "reasoning": true,
+                          "input": ["text", "image"],
+                          "contextWindow": 200000,
+                          "maxTokens": 64000,
+                          "cost": {
+                            "input": 3,
+                            "output": 15,
+                            "cacheRead": 0.3,
+                            "cacheWrite": 3.75
+                          },
+                          "compat": {
+                            "openRouterRouting": {
+                              "only": ["anthropic"],
+                              "allow_fallbacks": false
+                            }
+                          }
+                        },
+                        {
+                          "id": "local/qwen3",
+                          "api": "openai-compatible",
+                          "baseUrl": "http://localhost:1234/v1"
+                        }
+                      ]
+                    }
+                  }
+                }
+                """);
+
+            var catalog = new ModelCatalog(configurationStore: new ModelConfigurationStore([modelsPath]));
+
+            var model = catalog.GetModel("openrouter", "anthropic/claude-sonnet-4");
+
+            Assert.Equal("openai-chat-completions", model.Api);
+            Assert.Equal("https://openrouter.ai/api/v1", model.BaseUrl);
+            Assert.True(model.Reasoning);
+            Assert.Contains("image", model.InputModalities);
+            Assert.Equal(200_000, model.ContextWindow);
+            Assert.Equal(64_000, model.MaxOutputTokens);
+            Assert.Equal(3m, model.Cost!.Value.InputPerMillion);
+            Assert.Equal("https://tau.local", model.Headers!["HTTP-Referer"]);
+            Assert.False(model.Compat!.SupportsDeveloperRole);
+            Assert.False(model.Compat.SupportsUsageInStreaming);
+            Assert.Equal("max_completion_tokens", model.Compat.MaxTokensField);
+            Assert.Equal("openrouter", model.Compat.ThinkingFormat);
+            Assert.Equal("anthropic", ((JsonElement)model.Compat.OpenRouterRouting!["only"])[0].GetString());
+            Assert.False(((JsonElement)model.Compat.OpenRouterRouting["allow_fallbacks"]).GetBoolean());
+
+            var aliasModel = catalog.GetModel("openrouter", "local/qwen3");
+            Assert.Equal("openai-chat-completions", aliasModel.Api);
+            Assert.Equal("http://localhost:1234/v1", aliasModel.BaseUrl);
+        }
+        finally
+        {
+            Directory.Delete(tempDir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Constructor_IgnoresUnreadableOrInvalidCustomModelsConfig()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), $"tau-models-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+
+        try
+        {
+            var modelsPath = Path.Combine(tempDir, "models.json");
+            File.WriteAllText(modelsPath, "{ invalid json");
+
+            var catalog = new ModelCatalog(configurationStore: new ModelConfigurationStore([modelsPath]));
+
+            Assert.Equal("gpt-5.4", catalog.GetModel("openai", "gpt-5.4").Id);
+        }
+        finally
+        {
+            Directory.Delete(tempDir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Constructor_AppliesProviderAndModelOverridesToBuiltIns()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), $"tau-models-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+
+        try
+        {
+            var modelsPath = Path.Combine(tempDir, "models.json");
+            File.WriteAllText(modelsPath, """
+                {
+                  "providers": {
+                    "openai": {
+                      "baseUrl": "https://proxy.example.com/v1",
+                      "headers": {
+                        "X-Proxy": "tau"
+                      },
+                      "compat": {
+                        "supportsUsageInStreaming": false
+                      },
+                      "modelOverrides": {
+                        "gpt-5.4": {
+                          "name": "GPT-5.4 via Proxy",
+                          "reasoning": false,
+                          "cost": {
+                            "input": 9.5
+                          },
+                          "headers": {
+                            "X-Model": "gpt-54"
+                          },
+                          "compat": {
+                            "maxTokensField": "max_completion_tokens"
+                          }
+                        },
+                        "missing-model": {
+                          "name": "Ignored"
+                        }
+                      }
+                    }
+                  }
+                }
+                """);
+
+            var catalog = new ModelCatalog(configurationStore: new ModelConfigurationStore([modelsPath]));
+
+            var model = catalog.GetModel("openai", "gpt-5.4");
+
+            Assert.Equal("GPT-5.4 via Proxy", model.Name);
+            Assert.Equal("https://proxy.example.com/v1", model.BaseUrl);
+            Assert.False(model.Reasoning);
+            Assert.Equal(9.5m, model.Cost!.Value.InputPerMillion);
+            Assert.Equal(10m, model.Cost.Value.OutputPerMillion);
+            Assert.Equal("tau", model.Headers!["X-Proxy"]);
+            Assert.Equal("gpt-54", model.Headers["X-Model"]);
+            Assert.False(model.Compat!.SupportsUsageInStreaming);
+            Assert.Equal("max_completion_tokens", model.Compat.MaxTokensField);
+            Assert.Null(catalog.TryGetModel("openai", "missing-model"));
+        }
+        finally
+        {
+            Directory.Delete(tempDir, recursive: true);
+        }
+    }
+
+    [Fact]
     public void GetModel_ReturnsExpectedModel()
     {
-        var catalog = new ModelCatalog();
+        var catalog = CreateBuiltInCatalog();
 
         var model = catalog.GetModel("openai-codex", "gpt-5.2-codex");
 
@@ -75,6 +328,37 @@ public sealed class ModelCatalogTests
     }
 
     [Fact]
+    public void CreateOpenAiCompatibleModel_PreservesCompatibilityMetadata()
+    {
+        var compat = new ModelCompatibility
+        {
+            SupportsUsageInStreaming = false,
+            MaxTokensField = "max_tokens",
+            VercelGatewayRouting = new VercelGatewayRouting
+            {
+                Only = ["fireworks"],
+                Order = ["fireworks", "novita"]
+            }
+        };
+
+        var model = ModelCatalog.CreateOpenAiCompatibleModel(
+            "vercel-ai-gateway",
+            "moonshotai/kimi-k2.5",
+            "Kimi K2.5",
+            "https://ai-gateway.vercel.sh/v1",
+            reasoning: true,
+            contextWindow: 262_144,
+            maxTokens: 262_144,
+            inputCost: 0.6m,
+            outputCost: 3m,
+            compat: compat);
+
+        Assert.False(model.Compat!.SupportsUsageInStreaming);
+        Assert.Equal("max_tokens", model.Compat.MaxTokensField);
+        Assert.Equal("novita", model.Compat.VercelGatewayRouting!.Order![1]);
+    }
+
+    [Fact]
     public void SupportsXhigh_ReturnsTrue_ForGpt54AndOpus46()
     {
         var gpt = new Model { Id = "gpt-5.4", Name = "GPT-5.4", Api = "openai-chat-completions", Provider = "openai" };
@@ -83,4 +367,7 @@ public sealed class ModelCatalogTests
         Assert.True(ModelCatalog.SupportsXhigh(gpt));
         Assert.True(ModelCatalog.SupportsXhigh(opus));
     }
+
+    private static ModelCatalog CreateBuiltInCatalog() =>
+        new(configurationStore: new ModelConfigurationStore([]));
 }
