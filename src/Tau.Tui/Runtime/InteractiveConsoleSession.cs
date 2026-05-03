@@ -71,6 +71,15 @@ public sealed class InteractiveConsoleSession
         _transcript.Add(new TranscriptEntry(TranscriptEntryKind.Status, status));
     }
 
+
+    public void WriteStatus(string message)
+    {
+        EnsureStreamingLineClosed();
+        _terminal.Write("status> ", ConsoleColor.DarkGray);
+        _terminal.WriteLine(message);
+        _transcript.Add(new TranscriptEntry(TranscriptEntryKind.Status, message));
+    }
+
     public void WriteRuntimeError(string message)
     {
         EnsureStreamingLineClosed();

@@ -22,6 +22,10 @@ temp/
 .env
 .env.local
 .env.*.local
+.tau/coding-agent-session.json
+.tau/coding-agent-session.json.tmp
+.tau/coding-agent-settings.json.tmp
+.tau/coding-agent-settings.json
 
 # Dependency caches and common build output
 node_modules/

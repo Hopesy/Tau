@@ -108,6 +108,19 @@
 - `RuntimeCodingAgentRunner.Create(provider, model, history)` 显式宿主接线
 - 最小测试覆盖 runner/store
 
+### 切片 C2：`Tau.CodingAgent` 会话与设置基础层
+
+- CLI 启动时从本地 session store rehydrate messages/provider/model
+- 回合结束后保存当前 runtime messages
+- session JSON 先覆盖 Tau 当前消息抽象：user / assistant / toolResult 与 text / thinking / image / toolCall
+- `/new` 先做最小 session reset：清空当前 runtime messages，并把空快照写回当前 session store；当前不实现上游多 session resume/tree
+- `CodingAgentSettingsStore` 保存默认 provider/model，启动优先级为 env > session > settings
+- `/model`、`/provider`、`/models`、`/providers` 提供最小模型查看、切换和列表入口；命令不进入 LLM conversation context
+- `/auth [provider]` 通过 `ProviderAuthResolver.GetStatus(...)` 汇报 env/auth.json/models.json/OAuth 状态，`/login [provider]` 先做明确的未移植提示，不回显密钥
+- slash command 解析从 `CodingAgentHost` 抽到 `CodingAgentCommandRouter`，host 只负责输入循环、结果渲染、运行时事件和 session 持久化
+- `/compact [instructions]` 先做最小手动 compaction：使用当前模型生成会话摘要，`Reset()` runtime state，并把摘要保留成单条 user summary message
+- 暂不引入上游完整 JSONL session tree、branch、compaction、label、extension entry，避免一次性过度移植
+
 ### 切片 D：`Tau.Mom` 第二层入口
 
 - 为 runner / result schema 补更稳定 seam
@@ -172,6 +185,12 @@
 - [x] `Tau.Ai` typed/default model parsing 与共享默认选择
 - [x] `Tau.Ai` OpenAI-compatible compatibility / routing metadata（`Model.Compat` / generator / request body）
 - [x] `Tau.Ai` custom model/provider 配置入口（`ModelConfigurationStore` / models.json merge / provider 与 model override / request auth headers）
+- [x] `Tau.CodingAgent` 本地 session 持久化（`TAU_CODING_AGENT_SESSION_FILE` / `./.tau/coding-agent-session.json`，启动 rehydrate，回合后保存）
+- [x] `Tau.CodingAgent` 最小 session reset（`/new`，清空当前 runtime messages 并写回当前 session store）
+- [x] `Tau.CodingAgent` settings / model selection（`TAU_CODING_AGENT_SETTINGS_FILE` / `./.tau/coding-agent-settings.json`，`/model` / `/provider` / `/models` / `/providers`）
+- [x] `Tau.CodingAgent` 最小 auth 管理入口（`/auth` status / `/login` 未移植提示，基于 `ProviderAuthResolver.GetStatus`，不回显 secret）
+- [x] `Tau.CodingAgent` slash command router 抽离（`CodingAgentCommandRouter`，保持 `/model` / `/provider` / `/models` / `/providers` / `/auth` / `/login` 行为不变）
+- [x] `Tau.CodingAgent` 最小手动 compaction（`/compact [instructions]`，当前模型生成摘要后压缩为单条 summary message）
 - [ ] `Tau.WebUi` 流式 UI / richer rendering / attachment
 - [ ] `Tau.Mom` Slack / workspace / sandbox / delegation semantics
 - [ ] `Tau.Pods` SSH / lifecycle / model management
@@ -201,3 +220,15 @@
 - 2026-05-01：决定把 provider/model 默认解析收口到 `ModelCatalog`，而不是继续在 CodingAgent/WebUi/Mom 各自维护一份 switch/default 逻辑。原因是 generated catalog 已经成为模型 source of truth，默认 provider、默认 model、canonical `provider/model` 引用和 `default` 关键字解析都应该共享同一套规则，避免多个宿主各自漂移。
 - 2026-05-02：决定只把 Tau provider 当前能实际消费的 compatibility / routing 元数据接到 `Model.Compat`，而不是先照搬上游全部自定义 provider schema。原因是 OpenAI-compatible provider 现在已经能验证 stream usage、max token field、reasoning format/map、tool stream、strict mode、OpenRouter/Vercel routing；还不能实际消费的字段继续留到 custom model 配置入口和后续 provider 行为切片。
 - 2026-05-02：决定先落地 models.json 的模型目录合并入口，而不是一次性移植上游完整 request auth / dynamic provider 注册。原因是 Tau 当前已经有 `ProviderAuthResolver` 与已注册 API 家族，最小可靠切片是让用户无需改代码即可添加 OpenAI-compatible/custom model，并复用现有 provider 调用路径；`apiKey/authHeader`、shell/env/command value resolution 和 request headers 已在 `StreamFunctions` 层接入；OAuth login 和动态 API 注册继续拆成后续配置/auth 切片。
+
+- 2026-05-02：决定先为 `Tau.CodingAgent` 落地 Tau-native 的最小 JSON session store，而不是一次性移植上游完整 JSONL session tree。原因是当前最缺的是跨运行的 conversation rehydrate 基础能力；branch、label、compaction、extension entry 和 settings/slash 需要在有稳定消息持久化后分切片接入。
+
+- 2026-05-03：决定把 `Tau.CodingAgent` 的模型切换先做成最小 slash command，不引入完整上游命令系统。原因是当前只有 provider/model selection 需要本地可操作入口；先让命令不进入 LLM context，并把默认 provider/model 写入 settings store，后续再扩 auth、compaction 与通用 slash command registry。
+
+- 2026-05-03：决定把 `Tau.CodingAgent` auth 管理先收口成 `/auth` 状态查看和 `/login` 未移植提示，而不是在本切片内实现真实 OAuth/device flow。原因是 Tau.Ai 已有 env/auth.json/OAuth credential resolver 和 models.json request auth 合并，CodingAgent 当前最需要的是安全可见的凭证状态面；实际 Anthropic/Copilot/Codex/Gemini OAuth login 仍应在 Tau.Ai auth provider 切片中逐个实现。
+
+- 2026-05-03：决定把 `Tau.CodingAgent` 的 slash command 解析从 `CodingAgentHost` 抽到 `CodingAgentCommandRouter`，而不是继续在 host 里堆命令分支。原因是 session/settings/auth 已经让 host 同时承担输入循环、命令解析、UI 输出和持久化，继续追加 `/compact`、auth login 或 richer command 会让主循环变成难测的杂糅类；先固定一个无 UI 依赖、可单测的 command seam。
+
+- 2026-05-03：决定把 `Tau.CodingAgent` 的 compaction 先收口成最小手动版，而不是同步上游完整 session-manager / JSONL tree / auto-compaction。原因是 Tau 当前只有平面消息持久化和 `AgentRuntime.Reset()`，先用当前模型生成摘要并把运行态压成单条 summary message，能尽快提供真实可用的 `/compact`，同时不伪装成已经具备 branch、tokensBefore 边界、auto-retry 或 compaction metadata 的完整体系。
+
+- 2026-05-03：决定先补 `Tau.CodingAgent` 的 `/new`，而不是直接跳到 `/session`、`/resume` 或 tree/fork。原因是当前 Tau 只有单文件 session snapshot，没有多 session 索引和分支结构；先把“清空当前会话并立即持久化”的最小 lifecycle 做实，能与现有 session store 和 `AgentRuntime.Reset()` 直接闭环，同时为后续 richer session 管理留稳定 seam。

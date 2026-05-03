@@ -113,8 +113,14 @@ tests/
 - 基础 coding tools
 - 与 `ModelCatalog` 对齐的 provider / model 默认解析（CodingAgent / WebUi / Mom 复用同一解析器）
 - `RuntimeCodingAgentRunner.Create(provider, model, history)` 显式宿主工厂
+- 本地 session 持久化：默认写入当前目录 `./.tau/coding-agent-session.json`，也可通过 `TAU_CODING_AGENT_SESSION_FILE` 指定路径；启动时按保存的 provider/model/messages rehydrate，回合结束后保存当前消息
+- 最小 session lifecycle：`/new` 清空当前 runtime messages，并把空会话立即写回当前 session store；当前保留已选 model/provider，不实现上游多 session resume/tree
+- 最小 settings / model selection：`/model`、`/provider`、`/models`、`/providers`，默认模型写入 `./.tau/coding-agent-settings.json`，也可通过 `TAU_CODING_AGENT_SETTINGS_FILE` 指定路径
+- 最小 auth 管理入口：`/auth [provider]` 查询当前 provider 凭证来源，`/login [provider]` 给出已配置或未移植 OAuth/login 的明确提示；不会回显密钥
+- 最小手动 compaction：`/compact [instructions]` 使用当前模型生成会话摘要，重置 runtime state，并把摘要作为单条 user message 保留到 session store；当前不移植上游 JSONL/tree/branch/auto-compaction 体系
+- `CodingAgentCommandRouter` 承载 slash command 解析和本地命令执行，`CodingAgentHost` 保持为输入循环、UI 渲染、runtime event 和 session 持久化宿主
 
-这个显式 runner 工厂现在也是 `WebUi / Mom` 继续往宿主化推进的关键共享边界。
+这个显式 runner 工厂现在也是 `WebUi / Mom` 继续往宿主化推进的关键共享边界；本地 session/settings/auth-status 入口则为后续真实 OAuth、slash command、compaction 与 WebUi/Mom 共享会话语义打底。
 
 ### Tau.WebUi
 
@@ -238,6 +244,8 @@ dotnet run --project src/Tau.Pods/Tau.Pods.csproj --no-build -- probe tau.pods.j
 当前已知限制：
 
 - `Tau.CodingAgent.csproj` / `Tau.WebUi.csproj` / `Tau.Mom.csproj` / `Tau.Pods.csproj` 已可独立 build
+- `Tau.CodingAgent` 默认把本地会话保存到当前目录 `.tau/coding-agent-session.json`，`TAU_CODING_AGENT_SESSION_FILE` 可覆盖路径
+- `Tau.CodingAgent` 默认把本地模型设置保存到当前目录 `.tau/coding-agent-settings.json`，`TAU_CODING_AGENT_SETTINGS_FILE` 可覆盖路径
 - `Tau.WebUi` 的 `/api/status`、`/api/catalog`、`POST /api/sessions` 已可返回真实 JSON
 - `Tau.WebUi` 的 session 已可持久化到 `output/webui-sessions.json`
 - `Tau.Mom --once` 已可真实处理结构化请求并写出带 `provider/model/workingDirectory/metadata` 的 outbox

@@ -44,9 +44,12 @@
 
 ### Tau.CodingAgent
 
-- [ ] session 持久化
-- [ ] settings / model selection / provider selection
-- [ ] auth 管理入口
+- [x] session 持久化（`TAU_CODING_AGENT_SESSION_FILE` 或 `./.tau/coding-agent-session.json`，启动自动 rehydrate，回合后保存）
+- [~] session lifecycle（已补 `/new` 清空当前会话并写回 session store；仍缺 resume/tree/stats 等多 session 管理能力）
+- [x] settings / model selection / provider selection（`/model`、`/provider`、`/models`、`/providers`，默认写入 `TAU_CODING_AGENT_SETTINGS_FILE` 或 `./.tau/coding-agent-settings.json`）
+- [~] auth 管理入口（已补 `/auth` 状态查看和 `/login` 骨架提示；真实 OAuth/device flow 仍在 Tau.Ai OAuth backlog）
+- [x] slash command router 抽离（`CodingAgentCommandRouter`；当前命令行为不变，为 `/compact` / login flow 等后续命令留 seam）
+- [~] manual compaction（已补 `/compact [instructions]`，当前使用当前模型生成摘要并把 session 压成单条 summary message；仍缺 auto-compaction、branch/tree/metadata 与上游完整 session-manager 语义）
 - [ ] richer rendering
 - [x] 显式 `Create(provider, model, history)` runner 工厂
 - [x] 与 `ModelCatalog` 对齐的默认模型解析层继续收口

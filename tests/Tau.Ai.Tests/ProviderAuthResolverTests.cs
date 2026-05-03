@@ -15,6 +15,72 @@ public sealed class ProviderAuthResolverTests
         Assert.Equal("explicit-key", result);
     }
 
+
+
+    [Fact]
+    public void GetStatus_ReportsEnvironmentCredentialsWithoutLeakingSecret()
+    {
+        using var scope = EnvironmentVariableScope.Acquire();
+        scope.Set("OPENAI_API_KEY", "secret-openai-key");
+        scope.Set("TAU_AUTH_FILE", Path.Combine(Path.GetTempPath(), $"missing-auth-{Guid.NewGuid():N}.json"));
+
+        var resolver = new ProviderAuthResolver();
+
+        var status = resolver.GetStatus("openai");
+
+        Assert.True(status.IsConfigured);
+        Assert.Equal("environment", status.Source);
+        Assert.DoesNotContain("secret-openai-key", status.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void GetStatus_ReportsModelsJsonCredentials()
+    {
+        using var scope = EnvironmentVariableScope.Acquire();
+        var tempDir = Path.Combine(Path.GetTempPath(), $"tau-auth-status-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+
+        try
+        {
+            var modelsPath = Path.Combine(tempDir, "models.json");
+            var authPath = Path.Combine(tempDir, "auth.json");
+            File.WriteAllText(authPath, "{}");
+            File.WriteAllText(modelsPath, """
+                {
+                  "providers": {
+                    "custom-provider": {
+                      "apiKey": "models-key",
+                      "models": [
+                        { "id": "custom-model" }
+                      ]
+                    }
+                  }
+                }
+                """);
+            scope.Set("TAU_AUTH_FILE", authPath);
+            scope.Set("TAU_MODELS_FILE", modelsPath);
+
+            var model = new Model
+            {
+                Provider = "custom-provider",
+                Id = "custom-model",
+                Name = "Custom Model",
+                Api = "openai-chat-completions"
+            };
+            var resolver = new ProviderAuthResolver();
+
+            var status = resolver.GetStatus(model);
+
+            Assert.True(status.IsConfigured);
+            Assert.Equal("models.json", status.Source);
+            Assert.DoesNotContain("models-key", status.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(tempDir, recursive: true);
+        }
+    }
+
     [Fact]
     public void ResolveApiKey_UsesAuthFileApiKeyEntry()
     {

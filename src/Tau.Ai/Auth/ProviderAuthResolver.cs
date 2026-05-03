@@ -1,4 +1,5 @@
 using Tau.Ai.Auth.OAuth;
+using Tau.Ai.Registry;
 
 namespace Tau.Ai.Auth;
 
@@ -13,6 +14,68 @@ public sealed class ProviderAuthResolver
     {
         _oauthProviders = oauthProviders ?? new OAuthProviderRegistry();
         _credentialStore = credentialStore ?? new OAuthCredentialStore();
+    }
+
+
+
+    public ProviderAuthStatus GetStatus(Model model, string? explicitApiKey = null)
+    {
+        return GetStatus(model.Provider, model, explicitApiKey);
+    }
+
+    public ProviderAuthStatus GetStatus(string provider, Model? model = null, string? explicitApiKey = null)
+    {
+        if (!string.IsNullOrWhiteSpace(explicitApiKey))
+        {
+            return new ProviderAuthStatus(provider, true, "explicit", false, false, "API key provided explicitly for this request.");
+        }
+
+        var envApiKey = EnvironmentApiKeyResolver.GetApiKey(provider);
+        if (!string.IsNullOrWhiteSpace(envApiKey))
+        {
+            var source = EnvironmentApiKeyResolver.IsAuthenticatedMarker(envApiKey) ? "environment/ambient" : "environment";
+            return new ProviderAuthStatus(provider, true, source, false, false, "Credentials are available from environment or ambient provider credentials.");
+        }
+
+        var authEntries = _credentialStore.LoadEntries();
+        if (authEntries.TryGetValue(provider, out var entry))
+        {
+            if (!string.IsNullOrWhiteSpace(entry.ApiKey))
+            {
+                return new ProviderAuthStatus(provider, true, "auth.json api_key", false, false, "API key entry found in auth.json.");
+            }
+
+            if (entry.OAuth is not null)
+            {
+                var oauthProvider = _oauthProviders.TryGet(provider);
+                if (oauthProvider is null)
+                {
+                    return new ProviderAuthStatus(provider, false, "auth.json oauth", true, false, "OAuth credentials exist, but no OAuth provider is registered for this provider.");
+                }
+
+                if (entry.OAuth.IsExpired())
+                {
+                    return new ProviderAuthStatus(provider, false, "auth.json oauth", true, true, "OAuth credentials exist but are expired; refresh/login flow is not yet fully ported for this provider.");
+                }
+
+                return new ProviderAuthStatus(provider, true, "auth.json oauth", true, true, "OAuth credentials found in auth.json.");
+            }
+        }
+
+        if (model is not null)
+        {
+            var requestConfig = new ModelConfigurationStore().ResolveRequestConfiguration(model);
+            if (!string.IsNullOrWhiteSpace(requestConfig.ApiKey))
+            {
+                return new ProviderAuthStatus(provider, true, "models.json", false, false, "API key resolved from models.json provider/model configuration.");
+            }
+        }
+
+        var canLogin = _oauthProviders.TryGet(provider) is not null;
+        var message = canLogin
+            ? "No credentials found. OAuth provider metadata exists, but login flow is not yet ported; use environment variables or auth.json."
+            : "No credentials found. Use environment variables, auth.json, or models.json provider configuration.";
+        return new ProviderAuthStatus(provider, false, "none", false, canLogin, message);
     }
 
     public string? ResolveApiKey(string provider, string? explicitApiKey = null)
