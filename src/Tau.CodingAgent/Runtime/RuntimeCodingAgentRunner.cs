@@ -48,6 +48,7 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner
 
     public IReadOnlyList<ChatMessage> Messages => _runtime.State.Messages;
     public Model Model => _config.Model;
+    public string? SessionName { get; set; }
 
     public IReadOnlyList<string> GetProviders() => _modelCatalog.GetProviders();
 
@@ -70,6 +71,20 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner
         return _authResolver.GetStatus(provider, model);
     }
 
+    public CodingAgentSessionStats GetSessionStats(string? sessionFile = null)
+    {
+        var messages = Messages;
+        return new CodingAgentSessionStats(
+            _config.Model.Provider,
+            _config.Model.Id,
+            messages.Count,
+            messages.OfType<UserMessage>().Count(),
+            messages.OfType<AssistantMessage>().Count(),
+            messages.OfType<ToolResultMessage>().Count(),
+            messages.OfType<AssistantMessage>().Sum(message => message.Content.OfType<ToolCallContent>().Count()),
+            SessionName,
+            sessionFile);
+    }
     public async Task<CodingAgentCompactionResult> CompactAsync(
         string? customInstructions = null,
         CancellationToken cancellationToken = default)
@@ -122,6 +137,23 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner
     public void ResetSession()
     {
         _runtime.Reset();
+        SessionName = null;
+    }
+
+    public void RestoreSession(CodingAgentSessionSnapshot snapshot)
+    {
+        if (!string.IsNullOrWhiteSpace(snapshot.Provider) || !string.IsNullOrWhiteSpace(snapshot.Model))
+        {
+            SelectModel(snapshot.Provider, snapshot.Model);
+        }
+
+        _runtime.Reset();
+        foreach (var message in snapshot.Messages)
+        {
+            _runtime.AddMessage(message);
+        }
+
+        SessionName = snapshot.Name;
     }
 
     public IAsyncEnumerable<AgentEvent> RunAsync(string input, CancellationToken cancellationToken = default)

@@ -19,26 +19,11 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Reference Include="Tau.CodingAgent">
-      <HintPath>..\..\src\Tau.CodingAgent\bin\$(Configuration)\$(TargetFramework)\Tau.CodingAgent.dll</HintPath>
-      <Private>true</Private>
-    </Reference>
-    <Reference Include="Tau.Ai">
-      <HintPath>..\..\src\Tau.Ai\bin\$(Configuration)\$(TargetFramework)\Tau.Ai.dll</HintPath>
-      <Private>true</Private>
-    </Reference>
-    <Reference Include="Tau.Agent">
-      <HintPath>..\..\src\Tau.Agent\bin\$(Configuration)\$(TargetFramework)\Tau.Agent.dll</HintPath>
-      <Private>true</Private>
-    </Reference>
-    <Reference Include="Tau.Tui">
-      <HintPath>..\..\src\Tau.Tui\bin\$(Configuration)\$(TargetFramework)\Tau.Tui.dll</HintPath>
-      <Private>true</Private>
-    </Reference>
-    <Reference Include="Tau.WebUi">
-      <HintPath>..\..\src\Tau.WebUi\bin\$(Configuration)\$(TargetFramework)\Tau.WebUi.dll</HintPath>
-      <Private>true</Private>
-    </Reference>
+    <ProjectReference Include="..\..\src\Tau.CodingAgent\Tau.CodingAgent.csproj" />
+    <ProjectReference Include="..\..\src\Tau.Ai\Tau.Ai.csproj" />
+    <ProjectReference Include="..\..\src\Tau.Agent\Tau.Agent.csproj" />
+    <ProjectReference Include="..\..\src\Tau.Tui\Tau.Tui.csproj" />
+    <ProjectReference Include="..\..\src\Tau.WebUi\Tau.WebUi.csproj" />
   </ItemGroup>
 
 </Project>

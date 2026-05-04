@@ -13,20 +13,9 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\Tau.Agent\Tau.Agent.csproj">
-      <SkipGetTargetFrameworkProperties>true</SkipGetTargetFrameworkProperties>
-    </ProjectReference>
-    <Reference Include="Tau.Ai">
-      <HintPath>..\Tau.Ai\bin\$(Configuration)\$(TargetFramework)\Tau.Ai.dll</HintPath>
-      <Private>true</Private>
-    </Reference>
-    <Reference Include="Tau.CodingAgent">
-      <HintPath>..\Tau.CodingAgent\bin\$(Configuration)\$(TargetFramework)\Tau.CodingAgent.dll</HintPath>
-      <Private>true</Private>
-    </Reference>
-    <Reference Include="Tau.Tui">
-      <HintPath>..\Tau.Tui\bin\$(Configuration)\$(TargetFramework)\Tau.Tui.dll</HintPath>
-      <Private>true</Private>
-    </Reference>
+    <ProjectReference Include="..\Tau.Agent\Tau.Agent.csproj" />
+    <ProjectReference Include="..\Tau.Ai\Tau.Ai.csproj" />
+    <ProjectReference Include="..\Tau.CodingAgent\Tau.CodingAgent.csproj" />
+    <ProjectReference Include="..\Tau.Tui\Tau.Tui.csproj" />
   </ItemGroup>
 </Project>

@@ -1,0 +1,205 @@
+param(
+    [switch]$SkipRestore,
+    [switch]$RunSmoke
+)
+
+$ErrorActionPreference = 'Stop'
+$repoRoot = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
+Set-Location $repoRoot
+
+$env:DOTNET_CLI_HOME = if ($env:DOTNET_CLI_HOME) { $env:DOTNET_CLI_HOME } else { Join-Path $repoRoot '.dotnet' }
+$env:DOTNET_SKIP_FIRST_TIME_EXPERIENCE = if ($env:DOTNET_SKIP_FIRST_TIME_EXPERIENCE) { $env:DOTNET_SKIP_FIRST_TIME_EXPERIENCE } else { '1' }
+$env:DOTNET_CLI_TELEMETRY_OPTOUT = if ($env:DOTNET_CLI_TELEMETRY_OPTOUT) { $env:DOTNET_CLI_TELEMETRY_OPTOUT } else { '1' }
+$env:DOTNET_NOLOGO = if ($env:DOTNET_NOLOGO) { $env:DOTNET_NOLOGO } else { '1' }
+
+New-Item -ItemType Directory -Force -Path $env:DOTNET_CLI_HOME | Out-Null
+
+function Invoke-DotnetCommand {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$Arguments
+    )
+
+    & dotnet @Arguments
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+}
+
+function Get-FreeTcpPort {
+    $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+    try {
+        $listener.Start()
+        return $listener.LocalEndpoint.Port
+    }
+    finally {
+        $listener.Stop()
+    }
+}
+
+function Wait-HttpReady {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Url,
+        [int]$TimeoutSeconds = 20
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        try {
+            Invoke-RestMethod -Uri $Url -Method Get | Out-Null
+            return
+        }
+        catch {
+            Start-Sleep -Milliseconds 250
+        }
+    }
+
+    throw "Timed out waiting for $Url"
+}
+
+function Invoke-WebUiSmoke {
+    $smokeRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("tau-webui-smoke-" + [Guid]::NewGuid().ToString("N"))
+    $sessionsPath = Join-Path $smokeRoot 'webui-sessions.json'
+    $stdoutPath = Join-Path $smokeRoot 'webui-stdout.log'
+    $stderrPath = Join-Path $smokeRoot 'webui-stderr.log'
+    $port = Get-FreeTcpPort
+    $baseUrl = "http://127.0.0.1:$port"
+
+    New-Item -ItemType Directory -Force -Path $smokeRoot | Out-Null
+
+    $previousSessionsPath = $env:WebUi__SessionsPath
+    $env:WebUi__SessionsPath = $sessionsPath
+    $process = $null
+
+    try {
+        $process = Start-Process `
+            -FilePath 'dotnet' `
+            -ArgumentList @('run', '--project', 'src/Tau.WebUi/Tau.WebUi.csproj', '--no-build', '--', '--urls', $baseUrl) `
+            -WorkingDirectory $repoRoot `
+            -RedirectStandardOutput $stdoutPath `
+            -RedirectStandardError $stderrPath `
+            -WindowStyle Hidden `
+            -PassThru
+
+        Wait-HttpReady -Url "$baseUrl/healthz"
+        Invoke-RestMethod -Uri "$baseUrl/api/status" -Method Get | Out-Null
+        Invoke-RestMethod -Uri "$baseUrl/api/catalog" -Method Get | Out-Null
+        $session = Invoke-RestMethod -Uri "$baseUrl/api/sessions" -Method Post -ContentType 'application/json' -Body '{"title":"Smoke Session"}'
+
+        if (-not (Test-Path $sessionsPath)) {
+            throw "WebUi smoke did not create sessions store at $sessionsPath"
+        }
+
+        $sessionsJson = Get-Content -Path $sessionsPath -Raw
+        if ($sessionsJson -notmatch [Regex]::Escape($session.id)) {
+            throw "WebUi smoke sessions store does not contain created session id $($session.id)"
+        }
+    }
+    finally {
+        if ($process -and -not $process.HasExited) {
+            Stop-Process -Id $process.Id -Force
+        }
+
+        if ($null -eq $previousSessionsPath) {
+            Remove-Item Env:WebUi__SessionsPath -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:WebUi__SessionsPath = $previousSessionsPath
+        }
+    }
+}
+
+function Invoke-MomSmoke {
+    $smokeRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("tau-mom-smoke-" + [Guid]::NewGuid().ToString("N"))
+    $inboxPath = Join-Path $smokeRoot 'inbox'
+    $outboxPath = Join-Path $smokeRoot 'outbox'
+    $archivePath = Join-Path $smokeRoot 'archive'
+    $workingDirectory = $repoRoot
+
+    New-Item -ItemType Directory -Force -Path $inboxPath, $outboxPath, $archivePath | Out-Null
+    Set-Content -Path (Join-Path $inboxPath 'delegation.txt') -Value 'smoke request'
+
+    $previousInbox = $env:Mom__InboxPath
+    $previousOutbox = $env:Mom__OutboxPath
+    $previousArchive = $env:Mom__ArchivePath
+    $previousWorkdir = $env:Mom__DefaultWorkingDirectory
+
+    try {
+        $env:Mom__InboxPath = $inboxPath
+        $env:Mom__OutboxPath = $outboxPath
+        $env:Mom__ArchivePath = $archivePath
+        $env:Mom__DefaultWorkingDirectory = $workingDirectory
+
+        Invoke-DotnetCommand -Arguments @('run', '--project', 'src/Tau.Mom/Tau.Mom.csproj', '--no-build', '--', '--once')
+
+        $outboxFiles = Get-ChildItem -Path $outboxPath -Filter *.json
+        $archiveFiles = Get-ChildItem -Path $archivePath -File
+        if ($outboxFiles.Count -ne 1) {
+            throw "Mom smoke expected exactly one outbox json but found $($outboxFiles.Count)"
+        }
+
+        if ($archiveFiles.Count -ne 1) {
+            throw "Mom smoke expected exactly one archived request but found $($archiveFiles.Count)"
+        }
+    }
+    finally {
+        if ($null -eq $previousInbox) { Remove-Item Env:Mom__InboxPath -ErrorAction SilentlyContinue } else { $env:Mom__InboxPath = $previousInbox }
+        if ($null -eq $previousOutbox) { Remove-Item Env:Mom__OutboxPath -ErrorAction SilentlyContinue } else { $env:Mom__OutboxPath = $previousOutbox }
+        if ($null -eq $previousArchive) { Remove-Item Env:Mom__ArchivePath -ErrorAction SilentlyContinue } else { $env:Mom__ArchivePath = $previousArchive }
+        if ($null -eq $previousWorkdir) { Remove-Item Env:Mom__DefaultWorkingDirectory -ErrorAction SilentlyContinue } else { $env:Mom__DefaultWorkingDirectory = $previousWorkdir }
+    }
+}
+
+$sourceProjects = @(
+    'src/Tau.Ai/Tau.Ai.csproj',
+    'src/Tau.Agent/Tau.Agent.csproj',
+    'src/Tau.Tui/Tau.Tui.csproj',
+    'src/Tau.CodingAgent/Tau.CodingAgent.csproj',
+    'src/Tau.WebUi/Tau.WebUi.csproj',
+    'src/Tau.Mom/Tau.Mom.csproj',
+    'src/Tau.Pods/Tau.Pods.csproj'
+)
+
+$testProjects = @(
+    'tests/Tau.Ai.Tests/Tau.Ai.Tests.csproj',
+    'tests/Tau.Agent.Tests/Tau.Agent.Tests.csproj',
+    'tests/Tau.Tui.Tests/Tau.Tui.Tests.csproj',
+    'tests/Tau.CodingAgent.Tests/Tau.CodingAgent.Tests.csproj',
+    'tests/Tau.Pods.Tests/Tau.Pods.Tests.csproj'
+)
+
+if (-not $SkipRestore) {
+    Write-Host '==> restore'
+    foreach ($project in @($sourceProjects + $testProjects)) {
+        Write-Host "dotnet restore $project"
+        Invoke-DotnetCommand -Arguments @('restore', $project, '--verbosity', 'minimal')
+    }
+}
+
+Write-Host '==> build src'
+foreach ($project in $sourceProjects) {
+    Write-Host "dotnet build $project"
+    Invoke-DotnetCommand -Arguments @('build', $project, '--no-restore', '--verbosity', 'minimal')
+}
+
+Write-Host '==> build tests'
+foreach ($project in $testProjects) {
+    Write-Host "dotnet build $project"
+    Invoke-DotnetCommand -Arguments @('build', $project, '--no-restore', '--verbosity', 'minimal')
+}
+
+Write-Host '==> test'
+foreach ($project in $testProjects) {
+    Write-Host "dotnet test $project"
+    Invoke-DotnetCommand -Arguments @('test', $project, '--no-build', '--no-restore', '--verbosity', 'minimal')
+}
+
+if ($RunSmoke) {
+    Write-Host '==> smoke webui'
+    Invoke-WebUiSmoke
+    Write-Host '==> smoke mom'
+    Invoke-MomSmoke
+}
+
+Write-Host 'Tau .NET project-level validation passed'

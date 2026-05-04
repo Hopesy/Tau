@@ -11,17 +11,19 @@ public sealed class CodingAgentHost
     private readonly ICodingAgentRunner _runner;
     private readonly CodingAgentSessionStore? _sessionStore;
     private readonly CodingAgentCommandRouter _commandRouter;
+    private bool _shutdownRendered;
 
     public CodingAgentHost(
         InteractiveConsoleSession ui,
         ICodingAgentRunner runner,
         CodingAgentSessionStore? sessionStore = null,
-        CodingAgentSettingsStore? settingsStore = null)
+        CodingAgentSettingsStore? settingsStore = null,
+        ICodingAgentClipboard? clipboard = null)
     {
         _ui = ui;
         _runner = runner;
         _sessionStore = sessionStore;
-        _commandRouter = new CodingAgentCommandRouter(runner, settingsStore);
+        _commandRouter = new CodingAgentCommandRouter(runner, settingsStore, sessionStore?.Path, clipboard);
     }
 
     public async Task<int> RunAsync(CancellationToken cancellationToken = default)
@@ -46,6 +48,11 @@ public sealed class CodingAgentHost
                 if (await TryHandleCommandAsync(input, cancellationToken).ConfigureAwait(false))
                 {
                     PersistSession();
+                    if (_shutdownRendered)
+                    {
+                        break;
+                    }
+
                     continue;
                 }
             }
@@ -78,7 +85,11 @@ public sealed class CodingAgentHost
             }
         }
 
-        _ui.WriteShutdown("Goodbye!");
+        if (!_shutdownRendered)
+        {
+            _ui.WriteShutdown("Goodbye!");
+        }
+
         return 0;
     }
 
@@ -96,10 +107,20 @@ public sealed class CodingAgentHost
             {
                 _ui.WriteRuntimeError(result.Message);
             }
+            else if (result.ShouldExit)
+            {
+                _ui.WriteShutdown(result.Message);
+                _shutdownRendered = true;
+            }
             else
             {
                 _ui.WriteStatus(result.Message);
             }
+        }
+
+        if (result.ShouldExit && string.IsNullOrWhiteSpace(result.Message))
+        {
+            _shutdownRendered = true;
         }
 
         return true;
@@ -114,7 +135,7 @@ public sealed class CodingAgentHost
 
         try
         {
-            _sessionStore.Save(_runner.Messages, _runner.Model);
+            _sessionStore.Save(_runner.Messages, _runner.Model, _runner.SessionName);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
         {

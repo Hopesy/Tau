@@ -113,12 +113,19 @@ tests/
 - 基础 coding tools
 - 与 `ModelCatalog` 对齐的 provider / model 默认解析（CodingAgent / WebUi / Mom 复用同一解析器）
 - `RuntimeCodingAgentRunner.Create(provider, model, history)` 显式宿主工厂
-- 本地 session 持久化：默认写入当前目录 `./.tau/coding-agent-session.json`，也可通过 `TAU_CODING_AGENT_SESSION_FILE` 指定路径；启动时按保存的 provider/model/messages rehydrate，回合结束后保存当前消息
-- 最小 session lifecycle：`/new` 清空当前 runtime messages，并把空会话立即写回当前 session store；当前保留已选 model/provider，不实现上游多 session resume/tree
+- 本地 session 持久化：默认写入当前目录 `./.tau/coding-agent-session.json`，也可通过 `TAU_CODING_AGENT_SESSION_FILE` 指定路径；启动时按保存的 provider/model/messages/session display name rehydrate，回合结束后保存当前消息和 display name
+- 最小 session lifecycle：`/new` 清空当前 runtime messages 和 display name，并把空会话立即写回当前 session store；`/session` 输出当前平面 session 的 display name、model、消息计数、tool call 数和 session 文件路径；当前保留已选 model/provider，不实现上游多 session resume/tree/branch/full stats
+- 最小 session display name：`/name [display name | clear]` 查看、设置或清空当前 session display name，并随 session store 持久化
+- 最小退出命令：`/quit` 与文本 `exit` 一样结束当前 CLI loop，不调用 runner，不进入 LLM conversation
+- 最小帮助命令：`/help` 列出当前 Tau 已支持的本地命令，避免用户只能靠文档猜命令面
+- 最小 copy 命令：`/copy` 复制最后一条 assistant 文本消息到系统剪贴板；剪贴板写入通过 `ICodingAgentClipboard` 抽象隔离，便于测试和后续替换
+- 最小 export 命令：`/export <path>` 把当前 Tau 平面 session snapshot 导出为 JSON；当前复用 `CodingAgentSessionStore` 格式，不实现上游 HTML/JSONL/tree export
+- 最小 import 命令：`/import <path>` 从 Tau snapshot JSON 严格导入当前平面 session，恢复 messages/provider/model/display name；无效 JSON 或缺失文件直接报错，不回落空 session
 - 最小 settings / model selection：`/model`、`/provider`、`/models`、`/providers`，默认模型写入 `./.tau/coding-agent-settings.json`，也可通过 `TAU_CODING_AGENT_SETTINGS_FILE` 指定路径
 - 最小 auth 管理入口：`/auth [provider]` 查询当前 provider 凭证来源，`/login [provider]` 给出已配置或未移植 OAuth/login 的明确提示；不会回显密钥
 - 最小手动 compaction：`/compact [instructions]` 使用当前模型生成会话摘要，重置 runtime state，并把摘要作为单条 user message 保留到 session store；当前不移植上游 JSONL/tree/branch/auto-compaction 体系
-- `CodingAgentCommandRouter` 承载 slash command 解析和本地命令执行，`CodingAgentHost` 保持为输入循环、UI 渲染、runtime event 和 session 持久化宿主
+- `CodingAgentCommandRouter` 承载 slash command 解析和本地命令执行，`CodingAgentHost` 保持为输入循环、UI 渲染、runtime event、退出信号和 session 持久化宿主；host 会把当前 session store path 注入 router，供 `/session` 做本地状态报告
+- `CodingAgentCommandCatalog` 维护当前已支持 slash command 的名称、usage 和描述，`/help` 与参数错误共用同一事实源，避免继续在 router 内散落命令字符串；当前已支持 `/help`、`/name`、`/copy`、`/export`、`/import`、`/new`、`/session`、`/quit`、`/model`、`/provider`、`/models`、`/providers`、`/auth`、`/login`、`/compact`
 
 这个显式 runner 工厂现在也是 `WebUi / Mom` 继续往宿主化推进的关键共享边界；本地 session/settings/auth-status 入口则为后续真实 OAuth、slash command、compaction 与 WebUi/Mom 共享会话语义打底。
 
@@ -149,7 +156,9 @@ tests/
 - `.txt/.md` 请求继续兼容为纯 prompt
 - `.json` 请求支持 `prompt/provider/model/workingDirectory/title/metadata`
 - 调用 runtime runner 处理 prompt
-- 结果序列化到 outbox `.json`
+- `IDelegationAgentRunner` 返回 `DelegationExecution`：response、结构化 `DelegationToolEvent`（phase/toolName/toolCallId/isError/durationMs）、stop reason、`DelegationUsage`（input/output/cache tokens 与可选总成本）、provider/model/workingDirectory/metadata
+- `RuntimeDelegationAgentRunner` 通过可注入的 `Func<provider, model, ICodingAgentRunner>` 工厂构造内核 runner，便于测试和后续 Slack/workspace/sandbox 适配层复用
+- 结果序列化到 outbox `.json`，包含 stop reason、结构化 tool events 与 usage
 - 原始请求归档到 archive
 - 支持 `--once`
 
@@ -225,16 +234,18 @@ Tau.Pods（完全独立）
 
 当前额外现实：
 
-- `Tau.WebUi` / `Tau.Mom` 暂时通过 `Reference + HintPath` 引用 `Tau.CodingAgent` / `Tau.Tui`
-- `Tau.WebUi` / `Tau.Mom` 还通过 `HintPath` 引用 `Tau.Ai`
-- 这是当前为绕开 `.NET 10 SDK / solution metaproj / workload resolver` 异常而接受的工程化 workaround
-- 后续仍需要收回到更正常的 project reference 结构
+- `Tau.CodingAgent`、`Tau.WebUi`、`Tau.Mom` 与 `Tau.CodingAgent.Tests` 已收回到正常 `ProjectReference`，干净构建不再依赖预先存在的 DLL `HintPath`
+- `Tau.slnx` 当前已可通过 `dotnet build Tau.slnx --verbosity minimal` 完成 solution-level build
+- 当前机器的 `bash scripts/verify-dotnet.sh --skip-restore` 仍会落到 WSL 并失败于缺少 `/bin/bash`，因此本机继续使用等价 PowerShell / dotnet 顺序命令做验证兜底
 
 ## 本地开发
 
 ```bash
 bash scripts/verify-dotnet.sh
 bash scripts/verify-dotnet.sh --skip-restore
+powershell -ExecutionPolicy Bypass -File .\scripts\verify-dotnet.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\verify-dotnet.ps1 -SkipRestore
+powershell -ExecutionPolicy Bypass -File .\scripts\verify-dotnet.ps1 -SkipRestore -RunSmoke
 dotnet run --project src/Tau.CodingAgent/Tau.CodingAgent.csproj --no-build
 dotnet run --project src/Tau.WebUi/Tau.WebUi.csproj --no-build -- --urls http://127.0.0.1:5088
 dotnet run --project src/Tau.Mom/Tau.Mom.csproj --no-build -- --once
@@ -251,4 +262,5 @@ dotnet run --project src/Tau.Pods/Tau.Pods.csproj --no-build -- probe tau.pods.j
 - `Tau.Mom --once` 已可真实处理结构化请求并写出带 `provider/model/workingDirectory/metadata` 的 outbox
 - `Tau.Pods probe` 已可对本地 HTTP endpoint 返回真实健康结果
 - `Tau.Pods exec` 已可对 SSH pod 通过系统 `ssh` 客户端执行远程命令
-- `Tau.slnx` 仍有 solution-level metaproj / workload resolver 异常，暂时不是可信门禁入口
+- `Tau.slnx` 当前已可 build；如果本机 `bash` 入口不可用，可按 `scripts/verify-dotnet.sh` 中的项目顺序直接执行等价 `dotnet build/test` 命令
+- `scripts/verify-dotnet.ps1` 当前提供 Windows PowerShell 等价验证入口，覆盖与 `verify-dotnet.sh` 相同的 restore/build/test 项目顺序，并支持可选 `-RunSmoke` 执行 `WebUi` 和 `Mom --once` 的最小运行态 smoke

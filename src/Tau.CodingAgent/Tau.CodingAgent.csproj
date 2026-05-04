@@ -1,18 +1,9 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
-    <Reference Include="Tau.Ai">
-      <HintPath>..\Tau.Ai\bin\$(Configuration)\$(TargetFramework)\Tau.Ai.dll</HintPath>
-      <Private>true</Private>
-    </Reference>
-    <Reference Include="Tau.Agent">
-      <HintPath>..\Tau.Agent\bin\$(Configuration)\$(TargetFramework)\Tau.Agent.dll</HintPath>
-      <Private>true</Private>
-    </Reference>
-    <Reference Include="Tau.Tui">
-      <HintPath>..\Tau.Tui\bin\$(Configuration)\$(TargetFramework)\Tau.Tui.dll</HintPath>
-      <Private>true</Private>
-    </Reference>
+    <ProjectReference Include="..\Tau.Ai\Tau.Ai.csproj" />
+    <ProjectReference Include="..\Tau.Agent\Tau.Agent.csproj" />
+    <ProjectReference Include="..\Tau.Tui\Tau.Tui.csproj" />
   </ItemGroup>
 
   <PropertyGroup>

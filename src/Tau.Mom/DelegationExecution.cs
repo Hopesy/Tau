@@ -2,9 +2,11 @@ namespace Tau.Mom;
 
 public sealed record DelegationExecution(
     string Response,
-    IReadOnlyList<string> ToolEvents,
+    IReadOnlyList<DelegationToolEvent> ToolEvents,
     string? Error,
     string Provider,
     string Model,
     string WorkingDirectory,
-    IReadOnlyDictionary<string, string>? Metadata = null);
+    IReadOnlyDictionary<string, string>? Metadata = null,
+    string? StopReason = null,
+    DelegationUsage? Usage = null);

@@ -73,6 +73,37 @@ public class RuntimeCodingAgentRunnerTests
     }
 
     [Fact]
+    public void GetSessionStats_CountsFlatSessionMessagesAndToolCalls()
+    {
+        var sessionFile = Path.Combine(Path.GetTempPath(), "tau-session-stats.json");
+        var runner = RuntimeCodingAgentRunner.Create(
+            "openai",
+            "gpt-5.4",
+            [
+                new UserMessage("hello"),
+                new AssistantMessage(
+                    [
+                        new TextContent("thinking"),
+                        new ToolCallContent("tool-1", "read_file", "{}")
+                    ]),
+                new ToolResultMessage("tool-1", [new TextContent("done")])
+            ]);
+        runner.SessionName = "stats session";
+
+        var stats = runner.GetSessionStats(sessionFile);
+
+        Assert.Equal("openai", stats.Provider, ignoreCase: true);
+        Assert.Equal("gpt-5.4", stats.Model, ignoreCase: true);
+        Assert.Equal("stats session", stats.SessionName);
+        Assert.Equal(3, stats.TotalMessages);
+        Assert.Equal(1, stats.UserMessages);
+        Assert.Equal(1, stats.AssistantMessages);
+        Assert.Equal(1, stats.ToolResultMessages);
+        Assert.Equal(1, stats.ToolCalls);
+        Assert.Equal(sessionFile, stats.SessionFile);
+    }
+
+    [Fact]
     public async Task CompactAsync_ReplacesConversationWithCompactionSummaryMessage()
     {
         var model = new Model

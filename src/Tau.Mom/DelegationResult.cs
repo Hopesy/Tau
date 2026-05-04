@@ -4,11 +4,13 @@ public sealed record DelegationResult(
     string RequestFile,
     string Prompt,
     string Response,
-    IReadOnlyList<string> ToolEvents,
+    IReadOnlyList<DelegationToolEvent> ToolEvents,
     string? Error,
     string Provider,
     string Model,
     string WorkingDirectory,
     IReadOnlyDictionary<string, string>? Metadata,
     DateTimeOffset ProcessedAt,
-    TimeSpan Duration);
+    TimeSpan Duration,
+    string? StopReason = null,
+    DelegationUsage? Usage = null);

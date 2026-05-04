@@ -36,7 +36,7 @@
   - 同步维护 README、architecture、quality、history 与验证命令
 - 不包含：
   - 一次性追求与上游 `pi-mono` 的 1:1 全量完成度
-  - 在 `Tau.slnx` 未恢复可信前，强行把 solution build 当主门禁
+  - 在没有验证证据时，强行把单一 solution build 当唯一门禁
   - 在 release 仍是仓库元数据制品阶段时，假装已经有完整产品发布链
 
 ## 背景
@@ -56,9 +56,9 @@
   - `src/Tau.Pods/`
   - `tests/`
 - 已知约束：
-  - `Tau.slnx` 仍会在当前机器上触发 solution metaproj / workload resolver 异常
-  - `Tau.CodingAgent` / `Tau.WebUi` / `Tau.Mom` 仍部分依赖 `Reference + HintPath` workaround
-  - 当前 Windows 环境下 `bash` 服务仍可能报 `Bash/Service/CreateInstance/E_ACCESSDENIED`，所以本地验证要接受“仓库标准命令写 bash，现场执行可退回等价顺序 dotnet 命令”的现实
+  - `Tau.slnx` 当前已可通过 `dotnet build Tau.slnx --verbosity minimal`
+  - `Tau.CodingAgent` / `Tau.WebUi` / `Tau.Mom` / `Tau.CodingAgent.Tests` 已收回到 `ProjectReference`
+  - 当前 Windows 环境下 `bash scripts/verify-dotnet.sh --skip-restore` 会落到 WSL 并因缺少 `/bin/bash` 失败，所以本地验证仍接受“仓库标准命令写 bash，现场执行可退回等价顺序 dotnet 命令”的现实
 
 ## 风险
 
@@ -82,7 +82,7 @@
    - Mom Slack / workspace / sandbox
    - Pods SSH / lifecycle / model management
 6. 工程化收口：
-   - 解决 `Tau.slnx` / metaproj / workload resolver 异常
+   - 恢复 `Tau.slnx` solution-level build
    - 收回 `HintPath` workaround
    - 让 release 开始对应真实 Tau 产物
 
@@ -113,11 +113,18 @@
 - CLI 启动时从本地 session store rehydrate messages/provider/model
 - 回合结束后保存当前 runtime messages
 - session JSON 先覆盖 Tau 当前消息抽象：user / assistant / toolResult 与 text / thinking / image / toolCall
-- `/new` 先做最小 session reset：清空当前 runtime messages，并把空快照写回当前 session store；当前不实现上游多 session resume/tree
+- `/new` 先做最小 session reset：清空当前 runtime messages 和 display name，并把空快照写回当前 session store；`/session` 先做当前平面 session status：输出 display name、model、消息计数、tool call 数和 session 文件路径；`/name` 先做当前 session display name 的查看、设置和清空；当前不实现上游多 session resume/tree/branch/full stats
 - `CodingAgentSettingsStore` 保存默认 provider/model，启动优先级为 env > session > settings
 - `/model`、`/provider`、`/models`、`/providers` 提供最小模型查看、切换和列表入口；命令不进入 LLM conversation context
 - `/auth [provider]` 通过 `ProviderAuthResolver.GetStatus(...)` 汇报 env/auth.json/models.json/OAuth 状态，`/login [provider]` 先做明确的未移植提示，不回显密钥
-- slash command 解析从 `CodingAgentHost` 抽到 `CodingAgentCommandRouter`，host 只负责输入循环、结果渲染、运行时事件和 session 持久化
+- slash command 解析从 `CodingAgentHost` 抽到 `CodingAgentCommandRouter`，host 只负责输入循环、结果渲染、运行时事件、退出信号和 session 持久化
+- `/quit` 结束当前 CLI loop，作为本地控制命令不进入 LLM conversation；当前仍保留文本 `exit` 兼容路径
+- `/help` 列出当前 Tau 已支持命令；暂不移植上游 extension/prompt/skill 动态 slash command 发现
+- `CodingAgentCommandCatalog` 统一当前本地 slash command 的 name / usage / description，避免 `/help`、usage 错误和后续命令迁移继续散落重复字符串
+- `/name [display name | clear]` 在 Tau 当前单文件 session snapshot 上保存 display name，作为上游 session_info display name 的最小等价物
+- `/copy` 复制最后一条 assistant 文本消息到系统剪贴板；通过 `ICodingAgentClipboard` 抽象隔离系统 clipboard 写入，生产实现使用平台常见命令，测试使用 fake
+- `/export <path>` 导出当前 Tau 平面 session snapshot JSON，复用 `CodingAgentSessionStore` 格式；暂不实现上游 HTML default、JSONL tree、import/share/export-html 体系
+- `/import <path>` 严格读取 Tau snapshot JSON 并恢复当前平面 session 的 messages/provider/model/display name；无效文件通过 `LoadStrict()` 报错，不再像启动路径 `Load()` 那样静默回落空 session
 - `/compact [instructions]` 先做最小手动 compaction：使用当前模型生成会话摘要，`Reset()` runtime state，并把摘要保留成单条 user summary message
 - 暂不引入上游完整 JSONL session tree、branch、compaction、label、extension entry，避免一次性过度移植
 
@@ -135,13 +142,18 @@
 
 - 保持 `scripts/verify-dotnet.sh` 为主 CI
 - 在当前环境接受顺序 `dotnet build/test` 作为 bash 不可用时的本地等价验证
-- 后续独立处理 `Tau.slnx` 与引用结构收口
+- `Tau.slnx` 与引用结构已恢复到可 build 状态，后续继续补运行态 smoke 和 release 产物
 
 ## 验证方式
 
 - 仓库标准命令：
   - `bash scripts/verify-dotnet.sh`
   - `bash scripts/verify-dotnet.sh --skip-restore`
+  - `powershell -ExecutionPolicy Bypass -File .\scripts\verify-dotnet.ps1`
+  - `powershell -ExecutionPolicy Bypass -File .\scripts\verify-dotnet.ps1 -SkipRestore`
+  - `powershell -ExecutionPolicy Bypass -File .\scripts\verify-dotnet.ps1 -SkipRestore -RunSmoke`
+- Solution build：
+  - `dotnet build Tau.slnx --verbosity minimal`
 - 当前机器上的等价顺序验证：
   - `dotnet build src/Tau.CodingAgent/Tau.CodingAgent.csproj --no-restore`
   - `dotnet build src/Tau.WebUi/Tau.WebUi.csproj --no-restore`
@@ -162,7 +174,7 @@
 - `Tau.WebUi` 已具备会话持久化与 provider/model 选择，不再只是内存聊天页
 - `Tau.Mom` / `Tau.Pods` 都已经从模板壳进入真实切片，并有明确第二层 backlog
 - 仓库文档、质量评分、next 与当前实现状态一致
-- `Tau.slnx` / 引用 workaround 已被单独追踪，而不是继续藏在产品改动里
+- `Tau.slnx` / 引用 workaround 已完成基础收口，而不是继续藏在产品改动里
 
 ## 进度记录
 
@@ -187,15 +199,24 @@
 - [x] `Tau.Ai` custom model/provider 配置入口（`ModelConfigurationStore` / models.json merge / provider 与 model override / request auth headers）
 - [x] `Tau.CodingAgent` 本地 session 持久化（`TAU_CODING_AGENT_SESSION_FILE` / `./.tau/coding-agent-session.json`，启动 rehydrate，回合后保存）
 - [x] `Tau.CodingAgent` 最小 session reset（`/new`，清空当前 runtime messages 并写回当前 session store）
+- [x] `Tau.CodingAgent` 最小 session status（`/session`，报告当前平面 session stats 与 session store path，不进入 LLM conversation）
+- [x] `Tau.CodingAgent` 最小 session display name（`/name [display name | clear]`，随 session store 持久化并显示在 `/session`）
+- [x] `Tau.CodingAgent` 最小退出命令（`/quit`，通过 command result 退出 host loop，不调用 runner）
+- [x] `Tau.CodingAgent` 最小帮助命令（`/help`，列出当前 Tau 已支持本地命令，不调用 runner）
+- [x] `Tau.CodingAgent` slash command catalog（统一已支持命令 name / usage / description，`/help` 与参数错误共用）
+- [x] `Tau.CodingAgent` 最小 copy 命令（`/copy`，复制最后一条 assistant 文本到 clipboard，不进入 LLM conversation）
+- [x] `Tau.CodingAgent` 最小 export 命令（`/export <path>`，导出当前 Tau snapshot JSON，不进入 LLM conversation）
+- [x] `Tau.CodingAgent` 最小 import 命令（`/import <path>`，严格导入当前 Tau snapshot JSON 并恢复平面 session，不进入 LLM conversation）
 - [x] `Tau.CodingAgent` settings / model selection（`TAU_CODING_AGENT_SETTINGS_FILE` / `./.tau/coding-agent-settings.json`，`/model` / `/provider` / `/models` / `/providers`）
 - [x] `Tau.CodingAgent` 最小 auth 管理入口（`/auth` status / `/login` 未移植提示，基于 `ProviderAuthResolver.GetStatus`，不回显 secret）
 - [x] `Tau.CodingAgent` slash command router 抽离（`CodingAgentCommandRouter`，保持 `/model` / `/provider` / `/models` / `/providers` / `/auth` / `/login` 行为不变）
 - [x] `Tau.CodingAgent` 最小手动 compaction（`/compact [instructions]`，当前模型生成摘要后压缩为单条 summary message）
+- [x] `Tau.Mom` runner / result schema 收口（结构化 `DelegationToolEvent`、stop reason、`DelegationUsage` 含 token + 可选总成本、可注入 `ICodingAgentRunner` 工厂）
 - [ ] `Tau.WebUi` 流式 UI / richer rendering / attachment
 - [ ] `Tau.Mom` Slack / workspace / sandbox / delegation semantics
 - [ ] `Tau.Pods` SSH / lifecycle / model management
-- [ ] `Tau.slnx` / metaproj / workload resolver 异常收口
-- [ ] `HintPath` workaround 收回到更正常的 `ProjectReference`
+- [x] `Tau.slnx` / metaproj / workload resolver 异常收口（当前 `dotnet build Tau.slnx --verbosity minimal` 已通过）
+- [x] `HintPath` workaround 收回到更正常的 `ProjectReference`
 
 ## 决策记录
 
@@ -232,3 +253,27 @@
 - 2026-05-03：决定把 `Tau.CodingAgent` 的 compaction 先收口成最小手动版，而不是同步上游完整 session-manager / JSONL tree / auto-compaction。原因是 Tau 当前只有平面消息持久化和 `AgentRuntime.Reset()`，先用当前模型生成摘要并把运行态压成单条 summary message，能尽快提供真实可用的 `/compact`，同时不伪装成已经具备 branch、tokensBefore 边界、auto-retry 或 compaction metadata 的完整体系。
 
 - 2026-05-03：决定先补 `Tau.CodingAgent` 的 `/new`，而不是直接跳到 `/session`、`/resume` 或 tree/fork。原因是当前 Tau 只有单文件 session snapshot，没有多 session 索引和分支结构；先把“清空当前会话并立即持久化”的最小 lifecycle 做实，能与现有 session store 和 `AgentRuntime.Reset()` 直接闭环，同时为后续 richer session 管理留稳定 seam。
+
+- 2026-05-03：决定把 `Tau.CodingAgent` 的 `/session` 先做成当前平面 runtime status，而不是同步上游 JSONL session tree/resume/full stats。原因是 Tau 当前只有单文件 session snapshot 和 runtime messages；先固定 model、消息计数、tool call 数与 session 文件路径的本地命令，能提供可见状态面，同时不伪装成已有多 session/branch 体系。
+
+- 2026-05-03：决定把 `Tau.CodingAgent` 的 `/quit` 做成 command result 上的退出信号，而不是在 router 里直接操作 UI 或进程。原因是 router 应保持无 UI 依赖、可单测；host 负责渲染 goodbye、停止 loop 和持久化，文本 `exit` 继续保留为兼容入口。
+
+- 2026-05-03：决定把 `Tau.CodingAgent` 的 `/help` 先做成静态命令列表，而不是同步上游 extension/prompt/skill 动态发现。原因是 Tau 当前 slash command 还处于本地基础层，先把已支持的命令面暴露给用户，后续等扩展、prompt、skill 体系存在后再接动态来源。
+
+- 2026-05-03：决定为 `Tau.CodingAgent` 增加 `CodingAgentCommandCatalog`，统一本地 slash command 的名称、usage 和描述，而不是继续把 `/help` 输出与参数错误字符串散落在 router 分支里。原因是当前命令数量已经进入两位数，后续继续迁移 `/export`、`/copy`、`/resume` 等命令时需要一个轻量事实源，先不引入完整上游动态命令 registry。
+
+- 2026-05-03：决定把 `Tau.CodingAgent` 的 `/name` 收口成 Tau 当前单文件 session snapshot 的 display name 字段，而不是同步上游 `session_info` JSONL entry。原因是 Tau 还没有 session tree/entry log；直接在 snapshot 上保存 name 能覆盖当前可验证需求，并让 `/session` 输出包含 display name，后续迁移 JSONL/tree 时再映射到 session_info entry。
+
+- 2026-05-03：决定把 `Tau.CodingAgent` 的 `/copy` 先做成“复制最后一条 assistant 文本消息”，而不是同步上游完整富文本/HTML/session export 剪贴板语义。原因是 Tau 当前 TUI 仍是最小 transcript，先用 `ICodingAgentClipboard` 固定可测试 seam 和用户最常用路径；图片、tool timeline、HTML 和多消息选择留给 richer rendering/export 切片。
+
+- 2026-05-03：决定把 `Tau.CodingAgent` 的 `/export` 先做成显式路径的 Tau snapshot JSON 导出，而不是同步上游默认 HTML export 或 JSONL session tree export。原因是 Tau 当前事实源是 `CodingAgentSessionStore` 单文件 snapshot；先复用已验证序列化格式能提供可用备份/迁移入口，`/import`、HTML、JSONL tree 和 share 留给后续 session manager 切片。
+
+- 2026-05-03：决定把 `Tau.CodingAgent` 的 `/import` 先做成 Tau snapshot JSON 的严格导入，而不是同步上游 JSONL tree/import/share。原因是 `/export` 已固定单文件 snapshot 格式，最小可用闭环应该先能恢复 messages/provider/model/display name；导入失败必须显式报错，避免把坏备份静默当成空会话。
+
+- 2026-05-03：决定先把 `Tau.CodingAgent`、`Tau.WebUi` 和 `Tau.CodingAgent.Tests` 的 DLL `HintPath` 收回到 `ProjectReference`，而不是继续要求先按手工顺序生成依赖 DLL。原因是 `/import` 验证时已经暴露 stale assembly / 并行构建顺序风险；这次只收口已能稳定验证的 CodingAgent/WebUi 链，`Tau.Mom` 和 `Tau.slnx` 继续作为独立工程化任务。
+
+- 2026-05-03：决定把 `Tau.Mom` 也一并从 DLL `HintPath` 收回到 `ProjectReference`。原因是这轮已经确认干净构建可以按 project reference 链路稳定完成，继续保留唯一一处 workaround 只会让引用结构长期分叉，并继续增加 stale assembly 风险。
+
+- 2026-05-03：重新验证 `Tau.slnx` 后决定把 solution-level build 标记为当前可用。原因是所有 `HintPath` workaround 收回 `ProjectReference` 后，`dotnet build Tau.slnx --verbosity minimal` 已能真实通过；当前仓库标准 bash 脚本在本机失败的根因是 WSL `/bin/bash` 缺失，而不是 Tau solution build。
+
+- 2026-05-04：决定先把 `Tau.Mom` 的 runner / result schema 收口为结构化事实，再去接 Slack。原因是当前 `IReadOnlyList<string> ToolEvents` 把 toolName/toolCallId/isError/duration 全部塞回字符串里，后续 Slack/workspace/sandbox 适配层既看不见持续时间，也无法可靠把多次调用按 ID 关联起来；本轮先把 ToolEvents 拆成 `DelegationToolEvent { Phase, ToolName, ToolCallId, IsError, DurationMs }`，并补 `StopReason`（沿用 Tau.Ai `StopReason` 加 `cancelled`/`error`）和 `DelegationUsage`（input/output/cache token + 可选总成本，用 `ModelCatalog.CalculateCost` 计算），同时把 `RuntimeDelegationAgentRunner` 改成接受 `Func<string, string, ICodingAgentRunner>` 工厂。这样 Slack/Workspace 适配层可以基于结构化事件直接渲染 `→ tool / ✓ tool (1.2s)`，单测可以用 fake runner 直接驱动事件流，且 outbox JSON 仍向后保留所有旧字段。

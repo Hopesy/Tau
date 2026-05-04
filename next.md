@@ -45,16 +45,23 @@
 ### Tau.CodingAgent
 
 - [x] session 持久化（`TAU_CODING_AGENT_SESSION_FILE` 或 `./.tau/coding-agent-session.json`，启动自动 rehydrate，回合后保存）
-- [~] session lifecycle（已补 `/new` 清空当前会话并写回 session store；仍缺 resume/tree/stats 等多 session 管理能力）
+- [~] session lifecycle（已补 `/new` 清空当前会话并写回 session store，`/session` 报告当前平面 session stats 与文件路径，`/name` 持久化当前 session display name；仍缺 resume/tree/full stats 等多 session 管理能力）
 - [x] settings / model selection / provider selection（`/model`、`/provider`、`/models`、`/providers`，默认写入 `TAU_CODING_AGENT_SETTINGS_FILE` 或 `./.tau/coding-agent-settings.json`）
 - [~] auth 管理入口（已补 `/auth` 状态查看和 `/login` 骨架提示；真实 OAuth/device flow 仍在 Tau.Ai OAuth backlog）
 - [x] slash command router 抽离（`CodingAgentCommandRouter`；当前命令行为不变，为 `/compact` / login flow 等后续命令留 seam）
+- [x] local quit command（`/quit` 结束当前 CLI loop，不调用 runner，不进入 LLM conversation）
+- [x] local help command（`/help` 列出当前 Tau 已支持命令，先不移植上游扩展/prompt/skill 命令发现）
+- [x] slash command catalog（`CodingAgentCommandCatalog` 统一当前本地命令 name/usage/description，`/help` 和 usage 错误共用）
+- [x] local session name command（`/name [display name | clear]` 查看、设置或清空当前 session display name，并写入 session store）
+- [x] local copy command（`/copy` 复制最后一条 assistant 文本到系统剪贴板，clipboard 写入通过 `ICodingAgentClipboard` 隔离）
+- [x] local export command（`/export <path>` 导出当前 Tau 平面 session snapshot JSON；仍缺上游 HTML/JSONL/tree export）
+- [x] local import command（`/import <path>` 严格导入 Tau snapshot JSON，并恢复 messages/provider/model/display name；仍缺上游 JSONL tree/share/import 体系）
 - [~] manual compaction（已补 `/compact [instructions]`，当前使用当前模型生成摘要并把 session 压成单条 summary message；仍缺 auto-compaction、branch/tree/metadata 与上游完整 session-manager 语义）
 - [ ] richer rendering
 - [x] 显式 `Create(provider, model, history)` runner 工厂
 - [x] 与 `ModelCatalog` 对齐的默认模型解析层继续收口
-- [ ] 把当前 `Tau.CodingAgent` / `Tau.CodingAgent.Tests` 的 DLL `HintPath` workaround 收回到更正常的 `ProjectReference` 结构
-- [ ] 解决当前本机上 `Tau.slnx` / metaproj / workload resolver 的 build 异常
+- [x] 把当前 `Tau.CodingAgent` / `Tau.WebUi` / `Tau.Mom` / `Tau.CodingAgent.Tests` 的 DLL `HintPath` workaround 收回到更正常的 `ProjectReference` 结构
+- [x] 解决当前本机上 `Tau.slnx` / metaproj / workload resolver 的 build 异常（`dotnet build Tau.slnx --verbosity minimal` 已通过）
 
 ### Tau.Tui
 
@@ -83,6 +90,7 @@
 - [x] `--once`
 - [x] inbox/outbox/archive
 - [x] 结构化 `.json` 请求（`prompt/provider/model/workingDirectory/metadata`）
+- [x] runner / result schema seam（结构化 `DelegationToolEvent` + stop reason + `DelegationUsage` + 可注入 `ICodingAgentRunner` 工厂，留给 Slack/workspace/sandbox 适配层接线）
 - [ ] Slack 对接
 - [ ] workspace / sandbox / tool delegation
 - [ ] message / runtime flow
@@ -104,9 +112,12 @@
 - [ ] coding-agent 默认路径的更高层回归测试
 - [ ] 可观测性：provider 调用、auth、tool execution、session / delegation / pod probe 的最小日志
 - [ ] `scripts/verify-dotnet.sh` 对运行态 smoke 的进一步自动化
+- [x] `scripts/verify-dotnet.ps1` 对运行态 smoke 的进一步自动化（`-RunSmoke` 已覆盖 `WebUi` 与 `Mom --once`）
+- [ ] 把 `verify-dotnet.ps1 -RunSmoke` 接到 CI 或补 bash 等价 smoke
 
 ## 当前已知环境现实
 
-- [ ] 当前 Windows 环境下 `bash` 仍可能报 `Bash/Service/CreateInstance/E_ACCESSDENIED`
-- [ ] 本地标准命令继续保持 bash 形式，但现场执行要接受等价顺序 `dotnet` 验证作为兜底
-- [ ] `Tau.WebUi / Tau.Mom` 仍保留 `HintPath` workaround，暂时不要和产品能力改动混做
+- [ ] 当前 Windows 环境下 `bash scripts/verify-dotnet.sh --skip-restore` 会落到 WSL 并失败于缺少 `/bin/bash`
+- [x] Windows 本机已补 `scripts/verify-dotnet.ps1` 作为等价项目级验证入口
+- [ ] 本地标准命令继续保持 bash 形式，但现场执行要接受 PowerShell 脚本或等价顺序 `dotnet` 验证作为兜底
+- [x] `Tau.Mom` 也已收回 `ProjectReference`

@@ -56,6 +56,15 @@ public class FileDelegationProcessorTests
         Assert.Contains("\"model\": \"gemini-2.5-pro\"", outboxJson, StringComparison.Ordinal);
         Assert.Contains("\"workingDirectory\"", outboxJson, StringComparison.Ordinal);
         Assert.Contains("\"requestId\": \"abc-123\"", outboxJson, StringComparison.Ordinal);
+        Assert.Contains("\"stopReason\": \"end_turn\"", outboxJson, StringComparison.Ordinal);
+        Assert.Contains("\"phase\": \"start\"", outboxJson, StringComparison.Ordinal);
+        Assert.Contains("\"phase\": \"end\"", outboxJson, StringComparison.Ordinal);
+        Assert.Contains("\"toolName\": \"ls\"", outboxJson, StringComparison.Ordinal);
+        Assert.Contains("\"toolCallId\": \"tool-1\"", outboxJson, StringComparison.Ordinal);
+        Assert.Contains("\"isError\": false", outboxJson, StringComparison.Ordinal);
+        Assert.Contains("\"durationMs\": 42", outboxJson, StringComparison.Ordinal);
+        Assert.Contains("\"inputTokens\": 100", outboxJson, StringComparison.Ordinal);
+        Assert.Contains("\"outputTokens\": 25", outboxJson, StringComparison.Ordinal);
 
         var archived = Assert.Single(Directory.GetFiles(archive));
         Assert.EndsWith("delegation.json", archived, StringComparison.OrdinalIgnoreCase);
@@ -108,12 +117,17 @@ public class FileDelegationProcessorTests
             Requests.Add(request);
             return Task.FromResult(new DelegationExecution(
                 "stub-response",
-                ["start:ls", "end:tool-1:ok"],
+                [
+                    new DelegationToolEvent("start", "ls", "tool-1"),
+                    new DelegationToolEvent("end", "ls", "tool-1", IsError: false, DurationMs: 42)
+                ],
                 null,
                 request.Provider ?? "unknown",
                 request.Model ?? "unknown",
                 request.WorkingDirectory ?? Directory.GetCurrentDirectory(),
-                request.Metadata));
+                request.Metadata,
+                StopReason: "end_turn",
+                Usage: new DelegationUsage(InputTokens: 100, OutputTokens: 25)));
         }
     }
 

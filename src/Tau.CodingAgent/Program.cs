@@ -12,6 +12,7 @@ var modelId = Environment.GetEnvironmentVariable("TAU_MODEL")
               ?? (string.Equals(providerId, session.Provider, StringComparison.OrdinalIgnoreCase) ? session.Model : null)
               ?? (string.Equals(providerId, settings.DefaultProvider, StringComparison.OrdinalIgnoreCase) ? settings.DefaultModel : null);
 var runner = RuntimeCodingAgentRunner.Create(providerId, modelId, session.Messages);
+runner.SessionName = session.Name;
 var host = new CodingAgentHost(ui, runner, sessionStore, settingsStore);
 using var cts = new CancellationTokenSource();
 

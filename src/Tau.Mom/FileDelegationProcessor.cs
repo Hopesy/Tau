@@ -60,7 +60,8 @@ public sealed class FileDelegationProcessor
                 request.Provider!,
                 request.Model!,
                 ResolveWorkingDirectory(request.WorkingDirectory),
-                request.Metadata);
+                request.Metadata,
+                StopReason: "error");
         }
 
         var result = new DelegationResult(
@@ -74,7 +75,9 @@ public sealed class FileDelegationProcessor
             execution.WorkingDirectory,
             execution.Metadata,
             DateTimeOffset.UtcNow,
-            DateTimeOffset.UtcNow - startedAt);
+            DateTimeOffset.UtcNow - startedAt,
+            execution.StopReason,
+            execution.Usage);
 
         var outFile = Path.Combine(_options.OutboxPath, Path.GetFileNameWithoutExtension(file) + ".json");
         var json = JsonSerializer.Serialize(result, MomJsonContext.Default.DelegationResult);

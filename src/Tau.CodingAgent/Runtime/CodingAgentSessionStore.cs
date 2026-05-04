@@ -7,7 +7,8 @@ namespace Tau.CodingAgent.Runtime;
 public sealed record CodingAgentSessionSnapshot(
     IReadOnlyList<ChatMessage> Messages,
     string? Provider,
-    string? Model);
+    string? Model,
+    string? Name);
 
 public sealed class CodingAgentSessionStore
 {
@@ -34,51 +35,58 @@ public sealed class CodingAgentSessionStore
 
     public CodingAgentSessionSnapshot Load()
     {
-        if (!File.Exists(_path))
-        {
-            return new CodingAgentSessionSnapshot([], null, null);
-        }
-
         try
         {
-            using var stream = File.OpenRead(_path);
-            var document = JsonSerializer.Deserialize(stream, CodingAgentSessionJsonContext.Default.CodingAgentSessionDocument);
-            if (document is null || document.Version <= 0)
-            {
-                return new CodingAgentSessionSnapshot([], null, null);
-            }
-
-            var messages = document.Messages
-                .Select(ToMessage)
-                .Where(static message => message is not null)
-                .Cast<ChatMessage>()
-                .ToArray();
-
-            return new CodingAgentSessionSnapshot(messages, document.Provider, document.Model);
+            return LoadStrict();
         }
         catch (JsonException)
         {
-            return new CodingAgentSessionSnapshot([], null, null);
+            return new CodingAgentSessionSnapshot([], null, null, null);
         }
         catch (IOException)
         {
-            return new CodingAgentSessionSnapshot([], null, null);
+            return new CodingAgentSessionSnapshot([], null, null, null);
         }
         catch (UnauthorizedAccessException)
         {
-            return new CodingAgentSessionSnapshot([], null, null);
+            return new CodingAgentSessionSnapshot([], null, null, null);
         }
+    }
+
+    public CodingAgentSessionSnapshot LoadStrict()
+    {
+        if (!File.Exists(_path))
+        {
+            throw new IOException($"session file not found: {_path}");
+        }
+
+        using var stream = File.OpenRead(_path);
+        var document = JsonSerializer.Deserialize(stream, CodingAgentSessionJsonContext.Default.CodingAgentSessionDocument);
+        if (document is null || document.Version <= 0)
+        {
+            throw new JsonException("invalid coding agent session document");
+        }
+
+        var messages = document.Messages
+            .Select(ToMessage)
+            .Where(static message => message is not null)
+            .Cast<ChatMessage>()
+            .ToArray();
+
+        var name = string.IsNullOrWhiteSpace(document.Name) ? null : document.Name.Trim();
+        return new CodingAgentSessionSnapshot(messages, document.Provider, document.Model, name);
     }
 
     public IReadOnlyList<ChatMessage> LoadMessages() => Load().Messages;
 
-    public void Save(IReadOnlyList<ChatMessage> messages, Model? model = null)
+    public void Save(IReadOnlyList<ChatMessage> messages, Model? model = null, string? name = null)
     {
         var document = new CodingAgentSessionDocument
         {
             Version = CurrentVersion,
             Provider = model?.Provider,
             Model = model?.Id,
+            Name = string.IsNullOrWhiteSpace(name) ? null : name.Trim(),
             UpdatedAt = DateTimeOffset.UtcNow,
             Messages = messages.Select(FromMessage).ToList()
         };
@@ -204,6 +212,7 @@ internal sealed class CodingAgentSessionDocument
     public int Version { get; init; }
     public string? Provider { get; init; }
     public string? Model { get; init; }
+    public string? Name { get; init; }
     public DateTimeOffset UpdatedAt { get; init; }
     public List<CodingAgentSessionMessage> Messages { get; init; } = [];
 }

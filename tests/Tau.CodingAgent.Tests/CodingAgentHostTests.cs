@@ -28,6 +28,45 @@ public class CodingAgentHostTests
     }
 
     [Fact]
+    public async Task RunAsync_HelpCommand_RendersCommandListWithoutInvokingRunner()
+    {
+        var terminal = new FakeTerminal();
+        terminal.QueueInput("/help");
+        terminal.QueueInput("exit");
+
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var host = new CodingAgentHost(new InteractiveConsoleSession(terminal), runner);
+
+        await host.RunAsync();
+
+        Assert.Empty(runner.Inputs);
+        Assert.Contains(
+            "status> commands: /help, /name, /copy, /export, /import, /new, /session, /quit, /model, /provider, /models, /providers, /auth, /login, /compact",
+            terminal.FlattenedText());
+    }
+
+    [Fact]
+    public async Task RunAsync_QuitCommand_ExitsWithoutReadingFurtherInputOrInvokingRunner()
+    {
+        var terminal = new FakeTerminal();
+        terminal.QueueInput("/quit");
+        terminal.QueueInput("should not run");
+
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var host = new CodingAgentHost(new InteractiveConsoleSession(terminal), runner);
+
+        var exitCode = await host.RunAsync();
+
+        Assert.Equal(0, exitCode);
+        Assert.Empty(runner.Inputs);
+
+        var output = terminal.FlattenedText();
+        Assert.Contains("Goodbye!\n", output);
+        Assert.DoesNotContain("you> should not run", output);
+        Assert.Equal(1, CountOccurrences(output, "Goodbye!"));
+    }
+
+    [Fact]
     public async Task RunAsync_RendersAssistantAndToolLifecycle()
     {
         var terminal = new FakeTerminal();
@@ -180,6 +219,7 @@ public class CodingAgentHostTests
 
         var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
         runner.MutableMessages.Add(new UserMessage("old state"));
+        runner.SessionName = "old name";
         var host = new CodingAgentHost(new InteractiveConsoleSession(terminal), runner, new CodingAgentSessionStore(path));
 
         try
@@ -192,6 +232,7 @@ public class CodingAgentHostTests
 
             var loaded = new CodingAgentSessionStore(path).Load();
             Assert.Empty(loaded.Messages);
+            Assert.Null(loaded.Name);
             Assert.Equal("openai", loaded.Provider);
             Assert.Equal("gpt-5.4", loaded.Model);
         }
@@ -204,6 +245,179 @@ public class CodingAgentHostTests
         }
     }
 
+
+    [Fact]
+    public async Task RunAsync_CopyCommand_RendersStatusAndUsesClipboard()
+    {
+        var terminal = new FakeTerminal();
+        terminal.QueueInput("/copy");
+        terminal.QueueInput("exit");
+
+        var clipboard = new FakeCodingAgentClipboard();
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.MutableMessages.Add(new AssistantMessage([new TextContent("copy me")]));
+        var host = new CodingAgentHost(new InteractiveConsoleSession(terminal), runner, clipboard: clipboard);
+
+        await host.RunAsync();
+
+        Assert.Empty(runner.Inputs);
+        Assert.Equal("copy me", Assert.Single(clipboard.CopiedTexts));
+        Assert.Contains("status> copied last assistant message to clipboard", terminal.FlattenedText());
+    }
+
+    [Fact]
+    public async Task RunAsync_ExportCommand_RendersStatusAndWritesSnapshot()
+    {
+        var path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"tau-coding-agent-host-export-{Guid.NewGuid():N}.json");
+        var terminal = new FakeTerminal();
+        terminal.QueueInput($"/export {path}");
+        terminal.QueueInput("exit");
+
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.SessionName = "host export";
+        runner.MutableMessages.Add(new UserMessage("persisted"));
+        var host = new CodingAgentHost(new InteractiveConsoleSession(terminal), runner);
+
+        try
+        {
+            await host.RunAsync();
+
+            Assert.Empty(runner.Inputs);
+            Assert.Contains($"status> exported session to {System.IO.Path.GetFullPath(path)}", terminal.FlattenedText());
+
+            var loaded = new CodingAgentSessionStore(path).Load();
+            Assert.Equal("host export", loaded.Name);
+            Assert.Single(loaded.Messages);
+        }
+        finally
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task RunAsync_ImportCommand_RendersStatusAndPersistsImportedSnapshot()
+    {
+        var importPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"tau-coding-agent-host-import-{Guid.NewGuid():N}.json");
+        var sessionPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"tau-coding-agent-host-import-current-{Guid.NewGuid():N}.json");
+        var terminal = new FakeTerminal();
+        terminal.QueueInput($"/import {importPath}");
+        terminal.QueueInput("exit");
+        var model = new Model
+        {
+            Provider = "google",
+            Id = "gemini-2.5-pro",
+            Name = "Gemini 2.5 Pro",
+            Api = "google-gemini"
+        };
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.MutableMessages.Add(new UserMessage("stale"));
+        var host = new CodingAgentHost(
+            new InteractiveConsoleSession(terminal),
+            runner,
+            new CodingAgentSessionStore(sessionPath));
+
+        try
+        {
+            new CodingAgentSessionStore(importPath).Save(
+                [
+                    new UserMessage("imported"),
+                    new AssistantMessage([new TextContent("snapshot")])
+                ],
+                model,
+                "host import");
+
+            await host.RunAsync();
+
+            Assert.Empty(runner.Inputs);
+            Assert.Contains(
+                $"status> imported session from {System.IO.Path.GetFullPath(importPath)}: 2 messages, model google/gemini-2.5-pro, name host import",
+                terminal.FlattenedText());
+
+            var loaded = new CodingAgentSessionStore(sessionPath).Load();
+            Assert.Equal("host import", loaded.Name);
+            Assert.Equal("google", loaded.Provider);
+            Assert.Equal("gemini-2.5-pro", loaded.Model);
+            Assert.Equal(2, loaded.Messages.Count);
+        }
+        finally
+        {
+            if (File.Exists(importPath))
+            {
+                File.Delete(importPath);
+            }
+
+            if (File.Exists(sessionPath))
+            {
+                File.Delete(sessionPath);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task RunAsync_NameCommand_RendersAndPersistsSessionName()
+    {
+        var path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"tau-coding-agent-name-command-{Guid.NewGuid():N}.json");
+        var terminal = new FakeTerminal();
+        terminal.QueueInput("/name focused port slice");
+        terminal.QueueInput("exit");
+
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var host = new CodingAgentHost(new InteractiveConsoleSession(terminal), runner, new CodingAgentSessionStore(path));
+
+        try
+        {
+            await host.RunAsync();
+
+            Assert.Empty(runner.Inputs);
+            Assert.Contains("status> session name: focused port slice", terminal.FlattenedText());
+
+            var loaded = new CodingAgentSessionStore(path).Load();
+            Assert.Equal("focused port slice", loaded.Name);
+            Assert.Equal("openai", loaded.Provider);
+            Assert.Equal("gpt-5.4", loaded.Model);
+        }
+        finally
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task RunAsync_SessionCommand_RendersSessionStorePathWithoutInvokingRunner()
+    {
+        var path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"tau-coding-agent-session-command-{Guid.NewGuid():N}.json");
+        var terminal = new FakeTerminal();
+        terminal.QueueInput("/session");
+        terminal.QueueInput("exit");
+
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.MutableMessages.Add(new UserMessage("current state"));
+        var host = new CodingAgentHost(new InteractiveConsoleSession(terminal), runner, new CodingAgentSessionStore(path));
+
+        try
+        {
+            await host.RunAsync();
+
+            Assert.Empty(runner.Inputs);
+            Assert.Contains(
+                $"status> session: name none, model openai/gpt-5.4, messages 1 (user 1, assistant 0, tool 0, toolCalls 0), file {path}",
+                terminal.FlattenedText());
+        }
+        finally
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+        }
+    }
 
     [Fact]
     public async Task RunAsync_AuthCommand_RendersCurrentAuthStatus()
@@ -282,6 +496,19 @@ public class CodingAgentHostTests
                 File.Delete(path);
             }
         }
+    }
+
+    private static int CountOccurrences(string value, string needle)
+    {
+        var count = 0;
+        var index = 0;
+        while ((index = value.IndexOf(needle, index, StringComparison.Ordinal)) >= 0)
+        {
+            count++;
+            index += needle.Length;
+        }
+
+        return count;
     }
 
 }

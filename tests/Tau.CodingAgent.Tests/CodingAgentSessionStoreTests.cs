@@ -26,12 +26,14 @@ public class CodingAgentSessionStoreTests
                     new AssistantMessage([new ThinkingContent("reason"), new TextContent("world"), new ToolCallContent("call-1", "read_file", "{\"path\":\"README.md\"}")]),
                     new ToolResultMessage("call-1", [new TextContent("done")], IsError: true)
                 ],
-                model);
+                model,
+                "Focused session");
 
             var loaded = store.Load();
 
             Assert.Equal("google", loaded.Provider);
             Assert.Equal("gemini-2.5-pro", loaded.Model);
+            Assert.Equal("Focused session", loaded.Name);
             Assert.Equal(3, loaded.Messages.Count);
 
             var user = Assert.IsType<UserMessage>(loaded.Messages[0]);
@@ -75,6 +77,36 @@ public class CodingAgentSessionStoreTests
             Assert.Empty(loaded.Messages);
             Assert.Null(loaded.Provider);
             Assert.Null(loaded.Model);
+            Assert.Null(loaded.Name);
+        }
+        finally
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+        }
+    }
+
+    [Fact]
+    public void LoadStrict_MissingFile_Throws()
+    {
+        var path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"tau-coding-agent-session-missing-{Guid.NewGuid():N}.json");
+
+        var ex = Assert.Throws<IOException>(() => new CodingAgentSessionStore(path).LoadStrict());
+        Assert.Equal($"session file not found: {System.IO.Path.GetFullPath(path)}", ex.Message);
+    }
+
+    [Fact]
+    public void LoadStrict_InvalidJson_Throws()
+    {
+        var path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"tau-coding-agent-session-invalid-strict-{Guid.NewGuid():N}.json");
+
+        try
+        {
+            File.WriteAllText(path, "not json");
+
+            Assert.Throws<System.Text.Json.JsonException>(() => new CodingAgentSessionStore(path).LoadStrict());
         }
         finally
         {

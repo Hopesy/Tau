@@ -42,6 +42,7 @@ public sealed class FakeCodingAgentRunner : ICodingAgentRunner
     public List<ChatMessage> MutableMessages { get; } = [];
     public IReadOnlyList<ChatMessage> Messages => MutableMessages;
     public Model Model { get; private set; }
+    public string? SessionName { get; set; }
     public Func<string?, CancellationToken, Task<CodingAgentCompactionResult>>? CompactHandler { get; set; }
     public string? LastCompactInstructions { get; private set; }
     public int ResetSessionCalls { get; private set; }
@@ -77,6 +78,19 @@ public sealed class FakeCodingAgentRunner : ICodingAgentRunner
     public ProviderAuthStatus GetAuthStatus(string? providerId = null) =>
         AuthStatus with { Provider = string.IsNullOrWhiteSpace(providerId) ? Model.Provider : providerId };
 
+    public CodingAgentSessionStats GetSessionStats(string? sessionFile = null)
+    {
+        return new CodingAgentSessionStats(
+            Model.Provider,
+            Model.Id,
+            Messages.Count,
+            Messages.OfType<UserMessage>().Count(),
+            Messages.OfType<AssistantMessage>().Count(),
+            Messages.OfType<ToolResultMessage>().Count(),
+            Messages.OfType<AssistantMessage>().Sum(message => message.Content.OfType<ToolCallContent>().Count()),
+            SessionName,
+            sessionFile);
+    }
     public Task<CodingAgentCompactionResult> CompactAsync(string? customInstructions = null, CancellationToken cancellationToken = default)
     {
         LastCompactInstructions = customInstructions;
@@ -92,6 +106,15 @@ public sealed class FakeCodingAgentRunner : ICodingAgentRunner
     {
         ResetSessionCalls++;
         MutableMessages.Clear();
+        SessionName = null;
+    }
+
+    public void RestoreSession(CodingAgentSessionSnapshot snapshot)
+    {
+        SelectModel(snapshot.Provider, snapshot.Model);
+        MutableMessages.Clear();
+        MutableMessages.AddRange(snapshot.Messages);
+        SessionName = snapshot.Name;
     }
 
     public IAsyncEnumerable<AgentEvent> RunAsync(string input, CancellationToken cancellationToken = default)
