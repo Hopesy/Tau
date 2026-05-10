@@ -1,5 +1,7 @@
 # Tau pi-mono 移植基线与多应用面 P1 收口计划
 
+> 当前完整移植总路线图已经升级到 `docs/exec-plans/active/2026-05-10-tau-complete-pi-mono-port.md`。本文件继续保留为 Tau 从 CLI-first 到多应用面 P1 的基线、进度和决策历史。
+
 ## 目标
 
 把 Tau 从“CLI-first 的可运行移植项目”继续推进到“多应用面都已经脱离模板壳、具备真实最小产品切片”的状态，并在此基础上进入第二层能力收口：
@@ -57,7 +59,7 @@
   - `tests/`
 - 已知约束：
   - `Tau.slnx` 当前已可通过 `dotnet build Tau.slnx --verbosity minimal`
-  - `Tau.CodingAgent` / `Tau.WebUi` / `Tau.Mom` / `Tau.CodingAgent.Tests` 已收回到 `ProjectReference`
+  - `Tau.CodingAgent` / `Tau.WebUi` / `Tau.Mom` / `Tau.CodingAgent.Tests` / `Tau.Agent.Tests` 已收回到 `ProjectReference`
   - 当前 Windows 环境下 `bash scripts/verify-dotnet.sh --skip-restore` 会落到 WSL 并因缺少 `/bin/bash` 失败，所以本地验证仍接受“仓库标准命令写 bash，现场执行可退回等价顺序 dotnet 命令”的现实
 
 ## 风险
@@ -212,6 +214,20 @@
 - [x] `Tau.CodingAgent` slash command router 抽离（`CodingAgentCommandRouter`，保持 `/model` / `/provider` / `/models` / `/providers` / `/auth` / `/login` 行为不变）
 - [x] `Tau.CodingAgent` 最小手动 compaction（`/compact [instructions]`，当前模型生成摘要后压缩为单条 summary message）
 - [x] `Tau.Mom` runner / result schema 收口（结构化 `DelegationToolEvent`、stop reason、`DelegationUsage` 含 token + 可选总成本、可注入 `ICodingAgentRunner` 工厂）
+- [x] `Tau.Mom` 结构化 request context 接线（`title` session name、`metadata` / `attachments` 注入 runner 输入、outbox 回写 title/attachments）
+- [x] `Tau.Mom` local attachment staging（本地存在的 request/event attachment 进入 `workingDirectory/attachments/`，并保留 original/local/source manifest 与 channel log 元数据）
+- [x] `Tau.Mom` workspace memory context（`workingDirectory/MEMORY.md` 与父目录 `MEMORY.md` 注入 delegation prompt）
+- [x] `Tau.Mom` channel history context（`workingDirectory/log.jsonl` 最近非 bot 文本消息注入 delegation prompt，跳过 malformed/空文本/current ts）
+- [x] `Tau.Mom` local channel log writeback（本地 file delegation 完成后把用户请求和 bot 结果追加到 `workingDirectory/log.jsonl`）
+- [x] `Tau.Mom` local runtime status（本地 file delegation 执行前后写 `workingDirectory/status.json`，记录 `running/completed/failed`、请求文件、provider/model、时间、错误与响应摘要）
+- [x] `Tau.Mom` local busy-state guard（同一 workdir 已有未过期 `running` 状态时保留 inbox 请求并跳过处理，默认 60 分钟后视为 stale）
+- [x] `Tau.Mom` local events wake-up（`events/*.json` 的 `immediate` / `one-shot` / `periodic` 转换为 inbox 委派请求，channelId 映射到本地 channel workdir）
+- [x] `Tau.Mom` runtime context prompt（`<mom_runtime_context>` 注入 workspace/channel layout、events 文件格式、attachment manifest、memory/log/status 路径与 `[SILENT]` 约定）
+- [x] `Tau.Mom` local channel session context（`workingDirectory/context.json` 使用 Tau-native session snapshot 恢复/保存同一 workdir 的 runtime messages）
+- [x] `Tau.Mom` prompt debug snapshot（调用 runner 前写 `workingDirectory/last_prompt.jsonl`，记录 mom runtime context、delegation context、实际 runner input、恢复的 session messages、当前 prompt 和 attachment/image attachment count）
+- [x] `Tau.Mom` workspace layout bootstrap（统一创建 `scratch/`、workspace/channel `skills/`、`attachments/`、`events/`，并把 `SYSTEM.md` 与 skill docs inventory 注入 prompt context）
+- [x] `Tau.Mom` Slack-compatible channel message envelope（`MomChannelMessage` / `MomChannelAttachment` 统一 file/events/未来 Slack adapter 的 channel/user/ts/thread/attachment/request metadata 映射）
+- [x] `Tau.Mom` transport/responder seam（`IMomChannelTransport` / `IMomChannelResponder` / `MomChannelMessageProcessor` 固定 busy/stop/typing/thread response/status/log/runner 接线）
 - [ ] `Tau.WebUi` 流式 UI / richer rendering / attachment
 - [ ] `Tau.Mom` Slack / workspace / sandbox / delegation semantics
 - [ ] `Tau.Pods` SSH / lifecycle / model management
@@ -273,7 +289,23 @@
 - 2026-05-03：决定先把 `Tau.CodingAgent`、`Tau.WebUi` 和 `Tau.CodingAgent.Tests` 的 DLL `HintPath` 收回到 `ProjectReference`，而不是继续要求先按手工顺序生成依赖 DLL。原因是 `/import` 验证时已经暴露 stale assembly / 并行构建顺序风险；这次只收口已能稳定验证的 CodingAgent/WebUi 链，`Tau.Mom` 和 `Tau.slnx` 继续作为独立工程化任务。
 
 - 2026-05-03：决定把 `Tau.Mom` 也一并从 DLL `HintPath` 收回到 `ProjectReference`。原因是这轮已经确认干净构建可以按 project reference 链路稳定完成，继续保留唯一一处 workaround 只会让引用结构长期分叉，并继续增加 stale assembly 风险。
+- 2026-05-05：决定把 `Tau.Agent.Tests` 也从 DLL `HintPath` 收回到 `ProjectReference`。原因是 Mom busy-state 测试需要看到最新 `MomOptions` / `ChannelStatusStore` 类型，继续通过预先存在的 `Tau.Mom.dll` 会重新引入 stale assembly 风险，和当前工程化方向相反。
 
 - 2026-05-03：重新验证 `Tau.slnx` 后决定把 solution-level build 标记为当前可用。原因是所有 `HintPath` workaround 收回 `ProjectReference` 后，`dotnet build Tau.slnx --verbosity minimal` 已能真实通过；当前仓库标准 bash 脚本在本机失败的根因是 WSL `/bin/bash` 缺失，而不是 Tau solution build。
 
 - 2026-05-04：决定先把 `Tau.Mom` 的 runner / result schema 收口为结构化事实，再去接 Slack。原因是当前 `IReadOnlyList<string> ToolEvents` 把 toolName/toolCallId/isError/duration 全部塞回字符串里，后续 Slack/workspace/sandbox 适配层既看不见持续时间，也无法可靠把多次调用按 ID 关联起来；本轮先把 ToolEvents 拆成 `DelegationToolEvent { Phase, ToolName, ToolCallId, IsError, DurationMs }`，并补 `StopReason`（沿用 Tau.Ai `StopReason` 加 `cancelled`/`error`）和 `DelegationUsage`（input/output/cache token + 可选总成本，用 `ModelCatalog.CalculateCost` 计算），同时把 `RuntimeDelegationAgentRunner` 改成接受 `Func<string, string, ICodingAgentRunner>` 工厂。这样 Slack/Workspace 适配层可以基于结构化事件直接渲染 `→ tool / ✓ tool (1.2s)`，单测可以用 fake runner 直接驱动事件流，且 outbox JSON 仍向后保留所有旧字段。
+- 2026-05-05：决定先把 `Tau.Mom` 已声明的结构化 request 字段做成真实运行时语义，而不是继续把它们停留在输入 JSON 和 outbox 旁路里。原因是当前 `title` 虽然已进入 `DelegationRequest`，但 runner 实际只把 `Prompt` 裸传给 `ICodingAgentRunner.RunAsync()`，`metadata` 也无法影响模型上下文；先把 `title` 接成 session name，把 `metadata` / `attachments` 包成稳定的 `<delegation_context>` 文本前缀，能在不破坏 Tau 当前 string-only runner seam 的前提下，让 Slack/workspace 未来需要的请求上下文真正进入 agent 执行链。
+- 2026-05-05：决定把 `Tau.Mom` 的 workspace memory 先做成 `MEMORY.md` 文件读取，而不是一次性移植上游完整 Slack store / channel log / sandbox workspace。原因是上游 mom 的关键持久上下文来自 workspace 与 channel 的 `MEMORY.md`；Tau 当前已经有 `workingDirectory`，最小等价行为是读取当前工作目录和父目录的 `MEMORY.md` 并注入 delegation prompt。这样可以先固定可测试的 memory 语义，后续再接 Slack channel、log sync 和 sandbox。
+- 2026-05-05：决定把 `Tau.Mom` 的 message/runtime flow 先切出最小 `log.jsonl` channel history 注入，而不是一次性移植上游 `SessionManager` 同步。原因是 Tau 当前 runner seam 仍是 `RunAsync(string input)`，最小可靠路径是读取 `workingDirectory/log.jsonl`、过滤 malformed/空文本/bot/current ts，并把最近 20 条人类消息注入 `<delegation_context>`；Slack session sync、busy-state、多消息 runtime flow 和 sandbox 继续留在后续切片。
+- 2026-05-05：决定让本地 file delegation 也写回 `workingDirectory/log.jsonl`，而不是把 channel history 只做成被动读取。原因是没有 Slack adapter 时，Tau.Mom 仍需要一个本地可验证的消息流闭环；本轮只写 compact JSONL 的用户请求和 bot 结果，并用 `ts` 做简单去重，附件保留为本地路径，不把 tool result 或完整 session tree 混进 log。
+- 2026-05-05：决定把 `Tau.Mom` 的 busy-state 先收口成本地 `status.json`，而不是直接接 Slack handler 或完整事件队列。原因是上游 mom 的 Slack adapter 需要知道 channel 是否 running、当前请求和最终错误/结果；Tau 当前还没有 Slack adapter，本轮先让 file delegation 在执行前后写 `running/completed/failed` 状态，既能被 smoke 验证，也能给后续 stop/queue/adapter 复用同一状态文件。
+- 2026-05-05：决定让本地 file delegation 读取 `status.json` 做最小 busy-state guard，而不是只写不读。原因是没有 Slack adapter 时，Tau.Mom 仍可能在同一 workdir 已经 `running` 时重复处理 inbox 请求；本轮以 `RunningStatusStaleAfterMinutes`（默认 60）作为崩溃恢复窗口，新鲜 `running` 保留 inbox 文件并跳过处理，过期 `running` 视为 stale 后继续执行。
+- 2026-05-10：决定先把上游 mom 的 events 系统迁移成本地 `MomEventProcessor`，而不是在同一轮引入 Slack Socket Mode SDK。原因是 events 只需要文件系统、cron 匹配和现有 inbox/outbox seam 就能本地验证；`immediate` / `one-shot` / `periodic` 事件现在会转换成标准 `DelegationRequest`，并复用 `channelId -> workingDirectory/<channelId>` 的 memory/log/status 语义，真实 Slack queue/backfill/stop 继续留给下一步 adapter。
+- 2026-05-10：决定先把上游 mom `ChannelStore.processAttachments()` 迁移成本地 `ChannelAttachmentStore`，而不是直接接 Slack 文件下载。原因是 Tau 当前还没有 Slack adapter，但已经有 `workingDirectory`、`log.jsonl` 和 request `attachments` 字段；先把本地存在的 attachment staging 到 `workingDirectory/attachments/`，并保留 `original/local/source` manifest 与 channel log 元数据，可以让后续 Slack 下载、backfill 和 sandbox workspace 共用同一附件布局。
+- 2026-05-10：决定把上游 mom `buildSystemPrompt()` 里不依赖 Slack SDK 的本地运行规则迁移为 `<mom_runtime_context>`，而不是改 `Tau.CodingAgent` 的系统 prompt 或提前引入完整 mom AgentSession。原因是 Tau.Mom 当前的 runner seam 仍是 `RunAsync(string input)`；把 workspace layout、events 文件格式、attachment manifest、memory/log/status 路径和 `[SILENT]` 约定作为本地前缀注入，可以先给模型稳定的 Mom 运行语义，同时不伪装成 Slack/socket/sandbox 已经完成。
+- 2026-05-10：决定把上游 mom per-channel `context.jsonl` session sync 先迁移成 Tau-native `context.json` snapshot，而不是一次性实现 JSONL session tree。原因是 `Tau.CodingAgent` 已有可复用的 `CodingAgentSessionStore` 平面 snapshot；Mom 先在同一 `workingDirectory` 上恢复/保存 runner messages，就能让后续 delegation 继承上一轮 runtime context，同时清楚标注这还不是上游完整 SessionManager / Slack session sync。
+- 2026-05-10：决定把上游 mom 的 `last_prompt.jsonl` debug 文件迁移为本地 `ChannelPromptDebugStore`，而不是继续只靠测试 fake runner 捕获输入。原因是后续 Slack/session/attachment 问题需要能在真实 channel workdir 里直接看到 prompt 组成、恢复的 session messages 和附件计数；本轮只写文本 debug snapshot，不把图片作为多模态内容传给当前 string-only runner。
+- 2026-05-10：决定把上游 mom system prompt 里的 workspace layout 规则迁移成 `ChannelWorkspaceLayout`，而不是继续在 runtime context、smoke 和后续 adapter 里各自拼路径。原因是 `scratch/`、workspace/channel `skills/`、`SYSTEM.md` 和 `events/` 都是后续 sandbox/tool delegation 的共同边界；本轮只创建目录、读取 `SYSTEM.md` 与 `SKILL.md` 元数据并注入 prompt，不提前承诺 custom skill runtime 或 Docker sandbox 已经接通。
+- 2026-05-10：决定用 `2026-05-10-tau-complete-pi-mono-port.md` 承接完整移植总路线图，本 baseline plan 不再无限扩展成跨模块总计划。原因是“完完整整的移植”已经超出 P1 baseline，需要单独的 parity closure plan，同时保留旧 plan 作为已完成基线和决策事实源。
+- 2026-05-10：决定把 Slack event / file request / local event 的共同输入事实抽成 `MomChannelMessage`，再生成 `DelegationRequest`。原因是下一步真实 Slack adapter、backfill、queue 和 file download 都需要复用 channel/user/ts/thread/attachment metadata；先固定 envelope seam 能避免 Slack SDK 接入后把消息映射逻辑散进 worker、event processor 和 log store。
+- 2026-05-10：决定把 Slack transport/responder 与 Mom channel runtime 分开。原因是 `IMomChannelResponder` 只负责发送/typing/upload，`MomChannelMessageProcessor` 承担 busy-state、stop placeholder、thread response、status/log writeback、attachment staging 和 runner 调用；这样后续真实 Slack SDK adapter 不会拥有业务状态机。

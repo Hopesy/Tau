@@ -10,14 +10,26 @@ namespace Tau.Mom;
 public sealed class RuntimeDelegationAgentRunner : IDelegationAgentRunner
 {
     private readonly Func<string, string, ICodingAgentRunner> _runnerFactory;
+    private readonly MomOptions _options;
 
     public RuntimeDelegationAgentRunner()
-        : this(static (provider, model) => RuntimeCodingAgentRunner.Create(provider, model))
+        : this(new MomOptions(), static (provider, model) => RuntimeCodingAgentRunner.Create(provider, model))
+    {
+    }
+
+    public RuntimeDelegationAgentRunner(MomOptions options)
+        : this(options, static (provider, model) => RuntimeCodingAgentRunner.Create(provider, model))
     {
     }
 
     public RuntimeDelegationAgentRunner(Func<string, string, ICodingAgentRunner> runnerFactory)
+        : this(new MomOptions(), runnerFactory)
     {
+    }
+
+    public RuntimeDelegationAgentRunner(MomOptions options, Func<string, string, ICodingAgentRunner> runnerFactory)
+    {
+        _options = options;
         _runnerFactory = runnerFactory;
     }
 
@@ -41,12 +53,33 @@ public sealed class RuntimeDelegationAgentRunner : IDelegationAgentRunner
 
         try
         {
+            var workspaceLayout = ChannelWorkspaceLayout.For(_options, workingDirectory);
+            workspaceLayout.EnsureDirectories();
             var previousDirectory = Directory.GetCurrentDirectory();
             Directory.SetCurrentDirectory(workingDirectory);
             try
             {
                 var runner = _runnerFactory(provider, model);
-                await foreach (var evt in runner.RunAsync(request.Prompt, cancellationToken).ConfigureAwait(false))
+                var sessionStore = new ChannelSessionStore(workingDirectory);
+                var requestedSessionName = string.IsNullOrWhiteSpace(request.Title) ? null : request.Title.Trim();
+                var snapshot = sessionStore.Load(provider, model, requestedSessionName);
+                if (snapshot.Messages.Count > 0)
+                {
+                    runner.RestoreSession(snapshot);
+                }
+
+                runner.SessionName = snapshot.Name;
+                var promptParts = BuildDelegationPromptParts(request, workingDirectory);
+                ChannelPromptDebugStore.Write(
+                    workingDirectory,
+                    promptParts,
+                    runner.Messages,
+                    request,
+                    provider,
+                    model,
+                    runner.SessionName);
+
+                await foreach (var evt in runner.RunAsync(promptParts.RunnerInput, cancellationToken).ConfigureAwait(false))
                 {
                     switch (evt)
                     {
@@ -88,6 +121,8 @@ public sealed class RuntimeDelegationAgentRunner : IDelegationAgentRunner
                             break;
                     }
                 }
+
+                sessionStore.Save(runner);
             }
             finally
             {
@@ -115,6 +150,133 @@ public sealed class RuntimeDelegationAgentRunner : IDelegationAgentRunner
             request.Metadata,
             stopReason,
             aggregatedUsage.ToDelegationUsage());
+    }
+
+    private DelegationPromptParts BuildDelegationPromptParts(DelegationRequest request, string workingDirectory)
+    {
+        var hasTitle = !string.IsNullOrWhiteSpace(request.Title);
+        var hasMetadata = request.Metadata is { Count: > 0 };
+        var hasAttachments = request.Attachments is { Count: > 0 };
+        var channelHistory = BuildChannelHistory(workingDirectory, request.Metadata);
+        var hasChannelHistory = !string.IsNullOrWhiteSpace(channelHistory);
+        var workspaceMemory = BuildWorkspaceMemory(workingDirectory);
+        var hasWorkspaceMemory = !string.IsNullOrWhiteSpace(workspaceMemory);
+        var workspaceLayout = ChannelWorkspaceLayout.For(_options, workingDirectory);
+        var systemLog = workspaceLayout.ReadSystemLog();
+        var hasSystemLog = !string.IsNullOrWhiteSpace(systemLog);
+        var momRuntimeContext = MomRuntimeContext.Build(_options, workingDirectory).Trim();
+        var builder = new StringBuilder();
+        builder.AppendLine(momRuntimeContext);
+        builder.AppendLine();
+
+        if (!hasTitle && !hasMetadata && !hasAttachments && !hasChannelHistory && !hasWorkspaceMemory && !hasSystemLog)
+        {
+            builder.Append(request.Prompt);
+            return new DelegationPromptParts(momRuntimeContext, null, builder.ToString());
+        }
+
+        var delegationBuilder = new StringBuilder();
+        delegationBuilder.AppendLine("<delegation_context>");
+        if (hasTitle)
+        {
+            delegationBuilder.Append("title: ").AppendLine(request.Title!.Trim());
+        }
+
+        if (hasMetadata)
+        {
+            delegationBuilder.AppendLine("metadata:");
+            foreach (var pair in request.Metadata!.OrderBy(static pair => pair.Key, StringComparer.OrdinalIgnoreCase))
+            {
+                delegationBuilder.Append("- ").Append(pair.Key).Append(": ").AppendLine(pair.Value);
+            }
+        }
+
+        if (hasAttachments)
+        {
+            delegationBuilder.AppendLine("attachments:");
+            foreach (var attachment in request.Attachments!)
+            {
+                delegationBuilder.Append("- ").AppendLine(attachment);
+            }
+            delegationBuilder.AppendLine("Use these attachment paths as local file context when relevant.");
+        }
+
+        if (hasChannelHistory)
+        {
+            delegationBuilder.AppendLine("channel_history:");
+            delegationBuilder.AppendLine(channelHistory!.Trim());
+        }
+
+        if (hasWorkspaceMemory)
+        {
+            delegationBuilder.AppendLine("workspace_memory:");
+            delegationBuilder.AppendLine(workspaceMemory!.Trim());
+        }
+
+        if (hasSystemLog)
+        {
+            delegationBuilder.AppendLine("system_configuration_log:");
+            delegationBuilder.AppendLine(systemLog!.Trim());
+        }
+
+        delegationBuilder.AppendLine("</delegation_context>");
+        var delegationContext = delegationBuilder.ToString().Trim();
+        builder.AppendLine(delegationContext);
+        builder.AppendLine();
+        builder.Append(request.Prompt);
+        return new DelegationPromptParts(momRuntimeContext, delegationContext, builder.ToString());
+    }
+
+    private static string? BuildChannelHistory(string? workingDirectory, IReadOnlyDictionary<string, string>? metadata)
+    {
+        return ChannelLogStore.BuildHistory(workingDirectory, metadata);
+    }
+
+    private static string? BuildWorkspaceMemory(string? workingDirectory)
+    {
+        if (string.IsNullOrWhiteSpace(workingDirectory))
+        {
+            return null;
+        }
+
+        var sections = new List<string>();
+        var currentDirectory = Path.GetFullPath(workingDirectory);
+        var parentDirectory = Directory.GetParent(currentDirectory)?.FullName;
+
+        AddMemorySection(currentDirectory, "Current Workspace Memory", sections);
+        if (!string.IsNullOrWhiteSpace(parentDirectory))
+        {
+            AddMemorySection(parentDirectory, "Parent Workspace Memory", sections);
+        }
+
+        if (sections.Count == 0)
+        {
+            return null;
+        }
+
+        return string.Join("\n\n", sections);
+    }
+
+    private static void AddMemorySection(string directory, string heading, ICollection<string> sections)
+    {
+        var memoryPath = Path.Combine(directory, "MEMORY.md");
+        if (!File.Exists(memoryPath))
+        {
+            return;
+        }
+
+        try
+        {
+            var content = File.ReadAllText(memoryPath).Trim();
+            if (!string.IsNullOrWhiteSpace(content))
+            {
+                sections.Add($"### {heading}\n{content}");
+            }
+        }
+        catch
+        {
+            // Ignore unreadable memory files and continue with the rest of the context.
+        }
     }
 
     private static void ApplyAssistantMessage(AssistantMessage message, Model resolvedModel, MutableUsage usage, ref string? stopReason)
@@ -156,7 +318,6 @@ public sealed class RuntimeDelegationAgentRunner : IDelegationAgentRunner
     };
 
     private readonly record struct PendingToolCall(string ToolName, long StartedMs);
-
     private sealed class MutableUsage
     {
         public int InputTokens;

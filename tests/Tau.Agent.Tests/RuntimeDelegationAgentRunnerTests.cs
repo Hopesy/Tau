@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Tau.Agent;
 using Tau.Ai;
 using Tau.Ai.Auth;
@@ -73,6 +74,142 @@ public class RuntimeDelegationAgentRunnerTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_IncludesStructuredContextInRunnerInput_AndSetsSessionName()
+    {
+        var model = new Model { Provider = "openai", Id = "gpt-5.4", Name = "GPT-5.4", Api = "openai-responses" };
+        var fake = new ScriptedRunner(model)
+        {
+            Events = [new AgentEndEvent()]
+        };
+
+        var root = Path.Combine(Path.GetTempPath(), $"tau-mom-{Guid.NewGuid():N}");
+        var workingDirectory = Path.Combine(root, "channel-a");
+        Directory.CreateDirectory(workingDirectory);
+        await File.WriteAllTextAsync(Path.Combine(root, "MEMORY.md"), "global memory: use project conventions");
+        await File.WriteAllTextAsync(Path.Combine(root, "SYSTEM.md"), "installed package: ripgrep");
+        await File.WriteAllTextAsync(Path.Combine(workingDirectory, "MEMORY.md"), "channel memory: deploy window is Friday");
+        var workspaceSkillDirectory = Path.Combine(root, "skills", "deploy-helper");
+        Directory.CreateDirectory(workspaceSkillDirectory);
+        await File.WriteAllTextAsync(Path.Combine(workspaceSkillDirectory, "SKILL.md"), """
+        ---
+        name: deploy-helper
+        description: Helps inspect deployment state.
+        ---
+
+        # Deploy Helper
+        """);
+        var channelSkillDirectory = Path.Combine(workingDirectory, "skills", "incident-helper");
+        Directory.CreateDirectory(channelSkillDirectory);
+        await File.WriteAllTextAsync(Path.Combine(channelSkillDirectory, "SKILL.md"), """
+        ---
+        name: incident-helper
+        description: Helps triage channel incidents.
+        ---
+
+        # Incident Helper
+        """);
+        await File.WriteAllTextAsync(Path.Combine(workingDirectory, "log.jsonl"), """
+        {"date":"2026-05-05T01:00:00Z","ts":"1","user":"U1","userName":"Alice","text":"first human message","isBot":false}
+        {"date":"2026-05-05T01:01:00Z","ts":"2","userName":"Tau Bot","text":"bot reply","isBot":true}
+        {"date":"2026-05-05T01:02:00Z","ts":"current-3","userName":"Alice","text":"current prompt duplicate","isBot":false}
+        {"date":"2026-05-05T01:03:00Z","ts":"4","user":"U2","text":"second human message\n\n<slack_attachments>\n{\"title\":\"large payload\"}","isBot":false}
+        []
+        {not-valid-json}
+        """);
+        var attachmentPath = Path.Combine(workingDirectory, "tau-mom-attachment.txt");
+        await File.WriteAllTextAsync(attachmentPath, "attachment content");
+
+        var delegationRunner = new RuntimeDelegationAgentRunner((_, _) => fake);
+
+        string? debugJson = null;
+        var scratchExists = false;
+        var workspaceSkillsExists = false;
+        var channelSkillsExists = false;
+        try
+        {
+            await delegationRunner.ExecuteAsync(new DelegationRequest(
+                "inspect the attached notes",
+                Provider: "openai",
+                Model: "gpt-5.4",
+                WorkingDirectory: workingDirectory,
+                Title: "triage build failure",
+                Metadata: new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["channel"] = "ops",
+                    ["requestId"] = "req-42",
+                    ["ts"] = "current-3"
+                },
+                Attachments: [attachmentPath]));
+            debugJson = await File.ReadAllTextAsync(Path.Combine(workingDirectory, "last_prompt.jsonl"));
+            scratchExists = Directory.Exists(Path.Combine(workingDirectory, "scratch"));
+            workspaceSkillsExists = Directory.Exists(Path.Combine(root, "skills"));
+            channelSkillsExists = Directory.Exists(Path.Combine(workingDirectory, "skills"));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+
+        Assert.True(scratchExists);
+        Assert.True(workspaceSkillsExists);
+        Assert.True(channelSkillsExists);
+        Assert.Equal("triage build failure", fake.SessionName);
+        Assert.NotNull(fake.LastInput);
+        Assert.Contains("<mom_runtime_context>", fake.LastInput, StringComparison.Ordinal);
+        Assert.Contains("role: Tau.Mom local delegation worker", fake.LastInput, StringComparison.Ordinal);
+        Assert.Contains("workspace_layout:", fake.LastInput, StringComparison.Ordinal);
+        Assert.Contains(Path.Combine(root, "SYSTEM.md"), fake.LastInput, StringComparison.Ordinal);
+        Assert.Contains(Path.Combine(workingDirectory, "scratch"), fake.LastInput, StringComparison.Ordinal);
+        Assert.Contains(Path.Combine(root, "skills"), fake.LastInput, StringComparison.Ordinal);
+        Assert.Contains(Path.Combine(workingDirectory, "skills"), fake.LastInput, StringComparison.Ordinal);
+        Assert.Contains(Path.Combine(workingDirectory, "attachments"), fake.LastInput, StringComparison.Ordinal);
+        Assert.Contains(Path.Combine(workingDirectory, "attachments", "attachments.jsonl"), fake.LastInput, StringComparison.Ordinal);
+        Assert.Contains("skill_docs:", fake.LastInput, StringComparison.Ordinal);
+        Assert.Contains("deploy-helper [workspace]: Helps inspect deployment state.", fake.LastInput, StringComparison.Ordinal);
+        Assert.Contains("incident-helper [channel]: Helps triage channel incidents.", fake.LastInput, StringComparison.Ordinal);
+        Assert.Contains("local_rules:", fake.LastInput, StringComparison.Ordinal);
+        Assert.Contains("Use scratch/ for temporary or generated working files", fake.LastInput, StringComparison.Ordinal);
+        Assert.Contains("Use SYSTEM.md to record environment modifications", fake.LastInput, StringComparison.Ordinal);
+        Assert.Contains("Skill directories are documented for local context only", fake.LastInput, StringComparison.Ordinal);
+        Assert.Contains("respond exactly [SILENT]", fake.LastInput, StringComparison.Ordinal);
+        Assert.Contains("event_files:", fake.LastInput, StringComparison.Ordinal);
+        Assert.Contains("<delegation_context>", fake.LastInput, StringComparison.Ordinal);
+        Assert.Contains("title: triage build failure", fake.LastInput, StringComparison.Ordinal);
+        Assert.Contains("- channel: ops", fake.LastInput, StringComparison.Ordinal);
+        Assert.Contains("- requestId: req-42", fake.LastInput, StringComparison.Ordinal);
+        Assert.Contains("- ts: current-3", fake.LastInput, StringComparison.Ordinal);
+        Assert.Contains($"- {attachmentPath}", fake.LastInput, StringComparison.Ordinal);
+        Assert.Contains("channel_history:", fake.LastInput, StringComparison.Ordinal);
+        Assert.Contains("[Alice]: first human message", fake.LastInput, StringComparison.Ordinal);
+        Assert.Contains("[U2]: second human message", fake.LastInput, StringComparison.Ordinal);
+        Assert.DoesNotContain("bot reply", fake.LastInput, StringComparison.Ordinal);
+        Assert.DoesNotContain("current prompt duplicate", fake.LastInput, StringComparison.Ordinal);
+        Assert.DoesNotContain("<slack_attachments>", fake.LastInput, StringComparison.Ordinal);
+        Assert.Contains("### Current Workspace Memory", fake.LastInput, StringComparison.Ordinal);
+        Assert.Contains("channel memory: deploy window is Friday", fake.LastInput, StringComparison.Ordinal);
+        Assert.Contains("### Parent Workspace Memory", fake.LastInput, StringComparison.Ordinal);
+        Assert.Contains("global memory: use project conventions", fake.LastInput, StringComparison.Ordinal);
+        Assert.Contains("system_configuration_log:", fake.LastInput, StringComparison.Ordinal);
+        Assert.Contains("installed package: ripgrep", fake.LastInput, StringComparison.Ordinal);
+        Assert.EndsWith("inspect the attached notes", fake.LastInput, StringComparison.Ordinal);
+
+        Assert.NotNull(debugJson);
+        using var debugDocument = JsonDocument.Parse(debugJson!);
+        var debugRoot = debugDocument.RootElement;
+        Assert.Equal("openai", debugRoot.GetProperty("provider").GetString());
+        Assert.Equal("gpt-5.4", debugRoot.GetProperty("model").GetString());
+        Assert.Equal("triage build failure", debugRoot.GetProperty("sessionName").GetString());
+        Assert.Equal("inspect the attached notes", debugRoot.GetProperty("newUserMessage").GetString());
+        Assert.Equal(0, debugRoot.GetProperty("restoredMessageCount").GetInt32());
+        Assert.Equal(1, debugRoot.GetProperty("attachmentCount").GetInt32());
+        Assert.Equal(0, debugRoot.GetProperty("imageAttachmentCount").GetInt32());
+        Assert.Contains("<mom_runtime_context>", debugRoot.GetProperty("systemPrompt").GetString(), StringComparison.Ordinal);
+        Assert.Contains("<delegation_context>", debugRoot.GetProperty("delegationContext").GetString(), StringComparison.Ordinal);
+        Assert.Contains("inspect the attached notes", debugRoot.GetProperty("runnerInput").GetString(), StringComparison.Ordinal);
+        Assert.Empty(debugRoot.GetProperty("messages").EnumerateArray());
+    }
+
+    [Fact]
     public async Task ExecuteAsync_WhenAgentEnd_ReportsErrorStopReason()
     {
         var model = new Model { Provider = "openai", Id = "gpt-5.4", Name = "GPT-5.4", Api = "openai-responses" };
@@ -122,6 +259,82 @@ public class RuntimeDelegationAgentRunnerTests
         Assert.Equal("openai", capturedProvider);
         Assert.False(string.IsNullOrWhiteSpace(capturedModel));
         Assert.Equal("openai", execution.Provider);
+        Assert.NotNull(fake.LastInput);
+        Assert.Contains("<mom_runtime_context>", fake.LastInput, StringComparison.Ordinal);
+        Assert.Contains("local_rules:", fake.LastInput, StringComparison.Ordinal);
+        Assert.DoesNotContain("<delegation_context>", fake.LastInput, StringComparison.Ordinal);
+        Assert.EndsWith("hello", fake.LastInput, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_LoadsAndSavesChannelContextSnapshot()
+    {
+        var model = new Model { Provider = "openai", Id = "gpt-5.4", Name = "GPT-5.4", Api = "openai-responses" };
+        var fake = new ScriptedRunner(model)
+        {
+            Events =
+            [
+                new MessageEndEvent(new AssistantMessage([new TextContent("fresh answer")])
+                {
+                    StopReason = StopReason.EndTurn
+                }),
+                new AgentEndEvent()
+            ]
+        };
+
+        var root = Path.Combine(Path.GetTempPath(), $"tau-mom-context-{Guid.NewGuid():N}");
+        var workingDirectory = Path.Combine(root, "channel-a");
+        Directory.CreateDirectory(workingDirectory);
+        var contextPath = Path.Combine(workingDirectory, ChannelSessionStore.ContextFileName);
+        new CodingAgentSessionStore(contextPath).Save(
+            [new UserMessage("previous channel turn")],
+            model,
+            "saved channel session");
+
+        var delegationRunner = new RuntimeDelegationAgentRunner(new MomOptions(), (_, _) => fake);
+
+        string? debugJson = null;
+        try
+        {
+            var execution = await delegationRunner.ExecuteAsync(new DelegationRequest(
+                "continue from context",
+                Provider: "openai",
+                Model: "gpt-5.4",
+                WorkingDirectory: workingDirectory));
+            debugJson = await File.ReadAllTextAsync(Path.Combine(workingDirectory, "last_prompt.jsonl"));
+
+            Assert.Equal("end_turn", execution.StopReason);
+            Assert.NotNull(fake.RestoredSnapshot);
+            Assert.Single(fake.RestoredSnapshot!.Messages);
+            Assert.Equal("saved channel session", fake.RestoredSnapshot.Name);
+            Assert.Equal("saved channel session", fake.SessionName);
+            Assert.Contains("continue from context", fake.LastInput, StringComparison.Ordinal);
+
+            var saved = new CodingAgentSessionStore(contextPath).Load();
+            Assert.Equal("saved channel session", saved.Name);
+            Assert.Equal("openai", saved.Provider);
+            Assert.Equal("gpt-5.4", saved.Model);
+            Assert.Equal(3, saved.Messages.Count);
+            Assert.IsType<UserMessage>(saved.Messages[0]);
+            Assert.IsType<UserMessage>(saved.Messages[1]);
+            var assistant = Assert.IsType<AssistantMessage>(saved.Messages[2]);
+            Assert.Contains("fresh answer", string.Join("\n", assistant.Content.OfType<TextContent>().Select(static text => text.Text)), StringComparison.Ordinal);
+
+            Assert.NotNull(debugJson);
+            using var debugDocument = JsonDocument.Parse(debugJson!);
+            var debugRoot = debugDocument.RootElement;
+            Assert.Equal("saved channel session", debugRoot.GetProperty("sessionName").GetString());
+            Assert.Equal(1, debugRoot.GetProperty("restoredMessageCount").GetInt32());
+            var messages = debugRoot.GetProperty("messages").EnumerateArray().ToArray();
+            var message = Assert.Single(messages);
+            Assert.Equal("user", message.GetProperty("role").GetString());
+            var content = Assert.Single(message.GetProperty("content").EnumerateArray().ToArray());
+            Assert.Equal("previous channel turn", content.GetProperty("text").GetString());
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
     }
 
     private sealed class ScriptedRunner : ICodingAgentRunner
@@ -132,9 +345,12 @@ public class RuntimeDelegationAgentRunnerTests
         }
 
         public List<AgentEvent> Events { get; set; } = [];
-        public IReadOnlyList<ChatMessage> Messages { get; } = [];
+        public List<ChatMessage> MutableMessages { get; } = [];
+        public IReadOnlyList<ChatMessage> Messages => MutableMessages;
         public Model Model { get; }
         public string? SessionName { get; set; }
+        public string? LastInput { get; private set; }
+        public CodingAgentSessionSnapshot? RestoredSnapshot { get; private set; }
 
         public IReadOnlyList<string> GetProviders() => [Model.Provider];
         public IReadOnlyList<Model> GetModels(string provider) => [Model];
@@ -145,11 +361,24 @@ public class RuntimeDelegationAgentRunnerTests
             new(Model.Provider, Model.Id, 0, 0, 0, 0, 0, null, sessionFile);
         public Task<CodingAgentCompactionResult> CompactAsync(string? customInstructions = null, CancellationToken cancellationToken = default) =>
             throw new NotSupportedException();
-        public void RestoreSession(CodingAgentSessionSnapshot snapshot) { }
-        public void ResetSession() { }
+        public void RestoreSession(CodingAgentSessionSnapshot snapshot)
+        {
+            RestoredSnapshot = snapshot;
+            MutableMessages.Clear();
+            MutableMessages.AddRange(snapshot.Messages);
+            SessionName = snapshot.Name;
+        }
+
+        public void ResetSession()
+        {
+            MutableMessages.Clear();
+            SessionName = null;
+        }
 
         public async IAsyncEnumerable<AgentEvent> RunAsync(string input, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
         {
+            LastInput = input;
+            MutableMessages.Add(new UserMessage(input));
             foreach (var evt in Events)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -157,6 +386,11 @@ public class RuntimeDelegationAgentRunnerTests
                 {
                     await Task.Delay(2, cancellationToken).ConfigureAwait(false);
                 }
+                else if (evt is MessageEndEvent messageEnd)
+                {
+                    MutableMessages.Add(messageEnd.Message);
+                }
+
                 yield return evt;
             }
         }

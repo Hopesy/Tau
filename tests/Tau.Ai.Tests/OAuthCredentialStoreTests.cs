@@ -40,4 +40,27 @@ public sealed class OAuthCredentialStoreTests
             Directory.Delete(tempDir, recursive: true);
         }
     }
+
+    [Fact]
+    public void LoadEntries_WhenAuthFileIsInvalid_ReturnsEmptyEntries()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), $"tau-auth-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+
+        try
+        {
+            var authPath = Path.Combine(tempDir, "auth.json");
+            File.WriteAllText(authPath, "{ invalid json");
+
+            var store = new OAuthCredentialStore([authPath]);
+
+            var entries = store.LoadEntries();
+
+            Assert.Empty(entries);
+        }
+        finally
+        {
+            Directory.Delete(tempDir, recursive: true);
+        }
+    }
 }

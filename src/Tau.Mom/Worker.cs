@@ -2,6 +2,7 @@ namespace Tau.Mom;
 
 public class Worker(
     ILogger<Worker> logger,
+    MomEventProcessor eventProcessor,
     FileDelegationProcessor processor,
     MomOptions options) : BackgroundService
 {
@@ -15,6 +16,12 @@ public class Worker(
 
         while (!stoppingToken.IsCancellationRequested)
         {
+            var queued = await eventProcessor.ProcessDueEventsAsync(stoppingToken).ConfigureAwait(false);
+            if (queued > 0)
+            {
+                logger.LogInformation("Queued {Queued} due mom event(s).", queued);
+            }
+
             var processed = await processor.ProcessPendingAsync(stoppingToken).ConfigureAwait(false);
             if (processed > 0)
             {

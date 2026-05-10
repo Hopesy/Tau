@@ -115,26 +115,31 @@ function Invoke-MomSmoke {
     $inboxPath = Join-Path $smokeRoot 'inbox'
     $outboxPath = Join-Path $smokeRoot 'outbox'
     $archivePath = Join-Path $smokeRoot 'archive'
-    $workingDirectory = $repoRoot
+    $eventsPath = Join-Path $smokeRoot 'events'
+    $workingDirectory = Join-Path $smokeRoot 'workdir'
+    $channelDirectory = Join-Path $workingDirectory 'smoke-channel'
 
-    New-Item -ItemType Directory -Force -Path $inboxPath, $outboxPath, $archivePath | Out-Null
-    Set-Content -Path (Join-Path $inboxPath 'delegation.txt') -Value 'smoke request'
+    New-Item -ItemType Directory -Force -Path $inboxPath, $outboxPath, $archivePath, $eventsPath, $workingDirectory | Out-Null
+    Set-Content -Path (Join-Path $eventsPath 'smoke-event.json') -Value '{"type":"immediate","channelId":"smoke-channel","text":"smoke request"}'
 
     $previousInbox = $env:Mom__InboxPath
     $previousOutbox = $env:Mom__OutboxPath
     $previousArchive = $env:Mom__ArchivePath
+    $previousEvents = $env:Mom__EventsPath
     $previousWorkdir = $env:Mom__DefaultWorkingDirectory
 
     try {
         $env:Mom__InboxPath = $inboxPath
         $env:Mom__OutboxPath = $outboxPath
         $env:Mom__ArchivePath = $archivePath
+        $env:Mom__EventsPath = $eventsPath
         $env:Mom__DefaultWorkingDirectory = $workingDirectory
 
         Invoke-DotnetCommand -Arguments @('run', '--project', 'src/Tau.Mom/Tau.Mom.csproj', '--no-build', '--', '--once')
 
         $outboxFiles = Get-ChildItem -Path $outboxPath -Filter *.json
         $archiveFiles = Get-ChildItem -Path $archivePath -File
+        $statusPath = Join-Path $channelDirectory 'status.json'
         if ($outboxFiles.Count -ne 1) {
             throw "Mom smoke expected exactly one outbox json but found $($outboxFiles.Count)"
         }
@@ -142,11 +147,61 @@ function Invoke-MomSmoke {
         if ($archiveFiles.Count -ne 1) {
             throw "Mom smoke expected exactly one archived request but found $($archiveFiles.Count)"
         }
+
+        if (Test-Path (Join-Path $eventsPath 'smoke-event.json')) {
+            throw "Mom smoke did not consume immediate event file"
+        }
+
+        if (-not (Test-Path $statusPath)) {
+            throw "Mom smoke did not create channel status at $statusPath"
+        }
+
+        if (-not (Test-Path (Join-Path $channelDirectory 'scratch'))) {
+            throw "Mom smoke did not create channel scratch directory"
+        }
+
+        if (-not (Test-Path (Join-Path $workingDirectory 'skills'))) {
+            throw "Mom smoke did not create workspace skills directory"
+        }
+
+        if (-not (Test-Path (Join-Path $channelDirectory 'skills'))) {
+            throw "Mom smoke did not create channel skills directory"
+        }
+
+        $statusJson = Get-Content -Path $statusPath -Raw
+        if (($statusJson -notmatch '"state": "completed"' -and $statusJson -notmatch '"state": "failed"') -or
+            $statusJson -notmatch '"requestFile": "event_smoke-event_') {
+            throw "Mom smoke channel status did not record final delegation state"
+        }
+
+        $logPath = Join-Path $channelDirectory 'log.jsonl'
+        if (-not (Test-Path $logPath)) {
+            throw "Mom smoke did not create channel log at $logPath"
+        }
+
+        $logContent = Get-Content -Path $logPath -Raw
+        if ($logContent -notmatch 'smoke request' -or $logContent -notmatch 'EVENT:smoke-event.json:immediate' -or $logContent -notmatch '"isBot":true') {
+            throw "Mom smoke channel log did not include request and bot result entries"
+        }
+
+        $promptDebugPath = Join-Path $channelDirectory 'last_prompt.jsonl'
+        if (-not (Test-Path $promptDebugPath)) {
+            throw "Mom smoke did not create prompt debug snapshot at $promptDebugPath"
+        }
+
+        $promptDebugContent = Get-Content -Path $promptDebugPath -Raw
+        if ($promptDebugContent -notmatch '"systemPrompt":' -or
+            $promptDebugContent -notmatch '"runnerInput":' -or
+            $promptDebugContent -notmatch 'smoke request' -or
+            $promptDebugContent -notmatch '"restoredMessageCount":') {
+            throw "Mom smoke prompt debug snapshot did not include expected prompt context"
+        }
     }
     finally {
         if ($null -eq $previousInbox) { Remove-Item Env:Mom__InboxPath -ErrorAction SilentlyContinue } else { $env:Mom__InboxPath = $previousInbox }
         if ($null -eq $previousOutbox) { Remove-Item Env:Mom__OutboxPath -ErrorAction SilentlyContinue } else { $env:Mom__OutboxPath = $previousOutbox }
         if ($null -eq $previousArchive) { Remove-Item Env:Mom__ArchivePath -ErrorAction SilentlyContinue } else { $env:Mom__ArchivePath = $previousArchive }
+        if ($null -eq $previousEvents) { Remove-Item Env:Mom__EventsPath -ErrorAction SilentlyContinue } else { $env:Mom__EventsPath = $previousEvents }
         if ($null -eq $previousWorkdir) { Remove-Item Env:Mom__DefaultWorkingDirectory -ErrorAction SilentlyContinue } else { $env:Mom__DefaultWorkingDirectory = $previousWorkdir }
     }
 }

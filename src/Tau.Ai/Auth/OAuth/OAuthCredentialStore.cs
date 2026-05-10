@@ -29,8 +29,8 @@ public sealed class OAuthCredentialStore
             return new Dictionary<string, StoredProviderAuth>(StringComparer.OrdinalIgnoreCase);
         }
 
-        using var doc = JsonDocument.Parse(File.ReadAllText(path));
-        if (doc.RootElement.ValueKind != JsonValueKind.Object)
+        using var doc = LoadDocument(path);
+        if (doc is null || doc.RootElement.ValueKind != JsonValueKind.Object)
         {
             return new Dictionary<string, StoredProviderAuth>(StringComparer.OrdinalIgnoreCase);
         }
@@ -51,6 +51,18 @@ public sealed class OAuthCredentialStore
         }
 
         return result;
+    }
+
+    private static JsonDocument? LoadDocument(string path)
+    {
+        try
+        {
+            return JsonDocument.Parse(File.ReadAllText(path));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+        {
+            return null;
+        }
     }
 
     private static StoredProviderAuth? ParseEntry(JsonElement element)

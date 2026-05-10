@@ -2,6 +2,8 @@
 
 这份文件只记录 **当前还没做完、后续需要继续推进的缺口**，方便快速检索。
 
+当前完整移植总路线图：`docs/exec-plans/active/2026-05-10-tau-complete-pi-mono-port.md`。后续所有 `pi-mono-main` parity 工作默认按这份 plan 推进，旧 `2026-04-23-tau-port-baseline.md` 保留为已完成 P1 基线和决策历史。
+
 ## P0：当前最值得继续推进的项
 
 ### Tau.Ai
@@ -60,7 +62,7 @@
 - [ ] richer rendering
 - [x] 显式 `Create(provider, model, history)` runner 工厂
 - [x] 与 `ModelCatalog` 对齐的默认模型解析层继续收口
-- [x] 把当前 `Tau.CodingAgent` / `Tau.WebUi` / `Tau.Mom` / `Tau.CodingAgent.Tests` 的 DLL `HintPath` workaround 收回到更正常的 `ProjectReference` 结构
+- [x] 把当前 `Tau.CodingAgent` / `Tau.WebUi` / `Tau.Mom` / `Tau.CodingAgent.Tests` / `Tau.Agent.Tests` 的 DLL `HintPath` workaround 收回到更正常的 `ProjectReference` 结构
 - [x] 解决当前本机上 `Tau.slnx` / metaproj / workload resolver 的 build 异常（`dotnet build Tau.slnx --verbosity minimal` 已通过）
 
 ### Tau.Tui
@@ -89,11 +91,24 @@
 - [x] 本地文件委派 worker
 - [x] `--once`
 - [x] inbox/outbox/archive
-- [x] 结构化 `.json` 请求（`prompt/provider/model/workingDirectory/metadata`）
+- [x] 结构化 `.json` 请求（`prompt/provider/model/workingDirectory/title/metadata/attachments`，title/metadata/attachments 已进入 runtime/outbox）
+- [x] local attachment staging（本地存在的 request/event attachment 会复制到 `workingDirectory/attachments/`，并通过 `attachments/attachments.jsonl` 与 `log.jsonl` 保留 `original/local` 元数据）
 - [x] runner / result schema seam（结构化 `DelegationToolEvent` + stop reason + `DelegationUsage` + 可注入 `ICodingAgentRunner` 工厂，留给 Slack/workspace/sandbox 适配层接线）
+- [x] workspace memory context（`workingDirectory/MEMORY.md` 与父目录 `MEMORY.md` 注入 delegation prompt）
+- [x] channel history context（`workingDirectory/log.jsonl` 最近非 bot 文本消息注入 delegation prompt，跳过 malformed/空文本/current ts）
+- [x] local channel log writeback（本地 file delegation 完成后把用户请求和 bot 结果追加到 `workingDirectory/log.jsonl`）
+- [x] local runtime status（本地 file delegation 执行前后写 `workingDirectory/status.json`，记录 `running/completed/failed`、请求文件、provider/model、时间、错误与响应摘要）
+- [x] local busy-state guard（同一 workdir 已有未过期 `running` 状态时保留 inbox 请求并跳过处理，默认 60 分钟后视为 stale）
+- [x] local events wake-up（`events/*.json` 的 `immediate` / `one-shot` / `periodic` 转换为 inbox 委派请求，channelId 映射到本地 channel workdir）
+- [x] mom runtime context seam（`<mom_runtime_context>` 注入 workspace/channel layout、events 文件格式、attachment manifest、memory/log/status 路径与 `[SILENT]` 约定）
+- [x] local channel session context（`workingDirectory/context.json` 使用 Tau-native session snapshot 恢复/保存同一 workdir 的 runtime messages）
+- [x] prompt debug snapshot（调用 runner 前写 `workingDirectory/last_prompt.jsonl`，记录 mom runtime context、delegation context、实际 runner input、恢复的 session messages、当前 prompt 和 attachment/image attachment count）
+- [x] workspace layout bootstrap（统一创建 `scratch/`、workspace/channel `skills/`、`attachments/`、`events/`，并把 `SYSTEM.md` 与 skill docs inventory 注入 prompt context）
+- [x] Slack-compatible channel message envelope（`MomChannelMessage` / `MomChannelAttachment` 统一 file/events/未来 Slack adapter 的 channel/user/ts/thread/attachment/request metadata 映射）
+- [x] fake Slack transport / responder seam（`IMomChannelTransport` / `IMomChannelResponder` / `MomChannelMessageProcessor` 先固定 Slack adapter 输入输出契约，不直接接真实 SDK）
 - [ ] Slack 对接
-- [ ] workspace / sandbox / tool delegation
-- [ ] message / runtime flow
+- [~] workspace / sandbox / tool delegation（已补 workspace memory context、本地 attachment staging、scratch 目录、SYSTEM.md 和 skill docs inventory，仍缺 sandbox/tool delegation 与 skill runtime loader）
+- [~] message / runtime flow（已补最小 `log.jsonl` channel history 注入、本地 request/result 写回、`context.json` runtime messages、`last_prompt.jsonl` prompt debug snapshot、`status.json` runtime 状态、本地 busy-state guard、Slack-compatible envelope 与 channel processor busy/stop/typing/thread response seam，仍缺真实 Slack session sync / cancellable stop/queue / 多消息 runtime flow）
 - [ ] 更高层 delegation flow 与端到端测试
 
 ### Tau.Pods

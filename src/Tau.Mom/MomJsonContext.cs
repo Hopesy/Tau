@@ -7,6 +7,11 @@ namespace Tau.Mom;
 [JsonSerializable(typeof(DelegationResult))]
 [JsonSerializable(typeof(DelegationToolEvent))]
 [JsonSerializable(typeof(DelegationUsage))]
+[JsonSerializable(typeof(ChannelStatus))]
+[JsonSerializable(typeof(MomEventFile))]
+[JsonSerializable(typeof(ChannelPromptDebugContext))]
+[JsonSerializable(typeof(ChannelPromptDebugMessage))]
+[JsonSerializable(typeof(ChannelPromptDebugContent))]
 internal sealed partial class MomJsonContext : JsonSerializerContext
 {
 }

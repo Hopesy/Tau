@@ -13,4 +13,6 @@ public sealed record DelegationResult(
     DateTimeOffset ProcessedAt,
     TimeSpan Duration,
     string? StopReason = null,
-    DelegationUsage? Usage = null);
+    DelegationUsage? Usage = null,
+    string? Title = null,
+    IReadOnlyList<string>? Attachments = null);
