@@ -8,6 +8,90 @@ internal static class ChannelLogStore
 {
     private const int MaxChannelHistoryMessages = 20;
 
+    public static IReadOnlySet<string> ReadTimestamps(string? workingDirectory, ILogger? logger = null)
+    {
+        if (string.IsNullOrWhiteSpace(workingDirectory))
+        {
+            return new HashSet<string>(StringComparer.Ordinal);
+        }
+
+        var logPath = Path.Combine(Path.GetFullPath(workingDirectory), "log.jsonl");
+        var timestamps = new HashSet<string>(StringComparer.Ordinal);
+        if (!File.Exists(logPath))
+        {
+            return timestamps;
+        }
+
+        try
+        {
+            foreach (var line in File.ReadLines(logPath))
+            {
+                if (string.IsNullOrWhiteSpace(line))
+                {
+                    continue;
+                }
+
+                using var document = ParseJsonLine(line);
+                if (document is null ||
+                    document.RootElement.ValueKind != JsonValueKind.Object)
+                {
+                    continue;
+                }
+
+                var ts = TryGetString(document.RootElement, "ts");
+                if (!string.IsNullOrWhiteSpace(ts))
+                {
+                    timestamps.Add(ts.Trim());
+                }
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogWarning(ex, "Failed to read channel log timestamps for working directory {WorkingDirectory}", workingDirectory);
+            return new HashSet<string>(StringComparer.Ordinal);
+        }
+
+        return timestamps;
+    }
+
+    public static async Task<bool> AppendMessageAsync(
+        string? workingDirectory,
+        ChannelLogEntry entry,
+        CancellationToken cancellationToken,
+        ILogger? logger = null)
+    {
+        if (string.IsNullOrWhiteSpace(workingDirectory))
+        {
+            return false;
+        }
+
+        try
+        {
+            var fullWorkingDirectory = Path.GetFullPath(workingDirectory);
+            Directory.CreateDirectory(fullWorkingDirectory);
+            var logPath = Path.Combine(fullWorkingDirectory, "log.jsonl");
+            if (!string.IsNullOrWhiteSpace(entry.Ts) && HasLogEntry(logPath, entry.Ts))
+            {
+                return false;
+            }
+
+            var builder = new StringBuilder();
+            AppendJsonLine(builder, entry);
+            if (NeedsLeadingNewLine(logPath))
+            {
+                builder.Insert(0, Environment.NewLine);
+            }
+
+            await File.AppendAllTextAsync(logPath, builder.ToString(), cancellationToken).ConfigureAwait(false);
+            return true;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogWarning(ex, "Failed to append channel log message for working directory {WorkingDirectory}", workingDirectory);
+            return false;
+        }
+    }
+
     public static async Task AppendDelegationAsync(
         string? workingDirectory,
         DelegationRequest request,
@@ -175,6 +259,43 @@ internal static class ChannelLogStore
                 }
 
                 if (TryGetBoolean(root, "isBot") == isBot)
+                {
+                    return true;
+                }
+            }
+        }
+        catch
+        {
+            return false;
+        }
+
+        return false;
+    }
+
+    private static bool HasLogEntry(string logPath, string ts)
+    {
+        if (!File.Exists(logPath))
+        {
+            return false;
+        }
+
+        try
+        {
+            foreach (var line in File.ReadLines(logPath))
+            {
+                if (string.IsNullOrWhiteSpace(line))
+                {
+                    continue;
+                }
+
+                using var document = ParseJsonLine(line);
+                if (document is null)
+                {
+                    continue;
+                }
+
+                var root = document.RootElement;
+                if (root.ValueKind == JsonValueKind.Object && StringEquals(root, "ts", ts))
                 {
                     return true;
                 }

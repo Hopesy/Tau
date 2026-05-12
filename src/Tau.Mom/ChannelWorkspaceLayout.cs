@@ -58,37 +58,43 @@ internal sealed record ChannelWorkspaceLayout(
         return ReadTextFile(SystemLogPath);
     }
 
-    public string BuildSkillInventory()
+    public string BuildSkillInventory(Func<string, string>? mapPath = null)
     {
-        var entries = new List<SkillEntry>();
+        var entries = new Dictionary<string, SkillEntry>(StringComparer.OrdinalIgnoreCase);
         AddSkills(entries, WorkspaceSkillsDirectory, "workspace");
         AddSkills(entries, ChannelSkillsDirectory, "channel");
 
         if (entries.Count == 0)
         {
-            return "(no skill docs installed)";
+            return "(no skills installed yet)";
         }
 
         var builder = new StringBuilder();
-        foreach (var entry in entries
+        builder.AppendLine("The following skills provide specialized instructions for specific tasks.");
+        builder.AppendLine("Use the read tool to load a skill's file when the task matches its description.");
+        builder.AppendLine("When a skill file references a relative path, resolve it against the skill directory and use that path in bash commands.");
+        builder.AppendLine("<available_skills>");
+
+        foreach (var entry in entries.Values
+            .Where(static skill => !skill.DisableModelInvocation)
             .OrderBy(static skill => skill.Source, StringComparer.Ordinal)
             .ThenBy(static skill => skill.Name, StringComparer.OrdinalIgnoreCase))
         {
-            builder.Append("- ")
-                .Append(entry.Name)
-                .Append(" [")
-                .Append(entry.Source)
-                .Append("]: ")
-                .Append(entry.Description)
-                .Append(" (")
-                .Append(entry.Path)
-                .AppendLine(")");
+            var location = mapPath is null ? entry.Path : mapPath(entry.Path);
+            builder.AppendLine("  <skill>");
+            builder.Append("    <name>").Append(EscapeXml(entry.Name)).AppendLine("</name>");
+            builder.Append("    <description>").Append(EscapeXml(entry.Description)).AppendLine("</description>");
+            builder.Append("    <source>").Append(EscapeXml(entry.Source)).AppendLine("</source>");
+            builder.Append("    <location>").Append(EscapeXml(location)).AppendLine("</location>");
+            builder.AppendLine("  </skill>");
         }
+
+        builder.Append("</available_skills>");
 
         return builder.ToString().TrimEnd();
     }
 
-    private static void AddSkills(ICollection<SkillEntry> entries, string directory, string source)
+    private static void AddSkills(IDictionary<string, SkillEntry> entries, string directory, string source)
     {
         if (!Directory.Exists(directory))
         {
@@ -101,7 +107,7 @@ internal sealed record ChannelWorkspaceLayout(
             {
                 if (TryReadSkill(skillFile, source) is { } skill)
                 {
-                    entries.Add(skill);
+                    entries[skill.Name] = skill;
                 }
             }
         }
@@ -125,6 +131,7 @@ internal sealed record ChannelWorkspaceLayout(
 
         var name = Path.GetFileName(Path.GetDirectoryName(path)) ?? "skill";
         var description = "No description.";
+        var disableModelInvocation = false;
 
         using var reader = new StringReader(content);
         if (string.Equals(reader.ReadLine()?.Trim(), "---", StringComparison.Ordinal))
@@ -154,10 +161,30 @@ internal sealed record ChannelWorkspaceLayout(
                 {
                     description = value;
                 }
+                else if (key.Equals("disable-model-invocation", StringComparison.OrdinalIgnoreCase) &&
+                         bool.TryParse(value, out var disabled))
+                {
+                    disableModelInvocation = disabled;
+                }
             }
         }
 
-        return new SkillEntry(name, description, source, path);
+        if (string.IsNullOrWhiteSpace(description) || description.Equals("No description.", StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        return new SkillEntry(name, description, source, path, disableModelInvocation);
+    }
+
+    private static string EscapeXml(string value)
+    {
+        return value
+            .Replace("&", "&amp;", StringComparison.Ordinal)
+            .Replace("<", "&lt;", StringComparison.Ordinal)
+            .Replace(">", "&gt;", StringComparison.Ordinal)
+            .Replace("\"", "&quot;", StringComparison.Ordinal)
+            .Replace("'", "&apos;", StringComparison.Ordinal);
     }
 
     private static string? ReadTextFile(string path)
@@ -178,5 +205,5 @@ internal sealed record ChannelWorkspaceLayout(
         }
     }
 
-    private sealed record SkillEntry(string Name, string Description, string Source, string Path);
+    private sealed record SkillEntry(string Name, string Description, string Source, string Path, bool DisableModelInvocation);
 }

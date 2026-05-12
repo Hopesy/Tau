@@ -8,5 +8,7 @@ public sealed record CodingAgentSessionStats(
     int AssistantMessages,
     int ToolResultMessages,
     int ToolCalls,
+    int EstimatedTokens,
+    int? ContextWindowTokens,
     string? SessionName,
     string? SessionFile);

@@ -48,10 +48,123 @@ public class CodingAgentCommandRouterTests
     }
 
     [Fact]
+    public async Task TryHandleAsync_PromptsCommand_ListsPromptTemplates()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-prompts-router-" + Guid.NewGuid().ToString("N"));
+        var prompts = Path.Combine(directory, ".tau", "prompts");
+        Directory.CreateDirectory(prompts);
+        await File.WriteAllTextAsync(
+            Path.Combine(prompts, "review.md"),
+            """
+            ---
+            description: Review a file
+            argument-hint: <file>
+            ---
+            Review $1
+            """);
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var promptStore = new CodingAgentPromptTemplateStore(cwd: directory);
+        var router = new CodingAgentCommandRouter(runner, promptTemplateStore: promptStore);
+
+        try
+        {
+            var result = await router.TryHandleAsync("/prompts");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Equal("prompts: /review <file> - Review a file", result.Message);
+            Assert.Empty(runner.Inputs);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_SkillsCommand_ListsSkillCommands()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-skills-router-" + Guid.NewGuid().ToString("N"));
+        var skillDirectory = Path.Combine(directory, ".tau", "skills", "reviewer");
+        Directory.CreateDirectory(skillDirectory);
+        await File.WriteAllTextAsync(
+            Path.Combine(skillDirectory, "SKILL.md"),
+            """
+            ---
+            name: reviewer
+            description: Review source changes
+            ---
+            Check the diff.
+            """);
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var skillStore = new CodingAgentSkillStore(cwd: directory);
+        var router = new CodingAgentCommandRouter(runner, skillStore: skillStore);
+
+        try
+        {
+            var result = await router.TryHandleAsync("/skills");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Equal("skills: /skill:reviewer - Review source changes", result.Message);
+            Assert.Empty(runner.Inputs);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_ExtensionsCommand_ListsExtensionCommands()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-router-" + Guid.NewGuid().ToString("N"));
+        var extensions = Path.Combine(directory, ".tau", "extensions");
+        Directory.CreateDirectory(extensions);
+        await File.WriteAllTextAsync(
+            Path.Combine(extensions, "commands.json"),
+            """
+            {
+              "commands": [
+                {
+                  "name": "hello",
+                  "description": "Say hello",
+                  "argumentHint": "<name>",
+                  "response": "Hello $ARGUMENTS"
+                },
+                {
+                  "name": "review",
+                  "description": "Review source",
+                  "prompt": "Review $1",
+                  "sendToRunner": true
+                }
+              ]
+            }
+            """);
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var extensionStore = new CodingAgentExtensionCommandStore(cwd: directory);
+        var router = new CodingAgentCommandRouter(runner, extensionCommandStore: extensionStore);
+
+        try
+        {
+            var result = await router.TryHandleAsync("/extensions");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Equal("extensions: /hello <name> - Say hello (project); /review - Review source (project, runner)", result.Message);
+            Assert.Empty(runner.Inputs);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public void CommandCatalog_HelpLine_MatchesSupportedCommandNames()
     {
         Assert.Equal(
-            "commands: /help, /name, /copy, /export, /import, /new, /session, /quit, /model, /provider, /models, /providers, /auth, /login, /compact",
+            "commands: /help, /name, /copy, /export, /import, /new, /session, /tree, /label, /fork, /resume, /quit, /model, /provider, /models, /providers, /prompts, /skills, /extensions, /auth, /login, /compact",
             CodingAgentCommandCatalog.HelpLine);
         Assert.All(CodingAgentCommandCatalog.SupportedCommands, command =>
         {
@@ -72,7 +185,7 @@ public class CodingAgentCommandRouterTests
         Assert.True(result.Handled);
         Assert.False(result.IsError);
         Assert.Equal(
-            "commands: /help, /name, /copy, /export, /import, /new, /session, /quit, /model, /provider, /models, /providers, /auth, /login, /compact",
+            "commands: /help, /name, /copy, /export, /import, /new, /session, /tree, /label, /fork, /resume, /quit, /model, /provider, /models, /providers, /prompts, /skills, /extensions, /auth, /login, /compact",
             result.Message);
         Assert.Empty(runner.Inputs);
     }
@@ -184,17 +297,39 @@ public class CodingAgentCommandRouterTests
     }
 
     [Fact]
-    public async Task TryHandleAsync_ExportCommandWithoutPath_ReturnsUsage()
+    public async Task TryHandleAsync_ExportCommandWithoutPath_WritesDefaultHtmlTranscript()
     {
+        var directory = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-export-default-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        var sessionFile = Path.Combine(directory, "session.json");
+        var expectedPath = Path.Combine(directory, "tau-session-session.html");
         var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
-        var router = new CodingAgentCommandRouter(runner);
+        runner.SessionName = "default export";
+        runner.MutableMessages.Add(new UserMessage("hello <tau>"));
+        runner.MutableMessages.Add(new AssistantMessage([new TextContent("world")]));
+        var router = new CodingAgentCommandRouter(runner, sessionFile: sessionFile);
 
-        var result = await router.TryHandleAsync("/export");
+        try
+        {
+            var result = await router.TryHandleAsync("/export");
 
-        Assert.True(result.Handled);
-        Assert.True(result.IsError);
-        Assert.Equal("usage: /export <path>", result.Message);
-        Assert.Empty(runner.Inputs);
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Equal($"exported session transcript to {expectedPath}", result.Message);
+            Assert.Empty(runner.Inputs);
+            var html = File.ReadAllText(expectedPath);
+            Assert.Contains("default export", html, StringComparison.Ordinal);
+            Assert.Contains("hello &lt;tau&gt;", html, StringComparison.Ordinal);
+            Assert.Contains("world", html, StringComparison.Ordinal);
+            Assert.Contains("Download JSONL", html, StringComparison.Ordinal);
+            Assert.Contains("session-jsonl", html, StringComparison.Ordinal);
+            Assert.Contains("Branch Outline", html, StringComparison.Ordinal);
+            Assert.Contains("id=\"message-1\"", html, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
     }
 
     [Fact]
@@ -367,9 +502,61 @@ public class CodingAgentCommandRouterTests
         Assert.True(result.Handled);
         Assert.False(result.IsError);
         Assert.Equal(
-            $"session: name port slice, model openai/gpt-5.4, messages 3 (user 1, assistant 1, tool 1, toolCalls 1), file {sessionFile}",
+            $"session: name port slice, model openai/gpt-5.4, messages 3 (user 1, assistant 1, tool 1, toolCalls 1), tokens ~9/128000 context (127991 remaining), file {sessionFile}",
             result.Message);
         Assert.Empty(runner.Inputs);
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_SessionCommand_ReturnsAutoCompactionBudgetWhenConfigured()
+    {
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.MutableMessages.Add(new UserMessage(new string('x', 40)));
+        var router = new CodingAgentCommandRouter(
+            runner,
+            autoCompaction: new CodingAgentAutoCompactionOptions(32));
+
+        var result = await router.TryHandleAsync("/session");
+
+        Assert.True(result.Handled);
+        Assert.False(result.IsError);
+        Assert.Equal(
+            "session: name none, model openai/gpt-5.4, messages 1 (user 1, assistant 0, tool 0, toolCalls 0), tokens ~10/128000 context (127990 remaining), auto-compact 32 (22 remaining), file none",
+            result.Message);
+        Assert.Empty(runner.Inputs);
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_SessionCommand_WithTreeSessionIncludesTokenBudgetAndTreeStats()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-coding-agent-session-tree-" + Guid.NewGuid().ToString("N"));
+        var treePath = Path.Combine(directory, "session.jsonl");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.MutableMessages.Add(new UserMessage(new string('t', 20)));
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+            var tree = CodingAgentTreeSessionController.OpenOrCreate(treePath);
+            var router = new CodingAgentCommandRouter(runner, treeSessionController: tree);
+
+            var result = await router.TryHandleAsync("/session");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.NotNull(result.Message);
+            Assert.Contains("tokens ~5/128000 context (127995 remaining)", result.Message, StringComparison.Ordinal);
+            Assert.Contains($", tree {treePath}, leaf ", result.Message, StringComparison.Ordinal);
+            Assert.Contains("branch messages 1", result.Message, StringComparison.Ordinal);
+            Assert.Empty(runner.Inputs);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
     }
 
     [Fact]
@@ -445,5 +632,61 @@ public class CodingAgentCommandRouterTests
         Assert.False(result.IsError);
         Assert.Equal("compacted session: 6 -> 1 messages", result.Message);
         Assert.Equal("keep decisions and blockers", runner.LastCompactInstructions);
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_CompactCommand_AppendsTreeCompactionEntry()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-coding-agent-tree-" + Guid.NewGuid().ToString("N"));
+        var treePath = Path.Combine(directory, "session.jsonl");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.MutableMessages.Add(new UserMessage("before"));
+        runner.MutableMessages.Add(new AssistantMessage([new TextContent("answer")]));
+        runner.CompactHandler = (_, _) =>
+        {
+            runner.MutableMessages.Clear();
+            runner.MutableMessages.Add(CodingAgentCompactionMessages.CreateSummaryMessage("summary"));
+            return Task.FromResult(new CodingAgentCompactionResult("summary", 2, 1, 42));
+        };
+
+        try
+        {
+            var tree = CodingAgentTreeSessionController.OpenOrCreate(treePath);
+            var router = new CodingAgentCommandRouter(runner, treeSessionController: tree);
+
+            var result = await router.TryHandleAsync("/compact");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Equal("compacted session: 2 -> 1 messages", result.Message);
+
+            var jsonl = File.ReadAllText(treePath);
+            Assert.Contains("\"type\":\"message\"", jsonl, StringComparison.Ordinal);
+            Assert.Contains("\"type\":\"compaction\"", jsonl, StringComparison.Ordinal);
+            Assert.Contains("\"summary\":\"summary\"", jsonl, StringComparison.Ordinal);
+            Assert.Contains("\"firstKeptEntryId\":\"\"", jsonl, StringComparison.Ordinal);
+            Assert.Contains("\"tokensBefore\":42", jsonl, StringComparison.Ordinal);
+
+            var snapshot = tree.LoadSnapshot();
+            var summary = Assert.Single(snapshot.Messages);
+            var summaryText = Assert.IsType<TextContent>(Assert.IsType<UserMessage>(summary).Content[0]).Text;
+            Assert.Contains("summary", summaryText, StringComparison.Ordinal);
+            Assert.Contains("compaction 42 tokens summary", tree.FormatTree(), StringComparison.Ordinal);
+
+            runner.MutableMessages.Add(new UserMessage("after"));
+            tree.SyncFromRunner(runner);
+
+            var resumed = tree.LoadSnapshot();
+            Assert.Equal(2, resumed.Messages.Count);
+            var after = Assert.IsType<UserMessage>(resumed.Messages[1]);
+            Assert.Equal("after", Assert.IsType<TextContent>(after.Content[0]).Text);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
     }
 }

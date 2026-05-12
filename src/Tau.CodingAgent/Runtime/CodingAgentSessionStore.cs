@@ -111,7 +111,7 @@ public sealed class CodingAgentSessionStore
         File.Move(tempPath, _path);
     }
 
-    private static CodingAgentSessionMessage FromMessage(ChatMessage message)
+    internal static CodingAgentSessionMessage FromMessage(ChatMessage message)
     {
         return message switch
         {
@@ -140,7 +140,7 @@ public sealed class CodingAgentSessionStore
         };
     }
 
-    private static ChatMessage? ToMessage(CodingAgentSessionMessage message)
+    internal static ChatMessage? ToMessage(CodingAgentSessionMessage message)
     {
         var content = message.Content
             .Select(ToContent)

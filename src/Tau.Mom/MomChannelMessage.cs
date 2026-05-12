@@ -29,9 +29,10 @@ public sealed record MomChannelMessage(
 {
     public DelegationRequest ToDelegationRequest(string workingDirectory)
     {
-        if (string.IsNullOrWhiteSpace(Text))
+        var attachments = BuildRequestAttachments();
+        if (string.IsNullOrWhiteSpace(Text) && attachments is null)
         {
-            throw new InvalidOperationException("Channel message text is required.");
+            throw new InvalidOperationException("Channel message text or attachments are required.");
         }
 
         if (string.IsNullOrWhiteSpace(workingDirectory))
@@ -40,7 +41,6 @@ public sealed record MomChannelMessage(
         }
 
         var metadata = BuildMetadata();
-        var attachments = BuildRequestAttachments();
 
         return new DelegationRequest(
             Text.Trim(),

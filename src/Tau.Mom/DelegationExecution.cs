@@ -9,4 +9,5 @@ public sealed record DelegationExecution(
     string WorkingDirectory,
     IReadOnlyDictionary<string, string>? Metadata = null,
     string? StopReason = null,
-    DelegationUsage? Usage = null);
+    DelegationUsage? Usage = null,
+    IReadOnlyList<string>? Attachments = null);

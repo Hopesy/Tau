@@ -65,6 +65,36 @@ public sealed class ChannelStatusStore
             cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task WriteCancelledAsync(
+        string requestFile,
+        DelegationRequest request,
+        DelegationExecution execution,
+        DateTimeOffset startedAt,
+        DateTimeOffset completedAt,
+        CancellationToken cancellationToken)
+    {
+        await WriteAsync(
+            execution.WorkingDirectory,
+            new ChannelStatus(
+                "cancelled",
+                requestFile,
+                execution.Provider,
+                execution.Model,
+                execution.WorkingDirectory,
+                startedAt,
+                completedAt,
+                request.Title,
+                Preview(request.Prompt),
+                execution.Metadata ?? request.Metadata,
+                request.Attachments,
+                completedAt,
+                Math.Max(0, (long)(completedAt - startedAt).TotalMilliseconds),
+                execution.StopReason,
+                execution.Error,
+                Preview(execution.Response)),
+            cancellationToken).ConfigureAwait(false);
+    }
+
     public ChannelStatus? TryRead(string? workingDirectory)
     {
         if (string.IsNullOrWhiteSpace(workingDirectory))

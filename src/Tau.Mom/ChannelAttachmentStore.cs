@@ -48,14 +48,18 @@ internal static class ChannelAttachmentStore
             if (IsInsideAttachmentsDirectory(sourcePath, workingDirectoryFullPath))
             {
                 var local = ToLocalPath(Path.GetRelativePath(workingDirectoryFullPath, sourcePath));
-                AppendManifestEntry(
-                    workingDirectoryFullPath,
-                    new ChannelAttachmentEntry(
-                        now.ToString("O", CultureInfo.InvariantCulture),
-                        Path.GetFileName(sourcePath),
-                        local,
-                        sourcePath),
-                    logger);
+                if (!ReadManifest(workingDirectoryFullPath).ContainsKey(local))
+                {
+                    AppendManifestEntry(
+                        workingDirectoryFullPath,
+                        new ChannelAttachmentEntry(
+                            now.ToString("O", CultureInfo.InvariantCulture),
+                            Path.GetFileName(sourcePath),
+                            local,
+                            sourcePath),
+                        logger);
+                }
+
                 staged.Add(local);
                 continue;
             }
@@ -75,6 +79,24 @@ internal static class ChannelAttachmentStore
         return staged.Count == 0 ? null : staged;
     }
 
+
+    public static void RecordAttachment(
+        string workingDirectory,
+        string original,
+        string local,
+        string? source,
+        DateTimeOffset now,
+        ILogger? logger = null)
+    {
+        AppendManifestEntry(
+            Path.GetFullPath(workingDirectory),
+            new ChannelAttachmentEntry(
+                now.ToString("O", CultureInfo.InvariantCulture),
+                original,
+                ToLocalPath(local),
+                source),
+            logger);
+    }
     public static IReadOnlyList<ChannelLogAttachment> BuildLogAttachments(
         string workingDirectory,
         IReadOnlyList<string>? attachments)

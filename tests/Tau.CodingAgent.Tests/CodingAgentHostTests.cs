@@ -41,7 +41,7 @@ public class CodingAgentHostTests
 
         Assert.Empty(runner.Inputs);
         Assert.Contains(
-            "status> commands: /help, /name, /copy, /export, /import, /new, /session, /quit, /model, /provider, /models, /providers, /auth, /login, /compact",
+            "status> commands: /help, /name, /copy, /export, /import, /new, /session, /tree, /label, /fork, /resume, /quit, /model, /provider, /models, /providers, /prompts, /skills, /extensions, /auth, /login, /compact",
             terminal.FlattenedText());
     }
 
@@ -115,6 +115,243 @@ public class CodingAgentHostTests
 
         Assert.Contains("error> runner failed\n", output);
         Assert.Contains("Goodbye!\n", output);
+    }
+
+    [Fact]
+    public async Task RunAsync_ExpandsPromptTemplateBeforeInvokingRunner()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-prompts-host-" + Guid.NewGuid().ToString("N"));
+        var prompts = Path.Combine(directory, ".tau", "prompts");
+        Directory.CreateDirectory(prompts);
+        await File.WriteAllTextAsync(
+            Path.Combine(prompts, "review.md"),
+            """
+            ---
+            description: Review a file
+            ---
+            Review $1 with $ARGUMENTS
+            """);
+
+        var terminal = new FakeTerminal();
+        terminal.QueueInput("/review \"src/app.cs\" carefully");
+        terminal.QueueInput("exit");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var host = new CodingAgentHost(
+            new InteractiveConsoleSession(terminal),
+            runner,
+            promptTemplateStore: new CodingAgentPromptTemplateStore(cwd: directory));
+
+        try
+        {
+            await host.RunAsync();
+
+            var input = Assert.Single(runner.Inputs);
+            Assert.Equal("Review src/app.cs with src/app.cs carefully", input.Trim());
+            Assert.Contains("you> Review src/app.cs with src/app.cs carefully\n", terminal.FlattenedText());
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RunAsync_ExpandsSkillCommandBeforeInvokingRunner()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-skills-host-" + Guid.NewGuid().ToString("N"));
+        var skillDirectory = Path.Combine(directory, ".tau", "skills", "reviewer");
+        Directory.CreateDirectory(skillDirectory);
+        var skillPath = Path.Combine(skillDirectory, "SKILL.md");
+        await File.WriteAllTextAsync(
+            skillPath,
+            """
+            ---
+            name: reviewer
+            description: Review source changes
+            ---
+            Check the diff and explain risks.
+            """);
+
+        var terminal = new FakeTerminal();
+        terminal.QueueInput("/skill:reviewer src/app.cs");
+        terminal.QueueInput("exit");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var host = new CodingAgentHost(
+            new InteractiveConsoleSession(terminal),
+            runner,
+            skillStore: new CodingAgentSkillStore(cwd: directory));
+
+        try
+        {
+            await host.RunAsync();
+
+            var input = Assert.Single(runner.Inputs);
+            Assert.Contains($"""<skill name="reviewer" location="{skillPath}">""", input, StringComparison.Ordinal);
+            Assert.Contains($"References are relative to {skillDirectory}.", input, StringComparison.Ordinal);
+            Assert.Contains("Check the diff and explain risks.", input, StringComparison.Ordinal);
+            Assert.EndsWith("src/app.cs", input, StringComparison.Ordinal);
+            Assert.Contains("you> <skill name=\"reviewer\"", terminal.FlattenedText());
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RunAsync_BuiltInSkillsCommandWinsOverSkillExpansion()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-skills-host-list-" + Guid.NewGuid().ToString("N"));
+        var skillDirectory = Path.Combine(directory, ".tau", "skills", "reviewer");
+        Directory.CreateDirectory(skillDirectory);
+        await File.WriteAllTextAsync(
+            Path.Combine(skillDirectory, "SKILL.md"),
+            """
+            ---
+            name: reviewer
+            description: Review source changes
+            ---
+            Check the diff.
+            """);
+
+        var terminal = new FakeTerminal();
+        terminal.QueueInput("/skills");
+        terminal.QueueInput("exit");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var host = new CodingAgentHost(
+            new InteractiveConsoleSession(terminal),
+            runner,
+            skillStore: new CodingAgentSkillStore(cwd: directory));
+
+        try
+        {
+            await host.RunAsync();
+
+            Assert.Empty(runner.Inputs);
+            Assert.Contains("status> skills: /skill:reviewer - Review source changes", terminal.FlattenedText());
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RunAsync_ExtensionStatusCommandRendersStatusWithoutInvokingRunner()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-host-status-" + Guid.NewGuid().ToString("N"));
+        var extensions = Path.Combine(directory, ".tau", "extensions");
+        Directory.CreateDirectory(extensions);
+        await File.WriteAllTextAsync(
+            Path.Combine(extensions, "hello.json"),
+            """
+            {
+              "name": "hello",
+              "description": "Say hello",
+              "response": "Hello $ARGUMENTS"
+            }
+            """);
+
+        var terminal = new FakeTerminal();
+        terminal.QueueInput("/hello Ada");
+        terminal.QueueInput("exit");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var host = new CodingAgentHost(
+            new InteractiveConsoleSession(terminal),
+            runner,
+            extensionCommandStore: new CodingAgentExtensionCommandStore(cwd: directory));
+
+        try
+        {
+            await host.RunAsync();
+
+            Assert.Empty(runner.Inputs);
+            Assert.Contains("status> Hello Ada", terminal.FlattenedText());
+            Assert.DoesNotContain("you> /hello Ada", terminal.FlattenedText());
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RunAsync_ExtensionRunnerCommandInvokesRunnerWithExpandedPrompt()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-host-runner-" + Guid.NewGuid().ToString("N"));
+        var extensions = Path.Combine(directory, ".tau", "extensions");
+        Directory.CreateDirectory(extensions);
+        await File.WriteAllTextAsync(
+            Path.Combine(extensions, "review.json"),
+            """
+            {
+              "name": "review",
+              "description": "Review source",
+              "prompt": "Review $1 with $ARGUMENTS",
+              "sendToRunner": true
+            }
+            """);
+
+        var terminal = new FakeTerminal();
+        terminal.QueueInput("/review src/app.cs carefully");
+        terminal.QueueInput("exit");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var host = new CodingAgentHost(
+            new InteractiveConsoleSession(terminal),
+            runner,
+            extensionCommandStore: new CodingAgentExtensionCommandStore(cwd: directory));
+
+        try
+        {
+            await host.RunAsync();
+
+            var input = Assert.Single(runner.Inputs);
+            Assert.Equal("Review src/app.cs with src/app.cs carefully", input);
+            Assert.Contains("you> Review src/app.cs with src/app.cs carefully\n", terminal.FlattenedText());
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RunAsync_BuiltInCommandWinsOverExtensionCommand()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-host-help-" + Guid.NewGuid().ToString("N"));
+        var extensions = Path.Combine(directory, ".tau", "extensions");
+        Directory.CreateDirectory(extensions);
+        await File.WriteAllTextAsync(
+            Path.Combine(extensions, "help.json"),
+            """
+            {
+              "name": "help",
+              "description": "Override help",
+              "response": "extension help"
+            }
+            """);
+
+        var terminal = new FakeTerminal();
+        terminal.QueueInput("/help");
+        terminal.QueueInput("exit");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var host = new CodingAgentHost(
+            new InteractiveConsoleSession(terminal),
+            runner,
+            extensionCommandStore: new CodingAgentExtensionCommandStore(cwd: directory));
+
+        try
+        {
+            await host.RunAsync();
+
+            Assert.Empty(runner.Inputs);
+            Assert.Contains("status> commands: /help, /name", terminal.FlattenedText());
+            Assert.DoesNotContain("extension help", terminal.FlattenedText());
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
     }
 
     [Fact]
@@ -407,7 +644,7 @@ public class CodingAgentHostTests
 
             Assert.Empty(runner.Inputs);
             Assert.Contains(
-                $"status> session: name none, model openai/gpt-5.4, messages 1 (user 1, assistant 0, tool 0, toolCalls 0), file {path}",
+                $"status> session: name none, model openai/gpt-5.4, messages 1 (user 1, assistant 0, tool 0, toolCalls 0), tokens ~4/128000 context (127996 remaining), file {path}",
                 terminal.FlattenedText());
         }
         finally
@@ -496,6 +733,83 @@ public class CodingAgentHostTests
                 File.Delete(path);
             }
         }
+    }
+
+    [Fact]
+    public async Task RunAsync_AutoCompactsBeforeNormalTurnWhenThresholdIsExceeded()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-auto-compact-{Guid.NewGuid():N}");
+        var sessionPath = Path.Combine(directory, "session.json");
+        var treePath = Path.Combine(directory, "session.jsonl");
+        var terminal = new FakeTerminal();
+        terminal.QueueInput("next task");
+        terminal.QueueInput("exit");
+
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.MutableMessages.Add(new UserMessage(new string('u', 120)));
+        runner.MutableMessages.Add(new AssistantMessage([new TextContent(new string('a', 120))]));
+        runner.CompactHandler = (_, _) =>
+        {
+            runner.MutableMessages.Clear();
+            runner.MutableMessages.Add(CodingAgentCompactionMessages.CreateSummaryMessage("auto summary"));
+            return Task.FromResult(new CodingAgentCompactionResult("auto summary", 2, 1, 60));
+        };
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+            var tree = CodingAgentTreeSessionController.OpenOrCreate(treePath);
+            var host = new CodingAgentHost(
+                new InteractiveConsoleSession(terminal),
+                runner,
+                new CodingAgentSessionStore(sessionPath),
+                treeSessionController: tree,
+                autoCompaction: new CodingAgentAutoCompactionOptions(1, "keep blockers"));
+
+            await host.RunAsync();
+
+            Assert.Equal("keep blockers", runner.LastCompactInstructions);
+            Assert.Equal(["next task"], runner.Inputs);
+            Assert.Contains("status> auto-compacted session: 2 -> 1 messages, estimated", terminal.FlattenedText());
+
+            var jsonl = File.ReadAllText(treePath);
+            Assert.Contains("\"type\":\"compaction\"", jsonl, StringComparison.Ordinal);
+            Assert.Contains("\"fromHook\":true", jsonl, StringComparison.Ordinal);
+
+            var loaded = new CodingAgentSessionStore(sessionPath).Load();
+            var summary = Assert.Single(loaded.Messages);
+            var text = Assert.IsType<TextContent>(Assert.IsType<UserMessage>(summary).Content[0]).Text;
+            Assert.Contains("auto summary", text, StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task RunAsync_AutoCompactionBelowThresholdDoesNotCallCompaction()
+    {
+        var terminal = new FakeTerminal();
+        terminal.QueueInput("short task");
+        terminal.QueueInput("exit");
+
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.MutableMessages.Add(new UserMessage("short"));
+        runner.MutableMessages.Add(new AssistantMessage([new TextContent("small")]));
+        var host = new CodingAgentHost(
+            new InteractiveConsoleSession(terminal),
+            runner,
+            autoCompaction: new CodingAgentAutoCompactionOptions(10_000));
+
+        await host.RunAsync();
+
+        Assert.Null(runner.LastCompactInstructions);
+        Assert.Equal(["short task"], runner.Inputs);
+        Assert.DoesNotContain("auto-compacted session", terminal.FlattenedText());
     }
 
     private static int CountOccurrences(string value, string needle)

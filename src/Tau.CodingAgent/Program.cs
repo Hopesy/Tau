@@ -3,17 +3,38 @@ using Tau.Tui.Runtime;
 
 var terminal = new SystemConsoleTerminal();
 var ui = new InteractiveConsoleSession(terminal);
-var sessionStore = new CodingAgentSessionStore();
+var sessionFile = Environment.GetEnvironmentVariable("TAU_CODING_AGENT_SESSION_FILE");
+var sessionStore = CodingAgentTreeSessionStore.IsJsonlPath(sessionFile)
+    ? null
+    : new CodingAgentSessionStore();
+var treeSessionController = CodingAgentTreeSessionController.OpenOrCreate();
 var settingsStore = new CodingAgentSettingsStore();
-var session = sessionStore.Load();
+var extensionCommandStore = new CodingAgentExtensionCommandStore();
+var extensionResources = extensionCommandStore.LoadResources();
+var promptTemplateStore = new CodingAgentPromptTemplateStore(explicitPaths: extensionResources.PromptPaths);
+var skillStore = new CodingAgentSkillStore(explicitPaths: extensionResources.SkillPaths);
+var flatSession = sessionStore?.Load() ?? new CodingAgentSessionSnapshot([], null, null, null);
+var treeSession = treeSessionController.LoadSnapshot();
+var session = CodingAgentTreeSessionStore.HasExplicitTreeSessionPath || treeSession.Messages.Count > 0
+    ? treeSession.ToFlatSnapshot()
+    : flatSession;
 var settings = settingsStore.Load();
 var providerId = Environment.GetEnvironmentVariable("TAU_PROVIDER") ?? session.Provider ?? settings.DefaultProvider;
 var modelId = Environment.GetEnvironmentVariable("TAU_MODEL")
               ?? (string.Equals(providerId, session.Provider, StringComparison.OrdinalIgnoreCase) ? session.Model : null)
               ?? (string.Equals(providerId, settings.DefaultProvider, StringComparison.OrdinalIgnoreCase) ? settings.DefaultModel : null);
-var runner = RuntimeCodingAgentRunner.Create(providerId, modelId, session.Messages);
+var runner = RuntimeCodingAgentRunner.Create(providerId, modelId, session.Messages, skills: skillStore.Load());
 runner.SessionName = session.Name;
-var host = new CodingAgentHost(ui, runner, sessionStore, settingsStore);
+var host = new CodingAgentHost(
+    ui,
+    runner,
+    sessionStore,
+    settingsStore,
+    treeSessionController: treeSessionController,
+    promptTemplateStore: promptTemplateStore,
+    skillStore: skillStore,
+    extensionCommandStore: extensionCommandStore,
+    autoCompaction: CodingAgentAutoCompactionOptions.FromEnvironment());
 using var cts = new CancellationTokenSource();
 
 Console.CancelKeyPress += (_, e) =>

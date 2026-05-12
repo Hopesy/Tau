@@ -10,29 +10,6 @@ namespace Tau.CodingAgent.Runtime;
 
 public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner
 {
-    private const string CompactionSummaryPrefix = """
-        The conversation history before this point was compacted into the following summary:
-
-        <summary>
-        """;
-    private const string CompactionSummarySuffix = """
-        </summary>
-        """;
-    private const string CompactionSystemPrompt = """
-        You are compacting an ongoing coding-agent session.
-        Produce a concise markdown summary that preserves:
-        - the user's current goal
-        - implementation decisions and constraints
-        - relevant files, commands, and observed outcomes
-        - unresolved issues and immediate next steps
-        Do not invent facts. Keep the summary dense and operational.
-        """;
-    private const string CompactionPrompt = """
-        Compact this coding-agent session for future continuation.
-        Summarize only facts already present in the conversation.
-        Focus on task state, code changes, runtime findings, risks, and next steps.
-        """;
-
     private readonly AgentRuntime _runtime;
     private readonly ModelCatalog _modelCatalog;
     private readonly ProviderAuthResolver _authResolver;
@@ -82,6 +59,8 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner
             messages.OfType<AssistantMessage>().Count(),
             messages.OfType<ToolResultMessage>().Count(),
             messages.OfType<AssistantMessage>().Sum(message => message.Content.OfType<ToolCallContent>().Count()),
+            CodingAgentTokenEstimator.Estimate(messages),
+            _config.Model.ContextWindow,
             SessionName,
             sessionFile);
     }
@@ -104,11 +83,12 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner
             throw new InvalidOperationException("Nothing to compact (session too small)");
         }
 
+        var tokensBefore = CodingAgentTokenEstimator.Estimate(Messages);
         var compactionPrompt = string.IsNullOrWhiteSpace(customInstructions)
-            ? CompactionPrompt
-            : $"{CompactionPrompt}\n\nAdditional instructions:\n{customInstructions.Trim()}";
+            ? CodingAgentCompactionMessages.Prompt
+            : $"{CodingAgentCompactionMessages.Prompt}\n\nAdditional instructions:\n{customInstructions.Trim()}";
         var summaryContext = new LlmContext(
-            CompactionSystemPrompt,
+            CodingAgentCompactionMessages.SystemPrompt,
             [.. Messages, new UserMessage(compactionPrompt)],
             Tools: null);
         var summaryOptions = (_config.StreamOptions ?? new SimpleStreamOptions { MaxTokens = 16_384 }) with
@@ -129,9 +109,9 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner
 
         var messagesBefore = Messages.Count;
         _runtime.Reset();
-        _runtime.AddMessage(new UserMessage($"{CompactionSummaryPrefix}\n{summary}\n{CompactionSummarySuffix}"));
+        _runtime.AddMessage(CodingAgentCompactionMessages.CreateSummaryMessage(summary));
 
-        return new CodingAgentCompactionResult(summary, messagesBefore, Messages.Count);
+        return new CodingAgentCompactionResult(summary, messagesBefore, Messages.Count, tokensBefore);
     }
 
     public void ResetSession()
@@ -170,7 +150,10 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner
     public static RuntimeCodingAgentRunner Create(
         string? providerId = null,
         string? modelId = null,
-        IReadOnlyList<ChatMessage>? initialMessages = null)
+        IReadOnlyList<ChatMessage>? initialMessages = null,
+        IReadOnlyList<IAgentTool>? toolsOverride = null,
+        string? systemPromptOverride = null,
+        IReadOnlyList<CodingAgentSkill>? skills = null)
     {
         var registry = new ProviderRegistry();
         BuiltInProviders.RegisterAll(registry);
@@ -182,13 +165,13 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner
             defaultProvider: Environment.GetEnvironmentVariable("TAU_PROVIDER"));
 
         var model = modelCatalog.GetModel(selection.Provider, selection.ModelId);
-        var tools = CreateDefaultTools();
+        var tools = toolsOverride ?? CreateDefaultTools();
         var config = new AgentLoopConfig
         {
             Model = model,
             ProviderRegistry = registry,
             Tools = tools,
-            SystemPrompt = BuildSystemPrompt(tools),
+            SystemPrompt = string.IsNullOrWhiteSpace(systemPromptOverride) ? BuildSystemPrompt(tools, skills ?? []) : systemPromptOverride,
             StreamOptions = new SimpleStreamOptions { MaxTokens = 16_384 }
         };
 
@@ -225,9 +208,9 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner
         ];
     }
 
-    private static string BuildSystemPrompt(IReadOnlyList<IAgentTool> tools)
+    private static string BuildSystemPrompt(IReadOnlyList<IAgentTool> tools, IReadOnlyList<CodingAgentSkill> skills)
     {
-        return $$"""
+        var prompt = $$"""
             You are Tau, a coding assistant. You help users with software engineering tasks.
 
             Working directory: {{Directory.GetCurrentDirectory()}}
@@ -238,6 +221,7 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner
             Use tools to explore the codebase, read files, make edits, and run commands.
             Be concise. Think step by step.
             """;
+        return prompt + CodingAgentSkillStore.FormatForSystemPrompt(skills);
     }
 
     private static string ExtractCompactionSummary(AssistantMessage message)
@@ -252,9 +236,6 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner
 
     private static bool IsCompactionSummaryMessage(ChatMessage message)
     {
-        return message is UserMessage user &&
-               user.Content.Count == 1 &&
-               user.Content[0] is TextContent text &&
-               text.Text.StartsWith(CompactionSummaryPrefix, StringComparison.Ordinal);
+        return CodingAgentCompactionMessages.IsSummaryMessage(message);
     }
 }

@@ -46,19 +46,24 @@
 
 ### Tau.CodingAgent
 
-- [x] session 持久化（`TAU_CODING_AGENT_SESSION_FILE` 或 `./.tau/coding-agent-session.json`，启动自动 rehydrate，回合后保存）
-- [~] session lifecycle（已补 `/new` 清空当前会话并写回 session store，`/session` 报告当前平面 session stats 与文件路径，`/name` 持久化当前 session display name；仍缺 resume/tree/full stats 等多 session 管理能力）
+- [x] flat session 持久化（`TAU_CODING_AGENT_SESSION_FILE` 或 `./.tau/coding-agent-session.json`，启动自动 rehydrate，回合后保存）
+- [x] JSONL session tree baseline（默认 `./.tau/coding-agent-session.jsonl`，`TAU_CODING_AGENT_TREE_SESSION_FILE` 或 `.jsonl` 形式的 `TAU_CODING_AGENT_SESSION_FILE` 可覆盖；已支持 header、append-only message/model/session-info/label entries、entry id/parentId/timestamp、runner diff 同步、current branch restore）
+- [~] session lifecycle（已补 `/new`、`/session` tree stats、估算 token/context usage、auto-compaction threshold budget、`/name`、`/tree`、`/label`、`/fork`、`/resume`、`.jsonl` export/import；仍缺 interactive tree navigator 和 richer session metadata）
 - [x] settings / model selection / provider selection（`/model`、`/provider`、`/models`、`/providers`，默认写入 `TAU_CODING_AGENT_SETTINGS_FILE` 或 `./.tau/coding-agent-settings.json`）
 - [~] auth 管理入口（已补 `/auth` 状态查看和 `/login` 骨架提示；真实 OAuth/device flow 仍在 Tau.Ai OAuth backlog）
 - [x] slash command router 抽离（`CodingAgentCommandRouter`；当前命令行为不变，为 `/compact` / login flow 等后续命令留 seam）
 - [x] local quit command（`/quit` 结束当前 CLI loop，不调用 runner，不进入 LLM conversation）
-- [x] local help command（`/help` 列出当前 Tau 已支持命令，先不移植上游扩展/prompt/skill 命令发现）
+- [x] local help command（`/help` 列出当前 Tau 已支持命令，已纳入 `/prompts`、`/skills` 与 `/extensions`）
 - [x] slash command catalog（`CodingAgentCommandCatalog` 统一当前本地命令 name/usage/description，`/help` 和 usage 错误共用）
 - [x] local session name command（`/name [display name | clear]` 查看、设置或清空当前 session display name，并写入 session store）
 - [x] local copy command（`/copy` 复制最后一条 assistant 文本到系统剪贴板，clipboard 写入通过 `ICodingAgentClipboard` 隔离）
-- [x] local export command（`/export <path>` 导出当前 Tau 平面 session snapshot JSON；仍缺上游 HTML/JSONL/tree export）
-- [x] local import command（`/import <path>` 严格导入 Tau snapshot JSON，并恢复 messages/provider/model/display name；仍缺上游 JSONL tree/share/import 体系）
-- [~] manual compaction（已补 `/compact [instructions]`，当前使用当前模型生成摘要并把 session 压成单条 summary message；仍缺 auto-compaction、branch/tree/metadata 与上游完整 session-manager 语义）
+- [x] local export command（`/export` 默认导出 standalone HTML transcript；`/export <path>` 对 `.html/.htm` 路径导出 HTML，对 `.jsonl` 路径导出当前 branch JSONL，其他路径导出 Tau 平面 session snapshot JSON；HTML 提供 branch outline 并内嵌可下载 JSONL；仍缺上游 share/Gist export 和 richer HTML template）
+- [x] local import command（`/import <path>` 严格导入 Tau snapshot JSON 或 resume JSONL session，并恢复 messages/provider/model/display name；仍缺上游 share/import richer metadata）
+- [~] manual / auto compaction（已补 `/compact [instructions]`，当前使用当前模型生成摘要并把 flat session 压成单条 summary message；JSONL tree 会追加 `compaction` entry，记录 `summary`、`firstKeptEntryId`、估算 `tokensBefore` 和 `fromHook` baseline，并在 branch restore 时由 entry 重建 summary message；已补 `TAU_CODING_AGENT_AUTO_COMPACT_TOKENS` / `TAU_CODING_AGENT_AUTO_COMPACT_INSTRUCTIONS`，普通消息执行前超过阈值会自动 compact 并写 `fromHook=true`，`/session` 会显示当前估算 token、模型 context window 和 auto threshold 剩余量；仍缺 retry/rollback 和上游 retained-message cut-point 语义）
+- [ ] JSONL interactive tree navigator / richer session metadata
+- [~] dynamic slash command registry / prompt registry / skills/extensions discovery（已补 prompt template discovery/expansion baseline：`~/.tau/prompts`、`./.tau/prompts`、`TAU_CODING_AGENT_PROMPT_PATHS`、`/prompts`、`$1/$@/$ARGUMENTS/${@:N[:L]}` 参数替换；已补 skill command discovery/expansion baseline：`~/.tau/skills`、`./.tau/skills`、`TAU_CODING_AGENT_SKILL_PATHS`、`/skills`、`/skill:<name>`、`disable-model-invocation` 和默认 system prompt inventory；已补 JSON extension command/resource discovery baseline：`~/.tau/extensions`、`./.tau/extensions`、`TAU_CODING_AGENT_EXTENSION_PATHS`、`/extensions`、`response/prompt` 参数替换、`sendToRunner`、重复命令 `name:1/name:2`、`promptPaths/skillPaths` 资源贡献；仍缺完整 TypeScript extension runtime、custom tools/events、theme loader、resource selector 和 diagnostics）
+- [x] standalone HTML transcript export（`/export` 默认 HTML，`/export <path.html|path.htm>` 显式 HTML，覆盖 text/thinking/tool call/tool result/image 内容，并提供 branch outline 和本地 Download JSONL）
+- [ ] share/Gist export parity 和上游 richer HTML template
 - [ ] richer rendering
 - [x] 显式 `Create(provider, model, history)` runner 工厂
 - [x] 与 `ModelCatalog` 对齐的默认模型解析层继续收口
@@ -103,12 +108,21 @@
 - [x] mom runtime context seam（`<mom_runtime_context>` 注入 workspace/channel layout、events 文件格式、attachment manifest、memory/log/status 路径与 `[SILENT]` 约定）
 - [x] local channel session context（`workingDirectory/context.json` 使用 Tau-native session snapshot 恢复/保存同一 workdir 的 runtime messages）
 - [x] prompt debug snapshot（调用 runner 前写 `workingDirectory/last_prompt.jsonl`，记录 mom runtime context、delegation context、实际 runner input、恢复的 session messages、当前 prompt 和 attachment/image attachment count）
-- [x] workspace layout bootstrap（统一创建 `scratch/`、workspace/channel `skills/`、`attachments/`、`events/`，并把 `SYSTEM.md` 与 skill docs inventory 注入 prompt context）
+- [x] workspace layout bootstrap（统一创建 `scratch/`、workspace/channel `skills/`、`attachments/`、`events/`，并把 `SYSTEM.md` 与 Agent Skills prompt inventory 注入 prompt context）
 - [x] Slack-compatible channel message envelope（`MomChannelMessage` / `MomChannelAttachment` 统一 file/events/未来 Slack adapter 的 channel/user/ts/thread/attachment/request metadata 映射）
 - [x] fake Slack transport / responder seam（`IMomChannelTransport` / `IMomChannelResponder` / `MomChannelMessageProcessor` 先固定 Slack adapter 输入输出契约，不直接接真实 SDK）
-- [ ] Slack 对接
-- [~] workspace / sandbox / tool delegation（已补 workspace memory context、本地 attachment staging、scratch 目录、SYSTEM.md 和 skill docs inventory，仍缺 sandbox/tool delegation 与 skill runtime loader）
-- [~] message / runtime flow（已补最小 `log.jsonl` channel history 注入、本地 request/result 写回、`context.json` runtime messages、`last_prompt.jsonl` prompt debug snapshot、`status.json` runtime 状态、本地 busy-state guard、Slack-compatible envelope 与 channel processor busy/stop/typing/thread response seam，仍缺真实 Slack session sync / cancellable stop/queue / 多消息 runtime flow）
+- [x] Slack event mapper seam（`SlackEventMapper` 固定 Socket Mode `app_mention` / DM / skip / mention stripping / file metadata 到 `MomChannelMessage` 的 receive-side 规则）
+- [x] Slack Web API responder seam（`SlackWebApiResponder` 用 `HttpClient` 固定 `chat.postMessage`、thread response、`files.uploadV2` 与 token 脱敏错误边界）
+- [x] Slack Socket Mode transport seam（`auth.test` / `apps.connections.open` / WebSocket text frame / envelope ack / `SlackSocketModeEnabled` worker 开关）
+- [x] Slack startup backfill seam（`SlackBackfillService` 对已有 `log.jsonl` 的 channel 调 `conversations.history`，oldest/cursor 分页、去重过滤、log-only old message writeback）
+- [x] Slack private file download seam（`SlackAttachmentDownloader` 使用 bot token 下载 `url_private_download/url_private`，并复用 `ChannelAttachmentStore` 写 `original/local/source` manifest）
+- [x] Slack per-channel queue seam（`MomChannelQueueDispatcher` 固定同频道顺序处理、不同频道独立推进、pending queue limit 和 stop bypass）
+- [x] Slack true cancellable stop seam（`MomChannelRunRegistry` 跟踪当前 in-process channel run，stop bypass queue 后取消 linked runner token，写 `cancelled` status 并回复 `_Stopped_`）
+- [x] Agent Skills prompt inventory parity（workspace/channel `skills/**/SKILL.md` -> XML `<available_skills>`，sandbox path mapping，channel override，`disable-model-invocation`）
+- [x] Mom sandbox/tool delegation seam（`MomSandboxConfig` / `IMomSandboxExecutor` / `MomToolSet`，默认 host sandbox，配置层支持 `docker:<container>`，runner 默认工具切到 `bash/read/write/edit/attach`，attach 产物进入 execution attachments）
+- [ ] real Slack smoke
+- [~] workspace / sandbox / tool delegation（已补 workspace memory context、本地 attachment staging、scratch 目录、SYSTEM.md、Agent Skills prompt inventory、host sandbox executor、docker path/command construction seam 和 `bash/read/write/edit/attach` tools；仍缺真实 Docker sandbox smoke）
+- [~] message / runtime flow（已补最小 `log.jsonl` channel history 注入、本地 request/result 写回、`context.json` runtime messages、`last_prompt.jsonl` prompt debug snapshot、`status.json` runtime 状态、本地 busy-state guard、Slack-compatible envelope、Slack event mapper、Slack Socket Mode transport seam、Slack startup backfill seam、channel processor busy/stop/typing/thread response seam、true cancellable stop seam、Slack Web API responder seam、Slack private file download seam 与 per-channel queue seam，仍缺真实 Slack session sync / 多消息 runtime flow）
 - [ ] 更高层 delegation flow 与端到端测试
 
 ### Tau.Pods

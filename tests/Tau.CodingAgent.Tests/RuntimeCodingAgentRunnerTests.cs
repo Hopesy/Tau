@@ -100,7 +100,51 @@ public class RuntimeCodingAgentRunnerTests
         Assert.Equal(1, stats.AssistantMessages);
         Assert.Equal(1, stats.ToolResultMessages);
         Assert.Equal(1, stats.ToolCalls);
+        Assert.Equal(CodingAgentTokenEstimator.Estimate(runner.Messages), stats.EstimatedTokens);
+        Assert.Equal(runner.Model.ContextWindow, stats.ContextWindowTokens);
         Assert.Equal(sessionFile, stats.SessionFile);
+    }
+
+    [Fact]
+    public void TokenEstimator_IncludesPendingInputAndStructuredContent()
+    {
+        var tokens = CodingAgentTokenEstimator.Estimate(
+            [
+                new UserMessage("12345678"),
+                new AssistantMessage(
+                    [
+                        new ThinkingContent("think"),
+                        new ToolCallContent("tool-1", "read_file", "{\"path\":\"README.md\"}")
+                    ]),
+                new ToolResultMessage("tool-1", [new TextContent("done")])
+            ],
+            "next");
+
+        Assert.True(tokens >= 12);
+    }
+
+    [Fact]
+    public void AutoCompactionOptions_FromEnvironment_ReadsPositiveThreshold()
+    {
+        var oldThreshold = Environment.GetEnvironmentVariable("TAU_CODING_AGENT_AUTO_COMPACT_TOKENS");
+        var oldInstructions = Environment.GetEnvironmentVariable("TAU_CODING_AGENT_AUTO_COMPACT_INSTRUCTIONS");
+
+        try
+        {
+            Environment.SetEnvironmentVariable("TAU_CODING_AGENT_AUTO_COMPACT_TOKENS", "1024");
+            Environment.SetEnvironmentVariable("TAU_CODING_AGENT_AUTO_COMPACT_INSTRUCTIONS", " keep blockers ");
+
+            var options = CodingAgentAutoCompactionOptions.FromEnvironment();
+
+            Assert.True(options.IsEnabled);
+            Assert.Equal(1024, options.ThresholdTokens);
+            Assert.Equal("keep blockers", options.Instructions);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("TAU_CODING_AGENT_AUTO_COMPACT_TOKENS", oldThreshold);
+            Environment.SetEnvironmentVariable("TAU_CODING_AGENT_AUTO_COMPACT_INSTRUCTIONS", oldInstructions);
+        }
     }
 
     [Fact]

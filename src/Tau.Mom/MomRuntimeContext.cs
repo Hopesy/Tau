@@ -7,12 +7,17 @@ internal static class MomRuntimeContext
     public static string Build(MomOptions options, string workingDirectory)
     {
         var layout = ChannelWorkspaceLayout.For(options, workingDirectory);
+        var sandbox = MomSandboxConfig.Parse(options.Sandbox);
+        var executor = MomSandboxExecutorFactory.Create(sandbox, workingDirectory);
+        var sandboxWorkspace = executor.WorkspacePath;
 
         var builder = new StringBuilder();
         builder.AppendLine("<mom_runtime_context>");
         builder.AppendLine("role: Tau.Mom local delegation worker");
         builder.AppendLine("tone: concise, direct, no emoji");
         builder.AppendLine("slack_adapter: not connected in this local worker slice");
+        builder.Append("sandbox: ").AppendLine(sandbox.DisplayName);
+        builder.Append("sandbox_workspace: ").AppendLine(sandboxWorkspace);
         builder.AppendLine();
 
         builder.AppendLine("workspace_layout:");
@@ -34,7 +39,7 @@ internal static class MomRuntimeContext
         builder.AppendLine();
 
         builder.AppendLine("skill_docs:");
-        builder.AppendLine(layout.BuildSkillInventory());
+        builder.AppendLine(layout.BuildSkillInventory(executor.ToWorkspacePath));
         builder.AppendLine();
 
         builder.AppendLine("local_rules:");
@@ -44,9 +49,12 @@ internal static class MomRuntimeContext
         builder.AppendLine("- Use SYSTEM.md to record environment modifications such as installed packages, changed config files, or persistent environment variables.");
         builder.AppendLine("- Use log.jsonl for older channel history; it stores user messages and final bot responses, not tool traces.");
         builder.AppendLine("- Use attachment paths from the delegation context as local files. Relative attachment paths are relative to the channel directory.");
-        builder.AppendLine("- Skill directories are documented for local context only; do not claim custom mom skills are executable tools until a runtime loader is wired.");
+        builder.AppendLine("- Available Mom tools are bash/read/write/edit/attach. Prefer these names over the generic CodingAgent tool names.");
+        builder.AppendLine("- attach can only share files that resolve inside the current channel workspace.");
+        builder.AppendLine("- Skill docs are discoverable context. Read SKILL.md and run referenced scripts with bash/read/write/edit; skills are not separate direct tool names.");
         builder.AppendLine("- If an event asks for a routine check and there is nothing useful to report, respond exactly [SILENT].");
-        builder.AppendLine("- Do not claim Slack, Docker sandboxing, or custom mom skills are available unless the current prompt or files prove they are wired.");
+        builder.AppendLine("- Do not claim Slack or custom mom skills are available unless the current prompt or files prove they are wired.");
+        builder.AppendLine("- Docker sandboxing is available only when sandbox starts with docker: and the configured container is running.");
         builder.AppendLine();
 
         builder.AppendLine("event_files:");

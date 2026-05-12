@@ -82,4 +82,21 @@ public sealed class MomChannelMessageTests
         Assert.Equal("1778414400000", request.Metadata["ts"]);
         Assert.Equal("2026-05-10T12:00:00.0000000+00:00", request.Metadata["date"]);
     }
+
+    [Fact]
+    public void ToDelegationRequest_AllowsAttachmentOnlyMessage()
+    {
+        var request = new MomChannelMessage(
+                "D123DM",
+                string.Empty,
+                "1778351400.123456",
+                "U123",
+                [new MomChannelAttachment("screenshot.png", Url: "https://slack.example/screenshot.png")])
+            .ToDelegationRequest(Path.GetTempPath());
+
+        Assert.Equal(string.Empty, request.Prompt);
+        Assert.Equal(["screenshot.png"], request.Attachments);
+        Assert.NotNull(request.Metadata);
+        Assert.Equal("D123DM", request.Metadata["channel"]);
+    }
 }

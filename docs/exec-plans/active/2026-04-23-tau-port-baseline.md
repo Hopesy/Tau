@@ -213,6 +213,7 @@
 - [x] `Tau.CodingAgent` 最小 auth 管理入口（`/auth` status / `/login` 未移植提示，基于 `ProviderAuthResolver.GetStatus`，不回显 secret）
 - [x] `Tau.CodingAgent` slash command router 抽离（`CodingAgentCommandRouter`，保持 `/model` / `/provider` / `/models` / `/providers` / `/auth` / `/login` 行为不变）
 - [x] `Tau.CodingAgent` 最小手动 compaction（`/compact [instructions]`，当前模型生成摘要后压缩为单条 summary message）
+- [x] `Tau.CodingAgent` JSONL session tree / HTML transcript / prompt template / skill command / JSON extension command baseline（完整移植后续状态以 `2026-05-10-tau-complete-pi-mono-port.md` 为准）
 - [x] `Tau.Mom` runner / result schema 收口（结构化 `DelegationToolEvent`、stop reason、`DelegationUsage` 含 token + 可选总成本、可注入 `ICodingAgentRunner` 工厂）
 - [x] `Tau.Mom` 结构化 request context 接线（`title` session name、`metadata` / `attachments` 注入 runner 输入、outbox 回写 title/attachments）
 - [x] `Tau.Mom` local attachment staging（本地存在的 request/event attachment 进入 `workingDirectory/attachments/`，并保留 original/local/source manifest 与 channel log 元数据）
@@ -225,11 +226,13 @@
 - [x] `Tau.Mom` runtime context prompt（`<mom_runtime_context>` 注入 workspace/channel layout、events 文件格式、attachment manifest、memory/log/status 路径与 `[SILENT]` 约定）
 - [x] `Tau.Mom` local channel session context（`workingDirectory/context.json` 使用 Tau-native session snapshot 恢复/保存同一 workdir 的 runtime messages）
 - [x] `Tau.Mom` prompt debug snapshot（调用 runner 前写 `workingDirectory/last_prompt.jsonl`，记录 mom runtime context、delegation context、实际 runner input、恢复的 session messages、当前 prompt 和 attachment/image attachment count）
-- [x] `Tau.Mom` workspace layout bootstrap（统一创建 `scratch/`、workspace/channel `skills/`、`attachments/`、`events/`，并把 `SYSTEM.md` 与 skill docs inventory 注入 prompt context）
+- [x] `Tau.Mom` workspace layout bootstrap（统一创建 `scratch/`、workspace/channel `skills/`、`attachments/`、`events/`，并把 `SYSTEM.md` 与 Agent Skills prompt inventory 注入 prompt context）
 - [x] `Tau.Mom` Slack-compatible channel message envelope（`MomChannelMessage` / `MomChannelAttachment` 统一 file/events/未来 Slack adapter 的 channel/user/ts/thread/attachment/request metadata 映射）
 - [x] `Tau.Mom` transport/responder seam（`IMomChannelTransport` / `IMomChannelResponder` / `MomChannelMessageProcessor` 固定 busy/stop/typing/thread response/status/log/runner 接线）
+- [x] `Tau.Mom` Agent Skills prompt inventory parity（`SKILL.md` -> XML `<available_skills>`、sandbox path mapping、channel override、`disable-model-invocation`）
+- [x] `Tau.Mom` sandbox/tool delegation seam（`MomSandboxConfig` / `IMomSandboxExecutor` / `MomToolSet`，host executor、本地 path authority、docker path/command construction、`bash/read/write/edit/attach` tools）
 - [ ] `Tau.WebUi` 流式 UI / richer rendering / attachment
-- [ ] `Tau.Mom` Slack / workspace / sandbox / delegation semantics
+- [ ] `Tau.Mom` real Slack smoke / Docker sandbox smoke / higher-level delegation semantics
 - [ ] `Tau.Pods` SSH / lifecycle / model management
 - [x] `Tau.slnx` / metaproj / workload resolver 异常收口（当前 `dotnet build Tau.slnx --verbosity minimal` 已通过）
 - [x] `HintPath` workaround 收回到更正常的 `ProjectReference`
@@ -305,7 +308,9 @@
 - 2026-05-10：决定把上游 mom `buildSystemPrompt()` 里不依赖 Slack SDK 的本地运行规则迁移为 `<mom_runtime_context>`，而不是改 `Tau.CodingAgent` 的系统 prompt 或提前引入完整 mom AgentSession。原因是 Tau.Mom 当前的 runner seam 仍是 `RunAsync(string input)`；把 workspace layout、events 文件格式、attachment manifest、memory/log/status 路径和 `[SILENT]` 约定作为本地前缀注入，可以先给模型稳定的 Mom 运行语义，同时不伪装成 Slack/socket/sandbox 已经完成。
 - 2026-05-10：决定把上游 mom per-channel `context.jsonl` session sync 先迁移成 Tau-native `context.json` snapshot，而不是一次性实现 JSONL session tree。原因是 `Tau.CodingAgent` 已有可复用的 `CodingAgentSessionStore` 平面 snapshot；Mom 先在同一 `workingDirectory` 上恢复/保存 runner messages，就能让后续 delegation 继承上一轮 runtime context，同时清楚标注这还不是上游完整 SessionManager / Slack session sync。
 - 2026-05-10：决定把上游 mom 的 `last_prompt.jsonl` debug 文件迁移为本地 `ChannelPromptDebugStore`，而不是继续只靠测试 fake runner 捕获输入。原因是后续 Slack/session/attachment 问题需要能在真实 channel workdir 里直接看到 prompt 组成、恢复的 session messages 和附件计数；本轮只写文本 debug snapshot，不把图片作为多模态内容传给当前 string-only runner。
-- 2026-05-10：决定把上游 mom system prompt 里的 workspace layout 规则迁移成 `ChannelWorkspaceLayout`，而不是继续在 runtime context、smoke 和后续 adapter 里各自拼路径。原因是 `scratch/`、workspace/channel `skills/`、`SYSTEM.md` 和 `events/` 都是后续 sandbox/tool delegation 的共同边界；本轮只创建目录、读取 `SYSTEM.md` 与 `SKILL.md` 元数据并注入 prompt，不提前承诺 custom skill runtime 或 Docker sandbox 已经接通。
+- 2026-05-10：决定把上游 mom system prompt 里的 workspace layout 规则迁移成 `ChannelWorkspaceLayout`，而不是继续在 runtime context、smoke 和后续 adapter 里各自拼路径。原因是 `scratch/`、workspace/channel `skills/`、`SYSTEM.md` 和 `events/` 都是后续 sandbox/tool delegation 的共同边界；本轮先创建目录、读取 `SYSTEM.md` 与 `SKILL.md` 元数据并注入 prompt，不提前承诺 Docker sandbox 已经接通。
+- 2026-05-11：决定把上游 mom 的 sandbox/tool boundary 先迁移成 Tau-native `MomSandboxConfig`、`IMomSandboxExecutor` 和 `MomToolSet`，而不是让 `Tau.Mom` 继续使用通用 CodingAgent 工具名。原因是上游 Mom runtime 明确暴露 `bash/read/write/edit/attach`，且 attach/upload、workspace path translation 和 Docker sandbox 都属于 Mom channel runtime 语义；Tau 当前先固定 host executor、docker path/command construction 和 tools contract，真实 Docker smoke 后续单独验证。
+- 2026-05-11：决定把 Mom skills 按上游 Agent Skills prompt inventory 对齐，而不是实现额外 direct-tool loader。原因是上游 `loadMomSkills()` 只加载 `SKILL.md` 元数据并放入 system prompt，脚本使用仍通过 `bash/read/write/edit`；Tau 当前补齐 XML `<available_skills>`、channel 覆盖 workspace、`disable-model-invocation` 和 sandbox path translation。
 - 2026-05-10：决定用 `2026-05-10-tau-complete-pi-mono-port.md` 承接完整移植总路线图，本 baseline plan 不再无限扩展成跨模块总计划。原因是“完完整整的移植”已经超出 P1 baseline，需要单独的 parity closure plan，同时保留旧 plan 作为已完成基线和决策事实源。
 - 2026-05-10：决定把 Slack event / file request / local event 的共同输入事实抽成 `MomChannelMessage`，再生成 `DelegationRequest`。原因是下一步真实 Slack adapter、backfill、queue 和 file download 都需要复用 channel/user/ts/thread/attachment metadata；先固定 envelope seam 能避免 Slack SDK 接入后把消息映射逻辑散进 worker、event processor 和 log store。
-- 2026-05-10：决定把 Slack transport/responder 与 Mom channel runtime 分开。原因是 `IMomChannelResponder` 只负责发送/typing/upload，`MomChannelMessageProcessor` 承担 busy-state、stop placeholder、thread response、status/log writeback、attachment staging 和 runner 调用；这样后续真实 Slack SDK adapter 不会拥有业务状态机。
+- 2026-05-10：决定把 Slack transport/responder 与 Mom channel runtime 分开。原因是 `IMomChannelResponder` 只负责发送/typing/upload，`MomChannelMessageProcessor` 承担 busy-state、stop flow、thread response、status/log writeback、attachment staging 和 runner 调用；这样后续真实 Slack SDK adapter 不会拥有业务状态机。

@@ -17,7 +17,8 @@ public sealed class FakeCodingAgentRunner : ICodingAgentRunner
                 Provider = "openai",
                 Id = "gpt-5.4",
                 Name = "GPT-5.4",
-                Api = "openai-responses"
+                Api = "openai-responses",
+                ContextWindow = 128_000
             }
         ],
         ["google"] =
@@ -27,7 +28,8 @@ public sealed class FakeCodingAgentRunner : ICodingAgentRunner
                 Provider = "google",
                 Id = "gemini-2.5-pro",
                 Name = "Gemini 2.5 Pro",
-                Api = "google-gemini"
+                Api = "google-gemini",
+                ContextWindow = 1_048_576
             }
         ]
     };
@@ -88,6 +90,8 @@ public sealed class FakeCodingAgentRunner : ICodingAgentRunner
             Messages.OfType<AssistantMessage>().Count(),
             Messages.OfType<ToolResultMessage>().Count(),
             Messages.OfType<AssistantMessage>().Sum(message => message.Content.OfType<ToolCallContent>().Count()),
+            CodingAgentTokenEstimator.Estimate(Messages),
+            Model.ContextWindow,
             SessionName,
             sessionFile);
     }

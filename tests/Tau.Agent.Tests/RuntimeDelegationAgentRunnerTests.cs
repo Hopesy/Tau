@@ -108,6 +108,17 @@ public class RuntimeDelegationAgentRunnerTests
 
         # Incident Helper
         """);
+        var disabledSkillDirectory = Path.Combine(workingDirectory, "skills", "hidden-helper");
+        Directory.CreateDirectory(disabledSkillDirectory);
+        await File.WriteAllTextAsync(Path.Combine(disabledSkillDirectory, "SKILL.md"), """
+        ---
+        name: hidden-helper
+        description: Hidden helper.
+        disable-model-invocation: true
+        ---
+
+        # Hidden Helper
+        """);
         await File.WriteAllTextAsync(Path.Combine(workingDirectory, "log.jsonl"), """
         {"date":"2026-05-05T01:00:00Z","ts":"1","user":"U1","userName":"Alice","text":"first human message","isBot":false}
         {"date":"2026-05-05T01:01:00Z","ts":"2","userName":"Tau Bot","text":"bot reply","isBot":true}
@@ -165,12 +176,18 @@ public class RuntimeDelegationAgentRunnerTests
         Assert.Contains(Path.Combine(workingDirectory, "attachments"), fake.LastInput, StringComparison.Ordinal);
         Assert.Contains(Path.Combine(workingDirectory, "attachments", "attachments.jsonl"), fake.LastInput, StringComparison.Ordinal);
         Assert.Contains("skill_docs:", fake.LastInput, StringComparison.Ordinal);
-        Assert.Contains("deploy-helper [workspace]: Helps inspect deployment state.", fake.LastInput, StringComparison.Ordinal);
-        Assert.Contains("incident-helper [channel]: Helps triage channel incidents.", fake.LastInput, StringComparison.Ordinal);
+        Assert.Contains("<available_skills>", fake.LastInput, StringComparison.Ordinal);
+        Assert.Contains("<name>deploy-helper</name>", fake.LastInput, StringComparison.Ordinal);
+        Assert.Contains("<description>Helps inspect deployment state.</description>", fake.LastInput, StringComparison.Ordinal);
+        Assert.Contains("<source>workspace</source>", fake.LastInput, StringComparison.Ordinal);
+        Assert.Contains("<name>incident-helper</name>", fake.LastInput, StringComparison.Ordinal);
+        Assert.Contains("<description>Helps triage channel incidents.</description>", fake.LastInput, StringComparison.Ordinal);
+        Assert.Contains("<source>channel</source>", fake.LastInput, StringComparison.Ordinal);
+        Assert.DoesNotContain("hidden-helper", fake.LastInput, StringComparison.Ordinal);
         Assert.Contains("local_rules:", fake.LastInput, StringComparison.Ordinal);
         Assert.Contains("Use scratch/ for temporary or generated working files", fake.LastInput, StringComparison.Ordinal);
         Assert.Contains("Use SYSTEM.md to record environment modifications", fake.LastInput, StringComparison.Ordinal);
-        Assert.Contains("Skill directories are documented for local context only", fake.LastInput, StringComparison.Ordinal);
+        Assert.Contains("Skill docs are discoverable context", fake.LastInput, StringComparison.Ordinal);
         Assert.Contains("respond exactly [SILENT]", fake.LastInput, StringComparison.Ordinal);
         Assert.Contains("event_files:", fake.LastInput, StringComparison.Ordinal);
         Assert.Contains("<delegation_context>", fake.LastInput, StringComparison.Ordinal);
@@ -267,6 +284,48 @@ public class RuntimeDelegationAgentRunnerTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_WithWorkspaceFactory_CapturesAttachedFiles()
+    {
+        var model = new Model { Provider = "openai", Id = "gpt-5.4", Name = "GPT-5.4", Api = "openai-responses" };
+        var fake = new ScriptedRunner(model)
+        {
+            Events = [new AgentEndEvent()]
+        };
+        var root = Path.Combine(Path.GetTempPath(), $"tau-mom-attach-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        var attachedPath = Path.Combine(root, "scratch", "report.txt");
+
+        string? capturedWorkingDirectory = null;
+        var delegationRunner = new RuntimeDelegationAgentRunner(
+            new MomOptions(),
+            (provider, modelId, workingDirectory, attachFile) =>
+            {
+                capturedWorkingDirectory = workingDirectory;
+                Directory.CreateDirectory(Path.GetDirectoryName(attachedPath)!);
+                File.WriteAllText(attachedPath, "report");
+                attachFile(attachedPath, "report");
+                return fake;
+            });
+
+        try
+        {
+            var execution = await delegationRunner.ExecuteAsync(new DelegationRequest(
+                "produce report",
+                Provider: "openai",
+                Model: "gpt-5.4",
+                WorkingDirectory: root));
+
+            Assert.Equal(root, capturedWorkingDirectory);
+            var attached = Assert.Single(execution.Attachments!);
+            Assert.Equal(attachedPath, attached);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task ExecuteAsync_LoadsAndSavesChannelContextSnapshot()
     {
         var model = new Model { Provider = "openai", Id = "gpt-5.4", Name = "GPT-5.4", Api = "openai-responses" };
@@ -358,7 +417,7 @@ public class RuntimeDelegationAgentRunnerTests
         public ProviderAuthStatus GetAuthStatus(string? providerId = null) =>
             new(providerId ?? Model.Provider, false, "none", false, false, "test");
         public CodingAgentSessionStats GetSessionStats(string? sessionFile = null) =>
-            new(Model.Provider, Model.Id, 0, 0, 0, 0, 0, null, sessionFile);
+            new(Model.Provider, Model.Id, 0, 0, 0, 0, 0, 0, Model.ContextWindow, null, sessionFile);
         public Task<CodingAgentCompactionResult> CompactAsync(string? customInstructions = null, CancellationToken cancellationToken = default) =>
             throw new NotSupportedException();
         public void RestoreSession(CodingAgentSessionSnapshot snapshot)

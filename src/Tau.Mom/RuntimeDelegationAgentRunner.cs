@@ -9,16 +9,21 @@ namespace Tau.Mom;
 
 public sealed class RuntimeDelegationAgentRunner : IDelegationAgentRunner
 {
-    private readonly Func<string, string, ICodingAgentRunner> _runnerFactory;
+    private readonly Func<string, string, string, Action<string, string?>, ICodingAgentRunner> _runnerFactory;
     private readonly MomOptions _options;
 
     public RuntimeDelegationAgentRunner()
-        : this(new MomOptions(), static (provider, model) => RuntimeCodingAgentRunner.Create(provider, model))
+        : this(new MomOptions())
     {
     }
 
     public RuntimeDelegationAgentRunner(MomOptions options)
-        : this(options, static (provider, model) => RuntimeCodingAgentRunner.Create(provider, model))
+        : this(options, (provider, model, workingDirectory, attachFile) =>
+        {
+            var executor = MomSandboxExecutorFactory.Create(options, workingDirectory);
+            var tools = MomToolSet.Create(executor, attachFile);
+            return RuntimeCodingAgentRunner.Create(provider, model, toolsOverride: tools);
+        })
     {
     }
 
@@ -28,6 +33,13 @@ public sealed class RuntimeDelegationAgentRunner : IDelegationAgentRunner
     }
 
     public RuntimeDelegationAgentRunner(MomOptions options, Func<string, string, ICodingAgentRunner> runnerFactory)
+        : this(options, (provider, model, _, _) => runnerFactory(provider, model))
+    {
+    }
+
+    public RuntimeDelegationAgentRunner(
+        MomOptions options,
+        Func<string, string, string, Action<string, string?>, ICodingAgentRunner> runnerFactory)
     {
         _options = options;
         _runnerFactory = runnerFactory;
@@ -42,6 +54,7 @@ public sealed class RuntimeDelegationAgentRunner : IDelegationAgentRunner
         string? error = null;
         string? stopReason = null;
         var aggregatedUsage = new MutableUsage();
+        var attachedFiles = new List<string>();
 
         var provider = string.IsNullOrWhiteSpace(request.Provider) ? "openai" : request.Provider.Trim();
         var model = string.IsNullOrWhiteSpace(request.Model)
@@ -59,7 +72,7 @@ public sealed class RuntimeDelegationAgentRunner : IDelegationAgentRunner
             Directory.SetCurrentDirectory(workingDirectory);
             try
             {
-                var runner = _runnerFactory(provider, model);
+                var runner = _runnerFactory(provider, model, workingDirectory, (path, _) => attachedFiles.Add(path));
                 var sessionStore = new ChannelSessionStore(workingDirectory);
                 var requestedSessionName = string.IsNullOrWhiteSpace(request.Title) ? null : request.Title.Trim();
                 var snapshot = sessionStore.Load(provider, model, requestedSessionName);
@@ -149,7 +162,8 @@ public sealed class RuntimeDelegationAgentRunner : IDelegationAgentRunner
             workingDirectory,
             request.Metadata,
             stopReason,
-            aggregatedUsage.ToDelegationUsage());
+            aggregatedUsage.ToDelegationUsage(),
+            attachedFiles.Count == 0 ? null : attachedFiles);
     }
 
     private DelegationPromptParts BuildDelegationPromptParts(DelegationRequest request, string workingDirectory)

@@ -16,8 +16,18 @@ builder.Services.AddSingleton(sp =>
         ArchivePath = Path.GetFullPath(configured.ArchivePath, root),
         EventsPath = Path.GetFullPath(configured.EventsPath, root),
         DefaultWorkingDirectory = Path.GetFullPath(configured.DefaultWorkingDirectory, root),
+        Sandbox = configured.Sandbox,
         DefaultProvider = configured.DefaultProvider,
         DefaultModel = configured.DefaultModel,
+        SlackSocketModeEnabled = configured.SlackSocketModeEnabled,
+        SlackAppToken = configured.SlackAppToken,
+        SlackBotToken = configured.SlackBotToken,
+        SlackApiBaseUrl = configured.SlackApiBaseUrl,
+        SlackBackfillEnabled = configured.SlackBackfillEnabled,
+        SlackBackfillMaxPages = configured.SlackBackfillMaxPages,
+        SlackBackfillPageSize = configured.SlackBackfillPageSize,
+        SlackChannelQueueLimit = configured.SlackChannelQueueLimit,
+        SlackSocketModeReconnectDelaySeconds = configured.SlackSocketModeReconnectDelaySeconds,
         PollIntervalSeconds = configured.PollIntervalSeconds,
         MaxFilesPerPoll = configured.MaxFilesPerPoll,
         RunningStatusStaleAfterMinutes = configured.RunningStatusStaleAfterMinutes
@@ -27,12 +37,19 @@ builder.Services.AddSingleton<IDelegationAgentRunner, RuntimeDelegationAgentRunn
 builder.Services.AddSingleton<ChannelStatusStore>();
 builder.Services.AddSingleton<MomEventProcessor>();
 builder.Services.AddSingleton<FileDelegationProcessor>();
+builder.Services.AddSingleton<MomChannelRunRegistry>();
 builder.Services.AddSingleton<MomChannelMessageProcessor>();
+builder.Services.AddSingleton<MomChannelQueueDispatcher>();
+builder.Services.AddSingleton<SlackAttachmentDownloader>();
+builder.Services.AddSingleton<SlackBackfillService>();
+builder.Services.AddSingleton<SlackWebApiResponder>();
+builder.Services.AddSingleton<SlackSocketModeTransport>();
 
 var runOnce = args.Any(arg => string.Equals(arg, "--once", StringComparison.OrdinalIgnoreCase));
 if (!runOnce)
 {
     builder.Services.AddHostedService<Worker>();
+    builder.Services.AddHostedService<SlackSocketModeWorker>();
 }
 
 var host = builder.Build();

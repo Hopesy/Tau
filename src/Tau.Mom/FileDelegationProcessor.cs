@@ -103,7 +103,7 @@ public sealed class FileDelegationProcessor
             execution.StopReason,
             execution.Usage,
             request.Title,
-            request.Attachments);
+            MergeAttachments(request.Attachments, execution.Attachments));
 
         var outFile = Path.Combine(_options.OutboxPath, Path.GetFileNameWithoutExtension(file) + ".json");
         var json = JsonSerializer.Serialize(result, MomJsonContext.Default.DelegationResult);
@@ -222,5 +222,18 @@ public sealed class FileDelegationProcessor
     private static string? NormalizeOptional(string? value)
     {
         return string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+    }
+
+    private static IReadOnlyList<string>? MergeAttachments(
+        IReadOnlyList<string>? requestAttachments,
+        IReadOnlyList<string>? executionAttachments)
+    {
+        if ((requestAttachments is null || requestAttachments.Count == 0) &&
+            (executionAttachments is null || executionAttachments.Count == 0))
+        {
+            return null;
+        }
+
+        return [.. (requestAttachments ?? []), .. (executionAttachments ?? [])];
     }
 }

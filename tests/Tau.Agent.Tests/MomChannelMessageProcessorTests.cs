@@ -104,7 +104,7 @@ public sealed class MomChannelMessageProcessorTests
     }
 
     [Fact]
-    public async Task ProcessAsync_WithStopWhileRunning_RespondsWithStopPlaceholder()
+    public async Task ProcessAsync_WithStopWhileRunningButNoActiveRunner_RespondsWithDetachedState()
     {
         var root = Path.Combine(Path.GetTempPath(), $"tau-mom-channel-{Guid.NewGuid():N}");
         var channelDir = Path.Combine(root, "D456");
@@ -124,11 +124,52 @@ public sealed class MomChannelMessageProcessorTests
             Assert.False(processed);
             Assert.Empty(runner.Requests);
             var response = Assert.Single(responder.Responses);
-            Assert.Equal("_Stop requested. Cancellation is not wired for this local runner yet._", response.Text);
+            Assert.Equal("_Stop requested, but no active runner is attached in this process._", response.Text);
         }
         finally
         {
             Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ProcessAsync_WithStopWhileActive_CancelsRunnerAndWritesCancelledStatus()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"tau-mom-channel-{Guid.NewGuid():N}");
+        var runner = new CancellableDelegationAgentRunner();
+        var responder = new RecordingResponder();
+        var registry = new MomChannelRunRegistry();
+        var processor = CreateProcessor(CreateOptions(root), runner, registry);
+
+        try
+        {
+            var processing = processor.ProcessAsync(
+                new MomChannelMessage("D456", "long work", "1778351400.123456", "U123"),
+                responder);
+            var startedRequest = await runner.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+            var stopped = await processor.ProcessAsync(
+                new MomChannelMessage("D456", "stop", "1778351401.123456", "U123"),
+                responder);
+
+            Assert.False(stopped);
+            await runner.Cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.False(await processing.WaitAsync(TimeSpan.FromSeconds(5)));
+            Assert.Equal(Path.Combine(root, "D456"), startedRequest.WorkingDirectory);
+            Assert.Contains(responder.Responses, static response => response.Text == "_Stopping..._");
+            Assert.Contains(responder.Responses, static response => response.Text == "_Stopped_");
+            Assert.Equal([true, false], responder.Typing);
+
+            var statusJson = await File.ReadAllTextAsync(Path.Combine(root, "D456", "status.json"));
+            Assert.Contains("\"state\": \"cancelled\"", statusJson, StringComparison.Ordinal);
+            Assert.Contains("\"stopReason\": \"cancelled\"", statusJson, StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
         }
     }
 
@@ -143,13 +184,17 @@ public sealed class MomChannelMessageProcessorTests
         };
     }
 
-    private static MomChannelMessageProcessor CreateProcessor(MomOptions options, IDelegationAgentRunner runner)
+    private static MomChannelMessageProcessor CreateProcessor(
+        MomOptions options,
+        IDelegationAgentRunner runner,
+        MomChannelRunRegistry? runRegistry = null)
     {
         return new MomChannelMessageProcessor(
             options,
             runner,
             new ChannelStatusStore(new SilentLogger<ChannelStatusStore>()),
-            new SilentLogger<MomChannelMessageProcessor>());
+            new SilentLogger<MomChannelMessageProcessor>(),
+            runRegistry: runRegistry);
     }
 
     private static Task WriteRunningStatusAsync(string workingDirectory, DateTimeOffset updatedAt)
@@ -187,6 +232,36 @@ public sealed class MomChannelMessageProcessorTests
                 request.Metadata,
                 StopReason: "end_turn",
                 Usage: new DelegationUsage(InputTokens: 10, OutputTokens: 5)));
+        }
+    }
+
+    private sealed class CancellableDelegationAgentRunner : IDelegationAgentRunner
+    {
+        public TaskCompletionSource<DelegationRequest> Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<bool> Cancelled { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async Task<DelegationExecution> ExecuteAsync(DelegationRequest request, CancellationToken cancellationToken = default)
+        {
+            Started.TrySetResult(request);
+            try
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                Cancelled.TrySetResult(true);
+                throw;
+            }
+
+            return new DelegationExecution(
+                "unexpected",
+                [],
+                Error: null,
+                request.Provider ?? "unknown",
+                request.Model ?? "unknown",
+                request.WorkingDirectory ?? Directory.GetCurrentDirectory(),
+                request.Metadata,
+                StopReason: "end_turn");
         }
     }
 
