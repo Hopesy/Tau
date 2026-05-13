@@ -89,6 +89,15 @@ public static class CodingAgentHtmlSessionExporter
         if (treeSummary is not null)
         {
             AppendMeta(builder, "Tree", $"{ShortId(treeSummary.LeafId)} leaf, {treeSummary.BranchMessageCount} branch messages, {treeSummary.LabelCount} labels");
+            if (!string.IsNullOrWhiteSpace(treeSummary.Cwd))
+            {
+                AppendMeta(builder, "Cwd", treeSummary.Cwd);
+            }
+
+            if (!string.IsNullOrWhiteSpace(treeSummary.ParentSession))
+            {
+                AppendMeta(builder, "Parent session", treeSummary.ParentSession);
+            }
         }
 
         builder.AppendLine("</dl>");

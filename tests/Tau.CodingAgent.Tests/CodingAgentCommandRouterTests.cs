@@ -334,6 +334,48 @@ public class CodingAgentCommandRouterTests
     }
 
     [Fact]
+    public async Task TryHandleAsync_ExportHtmlCommandWithTreeSession_IncludesSessionMetadata()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-export-tree-{Guid.NewGuid():N}");
+        var treePath = Path.Combine(directory, "session.jsonl");
+        var htmlPath = Path.Combine(directory, "session.html");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.SessionName = "tree export";
+        runner.MutableMessages.Add(new UserMessage("export tree metadata"));
+        runner.MutableMessages.Add(new AssistantMessage([new TextContent("metadata visible")]));
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+            var tree = CodingAgentTreeSessionController.OpenOrCreate(treePath);
+            var router = new CodingAgentCommandRouter(runner, treeSessionController: tree);
+
+            var cloneResult = await router.TryHandleAsync("/clone");
+            var exportResult = await router.TryHandleAsync($"/export {htmlPath}");
+
+            Assert.False(cloneResult.IsError);
+            Assert.True(exportResult.Handled);
+            Assert.False(exportResult.IsError);
+            Assert.Equal($"exported session transcript to {Path.GetFullPath(htmlPath)}", exportResult.Message);
+            Assert.Empty(runner.Inputs);
+
+            var html = File.ReadAllText(htmlPath);
+            Assert.Contains("<dt>Cwd</dt>", html, StringComparison.Ordinal);
+            Assert.Contains(Environment.CurrentDirectory, html, StringComparison.Ordinal);
+            Assert.Contains("<dt>Parent session</dt>", html, StringComparison.Ordinal);
+            Assert.Contains(treePath, html, StringComparison.Ordinal);
+            Assert.Contains("metadata visible", html, StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
     public async Task TryHandleAsync_ImportCommand_RestoresFlatSessionSnapshotWithoutInvokingRunner()
     {
         var path = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-import-{Guid.NewGuid():N}.json");
