@@ -4,7 +4,10 @@ using Tau.Ai;
 
 namespace Tau.CodingAgent.Runtime;
 
-public sealed record CodingAgentSettingsSnapshot(string? DefaultProvider, string? DefaultModel);
+public sealed record CodingAgentSettingsSnapshot(
+    string? DefaultProvider,
+    string? DefaultModel,
+    string? TreeFilterMode = null);
 
 public sealed class CodingAgentSettingsStore
 {
@@ -39,7 +42,7 @@ public sealed class CodingAgentSettingsStore
         {
             using var stream = File.OpenRead(_path);
             var document = JsonSerializer.Deserialize(stream, CodingAgentSettingsJsonContext.Default.CodingAgentSettingsDocument);
-            return new CodingAgentSettingsSnapshot(document?.DefaultProvider, document?.DefaultModel);
+            return new CodingAgentSettingsSnapshot(document?.DefaultProvider, document?.DefaultModel, document?.TreeFilterMode);
         }
         catch (JsonException)
         {
@@ -57,7 +60,8 @@ public sealed class CodingAgentSettingsStore
 
     public void SaveDefaultModel(Model model)
     {
-        Save(new CodingAgentSettingsSnapshot(model.Provider, model.Id));
+        var current = Load();
+        Save(current with { DefaultProvider = model.Provider, DefaultModel = model.Id });
     }
 
     public void Save(CodingAgentSettingsSnapshot snapshot)
@@ -66,6 +70,7 @@ public sealed class CodingAgentSettingsStore
         {
             DefaultProvider = snapshot.DefaultProvider,
             DefaultModel = snapshot.DefaultModel,
+            TreeFilterMode = snapshot.TreeFilterMode,
             UpdatedAt = DateTimeOffset.UtcNow
         };
 
@@ -94,6 +99,7 @@ internal sealed class CodingAgentSettingsDocument
 {
     public string? DefaultProvider { get; init; }
     public string? DefaultModel { get; init; }
+    public string? TreeFilterMode { get; init; }
     public DateTimeOffset UpdatedAt { get; init; }
 }
 

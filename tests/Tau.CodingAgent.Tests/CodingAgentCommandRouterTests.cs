@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Tau.Agent;
 using Tau.Ai;
 using Tau.CodingAgent.Runtime;
@@ -560,6 +561,155 @@ public class CodingAgentCommandRouterTests
     }
 
     [Fact]
+    public async Task TryHandleAsync_TreeCommand_AppliesFilterModesAndLabelTimestamps()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-coding-agent-tree-filter-" + Guid.NewGuid().ToString("N"));
+        var treePath = Path.Combine(directory, "session.jsonl");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.MutableMessages.Add(new UserMessage("first task"));
+        runner.MutableMessages.Add(new AssistantMessage([new ToolCallContent("call-1", "read_file", "{}")]));
+        runner.MutableMessages.Add(new ToolResultMessage("call-1", [new TextContent("done")]));
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+            var tree = CodingAgentTreeSessionController.OpenOrCreate(treePath);
+            tree.SyncFromRunner(runner);
+            var userEntryId = ReadMessageEntryId(treePath, "user");
+            tree.AppendLabelChange(userEntryId, "checkpoint");
+            var router = new CodingAgentCommandRouter(runner, treeSessionController: tree);
+
+            var defaultResult = await router.TryHandleAsync("/tree 20");
+            var noToolsResult = await router.TryHandleAsync("/tree no-tools");
+            var labeledResult = await router.TryHandleAsync("/tree labeled-only --label-time");
+            var allResult = await router.TryHandleAsync("/tree 20 all");
+
+            Assert.True(defaultResult.Handled);
+            Assert.False(defaultResult.IsError);
+            Assert.Contains("filter default", defaultResult.Message, StringComparison.Ordinal);
+            Assert.Contains("message user first task", defaultResult.Message, StringComparison.Ordinal);
+            Assert.Contains("message toolResult done", defaultResult.Message, StringComparison.Ordinal);
+            Assert.DoesNotContain("message assistant", defaultResult.Message, StringComparison.Ordinal);
+            Assert.DoesNotContain("model openai/gpt-5.4", defaultResult.Message, StringComparison.Ordinal);
+
+            Assert.False(noToolsResult.IsError);
+            Assert.Contains("filter no-tools", noToolsResult.Message, StringComparison.Ordinal);
+            Assert.DoesNotContain("message toolResult", noToolsResult.Message, StringComparison.Ordinal);
+
+            Assert.False(labeledResult.IsError);
+            Assert.Contains("filter labeled-only", labeledResult.Message, StringComparison.Ordinal);
+            Assert.Contains("message user first task [checkpoint] @", labeledResult.Message, StringComparison.Ordinal);
+            Assert.DoesNotContain("message toolResult", labeledResult.Message, StringComparison.Ordinal);
+
+            Assert.False(allResult.IsError);
+            Assert.Contains("filter all", allResult.Message, StringComparison.Ordinal);
+            Assert.Contains("model openai/gpt-5.4", allResult.Message, StringComparison.Ordinal);
+            Assert.Contains("message assistant", allResult.Message, StringComparison.Ordinal);
+            Assert.Contains("label ", allResult.Message, StringComparison.Ordinal);
+            Assert.Empty(runner.Inputs);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_TreeCommand_SearchesVisibleEntryTextAndLabels()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-coding-agent-tree-search-" + Guid.NewGuid().ToString("N"));
+        var treePath = Path.Combine(directory, "session.jsonl");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.MutableMessages.Add(new UserMessage("investigate renderer layout"));
+        runner.MutableMessages.Add(new AssistantMessage([new TextContent("renderer fixed")]));
+        runner.MutableMessages.Add(new UserMessage("update provider auth docs"));
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+            var tree = CodingAgentTreeSessionController.OpenOrCreate(treePath);
+            tree.SyncFromRunner(runner);
+            var authEntryId = ReadMessageEntryId(treePath, "user", "provider auth");
+            tree.AppendLabelChange(authEntryId, "docs-checkpoint");
+            var router = new CodingAgentCommandRouter(runner, treeSessionController: tree);
+
+            var rendererResult = await router.TryHandleAsync("/tree 20 --search renderer");
+            var labelResult = await router.TryHandleAsync("/tree labeled-only --search docs-checkpoint");
+            var noMatchResult = await router.TryHandleAsync("/tree user-only --search no-such-token");
+            var badSearchResult = await router.TryHandleAsync("/tree --search");
+
+            Assert.True(rendererResult.Handled);
+            Assert.False(rendererResult.IsError);
+            Assert.Contains("filter default, search renderer", rendererResult.Message, StringComparison.Ordinal);
+            Assert.Contains("message user investigate renderer layout", rendererResult.Message, StringComparison.Ordinal);
+            Assert.Contains("message assistant renderer fixed", rendererResult.Message, StringComparison.Ordinal);
+            Assert.DoesNotContain("provider auth docs", rendererResult.Message, StringComparison.Ordinal);
+
+            Assert.False(labelResult.IsError);
+            Assert.Contains("filter labeled-only, search docs-checkpoint", labelResult.Message, StringComparison.Ordinal);
+            Assert.Contains("provider auth docs [docs-checkpoint]", labelResult.Message, StringComparison.Ordinal);
+
+            Assert.False(noMatchResult.IsError);
+            Assert.Contains("tree has no entries matching filter", noMatchResult.Message, StringComparison.Ordinal);
+
+            Assert.True(badSearchResult.IsError);
+            Assert.Equal("usage: /tree [max entries] [default|no-tools|user-only|labeled-only|all] [--label-time] [--search query]", badSearchResult.Message);
+            Assert.Empty(runner.Inputs);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_TreeCommand_UsesConfiguredDefaultFilterMode()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-coding-agent-tree-settings-" + Guid.NewGuid().ToString("N"));
+        var treePath = Path.Combine(directory, "session.jsonl");
+        var settingsPath = Path.Combine(directory, "settings.json");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.MutableMessages.Add(new UserMessage("settings task"));
+        runner.MutableMessages.Add(new ToolResultMessage("call-1", [new TextContent("tool output")]));
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+            var tree = CodingAgentTreeSessionController.OpenOrCreate(treePath);
+            tree.SyncFromRunner(runner);
+            var settingsStore = new CodingAgentSettingsStore(settingsPath);
+            settingsStore.Save(new CodingAgentSettingsSnapshot(null, null, "no-tools"));
+            var router = new CodingAgentCommandRouter(runner, settingsStore, treeSessionController: tree);
+
+            var configuredDefaultResult = await router.TryHandleAsync("/tree 20");
+            var explicitAllResult = await router.TryHandleAsync("/tree 20 all");
+
+            Assert.True(configuredDefaultResult.Handled);
+            Assert.False(configuredDefaultResult.IsError);
+            Assert.Contains("filter no-tools", configuredDefaultResult.Message, StringComparison.Ordinal);
+            Assert.DoesNotContain("message toolResult", configuredDefaultResult.Message, StringComparison.Ordinal);
+
+            Assert.False(explicitAllResult.IsError);
+            Assert.Contains("filter all", explicitAllResult.Message, StringComparison.Ordinal);
+            Assert.Contains("message toolResult tool output", explicitAllResult.Message, StringComparison.Ordinal);
+            Assert.Empty(runner.Inputs);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
     public async Task TryHandleAsync_SessionCommandWithExtraArgs_ReturnsUsage()
     {
         var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
@@ -688,5 +838,51 @@ public class CodingAgentCommandRouterTests
                 Directory.Delete(directory, recursive: true);
             }
         }
+    }
+
+    private static string ReadMessageEntryId(string path, string role, string? textContains = null)
+    {
+        foreach (var line in File.ReadLines(path).Skip(1))
+        {
+            using var document = JsonDocument.Parse(line);
+            var root = document.RootElement;
+            if (!root.TryGetProperty("type", out var type) ||
+                !string.Equals(type.GetString(), "message", StringComparison.OrdinalIgnoreCase) ||
+                !root.TryGetProperty("message", out var message) ||
+                !message.TryGetProperty("role", out var messageRole) ||
+                !string.Equals(messageRole.GetString(), role, StringComparison.OrdinalIgnoreCase) ||
+                !root.TryGetProperty("id", out var id))
+            {
+                continue;
+            }
+
+            if (!string.IsNullOrWhiteSpace(textContains) && !MessageContains(message, textContains))
+            {
+                continue;
+            }
+
+            return id.GetString() ?? throw new InvalidOperationException("message entry id is empty");
+        }
+
+        throw new InvalidOperationException($"message entry with role '{role}' not found");
+    }
+
+    private static bool MessageContains(JsonElement message, string text)
+    {
+        if (!message.TryGetProperty("content", out var content) || content.ValueKind != JsonValueKind.Array)
+        {
+            return false;
+        }
+
+        foreach (var item in content.EnumerateArray())
+        {
+            if (item.TryGetProperty("text", out var textProperty) &&
+                textProperty.GetString()?.Contains(text, StringComparison.OrdinalIgnoreCase) == true)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 }

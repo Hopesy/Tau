@@ -29,6 +29,21 @@ public sealed record CodingAgentTreeSessionSummary(
     int BranchPointCount,
     int LabelCount);
 
+public enum CodingAgentTreeFilterMode
+{
+    Default,
+    NoTools,
+    UserOnly,
+    LabeledOnly,
+    All
+}
+
+public sealed record CodingAgentTreeFormatOptions(
+    int MaxEntries = 24,
+    CodingAgentTreeFilterMode FilterMode = CodingAgentTreeFilterMode.Default,
+    bool ShowLabelTimestamps = false,
+    string? SearchQuery = null);
+
 public sealed class CodingAgentTreeSessionController
 {
     private int _persistedMessageCount;
@@ -150,6 +165,8 @@ public sealed class CodingAgentTreeSessionController
     public CodingAgentTreeSessionSummary GetSummary() => Store.GetSummary();
 
     public string FormatTree(int maxEntries = 24) => Store.FormatTree(maxEntries);
+
+    public string FormatTree(CodingAgentTreeFormatOptions options) => Store.FormatTree(options);
 
     private void MarkSnapshot(CodingAgentTreeSessionSnapshot snapshot)
     {
@@ -474,7 +491,10 @@ public sealed class CodingAgentTreeSessionStore
         }
     }
 
-    public string FormatTree(int maxEntries = 24)
+    public string FormatTree(int maxEntries = 24) =>
+        FormatTree(new CodingAgentTreeFormatOptions(maxEntries));
+
+    public string FormatTree(CodingAgentTreeFormatOptions options)
     {
         var state = ReadState();
         var branchIds = state.GetBranch(state.LeafId)
@@ -483,7 +503,7 @@ public sealed class CodingAgentTreeSessionStore
         var summary = GetSummary();
         var lines = new List<string>
         {
-            $"tree: file {summary.FilePath}, session {ShortId(summary.SessionId)}, leaf {ShortId(summary.LeafId)}, entries {summary.EntryCount}, messages {summary.TotalMessageCount}, branch messages {summary.BranchMessageCount}, branches {summary.BranchPointCount}, labels {summary.LabelCount}"
+            $"tree: file {summary.FilePath}, session {ShortId(summary.SessionId)}, leaf {ShortId(summary.LeafId)}, entries {summary.EntryCount}, messages {summary.TotalMessageCount}, branch messages {summary.BranchMessageCount}, branches {summary.BranchPointCount}, labels {summary.LabelCount}, filter {FormatFilterMode(options.FilterMode)}{FormatSearchQuery(options.SearchQuery)}"
         };
 
         if (state.Entries.Count == 0)
@@ -492,15 +512,36 @@ public sealed class CodingAgentTreeSessionStore
             return string.Join('\n', lines);
         }
 
-        var visibleEntries = state.Entries
-            .Skip(Math.Max(0, state.Entries.Count - Math.Max(1, maxEntries)));
+        var filteredEntries = state.Entries
+            .Where(entry => ShouldShowEntry(entry, state, options.FilterMode))
+            .Where(entry => MatchesSearch(entry, state, options.SearchQuery))
+            .ToArray();
+        var visibleEntries = filteredEntries
+            .Skip(Math.Max(0, filteredEntries.Length - Math.Max(1, options.MaxEntries)));
+        var wroteEntry = false;
         foreach (var entry in visibleEntries)
         {
-            var marker = branchIds.Contains(entry.Id) ? "*" : " ";
+            wroteEntry = true;
+            var marker = entry.Id.Equals(state.LeafId, StringComparison.OrdinalIgnoreCase)
+                ? ">"
+                : branchIds.Contains(entry.Id)
+                    ? "*"
+                    : " ";
+            var depth = Math.Min(GetDepth(entry, state.ById), 16);
+            var indent = new string(' ', depth * 2);
             var label = state.LabelsById.TryGetValue(entry.Id, out var resolvedLabel)
                 ? $" [{resolvedLabel}]"
                 : string.Empty;
-            lines.Add($"{marker} {ShortId(entry.Id)} <- {ShortId(entry.ParentId)} {DescribeEntry(entry)}{label}");
+            var labelTime = options.ShowLabelTimestamps &&
+                            state.LabelTimestampsById.TryGetValue(entry.Id, out var timestamp)
+                ? $" @{timestamp}"
+                : string.Empty;
+            lines.Add($"{marker} {indent}{ShortId(entry.Id)} <- {ShortId(entry.ParentId)} {DescribeEntry(entry)}{label}{labelTime}");
+        }
+
+        if (!wroteEntry)
+        {
+            lines.Add("tree has no entries matching filter");
         }
 
         return string.Join('\n', lines);
@@ -697,6 +738,202 @@ public sealed class CodingAgentTreeSessionStore
     private static string ShortId(string? id) =>
         string.IsNullOrWhiteSpace(id) ? "root" : id.Length <= 8 ? id : id[..8];
 
+    private static bool ShouldShowEntry(
+        CodingAgentTreeSessionEntry entry,
+        TreeState state,
+        CodingAgentTreeFilterMode filterMode)
+    {
+        if (filterMode == CodingAgentTreeFilterMode.All)
+        {
+            return true;
+        }
+
+        if (filterMode == CodingAgentTreeFilterMode.LabeledOnly)
+        {
+            return state.LabelsById.ContainsKey(entry.Id);
+        }
+
+        if (filterMode == CodingAgentTreeFilterMode.UserOnly)
+        {
+            return entry.Type == MessageType &&
+                   string.Equals(entry.Message?.Role, "user", StringComparison.OrdinalIgnoreCase);
+        }
+
+        var isSettingsEntry = entry.Type is LabelType or ModelChangeType or SessionInfoType;
+        if (isSettingsEntry)
+        {
+            return false;
+        }
+
+        if (IsAssistantToolOnlyMessage(entry, state.LeafId))
+        {
+            return false;
+        }
+
+        if (filterMode == CodingAgentTreeFilterMode.NoTools)
+        {
+            return entry.Type != MessageType ||
+                   !string.Equals(entry.Message?.Role, "toolResult", StringComparison.OrdinalIgnoreCase);
+        }
+
+        return true;
+    }
+
+    private static bool MatchesSearch(
+        CodingAgentTreeSessionEntry entry,
+        TreeState state,
+        string? searchQuery)
+    {
+        if (string.IsNullOrWhiteSpace(searchQuery))
+        {
+            return true;
+        }
+
+        var haystack = BuildSearchText(entry, state);
+        var tokens = searchQuery
+            .Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        return tokens.All(token => haystack.Contains(token, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static string BuildSearchText(CodingAgentTreeSessionEntry entry, TreeState state)
+    {
+        var parts = new List<string>
+        {
+            entry.Type,
+            entry.Id
+        };
+
+        if (!string.IsNullOrWhiteSpace(entry.ParentId))
+        {
+            parts.Add(entry.ParentId);
+        }
+
+        if (state.LabelsById.TryGetValue(entry.Id, out var label))
+        {
+            parts.Add(label);
+        }
+
+        if (!string.IsNullOrWhiteSpace(entry.Provider))
+        {
+            parts.Add(entry.Provider);
+        }
+
+        if (!string.IsNullOrWhiteSpace(entry.Model))
+        {
+            parts.Add(entry.Model);
+        }
+
+        if (!string.IsNullOrWhiteSpace(entry.Name))
+        {
+            parts.Add(entry.Name);
+        }
+
+        if (!string.IsNullOrWhiteSpace(entry.Action))
+        {
+            parts.Add(entry.Action);
+        }
+
+        if (!string.IsNullOrWhiteSpace(entry.TargetId))
+        {
+            parts.Add(entry.TargetId);
+        }
+
+        if (!string.IsNullOrWhiteSpace(entry.Label))
+        {
+            parts.Add(entry.Label);
+        }
+
+        if (!string.IsNullOrWhiteSpace(entry.Summary))
+        {
+            parts.Add(entry.Summary);
+        }
+
+        if (entry.Message is { } message)
+        {
+            parts.Add(message.Role);
+            if (!string.IsNullOrWhiteSpace(message.ToolCallId))
+            {
+                parts.Add(message.ToolCallId);
+            }
+
+            foreach (var content in message.Content)
+            {
+                parts.Add(content.Type);
+                if (!string.IsNullOrWhiteSpace(content.Text))
+                {
+                    parts.Add(content.Text);
+                }
+
+                if (!string.IsNullOrWhiteSpace(content.Thinking))
+                {
+                    parts.Add(content.Thinking);
+                }
+
+                if (!string.IsNullOrWhiteSpace(content.Id))
+                {
+                    parts.Add(content.Id);
+                }
+
+                if (!string.IsNullOrWhiteSpace(content.Name))
+                {
+                    parts.Add(content.Name);
+                }
+
+                if (!string.IsNullOrWhiteSpace(content.Arguments))
+                {
+                    parts.Add(content.Arguments);
+                }
+            }
+        }
+
+        return string.Join(' ', parts);
+    }
+
+    private static bool IsAssistantToolOnlyMessage(CodingAgentTreeSessionEntry entry, string? leafId)
+    {
+        var message = entry.Message;
+        if (entry.Type != MessageType ||
+            message is null ||
+            !string.Equals(message.Role, "assistant", StringComparison.OrdinalIgnoreCase) ||
+            entry.Id.Equals(leafId, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        return !message.Content.Any(static content =>
+            content.Type == "text" && !string.IsNullOrWhiteSpace(content.Text));
+    }
+
+    private static int GetDepth(
+        CodingAgentTreeSessionEntry entry,
+        IReadOnlyDictionary<string, CodingAgentTreeSessionEntry> byId)
+    {
+        var depth = 0;
+        var parentId = entry.ParentId;
+        while (!string.IsNullOrWhiteSpace(parentId) &&
+               byId.TryGetValue(parentId, out var parent) &&
+               depth < 128)
+        {
+            depth++;
+            parentId = parent.ParentId;
+        }
+
+        return depth;
+    }
+
+    private static string FormatFilterMode(CodingAgentTreeFilterMode filterMode) =>
+        filterMode switch
+        {
+            CodingAgentTreeFilterMode.NoTools => "no-tools",
+            CodingAgentTreeFilterMode.UserOnly => "user-only",
+            CodingAgentTreeFilterMode.LabeledOnly => "labeled-only",
+            CodingAgentTreeFilterMode.All => "all",
+            _ => "default"
+        };
+
+    private static string FormatSearchQuery(string? searchQuery) =>
+        string.IsNullOrWhiteSpace(searchQuery) ? string.Empty : $", search {searchQuery.Trim()}";
+
     private static string DescribeEntry(CodingAgentTreeSessionEntry entry)
     {
         return entry.Type switch
@@ -747,7 +984,9 @@ public sealed class CodingAgentTreeSessionStore
             ById = entries.ToDictionary(static entry => entry.Id, StringComparer.OrdinalIgnoreCase);
             EntryIds = entries.Select(static entry => entry.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
             LeafId = entries.Count == 0 ? null : entries[^1].Id;
-            LabelsById = BuildLabelsById(entries);
+            var labels = BuildLabelsById(entries);
+            LabelsById = labels.Labels;
+            LabelTimestampsById = labels.LabelTimestamps;
             BranchPointCount = entries
                 .Where(static entry => entry.ParentId is not null)
                 .GroupBy(static entry => entry.ParentId, StringComparer.OrdinalIgnoreCase)
@@ -760,6 +999,7 @@ public sealed class CodingAgentTreeSessionStore
         public ISet<string> EntryIds { get; }
         public string? LeafId { get; }
         public IReadOnlyDictionary<string, string> LabelsById { get; }
+        public IReadOnlyDictionary<string, string> LabelTimestampsById { get; }
         public int BranchPointCount { get; }
 
         public CodingAgentTreeSessionEntry ResolveEntryId(string idOrPrefix)
@@ -801,9 +1041,11 @@ public sealed class CodingAgentTreeSessionStore
             return path;
         }
 
-        private static IReadOnlyDictionary<string, string> BuildLabelsById(IReadOnlyList<CodingAgentTreeSessionEntry> entries)
+        private static (IReadOnlyDictionary<string, string> Labels, IReadOnlyDictionary<string, string> LabelTimestamps) BuildLabelsById(
+            IReadOnlyList<CodingAgentTreeSessionEntry> entries)
         {
             var labels = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var timestamps = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             foreach (var entry in entries)
             {
                 if (entry.Type != LabelType || string.IsNullOrWhiteSpace(entry.TargetId))
@@ -815,14 +1057,16 @@ public sealed class CodingAgentTreeSessionStore
                 if (label is null)
                 {
                     labels.Remove(entry.TargetId);
+                    timestamps.Remove(entry.TargetId);
                 }
                 else
                 {
                     labels[entry.TargetId] = label;
+                    timestamps[entry.TargetId] = entry.Timestamp.ToString("yyyy-MM-dd HH:mm:ss zzz");
                 }
             }
 
-            return labels;
+            return (labels, timestamps);
         }
     }
 }

@@ -48,8 +48,8 @@
 
 - [x] flat session 持久化（`TAU_CODING_AGENT_SESSION_FILE` 或 `./.tau/coding-agent-session.json`，启动自动 rehydrate，回合后保存）
 - [x] JSONL session tree baseline（默认 `./.tau/coding-agent-session.jsonl`，`TAU_CODING_AGENT_TREE_SESSION_FILE` 或 `.jsonl` 形式的 `TAU_CODING_AGENT_SESSION_FILE` 可覆盖；已支持 header、append-only message/model/session-info/label entries、entry id/parentId/timestamp、runner diff 同步、current branch restore）
-- [~] session lifecycle（已补 `/new`、`/session` tree stats、估算 token/context usage、auto-compaction threshold budget、`/name`、`/tree`、`/label`、`/fork`、`/resume`、`.jsonl` export/import；仍缺 interactive tree navigator 和 richer session metadata）
-- [x] settings / model selection / provider selection（`/model`、`/provider`、`/models`、`/providers`，默认写入 `TAU_CODING_AGENT_SETTINGS_FILE` 或 `./.tau/coding-agent-settings.json`）
+- [~] session lifecycle（已补 `/new`、`/session` tree stats、估算 token/context usage、auto-compaction threshold budget、`/name`、`/tree` 过滤/搜索模式与 label timestamp、`/label`、`/fork`、`/resume`、`.jsonl` export/import；仍缺真正的 interactive tree navigator 和更完整 session metadata）
+- [x] settings / model selection / provider selection（`/model`、`/provider`、`/models`、`/providers`，默认写入 `TAU_CODING_AGENT_SETTINGS_FILE` 或 `./.tau/coding-agent-settings.json`；同一 settings 文件支持上游兼容 `treeFilterMode` 作为 `/tree` 默认过滤模式）
 - [~] auth 管理入口（已补 `/auth` 状态查看和 `/login` 骨架提示；真实 OAuth/device flow 仍在 Tau.Ai OAuth backlog）
 - [x] slash command router 抽离（`CodingAgentCommandRouter`；当前命令行为不变，为 `/compact` / login flow 等后续命令留 seam）
 - [x] local quit command（`/quit` 结束当前 CLI loop，不调用 runner，不进入 LLM conversation）
@@ -60,7 +60,7 @@
 - [x] local export command（`/export` 默认导出 standalone HTML transcript；`/export <path>` 对 `.html/.htm` 路径导出 HTML，对 `.jsonl` 路径导出当前 branch JSONL，其他路径导出 Tau 平面 session snapshot JSON；HTML 提供 branch outline 并内嵌可下载 JSONL；仍缺上游 share/Gist export 和 richer HTML template）
 - [x] local import command（`/import <path>` 严格导入 Tau snapshot JSON 或 resume JSONL session，并恢复 messages/provider/model/display name；仍缺上游 share/import richer metadata）
 - [~] manual / auto compaction（已补 `/compact [instructions]`，当前使用当前模型生成摘要并把 flat session 压成单条 summary message；JSONL tree 会追加 `compaction` entry，记录 `summary`、`firstKeptEntryId`、估算 `tokensBefore` 和 `fromHook` baseline，并在 branch restore 时由 entry 重建 summary message；已补 `TAU_CODING_AGENT_AUTO_COMPACT_TOKENS` / `TAU_CODING_AGENT_AUTO_COMPACT_INSTRUCTIONS`，普通消息执行前超过阈值会自动 compact 并写 `fromHook=true`，`/session` 会显示当前估算 token、模型 context window 和 auto threshold 剩余量；仍缺 retry/rollback 和上游 retained-message cut-point 语义）
-- [ ] JSONL interactive tree navigator / richer session metadata
+- [~] JSONL tree navigator / richer session metadata（已补命令行 tree filter/search：`default/no-tools/user-only/labeled-only/all`、settings `treeFilterMode`、`--search query` 与 `--label-time`；仍缺真正的 TUI interactive navigator、overlay search/fold/select 和完整 metadata）
 - [~] dynamic slash command registry / prompt registry / skills/extensions discovery（已补 prompt template discovery/expansion baseline：`~/.tau/prompts`、`./.tau/prompts`、`TAU_CODING_AGENT_PROMPT_PATHS`、`/prompts`、`$1/$@/$ARGUMENTS/${@:N[:L]}` 参数替换；已补 skill command discovery/expansion baseline：`~/.tau/skills`、`./.tau/skills`、`TAU_CODING_AGENT_SKILL_PATHS`、`/skills`、`/skill:<name>`、`disable-model-invocation` 和默认 system prompt inventory；已补 JSON extension command/resource discovery baseline：`~/.tau/extensions`、`./.tau/extensions`、`TAU_CODING_AGENT_EXTENSION_PATHS`、`/extensions`、`response/prompt` 参数替换、`sendToRunner`、重复命令 `name:1/name:2`、`promptPaths/skillPaths` 资源贡献；仍缺完整 TypeScript extension runtime、custom tools/events、theme loader、resource selector 和 diagnostics）
 - [x] standalone HTML transcript export（`/export` 默认 HTML，`/export <path.html|path.htm>` 显式 HTML，覆盖 text/thinking/tool call/tool result/image 内容，并提供 branch outline 和本地 Download JSONL）
 - [ ] share/Gist export parity 和上游 richer HTML template

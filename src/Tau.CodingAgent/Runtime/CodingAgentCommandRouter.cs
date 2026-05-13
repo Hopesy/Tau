@@ -270,24 +270,18 @@ public sealed class CodingAgentCommandRouter
 
     private CodingAgentCommandResult HandleTreeCommand(IReadOnlyList<string> parts)
     {
-        if (parts.Count > 2)
-        {
-            return CodingAgentCommandResult.Error(CodingAgentCommandCatalog.Usage("/tree"));
-        }
-
         if (_treeSessionController is null)
         {
             return CodingAgentCommandResult.Error("tree sessions are not enabled");
         }
 
-        var maxEntries = 24;
-        if (parts.Count == 2 && (!int.TryParse(parts[1], out maxEntries) || maxEntries <= 0))
+        if (!TryParseTreeOptions(parts, GetDefaultTreeFilterMode(), out var options))
         {
             return CodingAgentCommandResult.Error(CodingAgentCommandCatalog.Usage("/tree"));
         }
 
         _treeSessionController.SyncFromRunner(_runner);
-        return CodingAgentCommandResult.Status(_treeSessionController.FormatTree(maxEntries));
+        return CodingAgentCommandResult.Status(_treeSessionController.FormatTree(options));
     }
 
     private CodingAgentCommandResult HandleLabelCommand(string input, IReadOnlyList<string> parts)
@@ -589,6 +583,105 @@ public sealed class CodingAgentCommandRouter
 
     private static string FormatTreeId(string? id) =>
         string.IsNullOrWhiteSpace(id) ? "root" : id.Length <= 8 ? id : id[..8];
+
+    private static bool TryParseTreeOptions(
+        IReadOnlyList<string> parts,
+        CodingAgentTreeFilterMode defaultFilterMode,
+        out CodingAgentTreeFormatOptions options)
+    {
+        var maxEntries = 24;
+        var filterMode = defaultFilterMode;
+        var showLabelTimestamps = false;
+        string? searchQuery = null;
+        var hasMaxEntries = false;
+        var hasFilter = false;
+
+        for (var i = 1; i < parts.Count; i++)
+        {
+            var part = parts[i];
+            if (IsSearchOption(part))
+            {
+                if (!string.IsNullOrWhiteSpace(searchQuery) || i == parts.Count - 1)
+                {
+                    options = new CodingAgentTreeFormatOptions();
+                    return false;
+                }
+
+                searchQuery = string.Join(' ', parts.Skip(i + 1));
+                break;
+            }
+
+            if (int.TryParse(part, out var parsedMax))
+            {
+                if (hasMaxEntries || parsedMax <= 0)
+                {
+                    options = new CodingAgentTreeFormatOptions();
+                    return false;
+                }
+
+                maxEntries = parsedMax;
+                hasMaxEntries = true;
+                continue;
+            }
+
+            if (IsLabelTimestampOption(part))
+            {
+                showLabelTimestamps = true;
+                continue;
+            }
+
+            if (TryParseTreeFilterMode(part, out var parsedFilter))
+            {
+                if (hasFilter)
+                {
+                    options = new CodingAgentTreeFormatOptions();
+                    return false;
+                }
+
+                filterMode = parsedFilter;
+                hasFilter = true;
+                continue;
+            }
+
+            options = new CodingAgentTreeFormatOptions();
+            return false;
+        }
+
+        options = new CodingAgentTreeFormatOptions(maxEntries, filterMode, showLabelTimestamps, searchQuery);
+        return true;
+    }
+
+    private CodingAgentTreeFilterMode GetDefaultTreeFilterMode()
+    {
+        var configured = _settingsStore?.Load().TreeFilterMode;
+        return !string.IsNullOrWhiteSpace(configured) &&
+               TryParseTreeFilterMode(configured, out var filterMode)
+            ? filterMode
+            : CodingAgentTreeFilterMode.Default;
+    }
+
+    private static bool IsSearchOption(string value) =>
+        value.Equals("--search", StringComparison.OrdinalIgnoreCase) ||
+        value.Equals("-s", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsLabelTimestampOption(string value) =>
+        value.Equals("--label-time", StringComparison.OrdinalIgnoreCase) ||
+        value.Equals("--label-timestamps", StringComparison.OrdinalIgnoreCase) ||
+        value.Equals("+label-time", StringComparison.OrdinalIgnoreCase);
+
+    private static bool TryParseTreeFilterMode(string value, out CodingAgentTreeFilterMode filterMode)
+    {
+        filterMode = value.ToLowerInvariant() switch
+        {
+            "default" => CodingAgentTreeFilterMode.Default,
+            "no-tools" or "notools" => CodingAgentTreeFilterMode.NoTools,
+            "user" or "user-only" => CodingAgentTreeFilterMode.UserOnly,
+            "labeled" or "labels" or "labeled-only" => CodingAgentTreeFilterMode.LabeledOnly,
+            "all" => CodingAgentTreeFilterMode.All,
+            _ => (CodingAgentTreeFilterMode)(-1)
+        };
+        return filterMode != (CodingAgentTreeFilterMode)(-1);
+    }
 
     private string FormatTokenBudget(CodingAgentSessionStats stats)
     {

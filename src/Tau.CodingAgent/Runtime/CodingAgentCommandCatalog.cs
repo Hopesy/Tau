@@ -13,7 +13,7 @@ public static class CodingAgentCommandCatalog
         new("/import", "/import <path>", "Import a flat JSON snapshot or resume a JSONL session"),
         new("/new", "/new", "Start a new session"),
         new("/session", "/session", "Show current session status"),
-        new("/tree", "/tree [max entries]", "Show the current JSONL session tree"),
+        new("/tree", "/tree [max entries] [default|no-tools|user-only|labeled-only|all] [--label-time] [--search query]", "Show the current JSONL session tree"),
         new("/label", "/label <entry-id> [label | clear]", "Show, set, or clear a JSONL session entry label"),
         new("/fork", "/fork <entry-id>", "Fork the current JSONL session from an earlier entry"),
         new("/resume", "/resume [latest | path.jsonl]", "Resume a JSONL session"),
