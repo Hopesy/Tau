@@ -27,7 +27,9 @@ public sealed record CodingAgentTreeSessionSummary(
     int BranchEntryCount,
     int BranchMessageCount,
     int BranchPointCount,
-    int LabelCount);
+    int LabelCount,
+    string Cwd,
+    string? ParentSession);
 
 public enum CodingAgentTreeFilterMode
 {
@@ -296,7 +298,9 @@ public sealed class CodingAgentTreeSessionStore
             branch.Count,
             branch.Count(static entry => entry.Type == MessageType),
             state.BranchPointCount,
-            state.LabelsById.Count);
+            state.LabelsById.Count,
+            state.Header.Cwd,
+            state.Header.ParentSession);
     }
 
     public IReadOnlyList<string> AppendMessages(IReadOnlyList<ChatMessage> messages, int startIndex)
@@ -535,7 +539,7 @@ public sealed class CodingAgentTreeSessionStore
         var summary = GetSummary();
         var lines = new List<string>
         {
-            $"tree: file {summary.FilePath}, session {ShortId(summary.SessionId)}, leaf {ShortId(summary.LeafId)}, entries {summary.EntryCount}, messages {summary.TotalMessageCount}, branch messages {summary.BranchMessageCount}, branches {summary.BranchPointCount}, labels {summary.LabelCount}, filter {FormatFilterMode(options.FilterMode)}{FormatSearchQuery(options.SearchQuery)}"
+            $"tree: file {summary.FilePath}, session {ShortId(summary.SessionId)}, leaf {ShortId(summary.LeafId)}, entries {summary.EntryCount}, messages {summary.TotalMessageCount}, branch messages {summary.BranchMessageCount}, branches {summary.BranchPointCount}, labels {summary.LabelCount}, cwd {summary.Cwd}{FormatParentSession(summary.ParentSession)}, filter {FormatFilterMode(options.FilterMode)}{FormatSearchQuery(options.SearchQuery)}"
         };
 
         if (state.Entries.Count == 0)
@@ -989,6 +993,9 @@ public sealed class CodingAgentTreeSessionStore
 
     private static string FormatSearchQuery(string? searchQuery) =>
         string.IsNullOrWhiteSpace(searchQuery) ? string.Empty : $", search {searchQuery.Trim()}";
+
+    private static string FormatParentSession(string? parentSession) =>
+        string.IsNullOrWhiteSpace(parentSession) ? string.Empty : $", parent {parentSession}";
 
     private static string DescribeEntry(CodingAgentTreeSessionEntry entry)
     {

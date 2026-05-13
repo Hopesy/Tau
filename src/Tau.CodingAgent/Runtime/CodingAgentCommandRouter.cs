@@ -262,7 +262,7 @@ public sealed class CodingAgentCommandRouter
             _treeSessionController.SyncFromRunner(_runner);
             var tree = _treeSessionController.GetSummary();
             return CodingAgentCommandResult.Status(
-                $"session: name {FormatSessionName(stats.SessionName)}, model {stats.Provider}/{stats.Model}, messages {stats.TotalMessages} (user {stats.UserMessages}, assistant {stats.AssistantMessages}, tool {stats.ToolResultMessages}, toolCalls {stats.ToolCalls}), tokens {tokenBudget}, file {file}, tree {tree.FilePath}, leaf {FormatTreeId(tree.LeafId)}, entries {tree.EntryCount}, messages {tree.TotalMessageCount}, branch entries {tree.BranchEntryCount}, branch messages {tree.BranchMessageCount}, branches {tree.BranchPointCount}, labels {tree.LabelCount}");
+                $"session: name {FormatSessionName(stats.SessionName)}, model {stats.Provider}/{stats.Model}, messages {stats.TotalMessages} (user {stats.UserMessages}, assistant {stats.AssistantMessages}, tool {stats.ToolResultMessages}, toolCalls {stats.ToolCalls}), tokens {tokenBudget}, file {file}, tree {tree.FilePath}, leaf {FormatTreeId(tree.LeafId)}, entries {tree.EntryCount}, messages {tree.TotalMessageCount}, branch entries {tree.BranchEntryCount}, branch messages {tree.BranchMessageCount}, branches {tree.BranchPointCount}, labels {tree.LabelCount}, cwd {tree.Cwd}{FormatParentSession(tree.ParentSession)}");
         }
 
         return CodingAgentCommandResult.Status(
@@ -608,6 +608,9 @@ public sealed class CodingAgentCommandRouter
 
     private static string FormatTreeId(string? id) =>
         string.IsNullOrWhiteSpace(id) ? "root" : id.Length <= 8 ? id : id[..8];
+
+    private static string FormatParentSession(string? parentSession) =>
+        string.IsNullOrWhiteSpace(parentSession) ? string.Empty : $", parent {parentSession}";
 
     private static bool TryParseTreeOptions(
         IReadOnlyList<string> parts,

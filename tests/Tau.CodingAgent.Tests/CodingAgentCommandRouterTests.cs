@@ -549,6 +549,7 @@ public class CodingAgentCommandRouterTests
             Assert.Contains("tokens ~5/128000 context (127995 remaining)", result.Message, StringComparison.Ordinal);
             Assert.Contains($", tree {treePath}, leaf ", result.Message, StringComparison.Ordinal);
             Assert.Contains("branch messages 1", result.Message, StringComparison.Ordinal);
+            Assert.Contains($", cwd {Environment.CurrentDirectory}", result.Message, StringComparison.Ordinal);
             Assert.Empty(runner.Inputs);
         }
         finally
@@ -745,6 +746,18 @@ public class CodingAgentCommandRouterTests
             Assert.Equal(tree.Path, cloneSnapshot.FilePath);
             Assert.Equal(2, cloneSnapshot.Messages.Count);
             Assert.Equal("clone source", cloneSnapshot.Name);
+
+            var cloneSummary = tree.GetSummary();
+            Assert.Equal(Environment.CurrentDirectory, cloneSummary.Cwd);
+            Assert.Equal(treePath, cloneSummary.ParentSession);
+
+            var sessionResult = await router.TryHandleAsync("/session");
+            var treeResult = await router.TryHandleAsync("/tree 20 all");
+
+            Assert.False(sessionResult.IsError);
+            Assert.Contains($", cwd {Environment.CurrentDirectory}, parent {treePath}", sessionResult.Message, StringComparison.Ordinal);
+            Assert.False(treeResult.IsError);
+            Assert.Contains($", cwd {Environment.CurrentDirectory}, parent {treePath}, filter all", treeResult.Message, StringComparison.Ordinal);
         }
         finally
         {
