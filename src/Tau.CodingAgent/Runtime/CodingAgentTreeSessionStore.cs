@@ -146,6 +146,21 @@ public sealed class CodingAgentTreeSessionController
         return snapshot;
     }
 
+    public CodingAgentTreeSessionSnapshot? CloneCurrentBranch()
+    {
+        var current = Store.LoadCurrentBranchSnapshot();
+        if (current.Messages.Count == 0)
+        {
+            return null;
+        }
+
+        var clonePath = Store.ExportCurrentBranchToNewSession();
+        Store = new CodingAgentTreeSessionStore(clonePath);
+        var snapshot = Store.LoadCurrentBranchSnapshot();
+        MarkSnapshot(snapshot);
+        return snapshot;
+    }
+
     public CodingAgentTreeSessionSnapshot Resume(string path)
     {
         Store = new CodingAgentTreeSessionStore(path);
@@ -246,10 +261,12 @@ public sealed class CodingAgentTreeSessionStore
             candidates.Add(defaultPath);
         }
 
-        var sessionsDir = System.IO.Path.Combine(Environment.CurrentDirectory, ".tau", "coding-agent-sessions");
-        if (Directory.Exists(sessionsDir))
+        foreach (var sessionsDir in GetSessionSearchDirectories())
         {
-            candidates.AddRange(Directory.EnumerateFiles(sessionsDir, "*.jsonl").Where(IsValidSessionFileWithEntries));
+            if (Directory.Exists(sessionsDir))
+            {
+                candidates.AddRange(Directory.EnumerateFiles(sessionsDir, "*.jsonl").Where(IsValidSessionFileWithEntries));
+            }
         }
 
         return candidates
@@ -453,6 +470,21 @@ public sealed class CodingAgentTreeSessionStore
         using var writer = new StringWriter(builder);
         WriteCurrentBranch(writer);
         return builder.ToString();
+    }
+
+    public string ExportCurrentBranchToNewSession()
+    {
+        var directory = GetCloneSessionDirectory();
+        Directory.CreateDirectory(directory);
+
+        string path;
+        do
+        {
+            path = System.IO.Path.Combine(directory, $"tau-session-{CreateSessionId()}.jsonl");
+        }
+        while (File.Exists(path));
+
+        return ExportCurrentBranch(path);
     }
 
     private void WriteCurrentBranch(TextWriter writer)
@@ -731,6 +763,30 @@ public sealed class CodingAgentTreeSessionStore
     }
 
     private static string CreateSessionId() => $"{DateTimeOffset.UtcNow:yyyyMMddHHmmss}-{Guid.NewGuid():N}";
+
+    private string GetCloneSessionDirectory()
+    {
+        var directory = System.IO.Path.GetDirectoryName(_path);
+        return System.IO.Path.Combine(
+            string.IsNullOrWhiteSpace(directory) ? Environment.CurrentDirectory : directory,
+            "coding-agent-sessions");
+    }
+
+    private static IReadOnlyList<string> GetSessionSearchDirectories()
+    {
+        var directories = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            System.IO.Path.Combine(Environment.CurrentDirectory, ".tau", "coding-agent-sessions")
+        };
+
+        var defaultDirectory = System.IO.Path.GetDirectoryName(GetDefaultPath());
+        if (!string.IsNullOrWhiteSpace(defaultDirectory))
+        {
+            directories.Add(System.IO.Path.Combine(defaultDirectory, "coding-agent-sessions"));
+        }
+
+        return [.. directories];
+    }
 
     private static string? NormalizeName(string? name) =>
         string.IsNullOrWhiteSpace(name) ? null : name.Trim();

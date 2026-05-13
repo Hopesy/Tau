@@ -41,7 +41,7 @@ public class CodingAgentHostTests
 
         Assert.Empty(runner.Inputs);
         Assert.Contains(
-            "status> commands: /help, /name, /copy, /export, /import, /new, /session, /tree, /label, /fork, /resume, /quit, /model, /provider, /models, /providers, /prompts, /skills, /extensions, /auth, /login, /compact",
+            "status> commands: /help, /name, /copy, /export, /import, /new, /session, /tree, /label, /fork, /clone, /resume, /quit, /model, /provider, /models, /providers, /prompts, /skills, /extensions, /auth, /login, /compact",
             terminal.FlattenedText());
     }
 

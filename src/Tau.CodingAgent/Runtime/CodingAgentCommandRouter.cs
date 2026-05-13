@@ -68,6 +68,7 @@ public sealed class CodingAgentCommandRouter
                 "/tree" => HandleTreeCommand(parts),
                 "/label" => HandleLabelCommand(input, parts),
                 "/fork" => HandleForkCommand(parts),
+                "/clone" => HandleCloneCommand(parts),
                 "/resume" => HandleResumeCommand(input, parts),
                 "/model" => HandleModelCommand(parts),
                 "/provider" => HandleProviderCommand(parts),
@@ -327,6 +328,30 @@ public sealed class CodingAgentCommandRouter
         _runner.RestoreSession(snapshot.ToFlatSnapshot());
         return CodingAgentCommandResult.Status(
             $"forked session at {parts[1]}: leaf {FormatTreeId(snapshot.LeafId)}, messages {snapshot.Messages.Count}, model {_runner.Model.Provider}/{_runner.Model.Id}");
+    }
+
+    private CodingAgentCommandResult HandleCloneCommand(IReadOnlyList<string> parts)
+    {
+        if (parts.Count != 1)
+        {
+            return CodingAgentCommandResult.Error(CodingAgentCommandCatalog.Usage("/clone"));
+        }
+
+        if (_treeSessionController is null)
+        {
+            return CodingAgentCommandResult.Error("tree sessions are not enabled");
+        }
+
+        _treeSessionController.SyncFromRunner(_runner);
+        var snapshot = _treeSessionController.CloneCurrentBranch();
+        if (snapshot is null)
+        {
+            return CodingAgentCommandResult.Status("Nothing to clone yet");
+        }
+
+        _runner.RestoreSession(snapshot.ToFlatSnapshot());
+        return CodingAgentCommandResult.Status(
+            $"cloned session to {snapshot.FilePath}: leaf {FormatTreeId(snapshot.LeafId)}, messages {snapshot.Messages.Count}, model {_runner.Model.Provider}/{_runner.Model.Id}");
     }
 
     private CodingAgentCommandResult HandleResumeCommand(string input, IReadOnlyList<string> parts)

@@ -165,7 +165,7 @@ public class CodingAgentCommandRouterTests
     public void CommandCatalog_HelpLine_MatchesSupportedCommandNames()
     {
         Assert.Equal(
-            "commands: /help, /name, /copy, /export, /import, /new, /session, /tree, /label, /fork, /resume, /quit, /model, /provider, /models, /providers, /prompts, /skills, /extensions, /auth, /login, /compact",
+            "commands: /help, /name, /copy, /export, /import, /new, /session, /tree, /label, /fork, /clone, /resume, /quit, /model, /provider, /models, /providers, /prompts, /skills, /extensions, /auth, /login, /compact",
             CodingAgentCommandCatalog.HelpLine);
         Assert.All(CodingAgentCommandCatalog.SupportedCommands, command =>
         {
@@ -186,7 +186,7 @@ public class CodingAgentCommandRouterTests
         Assert.True(result.Handled);
         Assert.False(result.IsError);
         Assert.Equal(
-            "commands: /help, /name, /copy, /export, /import, /new, /session, /tree, /label, /fork, /resume, /quit, /model, /provider, /models, /providers, /prompts, /skills, /extensions, /auth, /login, /compact",
+            "commands: /help, /name, /copy, /export, /import, /new, /session, /tree, /label, /fork, /clone, /resume, /quit, /model, /provider, /models, /providers, /prompts, /skills, /extensions, /auth, /login, /compact",
             result.Message);
         Assert.Empty(runner.Inputs);
     }
@@ -707,6 +707,97 @@ public class CodingAgentCommandRouterTests
                 Directory.Delete(directory, recursive: true);
             }
         }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_CloneCommand_DuplicatesCurrentBranchIntoNewSession()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-coding-agent-tree-clone-" + Guid.NewGuid().ToString("N"));
+        var treePath = Path.Combine(directory, "session.jsonl");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.SessionName = "clone source";
+        runner.MutableMessages.Add(new UserMessage("clone this branch"));
+        runner.MutableMessages.Add(new AssistantMessage([new TextContent("branch copied")]));
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+            var tree = CodingAgentTreeSessionController.OpenOrCreate(treePath);
+            var router = new CodingAgentCommandRouter(runner, treeSessionController: tree);
+
+            var result = await router.TryHandleAsync("/clone");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.NotEqual(treePath, tree.Path);
+            Assert.StartsWith(Path.Combine(directory, "coding-agent-sessions"), tree.Path, StringComparison.OrdinalIgnoreCase);
+            Assert.True(File.Exists(tree.Path));
+            Assert.Contains($"cloned session to {tree.Path}: leaf ", result.Message, StringComparison.Ordinal);
+            Assert.Contains("messages 2, model openai/gpt-5.4", result.Message, StringComparison.Ordinal);
+            Assert.Equal("clone source", runner.SessionName);
+            Assert.Equal(2, runner.Messages.Count);
+            Assert.IsType<UserMessage>(runner.Messages[0]);
+            var assistant = Assert.IsType<AssistantMessage>(runner.Messages[1]);
+            Assert.Equal("branch copied", Assert.IsType<TextContent>(Assert.Single(assistant.Content)).Text);
+            Assert.Empty(runner.Inputs);
+
+            var cloneSnapshot = tree.LoadSnapshot();
+            Assert.Equal(tree.Path, cloneSnapshot.FilePath);
+            Assert.Equal(2, cloneSnapshot.Messages.Count);
+            Assert.Equal("clone source", cloneSnapshot.Name);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_CloneCommandWithoutMessages_ReturnsNothingToClone()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-coding-agent-tree-empty-clone-" + Guid.NewGuid().ToString("N"));
+        var treePath = Path.Combine(directory, "session.jsonl");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+            var tree = CodingAgentTreeSessionController.OpenOrCreate(treePath);
+            var router = new CodingAgentCommandRouter(runner, treeSessionController: tree);
+
+            var result = await router.TryHandleAsync("/clone");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Equal("Nothing to clone yet", result.Message);
+            Assert.Equal(treePath, tree.Path);
+            Assert.False(Directory.Exists(Path.Combine(directory, "coding-agent-sessions")));
+            Assert.Empty(runner.Inputs);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_CloneCommandWithExtraArgs_ReturnsUsage()
+    {
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var router = new CodingAgentCommandRouter(runner);
+
+        var result = await router.TryHandleAsync("/clone now");
+
+        Assert.True(result.Handled);
+        Assert.True(result.IsError);
+        Assert.Equal("usage: /clone", result.Message);
+        Assert.Empty(runner.Inputs);
     }
 
     [Fact]

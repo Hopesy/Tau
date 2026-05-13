@@ -16,6 +16,7 @@ public static class CodingAgentCommandCatalog
         new("/tree", "/tree [max entries] [default|no-tools|user-only|labeled-only|all] [--label-time] [--search query]", "Show the current JSONL session tree"),
         new("/label", "/label <entry-id> [label | clear]", "Show, set, or clear a JSONL session entry label"),
         new("/fork", "/fork <entry-id>", "Fork the current JSONL session from an earlier entry"),
+        new("/clone", "/clone", "Duplicate the current JSONL session branch into a new session"),
         new("/resume", "/resume [latest | path.jsonl]", "Resume a JSONL session"),
         new("/quit", "/quit", "Exit the CLI"),
         new("/model", "/model [provider/model | model] or /model <provider> <model>", "Show or select the current model"),

@@ -48,7 +48,7 @@
 
 - [x] flat session 持久化（`TAU_CODING_AGENT_SESSION_FILE` 或 `./.tau/coding-agent-session.json`，启动自动 rehydrate，回合后保存）
 - [x] JSONL session tree baseline（默认 `./.tau/coding-agent-session.jsonl`，`TAU_CODING_AGENT_TREE_SESSION_FILE` 或 `.jsonl` 形式的 `TAU_CODING_AGENT_SESSION_FILE` 可覆盖；已支持 header、append-only message/model/session-info/label entries、entry id/parentId/timestamp、runner diff 同步、current branch restore）
-- [~] session lifecycle（已补 `/new`、`/session` tree stats、估算 token/context usage、auto-compaction threshold budget、`/name`、`/tree` 过滤/搜索模式与 label timestamp、`/label`、`/fork`、`/resume`、`.jsonl` export/import；仍缺真正的 interactive tree navigator 和更完整 session metadata）
+- [~] session lifecycle（已补 `/new`、`/session` tree stats、估算 token/context usage、auto-compaction threshold budget、`/name`、`/tree` 过滤/搜索模式与 label timestamp、`/label`、`/fork`、`/clone`、`/resume`、`.jsonl` export/import；仍缺真正的 interactive tree navigator 和更完整 session metadata）
 - [x] settings / model selection / provider selection（`/model`、`/provider`、`/models`、`/providers`，默认写入 `TAU_CODING_AGENT_SETTINGS_FILE` 或 `./.tau/coding-agent-settings.json`；同一 settings 文件支持上游兼容 `treeFilterMode` 作为 `/tree` 默认过滤模式）
 - [~] auth 管理入口（已补 `/auth` 状态查看和 `/login` 骨架提示；真实 OAuth/device flow 仍在 Tau.Ai OAuth backlog）
 - [x] slash command router 抽离（`CodingAgentCommandRouter`；当前命令行为不变，为 `/compact` / login flow 等后续命令留 seam）
