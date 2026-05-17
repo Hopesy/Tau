@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using Tau.Agent;
 using Tau.Ai;
@@ -122,8 +123,9 @@ public class CodingAgentCommandRouterTests
         var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-router-" + Guid.NewGuid().ToString("N"));
         var extensions = Path.Combine(directory, ".tau", "extensions");
         Directory.CreateDirectory(extensions);
+        var extensionFile = Path.Combine(extensions, "commands.json");
         await File.WriteAllTextAsync(
-            Path.Combine(extensions, "commands.json"),
+            extensionFile,
             """
             {
               "commands": [
@@ -152,7 +154,40 @@ public class CodingAgentCommandRouterTests
 
             Assert.True(result.Handled);
             Assert.False(result.IsError);
-            Assert.Equal("extensions: /hello <name> - Say hello (project); /review - Review source (project, runner)", result.Message);
+            Assert.Contains("extensions: /hello <name> - Say hello (project); /review - Review source (project, runner)", result.Message, StringComparison.Ordinal);
+            Assert.Contains($"extension files: {extensionFile} (project, 2 commands, 0 prompts, 0 skills)", result.Message, StringComparison.Ordinal);
+            Assert.Empty(runner.Inputs);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_ExtensionsCommand_ShowsLoadDiagnostics()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-router-diagnostics-" + Guid.NewGuid().ToString("N"));
+        var extensions = Path.Combine(directory, ".tau", "extensions");
+        Directory.CreateDirectory(extensions);
+        var badFile = Path.Combine(extensions, "bad.json");
+        var missingFile = Path.Combine(directory, "missing.json");
+        await File.WriteAllTextAsync(badFile, "{ invalid");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var extensionStore = new CodingAgentExtensionCommandStore(
+            cwd: directory,
+            explicitPaths: [missingFile]);
+        var router = new CodingAgentCommandRouter(runner, extensionCommandStore: extensionStore);
+
+        try
+        {
+            var result = await router.TryHandleAsync("/extensions");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Contains("extensions: none", result.Message, StringComparison.Ordinal);
+            Assert.Contains($"error {badFile} (project) - failed to load extension json:", result.Message, StringComparison.Ordinal);
+            Assert.Contains($"warning {missingFile} (path) - extension path does not exist", result.Message, StringComparison.Ordinal);
             Assert.Empty(runner.Inputs);
         }
         finally
@@ -165,7 +200,7 @@ public class CodingAgentCommandRouterTests
     public void CommandCatalog_HelpLine_MatchesSupportedCommandNames()
     {
         Assert.Equal(
-            "commands: /help, /name, /copy, /export, /import, /new, /session, /tree, /label, /fork, /clone, /resume, /quit, /model, /provider, /models, /providers, /prompts, /skills, /extensions, /auth, /login, /compact",
+            "commands: /help, /name, /copy, /files, /export, /share, /import, /new, /session, /tree, /label, /fork, /clone, /resume, /quit, /model, /provider, /models, /providers, /prompts, /skills, /extensions, /auth, /login, /retry, /compact",
             CodingAgentCommandCatalog.HelpLine);
         Assert.All(CodingAgentCommandCatalog.SupportedCommands, command =>
         {
@@ -186,7 +221,7 @@ public class CodingAgentCommandRouterTests
         Assert.True(result.Handled);
         Assert.False(result.IsError);
         Assert.Equal(
-            "commands: /help, /name, /copy, /export, /import, /new, /session, /tree, /label, /fork, /clone, /resume, /quit, /model, /provider, /models, /providers, /prompts, /skills, /extensions, /auth, /login, /compact",
+            "commands: /help, /name, /copy, /files, /export, /share, /import, /new, /session, /tree, /label, /fork, /clone, /resume, /quit, /model, /provider, /models, /providers, /prompts, /skills, /extensions, /auth, /login, /retry, /compact",
             result.Message);
         Assert.Empty(runner.Inputs);
     }
@@ -308,7 +343,10 @@ public class CodingAgentCommandRouterTests
         runner.SessionName = "default export";
         runner.MutableMessages.Add(new UserMessage("hello <tau>"));
         runner.MutableMessages.Add(new AssistantMessage([new TextContent("world")]));
-        var router = new CodingAgentCommandRouter(runner, sessionFile: sessionFile);
+        var router = new CodingAgentCommandRouter(
+            runner,
+            sessionFile: sessionFile,
+            retryOptions: new CodingAgentRetryOptions(2, 125));
 
         try
         {
@@ -334,6 +372,641 @@ public class CodingAgentCommandRouterTests
     }
 
     [Fact]
+    public async Task TryHandleAsync_ExportHtmlCommand_RendersTextCodeFences()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-export-code-fence-{Guid.NewGuid():N}");
+        var htmlPath = Path.Combine(directory, "session.html");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.SessionName = "code fence export";
+        runner.MutableMessages.Add(new AssistantMessage(
+            [
+                new TextContent(
+                    """
+                    Before code
+                    ```csharp
+                    Console.WriteLine("<tau>");
+                    ```
+                    After code
+                    """)
+            ]));
+        var router = new CodingAgentCommandRouter(runner);
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+
+            var result = await router.TryHandleAsync($"/export {htmlPath}");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Equal($"exported session transcript to {Path.GetFullPath(htmlPath)}", result.Message);
+            Assert.Empty(runner.Inputs);
+
+            var html = File.ReadAllText(htmlPath);
+            Assert.Contains("<pre class=\"content-text\">Before code</pre>", html, StringComparison.Ordinal);
+            Assert.Contains("<figure class=\"code-block\">", html, StringComparison.Ordinal);
+            Assert.Contains("<figcaption>csharp</figcaption>", html, StringComparison.Ordinal);
+            Assert.Contains("<code data-language=\"csharp\">Console", html, StringComparison.Ordinal);
+            Assert.Contains("<span class=\"syntax-string\">&quot;&lt;tau&gt;&quot;</span>", html, StringComparison.Ordinal);
+            Assert.Contains("<pre class=\"content-text\">After code</pre>", html, StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_ExportHtmlCommand_RendersPlainTextLinks()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-export-links-{Guid.NewGuid():N}");
+        var htmlPath = Path.Combine(directory, "session.html");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.SessionName = "link export";
+        runner.MutableMessages.Add(new AssistantMessage(
+            [
+                new TextContent(
+                    """
+                    See [docs <tau>](https://example.com/docs?q=<tau>) and https://example.org/path?x=1.
+                    Ignore [unsafe](javascript:alert(1)).
+                    ```text
+                    https://code.example/path
+                    ```
+                    """)
+            ]));
+        var router = new CodingAgentCommandRouter(runner);
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+
+            var result = await router.TryHandleAsync($"/export {htmlPath}");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Equal($"exported session transcript to {Path.GetFullPath(htmlPath)}", result.Message);
+            Assert.Empty(runner.Inputs);
+
+            var html = File.ReadAllText(htmlPath);
+            Assert.Contains(
+                "<a href=\"https://example.com/docs?q=&lt;tau&gt;\" target=\"_blank\" rel=\"noreferrer noopener\">docs &lt;tau&gt;</a>",
+                html,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "<a href=\"https://example.org/path?x=1\" target=\"_blank\" rel=\"noreferrer noopener\">https://example.org/path?x=1</a>.",
+                html,
+                StringComparison.Ordinal);
+            Assert.Contains("[unsafe](javascript:alert(1)).", html, StringComparison.Ordinal);
+            Assert.DoesNotContain("href=\"javascript:", html, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("<code data-language=\"text\">https://code.example/path</code>", html, StringComparison.Ordinal);
+            Assert.DoesNotContain("href=\"https://code.example/path\"", html, StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_ExportHtmlCommand_RendersInlineCodeSpans()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-export-inline-code-{Guid.NewGuid():N}");
+        var htmlPath = Path.Combine(directory, "session.html");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.SessionName = "inline code export";
+        runner.MutableMessages.Add(new AssistantMessage(
+            [
+                new TextContent(
+                    """
+                    Run `dotnet test <tau>` and keep `https://inline.example/path` literal.
+                    See [docs](https://example.com/docs) and https://example.org/path.
+                    ```text
+                    `not inline`
+                    ```
+                    """)
+            ]));
+        var router = new CodingAgentCommandRouter(runner);
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+
+            var result = await router.TryHandleAsync($"/export {htmlPath}");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Equal($"exported session transcript to {Path.GetFullPath(htmlPath)}", result.Message);
+            Assert.Empty(runner.Inputs);
+
+            var html = File.ReadAllText(htmlPath);
+            Assert.Contains("<code class=\"inline-code\">dotnet test &lt;tau&gt;</code>", html, StringComparison.Ordinal);
+            Assert.Contains("<code class=\"inline-code\">https://inline.example/path</code>", html, StringComparison.Ordinal);
+            Assert.DoesNotContain("href=\"https://inline.example/path\"", html, StringComparison.Ordinal);
+            Assert.Contains(
+                "<a href=\"https://example.com/docs\" target=\"_blank\" rel=\"noreferrer noopener\">docs</a>",
+                html,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "<a href=\"https://example.org/path\" target=\"_blank\" rel=\"noreferrer noopener\">https://example.org/path</a>.",
+                html,
+                StringComparison.Ordinal);
+            Assert.Contains("<code data-language=\"text\">`not inline`</code>", html, StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_ExportHtmlCommand_RendersMarkdownBlockStructure()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-export-markdown-blocks-{Guid.NewGuid():N}");
+        var htmlPath = Path.Combine(directory, "session.html");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.SessionName = "markdown block export";
+        runner.MutableMessages.Add(new AssistantMessage(
+            [
+                new TextContent(
+                    """
+                    # Plan <tau>
+                    Intro with `src/Tau.cs` and [docs](https://example.com/docs).
+                    - first item
+                    - second https://example.org/list
+                    1. ordered `one`
+                    > quoted <safe>
+                    ```md
+                    # not a heading
+                    - not a list
+                    ```
+                    """)
+            ]));
+        var router = new CodingAgentCommandRouter(runner);
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+
+            var result = await router.TryHandleAsync($"/export {htmlPath}");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Equal($"exported session transcript to {Path.GetFullPath(htmlPath)}", result.Message);
+            Assert.Empty(runner.Inputs);
+
+            var html = File.ReadAllText(htmlPath);
+            Assert.Contains("<div class=\"content-text rich-text\">", html, StringComparison.Ordinal);
+            Assert.Contains("<h1>Plan &lt;tau&gt;</h1>", html, StringComparison.Ordinal);
+            Assert.Contains(
+                "<p>Intro with <code class=\"inline-code\">src/Tau.cs</code> and <a href=\"https://example.com/docs\" target=\"_blank\" rel=\"noreferrer noopener\">docs</a>.</p>",
+                html,
+                StringComparison.Ordinal);
+            Assert.Contains("<ul>", html, StringComparison.Ordinal);
+            Assert.Contains("<li>first item</li>", html, StringComparison.Ordinal);
+            Assert.Contains(
+                "<li>second <a href=\"https://example.org/list\" target=\"_blank\" rel=\"noreferrer noopener\">https://example.org/list</a></li>",
+                html,
+                StringComparison.Ordinal);
+            Assert.Contains("<ol>", html, StringComparison.Ordinal);
+            Assert.Contains("<li>ordered <code class=\"inline-code\">one</code></li>", html, StringComparison.Ordinal);
+            Assert.Contains("<blockquote>", html, StringComparison.Ordinal);
+            Assert.Contains("<p>quoted &lt;safe&gt;</p>", html, StringComparison.Ordinal);
+            Assert.Contains("<code data-language=\"md\"># not a heading", html, StringComparison.Ordinal);
+            Assert.Contains("- not a list</code>", html, StringComparison.Ordinal);
+            Assert.DoesNotContain("<h1>not a heading</h1>", html, StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_ExportHtmlCommand_RendersMarkdownTaskLists()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-export-task-list-{Guid.NewGuid():N}");
+        var htmlPath = Path.Combine(directory, "session.html");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.SessionName = "task list export";
+        runner.MutableMessages.Add(new AssistantMessage(
+            [
+                new TextContent(
+                    """
+                    - [x] **done <tau>**
+                    - [ ] [docs](https://example.com/docs) `next`
+                    1. [X] ordered _ready_
+                    ```md
+                    - [x] not a task
+                    ```
+                    """)
+            ]));
+        var router = new CodingAgentCommandRouter(runner);
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+
+            var result = await router.TryHandleAsync($"/export {htmlPath}");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Equal($"exported session transcript to {Path.GetFullPath(htmlPath)}", result.Message);
+            Assert.Empty(runner.Inputs);
+
+            var html = File.ReadAllText(htmlPath);
+            Assert.Contains("<li class=\"task-list-item\"><input type=\"checkbox\" disabled checked> <span><strong>done &lt;tau&gt;</strong></span></li>", html, StringComparison.Ordinal);
+            Assert.Contains(
+                "<li class=\"task-list-item\"><input type=\"checkbox\" disabled> <span><a href=\"https://example.com/docs\" target=\"_blank\" rel=\"noreferrer noopener\">docs</a> <code class=\"inline-code\">next</code></span></li>",
+                html,
+                StringComparison.Ordinal);
+            Assert.Contains("<li class=\"task-list-item\"><input type=\"checkbox\" disabled checked> <span>ordered <em>ready</em></span></li>", html, StringComparison.Ordinal);
+            Assert.Contains("<code data-language=\"md\">- [x] not a task</code>", html, StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_ExportHtmlCommand_RendersHorizontalRules()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-export-hr-{Guid.NewGuid():N}");
+        var htmlPath = Path.Combine(directory, "session.html");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.SessionName = "hr export";
+        runner.MutableMessages.Add(new AssistantMessage(
+            [
+                new TextContent(
+                    """
+                    Above
+
+                    ---
+                    Between
+
+                    ***
+                    After
+
+                    ___
+                    Final
+
+                    ```md
+                    ---
+                    ```
+                    """)
+            ]));
+        var router = new CodingAgentCommandRouter(runner);
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+
+            var result = await router.TryHandleAsync($"/export {htmlPath}");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+
+            var html = File.ReadAllText(htmlPath);
+            // Three Markdown horizontal-rule variants must each render as <hr>.
+            var hrCount = System.Text.RegularExpressions.Regex.Matches(html, "<hr>").Count;
+            Assert.True(hrCount >= 3, $"expected at least three <hr> blocks, saw {hrCount}");
+            // Surrounding plaintext segments still render normally.
+            Assert.Contains("Above", html, StringComparison.Ordinal);
+            Assert.Contains("Between", html, StringComparison.Ordinal);
+            Assert.Contains("After", html, StringComparison.Ordinal);
+            Assert.Contains("Final", html, StringComparison.Ordinal);
+            // The fenced code block must keep --- as literal code, not an <hr>.
+            Assert.Contains("<code data-language=\"md\">---</code>", html, StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_ExportHtmlCommand_RendersEmphasisSpans()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-export-emphasis-{Guid.NewGuid():N}");
+        var htmlPath = Path.Combine(directory, "session.html");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.SessionName = "emphasis export";
+        runner.MutableMessages.Add(new AssistantMessage(
+            [
+                new TextContent(
+                    """
+                    Plain **bold <tau>** and *italic* and __strong [docs](https://example.com)__ and _em `code`_.
+                    Keep foo_bar_baz literal and `**not bold**` literal.
+                    - **listed** item
+                    ```text
+                    **not bold**
+                    ```
+                    """)
+            ]));
+        var router = new CodingAgentCommandRouter(runner);
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+
+            var result = await router.TryHandleAsync($"/export {htmlPath}");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Equal($"exported session transcript to {Path.GetFullPath(htmlPath)}", result.Message);
+            Assert.Empty(runner.Inputs);
+
+            var html = File.ReadAllText(htmlPath);
+            Assert.Contains("<strong>bold &lt;tau&gt;</strong>", html, StringComparison.Ordinal);
+            Assert.Contains("<em>italic</em>", html, StringComparison.Ordinal);
+            Assert.Contains(
+                "<strong>strong <a href=\"https://example.com\" target=\"_blank\" rel=\"noreferrer noopener\">docs</a></strong>",
+                html,
+                StringComparison.Ordinal);
+            Assert.Contains("<em>em <code class=\"inline-code\">code</code></em>", html, StringComparison.Ordinal);
+            Assert.Contains("Keep foo_bar_baz literal", html, StringComparison.Ordinal);
+            Assert.Contains("<code class=\"inline-code\">**not bold**</code>", html, StringComparison.Ordinal);
+            Assert.Contains("<li><strong>listed</strong> item</li>", html, StringComparison.Ordinal);
+            Assert.Contains("<code data-language=\"text\">**not bold**</code>", html, StringComparison.Ordinal);
+            Assert.DoesNotContain("<strong>not bold</strong>", html, StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_ExportHtmlCommand_RendersMarkdownTables()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-export-tables-{Guid.NewGuid():N}");
+        var htmlPath = Path.Combine(directory, "session.html");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.SessionName = "table export";
+        runner.MutableMessages.Add(new AssistantMessage(
+            [
+                new TextContent(
+                    """
+                    | Area | Status |
+                    | --- | --- |
+                    | `core` | **done <tau>** |
+                    | [docs](https://example.com/docs) | _next_ |
+                    ```md
+                    | Not | Table |
+                    | --- | --- |
+                    ```
+                    """)
+            ]));
+        var router = new CodingAgentCommandRouter(runner);
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+
+            var result = await router.TryHandleAsync($"/export {htmlPath}");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Equal($"exported session transcript to {Path.GetFullPath(htmlPath)}", result.Message);
+            Assert.Empty(runner.Inputs);
+
+            var html = File.ReadAllText(htmlPath);
+            Assert.Contains("<div class=\"table-scroll\"><table>", html, StringComparison.Ordinal);
+            Assert.Contains("<th>Area</th>", html, StringComparison.Ordinal);
+            Assert.Contains("<th>Status</th>", html, StringComparison.Ordinal);
+            Assert.Contains("<td><code class=\"inline-code\">core</code></td>", html, StringComparison.Ordinal);
+            Assert.Contains("<td><strong>done &lt;tau&gt;</strong></td>", html, StringComparison.Ordinal);
+            Assert.Contains(
+                "<td><a href=\"https://example.com/docs\" target=\"_blank\" rel=\"noreferrer noopener\">docs</a></td>",
+                html,
+                StringComparison.Ordinal);
+            Assert.Contains("<td><em>next</em></td>", html, StringComparison.Ordinal);
+            Assert.Contains("<code data-language=\"md\">| Not | Table |", html, StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_ExportHtmlCommand_RendersImageMetadata()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-export-image-{Guid.NewGuid():N}");
+        var htmlPath = Path.Combine(directory, "session.html");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.SessionName = "image export";
+        runner.MutableMessages.Add(new UserMessage([new ImageContent("aGVsbG8=", "image/png")]));
+        var router = new CodingAgentCommandRouter(runner);
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+
+            var result = await router.TryHandleAsync($"/export {htmlPath}");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Equal($"exported session transcript to {Path.GetFullPath(htmlPath)}", result.Message);
+            Assert.Empty(runner.Inputs);
+
+            var html = File.ReadAllText(htmlPath);
+            Assert.Contains("<figure class=\"image-block\"><img alt=\"session image\" src=\"data:image/png;base64,aGVsbG8=\">", html, StringComparison.Ordinal);
+            Assert.Contains("<figcaption>image/png, 5 bytes</figcaption>", html, StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_ExportHtmlCommand_FoldsLongToolResults()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-export-tool-fold-{Guid.NewGuid():N}");
+        var htmlPath = Path.Combine(directory, "session.html");
+        var longAssistantText = "assistant long text " + new string('a', 4100);
+        var longToolText =
+            """
+            tool output <unsafe>
+            ```json
+            {"ok":"<yes>"}
+            ```
+            """
+            + new string('x', 4100);
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.SessionName = "tool fold export";
+        runner.MutableMessages.Add(new AssistantMessage([new TextContent(longAssistantText)]));
+        runner.MutableMessages.Add(new ToolResultMessage("call-1", [new TextContent(longToolText)]));
+        var router = new CodingAgentCommandRouter(runner);
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+
+            var result = await router.TryHandleAsync($"/export {htmlPath}");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Equal($"exported session transcript to {Path.GetFullPath(htmlPath)}", result.Message);
+            Assert.Empty(runner.Inputs);
+
+            var html = File.ReadAllText(htmlPath);
+            Assert.Contains("<details class=\"tool-result-fold\">", html, StringComparison.Ordinal);
+            Assert.Contains(
+                $"<summary>Tool output, {longToolText.Length.ToString("N0", CultureInfo.InvariantCulture)} characters</summary>",
+                html,
+                StringComparison.Ordinal);
+            Assert.Contains("tool output &lt;unsafe&gt;", html, StringComparison.Ordinal);
+            Assert.Contains("<figcaption>json</figcaption>", html, StringComparison.Ordinal);
+            Assert.Contains("<span class=\"syntax-property\">&quot;ok&quot;</span>", html, StringComparison.Ordinal);
+            Assert.Contains("<span class=\"syntax-string\">&quot;&lt;yes&gt;&quot;</span>", html, StringComparison.Ordinal);
+            Assert.Contains(new string('x', 120), html, StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                $"Tool output, {longAssistantText.Length.ToString("N0", CultureInfo.InvariantCulture)} characters",
+                html,
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_ExportHtmlCommand_RendersToolCallJsonArguments()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-export-tool-json-{Guid.NewGuid():N}");
+        var htmlPath = Path.Combine(directory, "session.html");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.SessionName = "tool json export";
+        runner.MutableMessages.Add(new AssistantMessage(
+            [
+                new ToolCallContent(
+                    "call-json",
+                    "write_file",
+                    """{"path":"src/<tau>.cs","lines":["one","two"]}"""),
+                new ToolCallContent("call-raw", "legacy_tool", "not-json <unsafe>")
+            ]));
+        var router = new CodingAgentCommandRouter(runner);
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+
+            var result = await router.TryHandleAsync($"/export {htmlPath}");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Equal($"exported session transcript to {Path.GetFullPath(htmlPath)}", result.Message);
+            Assert.Empty(runner.Inputs);
+
+            var html = File.ReadAllText(htmlPath);
+            Assert.Contains("<summary>write_file <span>call-json</span></summary>", html, StringComparison.Ordinal);
+            Assert.Contains("<figure class=\"code-block\">", html, StringComparison.Ordinal);
+            Assert.Contains("<figcaption>json</figcaption>", html, StringComparison.Ordinal);
+            Assert.Contains("<span class=\"syntax-property\">&quot;path&quot;</span>", html, StringComparison.Ordinal);
+            Assert.Contains("<span class=\"syntax-string\">&quot;src/&lt;tau&gt;.cs&quot;</span>", html, StringComparison.Ordinal);
+            Assert.Contains("<span class=\"syntax-property\">&quot;lines&quot;</span>", html, StringComparison.Ordinal);
+            Assert.Contains("<summary>legacy_tool <span>call-raw</span></summary>", html, StringComparison.Ordinal);
+            Assert.Contains("<pre>not-json &lt;unsafe&gt;</pre>", html, StringComparison.Ordinal);
+            Assert.DoesNotContain("<details class=\"tool-call-arguments-fold\">", html, StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_ExportHtmlCommand_FoldsLongToolCallArguments()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-export-tool-arguments-fold-{Guid.NewGuid():N}");
+        var htmlPath = Path.Combine(directory, "session.html");
+        var jsonArguments = "{\"payload\":\"<tau>" + new string('x', 4100) + "\"}";
+        var rawArguments = "raw <unsafe>" + new string('y', 4100);
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.SessionName = "tool arguments fold export";
+        runner.MutableMessages.Add(new AssistantMessage(
+            [
+                new ToolCallContent("call-json-long", "bulk_write", jsonArguments),
+                new ToolCallContent("call-raw-long", "legacy_tool", rawArguments)
+            ]));
+        var router = new CodingAgentCommandRouter(runner);
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+
+            var result = await router.TryHandleAsync($"/export {htmlPath}");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Equal($"exported session transcript to {Path.GetFullPath(htmlPath)}", result.Message);
+            Assert.Empty(runner.Inputs);
+
+            var html = File.ReadAllText(htmlPath);
+            Assert.Contains("<details class=\"tool-call-arguments-fold\">", html, StringComparison.Ordinal);
+            Assert.Contains(
+                $"<summary>Tool arguments, {jsonArguments.Length.ToString("N0", CultureInfo.InvariantCulture)} characters</summary>",
+                html,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                $"<summary>Tool arguments, {rawArguments.Length.ToString("N0", CultureInfo.InvariantCulture)} characters</summary>",
+                html,
+                StringComparison.Ordinal);
+            Assert.Contains("<summary>bulk_write <span>call-json-long</span></summary>", html, StringComparison.Ordinal);
+            Assert.Contains("<summary>legacy_tool <span>call-raw-long</span></summary>", html, StringComparison.Ordinal);
+            Assert.Contains("<figcaption>json</figcaption>", html, StringComparison.Ordinal);
+            Assert.Contains("<span class=\"syntax-property\">&quot;payload&quot;</span>", html, StringComparison.Ordinal);
+            Assert.Contains("<span class=\"syntax-string\">&quot;&lt;tau&gt;", html, StringComparison.Ordinal);
+            Assert.Contains(new string('x', 120), html, StringComparison.Ordinal);
+            Assert.Contains("<pre>raw &lt;unsafe&gt;", html, StringComparison.Ordinal);
+            Assert.Contains(new string('y', 120), html, StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
     public async Task TryHandleAsync_ExportHtmlCommandWithTreeSession_IncludesSessionMetadata()
     {
         var directory = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-export-tree-{Guid.NewGuid():N}");
@@ -349,6 +1022,18 @@ public class CodingAgentCommandRouterTests
             Directory.CreateDirectory(directory);
             var tree = CodingAgentTreeSessionController.OpenOrCreate(treePath);
             var router = new CodingAgentCommandRouter(runner, treeSessionController: tree);
+            tree.SyncFromRunner(runner);
+            var userEntryId = ReadMessageEntryId(treePath, "user", "export tree metadata");
+            tree.AppendLabelChange(userEntryId, "checkpoint");
+            tree.Store.AppendModelChange("google", "gemini-2.5-pro");
+            tree.Store.AppendCompaction(
+                "summary after compacted history",
+                userEntryId,
+                42,
+                fromHook: true,
+                turnPrefixSummary: "## Original Request\nexport tree metadata\n\n## Early Progress\n- assistant: metadata visible");
+            tree.AppendAutoRetryStart(1, 2, 0, "retry-token provider returned error 503");
+            tree.AppendAutoRetryEnd(success: false, 1, "retry-token provider returned error 503");
 
             var cloneResult = await router.TryHandleAsync("/clone");
             var exportResult = await router.TryHandleAsync($"/export {htmlPath}");
@@ -365,6 +1050,32 @@ public class CodingAgentCommandRouterTests
             Assert.Contains("<dt>Parent session</dt>", html, StringComparison.Ordinal);
             Assert.Contains(treePath, html, StringComparison.Ordinal);
             Assert.Contains("metadata visible", html, StringComparison.Ordinal);
+            Assert.Contains("data-entry-id=\"", html, StringComparison.Ordinal);
+            Assert.Contains("copy-link-button", html, StringComparison.Ordinal);
+            Assert.Contains("buildShareUrl", html, StringComparison.Ordinal);
+            Assert.Contains("targetId", html, StringComparison.Ordinal);
+            Assert.Contains("leafId", html, StringComparison.Ordinal);
+            Assert.Contains("deep-linked", html, StringComparison.Ordinal);
+            Assert.Contains("id=\"tree-search\"", html, StringComparison.Ordinal);
+            Assert.Contains("tree-filter-button", html, StringComparison.Ordinal);
+            Assert.Contains("data-filter=\"labeled-only\"", html, StringComparison.Ordinal);
+            Assert.Contains("shouldShowTreeEntry", html, StringComparison.Ordinal);
+            Assert.Contains("checkpoint", html, StringComparison.Ordinal);
+            Assert.Contains("model change", html, StringComparison.Ordinal);
+            Assert.Contains("google/gemini-2.5-pro", html, StringComparison.Ordinal);
+            Assert.Contains("auto compaction", html, StringComparison.Ordinal);
+            Assert.Contains("summary after compacted history", html, StringComparison.Ordinal);
+            Assert.Contains("Turn Context (split turn)", html, StringComparison.Ordinal);
+            Assert.Contains("assistant: metadata visible", html, StringComparison.Ordinal);
+            Assert.Contains("42 estimated tokens", html, StringComparison.Ordinal);
+            Assert.Contains("auto retry start", html, StringComparison.Ordinal);
+            Assert.Contains("Retry attempt 1/2 after 0ms: retry-token provider returned error 503", html, StringComparison.Ordinal);
+            Assert.Contains("auto retry end", html, StringComparison.Ordinal);
+            Assert.Contains("Retry failed after attempt 1: retry-token provider returned error 503", html, StringComparison.Ordinal);
+            Assert.Contains("retry-event", html, StringComparison.Ordinal);
+            Assert.Contains("auto_retry_start", html, StringComparison.Ordinal);
+            Assert.Contains("auto_retry_end", html, StringComparison.Ordinal);
+            Assert.Contains("label change", html, StringComparison.Ordinal);
         }
         finally
         {
@@ -373,6 +1084,46 @@ public class CodingAgentCommandRouterTests
                 Directory.Delete(directory, recursive: true);
             }
         }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_ShareCommand_ExportsTempHtmlAndCreatesGistWithoutInvokingRunner()
+    {
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.SessionName = "share session";
+        runner.MutableMessages.Add(new UserMessage("share this"));
+        runner.MutableMessages.Add(new AssistantMessage([new TextContent("shared answer")]));
+        var shareClient = new FakeShareClient();
+        var router = new CodingAgentCommandRouter(runner, shareClient: shareClient);
+
+        var result = await router.TryHandleAsync("/share");
+
+        Assert.True(result.Handled);
+        Assert.False(result.IsError);
+        Assert.Equal("Share URL: https://pi.dev/session/#abc123\nGist: https://gist.github.com/user/abc123", result.Message);
+        Assert.Empty(runner.Inputs);
+        var sharedPath = Assert.IsType<string>(shareClient.SharedPath);
+        var html = Assert.IsType<string>(shareClient.Html);
+        Assert.False(File.Exists(sharedPath));
+        Assert.Contains("share session", html, StringComparison.Ordinal);
+        Assert.Contains("share this", html, StringComparison.Ordinal);
+        Assert.Contains("shared answer", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_ShareCommandWithoutMessages_ReturnsError()
+    {
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var shareClient = new FakeShareClient();
+        var router = new CodingAgentCommandRouter(runner, shareClient: shareClient);
+
+        var result = await router.TryHandleAsync("/share");
+
+        Assert.True(result.Handled);
+        Assert.True(result.IsError);
+        Assert.Equal("nothing to share yet", result.Message);
+        Assert.Null(shareClient.SharedPath);
+        Assert.Empty(runner.Inputs);
     }
 
     [Fact]
@@ -538,14 +1289,17 @@ public class CodingAgentCommandRouterTests
             ]));
         runner.MutableMessages.Add(new ToolResultMessage("tool-1", [new TextContent("done")]));
         var sessionFile = Path.Combine(Path.GetTempPath(), "tau-session.json");
-        var router = new CodingAgentCommandRouter(runner, sessionFile: sessionFile);
+        var router = new CodingAgentCommandRouter(
+            runner,
+            sessionFile: sessionFile,
+            retryOptions: new CodingAgentRetryOptions(2, 125));
 
         var result = await router.TryHandleAsync("/session");
 
         Assert.True(result.Handled);
         Assert.False(result.IsError);
         Assert.Equal(
-            $"session: name port slice, model openai/gpt-5.4, messages 3 (user 1, assistant 1, tool 1, toolCalls 1), tokens ~9/128000 context (127991 remaining), file {sessionFile}",
+            $"session: name port slice, model openai/gpt-5.4, messages 3 (user 1, assistant 1, tool 1, toolCalls 1), tokens ~9/128000 context (127991 remaining), retry enabled 2 attempts, base 125ms, file {sessionFile}",
             result.Message);
         Assert.Empty(runner.Inputs);
     }
@@ -564,7 +1318,7 @@ public class CodingAgentCommandRouterTests
         Assert.True(result.Handled);
         Assert.False(result.IsError);
         Assert.Equal(
-            "session: name none, model openai/gpt-5.4, messages 1 (user 1, assistant 0, tool 0, toolCalls 0), tokens ~10/128000 context (127990 remaining), auto-compact 32 (22 remaining), file none",
+            "session: name none, model openai/gpt-5.4, messages 1 (user 1, assistant 0, tool 0, toolCalls 0), tokens ~10/128000 context (127990 remaining), auto-compact 32 (22 remaining), retry off, file none",
             result.Message);
         Assert.Empty(runner.Inputs);
     }
@@ -677,10 +1431,13 @@ public class CodingAgentCommandRouterTests
             tree.SyncFromRunner(runner);
             var authEntryId = ReadMessageEntryId(treePath, "user", "provider auth");
             tree.AppendLabelChange(authEntryId, "docs-checkpoint");
+            tree.AppendAutoRetryStart(1, 2, 0, "retry-token provider returned error 503");
+            tree.AppendAutoRetryEnd(success: false, 1, "retry-token provider returned error 503");
             var router = new CodingAgentCommandRouter(runner, treeSessionController: tree);
 
             var rendererResult = await router.TryHandleAsync("/tree 20 --search renderer");
             var labelResult = await router.TryHandleAsync("/tree labeled-only --search docs-checkpoint");
+            var retryResult = await router.TryHandleAsync("/tree 20 --search retry-token");
             var noMatchResult = await router.TryHandleAsync("/tree user-only --search no-such-token");
             var badSearchResult = await router.TryHandleAsync("/tree --search");
 
@@ -694,6 +1451,11 @@ public class CodingAgentCommandRouterTests
             Assert.False(labelResult.IsError);
             Assert.Contains("filter labeled-only, search docs-checkpoint", labelResult.Message, StringComparison.Ordinal);
             Assert.Contains("provider auth docs [docs-checkpoint]", labelResult.Message, StringComparison.Ordinal);
+
+            Assert.False(retryResult.IsError);
+            Assert.Contains("filter default, search retry-token", retryResult.Message, StringComparison.Ordinal);
+            Assert.Contains("auto-retry start 1/2 0ms retry-token provider returned error 503", retryResult.Message, StringComparison.Ordinal);
+            Assert.Contains("auto-retry end failed attempt 1 retry-token provider returned error 503", retryResult.Message, StringComparison.Ordinal);
 
             Assert.False(noMatchResult.IsError);
             Assert.Contains("tree has no entries matching filter", noMatchResult.Message, StringComparison.Ordinal);
@@ -870,6 +1632,86 @@ public class CodingAgentCommandRouterTests
     }
 
     [Fact]
+    public async Task TryHandleAsync_RetryCommand_ShowsUpdatesPersistsAndNotifiesRuntime()
+    {
+        var settingsPath = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-retry-settings-{Guid.NewGuid():N}.json");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var settingsStore = new CodingAgentSettingsStore(settingsPath);
+        var changed = new List<CodingAgentRetryOptions>();
+        var router = new CodingAgentCommandRouter(
+            runner,
+            settingsStore,
+            retryOptions: CodingAgentRetryOptions.Disabled,
+            retryOptionsChanged: changed.Add);
+
+        try
+        {
+            settingsStore.Save(new CodingAgentSettingsSnapshot("openai", "gpt-5.4", "no-tools"));
+
+            var current = await router.TryHandleAsync("/retry");
+            var configured = await router.TryHandleAsync("/retry 4 125");
+            var afterConfigure = await router.TryHandleAsync("/retry current");
+            var disabled = await router.TryHandleAsync("/retry off");
+            var defaulted = await router.TryHandleAsync("/retry default");
+
+            Assert.True(current.Handled);
+            Assert.False(current.IsError);
+            Assert.Equal("retry: off", current.Message);
+
+            Assert.False(configured.IsError);
+            Assert.Equal("retry: enabled 4 attempts, base 125ms", configured.Message);
+            Assert.False(afterConfigure.IsError);
+            Assert.Equal("retry: enabled 4 attempts, base 125ms", afterConfigure.Message);
+            Assert.False(disabled.IsError);
+            Assert.Equal("retry: off", disabled.Message);
+            Assert.False(defaulted.IsError);
+            Assert.StartsWith("retry: ", defaulted.Message, StringComparison.Ordinal);
+
+            Assert.Equal(3, changed.Count);
+            Assert.Equal(new CodingAgentRetryOptions(4, 125), changed[0]);
+            Assert.Equal(CodingAgentRetryOptions.Disabled, changed[1]);
+            Assert.Equal(changed[2], CodingAgentRetryOptions.FromSettingsOrEnvironment(settingsStore.Load()));
+
+            var settings = settingsStore.Load();
+            Assert.Equal("openai", settings.DefaultProvider);
+            Assert.Equal("gpt-5.4", settings.DefaultModel);
+            Assert.Equal("no-tools", settings.TreeFilterMode);
+            Assert.Null(settings.RetryMaxAttempts);
+            Assert.Null(settings.RetryBaseDelayMilliseconds);
+            Assert.Empty(runner.Inputs);
+        }
+        finally
+        {
+            if (File.Exists(settingsPath))
+            {
+                File.Delete(settingsPath);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_RetryCommand_InvalidArgumentsReturnUsage()
+    {
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var router = new CodingAgentCommandRouter(runner);
+
+        var negativeAttempts = await router.TryHandleAsync("/retry -1");
+        var invalidAttempts = await router.TryHandleAsync("/retry nope");
+        var invalidDelay = await router.TryHandleAsync("/retry 2 nope");
+        var extraArgs = await router.TryHandleAsync("/retry 2 100 extra");
+
+        Assert.All(
+            [negativeAttempts, invalidAttempts, invalidDelay, extraArgs],
+            result =>
+            {
+                Assert.True(result.Handled);
+                Assert.True(result.IsError);
+                Assert.Equal("usage: /retry [current|default|off|<max attempts> [base delay ms]]", result.Message);
+            });
+        Assert.Empty(runner.Inputs);
+    }
+
+    [Fact]
     public async Task TryHandleAsync_UnknownCommand_ReturnsErrorWithoutInvokingRunner()
     {
         var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
@@ -947,7 +1789,9 @@ public class CodingAgentCommandRouterTests
 
         try
         {
-            var tree = CodingAgentTreeSessionController.OpenOrCreate(treePath);
+            var tree = CodingAgentTreeSessionController.OpenOrCreate(
+                treePath,
+                new CodingAgentCompactionRetentionOptions(20_000, 4));
             var router = new CodingAgentCommandRouter(runner, treeSessionController: tree);
 
             var result = await router.TryHandleAsync("/compact");
@@ -986,6 +1830,229 @@ public class CodingAgentCommandRouterTests
         }
     }
 
+    [Fact]
+    public async Task TryHandleAsync_CompactCommand_RetainsRecentTreeMessages()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-coding-agent-tree-retain-" + Guid.NewGuid().ToString("N"));
+        var treePath = Path.Combine(directory, "session.jsonl");
+        var exportPath = Path.Combine(directory, "export.jsonl");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.MutableMessages.Add(new UserMessage("one"));
+        runner.MutableMessages.Add(new AssistantMessage([new TextContent("two")]));
+        runner.MutableMessages.Add(new UserMessage("three"));
+        runner.MutableMessages.Add(new AssistantMessage([new TextContent("four")]));
+        runner.MutableMessages.Add(new UserMessage("five"));
+        runner.MutableMessages.Add(new AssistantMessage([new TextContent("six")]));
+        runner.CompactHandler = (_, _) =>
+        {
+            runner.MutableMessages.Clear();
+            runner.MutableMessages.Add(CodingAgentCompactionMessages.CreateSummaryMessage("summary"));
+            return Task.FromResult(new CodingAgentCompactionResult("summary", 6, 1, 120));
+        };
+
+        try
+        {
+            var tree = CodingAgentTreeSessionController.OpenOrCreate(
+                treePath,
+                new CodingAgentCompactionRetentionOptions(20_000, 4));
+            var router = new CodingAgentCommandRouter(runner, treeSessionController: tree);
+
+            var result = await router.TryHandleAsync("/compact");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Equal("compacted session: 6 -> 5 messages", result.Message);
+
+            var firstKeptEntryId = ReadCompactionFirstKeptEntryId(treePath);
+            var retainedStartEntryId = ReadMessageEntryId(treePath, "user", "three");
+            Assert.Equal(retainedStartEntryId, firstKeptEntryId);
+
+            var snapshot = tree.LoadSnapshot();
+            Assert.Equal(5, snapshot.Messages.Count);
+            Assert.Contains("summary", ReadText(snapshot.Messages[0]), StringComparison.Ordinal);
+            Assert.Equal("three", ReadText(snapshot.Messages[1]));
+            Assert.Equal("four", ReadText(snapshot.Messages[2]));
+            Assert.Equal("five", ReadText(snapshot.Messages[3]));
+            Assert.Equal("six", ReadText(snapshot.Messages[4]));
+            Assert.Equal(5, runner.Messages.Count);
+
+            tree.ExportCurrentBranch(exportPath);
+            var exportedSnapshot = new CodingAgentTreeSessionStore(exportPath).LoadCurrentBranchSnapshot();
+            Assert.Equal(5, exportedSnapshot.Messages.Count);
+            Assert.Equal("three", ReadText(exportedSnapshot.Messages[1]));
+
+            var exportedFirstKeptEntryId = ReadCompactionFirstKeptEntryId(exportPath);
+            Assert.NotEqual(firstKeptEntryId, exportedFirstKeptEntryId);
+            Assert.Equal(ReadMessageEntryId(exportPath, "user", "three"), exportedFirstKeptEntryId);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_CompactCommand_UsesTokenRetentionCutPointBeforeMessageFallback()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-coding-agent-tree-retain-tokens-" + Guid.NewGuid().ToString("N"));
+        var treePath = Path.Combine(directory, "session.jsonl");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.MutableMessages.Add(new UserMessage("one-abcdefghijklmnop"));
+        runner.MutableMessages.Add(new AssistantMessage([new TextContent("two-abcdefghijklmnop")]));
+        runner.MutableMessages.Add(new UserMessage("three-abcdefghijklmnop"));
+        runner.MutableMessages.Add(new AssistantMessage([new TextContent("four-abcdefghijklmnop")]));
+        runner.MutableMessages.Add(new UserMessage("five-abcdefghijklmnop"));
+        runner.MutableMessages.Add(new AssistantMessage([new TextContent("six-abcdefghijklmnop")]));
+        runner.CompactHandler = (_, _) =>
+        {
+            runner.MutableMessages.Clear();
+            runner.MutableMessages.Add(CodingAgentCompactionMessages.CreateSummaryMessage("summary"));
+            return Task.FromResult(new CodingAgentCompactionResult("summary", 6, 1, 120));
+        };
+
+        try
+        {
+            var tree = CodingAgentTreeSessionController.OpenOrCreate(
+                treePath,
+                new CodingAgentCompactionRetentionOptions(8, 10));
+            var router = new CodingAgentCommandRouter(runner, treeSessionController: tree);
+
+            var result = await router.TryHandleAsync("/compact");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Equal("compacted session: 6 -> 3 messages", result.Message);
+
+            var firstKeptEntryId = ReadCompactionFirstKeptEntryId(treePath);
+            var retainedStartEntryId = ReadMessageEntryId(treePath, "user", "five-");
+            Assert.Equal(retainedStartEntryId, firstKeptEntryId);
+
+            var snapshot = tree.LoadSnapshot();
+            Assert.Equal(3, snapshot.Messages.Count);
+            Assert.Contains("summary", ReadText(snapshot.Messages[0]), StringComparison.Ordinal);
+            Assert.Equal("five-abcdefghijklmnop", ReadText(snapshot.Messages[1]));
+            Assert.Equal("six-abcdefghijklmnop", ReadText(snapshot.Messages[2]));
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_CompactCommand_AddsSplitTurnPrefixSummaryWhenRetentionStartsMidTurn()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-coding-agent-tree-split-turn-" + Guid.NewGuid().ToString("N"));
+        var treePath = Path.Combine(directory, "session.jsonl");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.MutableMessages.Add(new UserMessage("implement split turn support"));
+        runner.MutableMessages.Add(new AssistantMessage([new TextContent("early analysis and plan")]));
+        runner.MutableMessages.Add(new AssistantMessage([new TextContent("retained suffix work")]));
+        runner.CompactHandler = (_, _) =>
+        {
+            runner.MutableMessages.Clear();
+            runner.MutableMessages.Add(CodingAgentCompactionMessages.CreateSummaryMessage("history summary"));
+            return Task.FromResult(new CodingAgentCompactionResult("history summary", 3, 1, 90));
+        };
+
+        try
+        {
+            var tree = CodingAgentTreeSessionController.OpenOrCreate(
+                treePath,
+                new CodingAgentCompactionRetentionOptions(0, 1));
+            var router = new CodingAgentCommandRouter(runner, treeSessionController: tree);
+
+            var result = await router.TryHandleAsync("/compact");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Equal("compacted session: 3 -> 2 messages", result.Message);
+
+            var jsonl = File.ReadAllText(treePath);
+            Assert.Contains("\"isSplitTurn\":true", jsonl, StringComparison.Ordinal);
+            Assert.Contains("\"turnPrefixSummary\":", jsonl, StringComparison.Ordinal);
+            Assert.Contains("Original Request", jsonl, StringComparison.Ordinal);
+            Assert.Contains("implement split turn support", jsonl, StringComparison.Ordinal);
+            Assert.Contains("assistant: early analysis and plan", jsonl, StringComparison.Ordinal);
+
+            var retainedStartEntryId = ReadMessageEntryId(treePath, "assistant", "retained suffix work");
+            Assert.Equal(retainedStartEntryId, ReadCompactionFirstKeptEntryId(treePath));
+
+            var snapshot = tree.LoadSnapshot();
+            Assert.Equal(2, snapshot.Messages.Count);
+            var summaryText = ReadText(snapshot.Messages[0]);
+            Assert.Contains("history summary", summaryText, StringComparison.Ordinal);
+            Assert.Contains("Turn Context (split turn)", summaryText, StringComparison.Ordinal);
+            Assert.Contains("## Original Request", summaryText, StringComparison.Ordinal);
+            Assert.Contains("implement split turn support", summaryText, StringComparison.Ordinal);
+            Assert.Equal("retained suffix work", ReadText(snapshot.Messages[1]));
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public void TreeSnapshot_WithInvalidFirstKeptEntryId_DoesNotFailRestore()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-coding-agent-tree-invalid-kept-" + Guid.NewGuid().ToString("N"));
+        var treePath = Path.Combine(directory, "session.jsonl");
+
+        try
+        {
+            var store = new CodingAgentTreeSessionStore(treePath);
+            store.AppendMessages(
+                [
+                    new UserMessage("before"),
+                    new AssistantMessage([new TextContent("old answer")])
+                ],
+                0);
+            store.AppendCompaction("summary", "missing-entry", 90);
+            store.AppendMessages([new UserMessage("after")], 0);
+
+            var snapshot = store.LoadCurrentBranchSnapshot();
+
+            Assert.Equal(2, snapshot.Messages.Count);
+            Assert.Contains("summary", ReadText(snapshot.Messages[0]), StringComparison.Ordinal);
+            Assert.Equal("after", ReadText(snapshot.Messages[1]));
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    private sealed class FakeShareClient : ICodingAgentShareClient
+    {
+        public string? SharedPath { get; private set; }
+        public string? Html { get; private set; }
+
+        public Task<CodingAgentShareResult> ShareAsync(
+            string htmlPath,
+            CancellationToken cancellationToken = default)
+        {
+            SharedPath = htmlPath;
+            Html = File.ReadAllText(htmlPath);
+            return Task.FromResult(new CodingAgentShareResult(
+                "https://gist.github.com/user/abc123",
+                "abc123",
+                "https://pi.dev/session/#abc123"));
+        }
+    }
+
     private static string ReadMessageEntryId(string path, string role, string? textContains = null)
     {
         foreach (var line in File.ReadLines(path).Skip(1))
@@ -1011,6 +2078,39 @@ public class CodingAgentCommandRouterTests
         }
 
         throw new InvalidOperationException($"message entry with role '{role}' not found");
+    }
+
+    private static string ReadCompactionFirstKeptEntryId(string path)
+    {
+        foreach (var line in File.ReadLines(path).Skip(1))
+        {
+            using var document = JsonDocument.Parse(line);
+            var root = document.RootElement;
+            if (root.TryGetProperty("type", out var type) &&
+                string.Equals(type.GetString(), "compaction", StringComparison.OrdinalIgnoreCase) &&
+                root.TryGetProperty("firstKeptEntryId", out var firstKeptEntryId))
+            {
+                return firstKeptEntryId.GetString() ?? string.Empty;
+            }
+        }
+
+        throw new InvalidOperationException("compaction entry not found");
+    }
+
+    private static string ReadText(ChatMessage message)
+    {
+        IReadOnlyList<ContentBlock> content = message switch
+        {
+            UserMessage user => user.Content,
+            AssistantMessage assistant => assistant.Content,
+            ToolResultMessage toolResult => toolResult.Content,
+            _ => []
+        };
+        return string.Join(
+            "\n",
+            content
+                .OfType<TextContent>()
+                .Select(static text => text.Text));
     }
 
     private static bool MessageContains(JsonElement message, string text)
