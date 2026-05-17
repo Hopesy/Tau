@@ -147,6 +147,7 @@
 - targeted tests 覆盖 `Tau.Pods` `LogsAsync`：journalctl 命令构造（含 `tau-pod-<name>` unit、`-n <tail>`、回退 `~/.tau_pods/<name>.log`）、缺省 100 行、非 SSH pod 直接拒绝、exec 失败时 surface 错误 summary；CLI 端 `logs` 子命令未 ssh pod 报错、tail 参数非数值时拒绝
 - targeted tests 覆盖 `/history [count|all]` 命令：未提供 snapshot provider 时返回 not-available 错误、`/history` 默认 20 条 newest-first、显式 count 透传给 provider、非数值 argument 报 usage、provider 返回空时显示 empty status
 - targeted tests 覆盖 `/clear` 命令：clearScreen action 被显式调用、未注入 action 时返回 not-supported 错误、附加参数报 usage
+- targeted tests 覆盖 `/find <pattern>` 命令：UserMessage / AssistantMessage / ToolCallContent 都参与搜索、大小写不敏感、无匹配返回 friendly status、缺 pattern 报 usage、匹配输出包含 role + 序号 + 上下文截断
 - targeted tests 覆盖 `Tau.WebUi POST /api/sessions/{id}/clear`：清空 messages 后保留 Title/Provider/Model；session 不存在返回 404
 - targeted tests 覆盖 `TauSecretRedactor`（Tau.Ai）：AWS access key（AKIA/ASIA/AROA）/ GitHub token / Slack token / Anthropic `sk-ant-` / OpenAI `sk-` / `Bearer …` / JWT 三段式都替换为 `[redacted]`、非 secret 文本不动、`enabled=false` 跳过、`IsEnabledFromEnvironment` truth table；并覆盖 `Tau.WebUi GET /api/sessions/{id}/export.html` 与 `export.md` 默认对消息正文做替换、返回 `text/html` / `text/markdown`；不存在的 session 返回 404
 - targeted tests 覆盖 `Tau.WebUi GET /api/sessions/search?q=...`：大小写不敏感 substring 命中按 UpdatedAt 排序、无匹配返回空数组、缺 `q` 或空 `q` 报 400

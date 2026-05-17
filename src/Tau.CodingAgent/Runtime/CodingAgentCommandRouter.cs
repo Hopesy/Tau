@@ -98,6 +98,7 @@ public sealed class CodingAgentCommandRouter
                 "/login" => await HandleLoginCommandAsync(parts, cancellationToken).ConfigureAwait(false),
                 "/retry" => HandleRetryCommand(parts),
                 "/history" => HandleHistoryCommand(parts),
+                "/find" => HandleFindCommand(input, parts),
                 "/clear" => HandleClearCommand(parts),
                 "/compact" => await HandleCompactCommandAsync(input, parts, cancellationToken).ConfigureAwait(false),
                 _ => CodingAgentCommandResult.Error($"unknown command '{parts[0]}'")
@@ -707,6 +708,98 @@ public sealed class CodingAgentCommandRouter
         var credentials = await provider.LoginAsync(callbacks, cancellationToken).ConfigureAwait(false);
         _runner.SaveOAuthCredentials(status.Provider, credentials);
         return CodingAgentCommandResult.Status($"login {status.Provider}: authenticated successfully. Credentials saved to auth.json.");
+    }
+
+    private CodingAgentCommandResult HandleFindCommand(string input, IReadOnlyList<string> parts)
+    {
+        if (parts.Count < 2)
+        {
+            return CodingAgentCommandResult.Error(CodingAgentCommandCatalog.Usage("/find"));
+        }
+
+        var firstSpace = input.IndexOf(' ');
+        var pattern = firstSpace > 0 ? input[(firstSpace + 1)..].Trim() : string.Empty;
+        if (string.IsNullOrEmpty(pattern))
+        {
+            return CodingAgentCommandResult.Error(CodingAgentCommandCatalog.Usage("/find"));
+        }
+
+        var messages = _runner.Messages;
+        if (messages.Count == 0)
+        {
+            return CodingAgentCommandResult.Status("History is empty.");
+        }
+
+        var matches = new List<string>();
+        for (var i = 0; i < messages.Count; i++)
+        {
+            var message = messages[i];
+            var role = message.Role;
+            switch (message)
+            {
+                case UserMessage user:
+                    AppendContentMatches(matches, role, i, user.Content, pattern);
+                    break;
+                case AssistantMessage assistant:
+                    AppendContentMatches(matches, role, i, assistant.Content, pattern);
+                    break;
+                case ToolResultMessage tool:
+                    AppendContentMatches(matches, role, i, tool.Content, pattern);
+                    break;
+            }
+        }
+
+        if (matches.Count == 0)
+        {
+            return CodingAgentCommandResult.Status($"No matches for \"{pattern}\".");
+        }
+
+        var sb = new System.Text.StringBuilder();
+        sb.Append("Matches for \"").Append(pattern).Append("\" (").Append(matches.Count).AppendLine("):");
+        foreach (var line in matches)
+        {
+            sb.Append("  ").AppendLine(line);
+        }
+
+        return CodingAgentCommandResult.Status(sb.ToString().TrimEnd());
+    }
+
+    private static void AppendContentMatches(
+        List<string> matches,
+        string role,
+        int messageIndex,
+        IReadOnlyList<ContentBlock> content,
+        string pattern)
+    {
+        for (var blockIndex = 0; blockIndex < content.Count; blockIndex++)
+        {
+            var block = content[blockIndex];
+            string? text = block switch
+            {
+                TextContent t => t.Text,
+                ToolCallContent c => $"[{c.Name}] {c.Arguments}",
+                _ => null
+            };
+
+            if (string.IsNullOrEmpty(text))
+            {
+                continue;
+            }
+
+            var matchIndex = text.IndexOf(pattern, StringComparison.OrdinalIgnoreCase);
+            if (matchIndex < 0)
+            {
+                continue;
+            }
+
+            const int contextRadius = 40;
+            var start = Math.Max(0, matchIndex - contextRadius);
+            var end = Math.Min(text.Length, matchIndex + pattern.Length + contextRadius);
+            var preview = text[start..end].Replace('\n', '⏎').Replace('\r', '⏎');
+            var prefix = start > 0 ? "…" : string.Empty;
+            var suffix = end < text.Length ? "…" : string.Empty;
+            matches.Add($"[{messageIndex + 1,2}] {role}: {prefix}{preview}{suffix}");
+        }
     }
 
     private CodingAgentCommandResult HandleClearCommand(IReadOnlyList<string> parts)

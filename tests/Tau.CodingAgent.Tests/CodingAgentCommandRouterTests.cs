@@ -200,7 +200,7 @@ public class CodingAgentCommandRouterTests
     public void CommandCatalog_HelpLine_MatchesSupportedCommandNames()
     {
         Assert.Equal(
-            "commands: /help, /name, /copy, /files, /export, /share, /import, /new, /session, /tree, /label, /fork, /clone, /resume, /quit, /model, /provider, /models, /providers, /prompts, /skills, /extensions, /auth, /login, /retry, /history, /clear, /compact",
+            "commands: /help, /name, /copy, /files, /export, /share, /import, /new, /session, /tree, /label, /fork, /clone, /resume, /quit, /model, /provider, /models, /providers, /prompts, /skills, /extensions, /auth, /login, /retry, /history, /find, /clear, /compact",
             CodingAgentCommandCatalog.HelpLine);
         Assert.All(CodingAgentCommandCatalog.SupportedCommands, command =>
         {
@@ -221,7 +221,7 @@ public class CodingAgentCommandRouterTests
         Assert.True(result.Handled);
         Assert.False(result.IsError);
         Assert.Equal(
-            "commands: /help, /name, /copy, /files, /export, /share, /import, /new, /session, /tree, /label, /fork, /clone, /resume, /quit, /model, /provider, /models, /providers, /prompts, /skills, /extensions, /auth, /login, /retry, /history, /clear, /compact",
+            "commands: /help, /name, /copy, /files, /export, /share, /import, /new, /session, /tree, /label, /fork, /clone, /resume, /quit, /model, /provider, /models, /providers, /prompts, /skills, /extensions, /auth, /login, /retry, /history, /find, /clear, /compact",
             result.Message);
         Assert.Empty(runner.Inputs);
     }
@@ -1917,6 +1917,65 @@ public class CodingAgentCommandRouterTests
                 Directory.Delete(directory, recursive: true);
             }
         }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_FindCommand_LocatesSubstringInMessages()
+    {
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.MutableMessages.Add(new UserMessage("Tell me about pi-mono port plan"));
+        runner.MutableMessages.Add(new AssistantMessage([new TextContent("the plan covers AWS credential chain")]));
+        runner.MutableMessages.Add(new AssistantMessage([new TextContent("unrelated thoughts about kittens")]));
+        var router = new CodingAgentCommandRouter(runner);
+
+        var result = await router.TryHandleAsync("/find AWS");
+
+        Assert.True(result.Handled);
+        Assert.False(result.IsError);
+        Assert.Contains("Matches for \"AWS\"", result.Message, StringComparison.Ordinal);
+        Assert.Contains("assistant", result.Message, StringComparison.Ordinal);
+        Assert.Contains("AWS credential chain", result.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("kittens", result.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_FindCommand_IsCaseInsensitive()
+    {
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.MutableMessages.Add(new UserMessage("Note about Bedrock"));
+        var router = new CodingAgentCommandRouter(runner);
+
+        var result = await router.TryHandleAsync("/find bedrock");
+
+        Assert.True(result.Handled);
+        Assert.False(result.IsError);
+        Assert.Contains("Bedrock", result.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_FindCommand_ReportsNoMatches()
+    {
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.MutableMessages.Add(new UserMessage("hello"));
+        var router = new CodingAgentCommandRouter(runner);
+
+        var result = await router.TryHandleAsync("/find missing");
+
+        Assert.True(result.Handled);
+        Assert.False(result.IsError);
+        Assert.Contains("No matches", result.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_FindCommand_RejectsMissingPattern()
+    {
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var router = new CodingAgentCommandRouter(runner);
+
+        var result = await router.TryHandleAsync("/find");
+
+        Assert.True(result.IsError);
+        Assert.Contains("usage:", result.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
