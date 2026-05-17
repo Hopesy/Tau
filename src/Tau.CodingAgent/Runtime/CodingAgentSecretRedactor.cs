@@ -1,92 +1,35 @@
-using System.Text.RegularExpressions;
+using Tau.Ai;
 
 namespace Tau.CodingAgent.Runtime;
 
-public sealed partial class CodingAgentSecretRedactor
+/// <summary>
+/// Thin shim retained for backwards compatibility with callers that still
+/// reference <see cref="CodingAgentSecretRedactor"/>. Delegates to the shared
+/// <see cref="TauSecretRedactor"/> in Tau.Ai so both the coding agent and the
+/// WebUi exporter use the same patterns.
+/// </summary>
+public sealed class CodingAgentSecretRedactor
 {
-    public const string Placeholder = "[redacted]";
-
-    private static readonly (Regex Pattern, string Label)[] Patterns =
-    [
-        (AwsAccessKeyRegex(), "AWS access key"),
-        (GitHubTokenRegex(), "GitHub token"),
-        (SlackTokenRegex(), "Slack token"),
-        (AnthropicKeyRegex(), "Anthropic key"),
-        (OpenAiKeyRegex(), "OpenAI key"),
-        (BearerTokenRegex(), "Bearer token"),
-        (JwtRegex(), "JWT")
-    ];
+    public const string Placeholder = TauSecretRedactor.Placeholder;
 
     public static readonly CodingAgentSecretRedactor Default = new(IsDefaultEnabled());
 
-    private readonly bool _enabled;
+    private readonly TauSecretRedactor _inner;
 
     public CodingAgentSecretRedactor(bool enabled)
     {
-        _enabled = enabled;
+        _inner = new TauSecretRedactor(enabled);
     }
 
-    public bool Enabled => _enabled;
+    public bool Enabled => _inner.Enabled;
 
-    public string Redact(string? input)
-    {
-        if (!_enabled || string.IsNullOrEmpty(input))
-        {
-            return input ?? string.Empty;
-        }
-
-        var current = input;
-        foreach (var (pattern, _) in Patterns)
-        {
-            current = pattern.Replace(current, Placeholder);
-        }
-
-        return current;
-    }
+    public string Redact(string? input) => _inner.Redact(input);
 
     public static bool IsDefaultEnabled()
     {
-        return IsEnabledFromEnvironment(Environment.GetEnvironmentVariable("TAU_CODING_AGENT_REDACT_SECRETS"));
+        return IsEnabledFromEnvironment(Environment.GetEnvironmentVariable(TauSecretRedactor.CodingAgentEnvironmentVariable));
     }
 
     internal static bool IsEnabledFromEnvironment(string? raw)
-    {
-        if (string.IsNullOrWhiteSpace(raw))
-        {
-            return true;
-        }
-
-        return !string.Equals(raw, "0", StringComparison.Ordinal) &&
-               !string.Equals(raw, "false", StringComparison.OrdinalIgnoreCase);
-    }
-
-    // AWS access key IDs: AKIA / ASIA / AIDA / AROA / AGPA / AIPA followed by 16 base32 chars.
-    [GeneratedRegex(@"\b(?:AKIA|ASIA|AIDA|AROA|AGPA|AIPA|ANPA|ANVA)[0-9A-Z]{16}\b")]
-    private static partial Regex AwsAccessKeyRegex();
-
-    // GitHub PAT (ghp_), OAuth user-to-server (gho_, ghu_), server-to-server (ghs_), refresh (ghr_).
-    [GeneratedRegex(@"\bgh[pousr]_[A-Za-z0-9]{36,255}\b")]
-    private static partial Regex GitHubTokenRegex();
-
-    // Slack tokens: xoxb-/xoxa-/xoxp-/xoxs-/xoxr- followed by digits and identifiers.
-    [GeneratedRegex(@"\bxox[abprs]-[0-9A-Za-z-]{10,}\b")]
-    private static partial Regex SlackTokenRegex();
-
-    // Anthropic API keys: sk-ant-...
-    [GeneratedRegex(@"\bsk-ant-[A-Za-z0-9_-]{20,}\b")]
-    private static partial Regex AnthropicKeyRegex();
-
-    // OpenAI API keys: sk-... (general, but exclude the more specific Anthropic prefix
-    // by requiring the next char not be 'a' so 'sk-ant-...' is captured by the Anthropic
-    // pattern that runs first).
-    [GeneratedRegex(@"\bsk-(?!ant-)[A-Za-z0-9_-]{20,}\b")]
-    private static partial Regex OpenAiKeyRegex();
-
-    // Bearer <token> with at least 20 chars of base64url-ish content.
-    [GeneratedRegex(@"\bBearer\s+[A-Za-z0-9._~+/=-]{20,}")]
-    private static partial Regex BearerTokenRegex();
-
-    // JWT three-part dotted base64url; demands base64 lookalike chars in each segment.
-    [GeneratedRegex(@"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b")]
-    private static partial Regex JwtRegex();
+        => TauSecretRedactor.IsEnabledFromEnvironment(raw);
 }

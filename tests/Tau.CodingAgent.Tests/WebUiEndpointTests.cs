@@ -239,6 +239,42 @@ public class WebUiEndpointTests
         Assert.Equal(HttpStatusCode.NotFound, missing.StatusCode);
     }
 
+    [Fact]
+    public async Task ExportHtmlEndpoint_RendersSessionAndRedactsSecrets()
+    {
+        await using var fixture = await WebUiEndpointFixture.StartAsync(StreamOk);
+        var created = await fixture.Client.PostAsync(
+            "/api/sessions",
+            JsonBody(
+                new CreateSessionRequest("Export me", "openai", "gpt-5.4"),
+                WebUiEndpointJsonContext.Default.CreateSessionRequest));
+        created.EnsureSuccessStatusCode();
+        var session = JsonSerializer.Deserialize(
+            await created.Content.ReadAsStringAsync(),
+            WebUiEndpointJsonContext.Default.WebChatSessionDto);
+        Assert.NotNull(session);
+
+        var send = await fixture.Client.PostAsync(
+            $"/api/sessions/{session!.Id}/messages",
+            JsonBody(
+                new SendMessageRequest("AWS key AKIAIOSFODNN7EXAMPLE and a note"),
+                WebUiEndpointJsonContext.Default.SendMessageRequest));
+        send.EnsureSuccessStatusCode();
+
+        var exported = await fixture.Client.GetAsync($"/api/sessions/{session.Id}/export.html");
+        exported.EnsureSuccessStatusCode();
+        Assert.Equal("text/html", exported.Content.Headers.ContentType?.MediaType);
+        var html = await exported.Content.ReadAsStringAsync();
+        Assert.Contains("Export me", html, StringComparison.Ordinal);
+        Assert.Contains("gpt-5.4", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("AKIAIOSFODNN7EXAMPLE", html, StringComparison.Ordinal);
+        Assert.Contains("[redacted]", html, StringComparison.Ordinal);
+        Assert.Contains("a note", html, StringComparison.Ordinal);
+
+        var missing = await fixture.Client.GetAsync("/api/sessions/does-not-exist/export.html");
+        Assert.Equal(HttpStatusCode.NotFound, missing.StatusCode);
+    }
+
     private static StringContent JsonBody<T>(T value, JsonTypeInfo<T> jsonTypeInfo) =>
         new(JsonSerializer.Serialize(value, jsonTypeInfo), Encoding.UTF8, "application/json");
 

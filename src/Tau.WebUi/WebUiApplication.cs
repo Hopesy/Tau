@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using Tau.Ai;
 using Tau.WebUi.Contracts;
 using Tau.WebUi.Services;
 using Tau.WebUi.Ui;
@@ -45,6 +46,21 @@ public static class WebUiApplication
                 Encoding.UTF8.GetBytes(json),
                 "application/json; charset=utf-8",
                 $"{SafeFileName(session.Title)}.tau-webui-session.json");
+        });
+        app.MapGet("/api/sessions/{id}/export.html", (string id, WebChatService chat) =>
+        {
+            var session = chat.GetSession(id);
+            if (session is null)
+            {
+                return Results.NotFound();
+            }
+
+            var redactor = TauSecretRedactor.ForEnvironmentVariable(TauSecretRedactor.WebUiEnvironmentVariable);
+            var html = WebChatHtmlExporter.Render(session, redactor);
+            return Results.File(
+                Encoding.UTF8.GetBytes(html),
+                "text/html; charset=utf-8",
+                $"{SafeFileName(session.Title)}.tau-webui-session.html");
         });
         app.MapPost("/api/sessions", (CreateSessionRequest? request, WebChatService chat) =>
         {

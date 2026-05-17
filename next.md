@@ -38,7 +38,7 @@
 #### 配置 / 安全
 
 - [x] auth.json schema 明文化
-- [~] secret 持久化边界和脱敏规则（已补默认 `./.tau/auth.json` / `./.tau/models.json` / JSONL session 本地状态忽略、`auth.json` Unix 0600 写入、OAuth metadata 保留字段过滤、auth status 不回显密钥、models.json credential header 状态识别、command-backed `apiKey` 状态检查不执行 `!command` 的回归，以及 HTML transcript 导出（`/export` / `/share`）默认对常见 AWS / GitHub / Slack / Anthropic / OpenAI / Bearer / JWT secret 模式做 `[redacted]` 替换（`TAU_CODING_AGENT_REDACT_SECRETS=0` 可关闭）；仍需继续梳理 JSONL 流式 export / runtime 日志输出脱敏边界）
+- [~] secret 持久化边界和脱敏规则（已补默认 `./.tau/auth.json` / `./.tau/models.json` / JSONL session 本地状态忽略、`auth.json` Unix 0600 写入、OAuth metadata 保留字段过滤、auth status 不回显密钥、models.json credential header 状态识别、command-backed `apiKey` 状态检查不执行 `!command` 的回归、HTML transcript 导出（`/export` / `/share`）默认对常见 AWS / GitHub / Slack / Anthropic / OpenAI / Bearer / JWT secret 模式做 `[redacted]` 替换（`TAU_CODING_AGENT_REDACT_SECRETS=0` 可关闭），以及 `TauSecretRedactor` 提升到 `Tau.Ai` 并被 `Tau.WebUi GET /api/sessions/{id}/export.html` 使用（`TAU_WEBUI_REDACT_SECRETS=0` 可关闭）；仍需继续梳理 JSONL 流式 export / runtime 日志输出脱敏边界）
 - [x] provider-specific headers 支持（models.json 已能合并静态 provider/model headers，并在 StreamFunctions 层解析 provider/model request headers）
 - [x] Bedrock AWS SSO / AssumeRole / credential_process / IMDS / ECS / web identity credential chain（已覆盖全部六个源 + AssumeRole 的 source_profile 与 credential_source 两种触发方式（Environment / EcsContainer / Ec2InstanceMetadata）；SigV4 签名器泛化到任意 service，STS XML 解析共享，token cache 路径 / portal endpoint / sts endpoint 均可在 BedrockOptions 中显式覆盖；剩余增量：SSO token 自动刷新和真实云端 e2e）
 - [x] 自定义 provider / custom model 配置入口（`TAU_MODELS_FILE`、`./.tau/models.json`、`~/.tau/models.json`，支持 Tau 已注册 API 的 `providers/baseUrl/api/apiKey/authHeader/headers/compat/models/modelOverrides` 子集）

@@ -35,6 +35,7 @@ Tau 当前是本地开发者工具链项目，安全边界要围绕“**本地 A
 - 默认本地 `./.tau/auth.json` 和 `./.tau/models.json` 都必须忽略；需要版本化时只提交无密钥示例文件
 - `auth.json` 是 credential write-back store；`models.json` 是 request-time 配置，不承载 OAuth refresh 写回
 - HTML transcript 导出（`/export`、`/share`）默认走 `CodingAgentSecretRedactor`：匹配常见 AWS access key、GitHub token、Slack token、Anthropic / OpenAI key、`Bearer …` header、JWT 模式时替换为 `[redacted]`；可通过 `TAU_CODING_AGENT_REDACT_SECRETS=0` 显式关闭以备调试
+- Tau.WebUi `GET /api/sessions/{id}/export.html` 复用同一组规则（`TauSecretRedactor` 在 Tau.Ai 中实现），默认开启脱敏；可通过 `TAU_WEBUI_REDACT_SECRETS=0` 关闭
 
 ## 文件与命令工具边界
 
