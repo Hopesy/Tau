@@ -1,0 +1,156 @@
+using Tau.Pods.Cli;
+using Tau.Pods.Models;
+using Tau.Pods.Services;
+
+namespace Tau.Pods.Tests;
+
+public class PodsCliTests
+{
+    private static readonly SemaphoreSlim CurrentDirectoryGate = new(1, 1);
+
+    [Fact]
+    public async Task Deploy_WithoutConfigPath_UsesDefaultConfig()
+    {
+        await CurrentDirectoryGate.WaitAsync();
+        var previousDirectory = Environment.CurrentDirectory;
+        var tempDir = Directory.CreateTempSubdirectory("tau-pods-cli-");
+        var stdout = new StringWriter();
+        var stderr = new StringWriter();
+        var previousOut = Console.Out;
+        var previousError = Console.Error;
+
+        try
+        {
+            Environment.CurrentDirectory = tempDir.FullName;
+            Console.SetOut(stdout);
+            Console.SetError(stderr);
+            new PodsConfigStore().Save("tau.pods.json", ConfigWithHttpPod());
+
+            var exitCode = await PodsCli.RunAsync(["deploy", "http-pod", "meta/llama-3"]);
+
+            Assert.Equal(1, exitCode);
+            Assert.Contains("http-pod | ok=False | Deploy requires SSH-based pod.", stdout.ToString(), StringComparison.Ordinal);
+            Assert.DoesNotContain("Config not found", stderr.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            Console.SetOut(previousOut);
+            Console.SetError(previousError);
+            Environment.CurrentDirectory = previousDirectory;
+            tempDir.Delete(recursive: true);
+            CurrentDirectoryGate.Release();
+        }
+    }
+
+    [Fact]
+    public async Task Deploy_WithExplicitConfigPath_UsesProvidedConfig()
+    {
+        var tempDir = Directory.CreateTempSubdirectory("tau-pods-cli-");
+        var configPath = Path.Combine(tempDir.FullName, "custom-pods.json");
+        var stdout = new StringWriter();
+        var stderr = new StringWriter();
+        var previousOut = Console.Out;
+        var previousError = Console.Error;
+
+        try
+        {
+            Console.SetOut(stdout);
+            Console.SetError(stderr);
+            new PodsConfigStore().Save(configPath, ConfigWithHttpPod());
+
+            var exitCode = await PodsCli.RunAsync(["deploy", configPath, "http-pod", "meta/llama-3"]);
+
+            Assert.Equal(1, exitCode);
+            Assert.Contains("http-pod | ok=False | Deploy requires SSH-based pod.", stdout.ToString(), StringComparison.Ordinal);
+            Assert.DoesNotContain("Config not found", stderr.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            Console.SetOut(previousOut);
+            Console.SetError(previousError);
+            tempDir.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Logs_WithoutConfigPath_RejectsNonSshPod()
+    {
+        await CurrentDirectoryGate.WaitAsync();
+        var previousDirectory = Environment.CurrentDirectory;
+        var tempDir = Directory.CreateTempSubdirectory("tau-pods-cli-logs-");
+        var stdout = new StringWriter();
+        var stderr = new StringWriter();
+        var previousOut = Console.Out;
+        var previousError = Console.Error;
+
+        try
+        {
+            Environment.CurrentDirectory = tempDir.FullName;
+            Console.SetOut(stdout);
+            Console.SetError(stderr);
+            new PodsConfigStore().Save("tau.pods.json", ConfigWithHttpPod());
+
+            var exitCode = await PodsCli.RunAsync(["logs", "http-pod", "demo"]);
+
+            Assert.Equal(1, exitCode);
+            Assert.Contains("http-pod | ok=False | Logs require SSH-based pod.", stdout.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            Console.SetOut(previousOut);
+            Console.SetError(previousError);
+            Environment.CurrentDirectory = previousDirectory;
+            tempDir.Delete(recursive: true);
+            CurrentDirectoryGate.Release();
+        }
+    }
+
+    [Fact]
+    public async Task Logs_RejectsInvalidTail()
+    {
+        await CurrentDirectoryGate.WaitAsync();
+        var previousDirectory = Environment.CurrentDirectory;
+        var tempDir = Directory.CreateTempSubdirectory("tau-pods-cli-logs-tail-");
+        var stdout = new StringWriter();
+        var stderr = new StringWriter();
+        var previousOut = Console.Out;
+        var previousError = Console.Error;
+
+        try
+        {
+            Environment.CurrentDirectory = tempDir.FullName;
+            Console.SetOut(stdout);
+            Console.SetError(stderr);
+            new PodsConfigStore().Save("tau.pods.json", ConfigWithHttpPod());
+
+            var exitCode = await PodsCli.RunAsync(["logs", "http-pod", "demo", "notanumber"]);
+
+            Assert.Equal(1, exitCode);
+            Assert.Contains("Invalid tail value", stderr.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            Console.SetOut(previousOut);
+            Console.SetError(previousError);
+            Environment.CurrentDirectory = previousDirectory;
+            tempDir.Delete(recursive: true);
+            CurrentDirectoryGate.Release();
+        }
+    }
+
+    private static PodsConfig ConfigWithHttpPod() => new()
+    {
+        Pods =
+        [
+            new PodDefinition
+            {
+                Id = "http-pod",
+                Provider = "vllm",
+                Model = "llama",
+                Region = "local",
+                Endpoint = "http://127.0.0.1:9",
+                Enabled = true
+            }
+        ]
+    };
+}
