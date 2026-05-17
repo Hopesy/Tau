@@ -1,3 +1,4 @@
+using Tau.Tui.Abstractions;
 using Tau.Tui.Runtime;
 
 namespace Tau.Tui.Tests;
@@ -20,6 +21,53 @@ public class InteractiveConsoleSessionTests
         Assert.Contains("tau> hello\ntool> [read_file] (done)\n", output);
         Assert.Contains(session.Transcript, entry => entry is { Kind: TranscriptEntryKind.Assistant, Text: "hello" });
         Assert.Contains(session.Transcript, entry => entry is { Kind: TranscriptEntryKind.Tool, Text: "[read_file]" });
+    }
+
+    [Fact]
+    public async Task ReadInputAsync_PrefersEditorWhenProvided()
+    {
+        var terminal = new FakeTerminal();
+        var keyReader = new ScriptedKeyReader();
+        keyReader.Enqueue('h');
+        keyReader.Enqueue('i');
+        keyReader.EnqueueKey(ConsoleKey.Enter);
+        var renderer = new CapturingRenderer();
+        var editor = new InteractiveInputEditor(keyReader, renderer);
+        var session = new InteractiveConsoleSession(terminal, editor);
+
+        var input = await session.ReadInputAsync();
+
+        Assert.Equal("hi", input);
+        Assert.Empty(terminal.Writes);
+        Assert.Single(renderer.Prompts);
+    }
+
+    [Fact]
+    public async Task ReadInputAsync_FallsBackToTerminalPromptWhenNoEditor()
+    {
+        var terminal = new FakeTerminal();
+        terminal.QueueInput("hello");
+        var session = new InteractiveConsoleSession(terminal);
+
+        var input = await session.ReadInputAsync();
+
+        Assert.Equal("hello", input);
+        Assert.Contains(terminal.Writes, w => w.Text == "> ");
+    }
+
+    [Fact]
+    public async Task ReadInputAsync_TreatsEditorCancellationAsNullInput()
+    {
+        var terminal = new FakeTerminal();
+        var keyReader = new ScriptedKeyReader();
+        keyReader.EnqueueRaw(new ConsoleKeyInfo('\x03', ConsoleKey.C, shift: false, alt: false, control: true));
+        var renderer = new CapturingRenderer();
+        var editor = new InteractiveInputEditor(keyReader, renderer);
+        var session = new InteractiveConsoleSession(terminal, editor);
+
+        var input = await session.ReadInputAsync();
+
+        Assert.Null(input);
     }
 
     [Fact]
@@ -66,5 +114,35 @@ public class InteractiveConsoleSessionTests
         Assert.Contains("thinking> plan\ntau> answer\n", output);
         Assert.Contains(session.Transcript, entry => entry is { Kind: TranscriptEntryKind.Thinking, Text: "plan" });
         Assert.Contains(session.Transcript, entry => entry is { Kind: TranscriptEntryKind.Assistant, Text: "answer" });
+    }
+
+    private sealed class ScriptedKeyReader : IConsoleKeyReader
+    {
+        private readonly Queue<ConsoleKeyInfo> _keys = new();
+
+        public void Enqueue(char ch) =>
+            _keys.Enqueue(new ConsoleKeyInfo(ch, ConsoleKey.NoName, shift: false, alt: false, control: false));
+
+        public void EnqueueKey(ConsoleKey key) =>
+            _keys.Enqueue(new ConsoleKeyInfo('\0', key, shift: false, alt: false, control: false));
+
+        public void EnqueueRaw(ConsoleKeyInfo key) => _keys.Enqueue(key);
+
+        public ValueTask<ConsoleKeyInfo> ReadKeyAsync(CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(_keys.Dequeue());
+    }
+
+    private sealed class CapturingRenderer : IInteractiveRenderer
+    {
+        public int WindowWidth => 80;
+        public List<string> Prompts { get; } = [];
+        public List<(string Buffer, int Cursor)> Renders { get; } = [];
+        public int CommitCalls { get; private set; }
+        public int CancelCalls { get; private set; }
+
+        public void WritePrompt(string prompt, ConsoleColor? color = null) => Prompts.Add(prompt);
+        public void Render(string buffer, int cursorIndex) => Renders.Add((buffer, cursorIndex));
+        public void Commit() => CommitCalls++;
+        public void Cancel() => CancelCalls++;
     }
 }

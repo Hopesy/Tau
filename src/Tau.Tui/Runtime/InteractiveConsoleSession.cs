@@ -5,6 +5,7 @@ namespace Tau.Tui.Runtime;
 public sealed class InteractiveConsoleSession
 {
     private readonly ITerminal _terminal;
+    private readonly InteractiveInputEditor? _editor;
     private readonly List<TranscriptEntry> _transcript = [];
     private bool _streamingLineOpen;
     private TranscriptEntryKind? _streamingKind;
@@ -13,9 +14,10 @@ public sealed class InteractiveConsoleSession
     public InputBuffer InputBuffer { get; } = new();
     public IReadOnlyList<TranscriptEntry> Transcript => _transcript;
 
-    public InteractiveConsoleSession(ITerminal terminal)
+    public InteractiveConsoleSession(ITerminal terminal, InteractiveInputEditor? editor = null)
     {
         _terminal = terminal;
+        _editor = editor;
     }
 
     public void ShowWelcome(string title, string promptHint)
@@ -29,6 +31,20 @@ public sealed class InteractiveConsoleSession
 
     public async Task<string?> ReadInputAsync(CancellationToken cancellationToken = default)
     {
+        if (_editor is not null)
+        {
+            EnsureStreamingLineClosed();
+            var result = await _editor.ReadLineAsync("> ", ConsoleColor.Green, cancellationToken).ConfigureAwait(false);
+            if (result.Kind == InputResultKind.Cancelled)
+            {
+                // Match the Console.ReadLine semantic: returning null means EOF / abort.
+                return null;
+            }
+
+            InputBuffer.SetDraft(result.Text);
+            return InputBuffer.Commit();
+        }
+
         var input = await _terminal.PromptAsync("> ", ConsoleColor.Green, cancellationToken).ConfigureAwait(false);
         InputBuffer.SetDraft(input);
         return InputBuffer.Commit();

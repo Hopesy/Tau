@@ -73,7 +73,7 @@
 
 ### Tau.Tui
 
-- [~] 真正的输入编辑器（`InteractiveInputEditor` baseline 已落：key-by-key 读取、char append、backspace/delete、左/右光标、Home/End、Enter 提交、Ctrl-C 取消、`InputHistory` Up/Down 历史回放（去重 + capacity）；通过 `IConsoleKeyReader`/`IInteractiveRenderer` seam 测试；仍缺接入 `Tau.CodingAgent` 的 prompt 路径与多行/wrap 渲染）
+- [~] 真正的输入编辑器（`InteractiveInputEditor` baseline 已落：key-by-key 读取、char append、backspace/delete、左/右光标、Home/End、Enter 提交、Ctrl-C 取消、`InputHistory` Up/Down 历史回放（去重 + capacity）；`Tau.CodingAgent` 在交互式 console（无 redirected stdin/stdout、未设 `TAU_CODING_AGENT_DISABLE_INPUT_EDITOR=1`）下默认使用 editor，非交互回退 `Console.ReadLine`；通过 `IConsoleKeyReader`/`IInteractiveRenderer` seam 测试；仍缺多行/wrap 渲染与 reverse-search/word-jump）
 - [ ] 组件系统
 - [ ] 消息区 / 状态区
 - [~] 键盘体系（`SystemConsoleKeyReader` + `InteractiveInputEditor` 已支持主要导航/编辑键；仍缺 Ctrl-A/E/W、Meta-/word 移动、自定义绑定层）

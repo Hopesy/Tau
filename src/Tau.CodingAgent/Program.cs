@@ -2,7 +2,23 @@ using Tau.CodingAgent.Runtime;
 using Tau.Tui.Runtime;
 
 var terminal = new SystemConsoleTerminal();
-var ui = new InteractiveConsoleSession(terminal);
+var editor = CreateInteractiveEditorIfAttached();
+var ui = new InteractiveConsoleSession(terminal, editor);
+
+static InteractiveInputEditor? CreateInteractiveEditorIfAttached()
+{
+    if (Console.IsInputRedirected || Console.IsOutputRedirected)
+    {
+        return null;
+    }
+
+    if (string.Equals(Environment.GetEnvironmentVariable("TAU_CODING_AGENT_DISABLE_INPUT_EDITOR"), "1", StringComparison.Ordinal))
+    {
+        return null;
+    }
+
+    return new InteractiveInputEditor(new SystemConsoleKeyReader(), new SystemConsoleInteractiveRenderer());
+}
 var sessionFile = Environment.GetEnvironmentVariable("TAU_CODING_AGENT_SESSION_FILE");
 var sessionStore = CodingAgentTreeSessionStore.IsJsonlPath(sessionFile)
     ? null
@@ -34,7 +50,8 @@ var host = new CodingAgentHost(
     promptTemplateStore: promptTemplateStore,
     skillStore: skillStore,
     extensionCommandStore: extensionCommandStore,
-    autoCompaction: CodingAgentAutoCompactionOptions.FromEnvironment());
+    autoCompaction: CodingAgentAutoCompactionOptions.FromEnvironment(),
+    retryOptions: CodingAgentRetryOptions.FromSettingsOrEnvironment(settings));
 using var cts = new CancellationTokenSource();
 
 Console.CancelKeyPress += (_, e) =>
