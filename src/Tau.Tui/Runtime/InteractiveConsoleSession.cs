@@ -123,6 +123,14 @@ public sealed class InteractiveConsoleSession
         _transcript.Add(new TranscriptEntry(TranscriptEntryKind.System, message));
     }
 
+    public void ClearScreen()
+    {
+        EnsureStreamingLineClosed();
+        // ANSI clear screen + move cursor home. Terminals that don't support ANSI
+        // will just print the codes, which is acceptable for a /clear best-effort.
+        _terminal.Write("\u001b[2J\u001b[H");
+    }
+
     private void EnsureStreamingLineClosed()
     {
         if (!_streamingLineOpen)

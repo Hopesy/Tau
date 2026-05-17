@@ -16,6 +16,7 @@ public sealed class CodingAgentCommandRouter
     private readonly CodingAgentAutoCompactionOptions _autoCompaction;
     private readonly Action<CodingAgentRetryOptions>? _retryOptionsChanged;
     private readonly Func<int, IReadOnlyList<string>>? _historySnapshotProvider;
+    private readonly Action? _clearScreenAction;
     private readonly string? _sessionFile;
     private CodingAgentRetryOptions _retryOptions;
 
@@ -32,7 +33,8 @@ public sealed class CodingAgentCommandRouter
         CodingAgentAutoCompactionOptions? autoCompaction = null,
         CodingAgentRetryOptions? retryOptions = null,
         Action<CodingAgentRetryOptions>? retryOptionsChanged = null,
-        Func<int, IReadOnlyList<string>>? historySnapshotProvider = null)
+        Func<int, IReadOnlyList<string>>? historySnapshotProvider = null,
+        Action? clearScreenAction = null)
     {
         _runner = runner;
         _settingsStore = settingsStore;
@@ -46,6 +48,7 @@ public sealed class CodingAgentCommandRouter
         _retryOptions = retryOptions ?? CodingAgentRetryOptions.Disabled;
         _retryOptionsChanged = retryOptionsChanged;
         _historySnapshotProvider = historySnapshotProvider;
+        _clearScreenAction = clearScreenAction;
         _sessionFile = sessionFile;
     }
 
@@ -95,6 +98,7 @@ public sealed class CodingAgentCommandRouter
                 "/login" => await HandleLoginCommandAsync(parts, cancellationToken).ConfigureAwait(false),
                 "/retry" => HandleRetryCommand(parts),
                 "/history" => HandleHistoryCommand(parts),
+                "/clear" => HandleClearCommand(parts),
                 "/compact" => await HandleCompactCommandAsync(input, parts, cancellationToken).ConfigureAwait(false),
                 _ => CodingAgentCommandResult.Error($"unknown command '{parts[0]}'")
             };
@@ -703,6 +707,22 @@ public sealed class CodingAgentCommandRouter
         var credentials = await provider.LoginAsync(callbacks, cancellationToken).ConfigureAwait(false);
         _runner.SaveOAuthCredentials(status.Provider, credentials);
         return CodingAgentCommandResult.Status($"login {status.Provider}: authenticated successfully. Credentials saved to auth.json.");
+    }
+
+    private CodingAgentCommandResult HandleClearCommand(IReadOnlyList<string> parts)
+    {
+        if (parts.Count != 1)
+        {
+            return CodingAgentCommandResult.Error(CodingAgentCommandCatalog.Usage("/clear"));
+        }
+
+        if (_clearScreenAction is null)
+        {
+            return CodingAgentCommandResult.Error("clear-screen is not supported in this session");
+        }
+
+        _clearScreenAction();
+        return CodingAgentCommandResult.Status("");
     }
 
     private CodingAgentCommandResult HandleHistoryCommand(IReadOnlyList<string> parts)

@@ -32,6 +32,7 @@ public static class CodingAgentCommandCatalog
         new("/login", "/login [provider]", "Show login guidance for a provider"),
         new("/retry", "/retry [current|default|off|<max attempts> [base delay ms]]", "Show or configure transient retry behavior"),
         new("/history", "/history [count|all]", "List recent input history entries"),
+        new("/clear", "/clear", "Clear the terminal screen (keep session state)"),
         new("/compact", "/compact [instructions]", "Manually compact the current session")
     ];
 

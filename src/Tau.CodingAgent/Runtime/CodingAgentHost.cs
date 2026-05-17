@@ -57,7 +57,8 @@ public sealed class CodingAgentHost
             autoCompaction: _autoCompaction,
             retryOptions: _retryOptions,
             retryOptionsChanged: options => _retryOptions = options,
-            historySnapshotProvider: historySnapshotProvider);
+            historySnapshotProvider: historySnapshotProvider,
+            clearScreenAction: () => _ui.ClearScreen());
     }
 
     public async Task<int> RunAsync(CancellationToken cancellationToken = default)

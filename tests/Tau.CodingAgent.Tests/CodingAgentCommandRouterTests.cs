@@ -200,7 +200,7 @@ public class CodingAgentCommandRouterTests
     public void CommandCatalog_HelpLine_MatchesSupportedCommandNames()
     {
         Assert.Equal(
-            "commands: /help, /name, /copy, /files, /export, /share, /import, /new, /session, /tree, /label, /fork, /clone, /resume, /quit, /model, /provider, /models, /providers, /prompts, /skills, /extensions, /auth, /login, /retry, /history, /compact",
+            "commands: /help, /name, /copy, /files, /export, /share, /import, /new, /session, /tree, /label, /fork, /clone, /resume, /quit, /model, /provider, /models, /providers, /prompts, /skills, /extensions, /auth, /login, /retry, /history, /clear, /compact",
             CodingAgentCommandCatalog.HelpLine);
         Assert.All(CodingAgentCommandCatalog.SupportedCommands, command =>
         {
@@ -221,7 +221,7 @@ public class CodingAgentCommandRouterTests
         Assert.True(result.Handled);
         Assert.False(result.IsError);
         Assert.Equal(
-            "commands: /help, /name, /copy, /files, /export, /share, /import, /new, /session, /tree, /label, /fork, /clone, /resume, /quit, /model, /provider, /models, /providers, /prompts, /skills, /extensions, /auth, /login, /retry, /history, /compact",
+            "commands: /help, /name, /copy, /files, /export, /share, /import, /new, /session, /tree, /label, /fork, /clone, /resume, /quit, /model, /provider, /models, /providers, /prompts, /skills, /extensions, /auth, /login, /retry, /history, /clear, /compact",
             result.Message);
         Assert.Empty(runner.Inputs);
     }
@@ -1917,6 +1917,44 @@ public class CodingAgentCommandRouterTests
                 Directory.Delete(directory, recursive: true);
             }
         }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_ClearCommand_InvokesClearAction()
+    {
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var invocations = 0;
+        var router = new CodingAgentCommandRouter(runner, clearScreenAction: () => invocations++);
+
+        var result = await router.TryHandleAsync("/clear");
+
+        Assert.True(result.Handled);
+        Assert.False(result.IsError);
+        Assert.Equal(1, invocations);
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_ClearCommand_WithoutActionReturnsError()
+    {
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var router = new CodingAgentCommandRouter(runner);
+
+        var result = await router.TryHandleAsync("/clear");
+
+        Assert.True(result.IsError);
+        Assert.Contains("not supported", result.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_ClearCommand_RejectsExtraArguments()
+    {
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var router = new CodingAgentCommandRouter(runner, clearScreenAction: () => { });
+
+        var result = await router.TryHandleAsync("/clear extra");
+
+        Assert.True(result.IsError);
+        Assert.Contains("usage:", result.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
