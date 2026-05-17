@@ -1,45 +1,56 @@
 namespace Tau.Ai.Providers.Bedrock;
 
-internal sealed record BedrockProfileCredentials(
-    string? AccessKeyId,
-    string? SecretAccessKey,
-    string? SessionToken,
-    string? Region);
-
 internal static class BedrockProfileCredentialsResolver
 {
-    public static BedrockProfileCredentials? Load(BedrockOptions options)
+    public static BedrockProfileSnapshot? Load(BedrockOptions options, string? profileNameOverride = null)
     {
-        var profileName = FirstNonEmpty(options.Profile, Environment.GetEnvironmentVariable("AWS_PROFILE")) ?? "default";
-        var credentials = ReadProfile(ResolveCredentialsFile(options), profileName, configFile: false);
-        var config = ReadProfile(ResolveConfigFile(options), profileName, configFile: true);
+        var profileName = profileNameOverride
+            ?? FirstNonEmpty(options.Profile, Environment.GetEnvironmentVariable("AWS_PROFILE"))
+            ?? "default";
+        var credentialsPath = ResolveCredentialsFile(options);
+        var configPath = ResolveConfigFile(options);
+        var credentials = ReadProfile(credentialsPath, profileName, configFile: false);
+        var config = ReadProfile(configPath, profileName, configFile: true);
         if (credentials is null && config is null)
         {
             return null;
         }
 
-        var accessKeyId = FirstNonEmpty(
-            Get(credentials, "aws_access_key_id"),
-            Get(config, "aws_access_key_id"));
-        var secretAccessKey = FirstNonEmpty(
-            Get(credentials, "aws_secret_access_key"),
-            Get(config, "aws_secret_access_key"));
-        var sessionToken = FirstNonEmpty(
-            Get(credentials, "aws_session_token"),
-            Get(config, "aws_session_token"));
-        var region = FirstNonEmpty(
-            Get(config, "region"),
-            Get(credentials, "region"));
+        var ssoSession = FirstNonEmpty(Get(credentials, "sso_session"), Get(config, "sso_session"));
+        var ssoStartUrl = FirstNonEmpty(Get(credentials, "sso_start_url"), Get(config, "sso_start_url"));
+        var ssoRegion = FirstNonEmpty(Get(credentials, "sso_region"), Get(config, "sso_region"));
 
-        if (string.IsNullOrWhiteSpace(accessKeyId) &&
-            string.IsNullOrWhiteSpace(secretAccessKey) &&
-            string.IsNullOrWhiteSpace(sessionToken) &&
-            string.IsNullOrWhiteSpace(region))
+        if (!string.IsNullOrWhiteSpace(ssoSession) && !string.IsNullOrWhiteSpace(configPath) && File.Exists(configPath))
         {
-            return null;
+            var ssoSection = ReadIni(configPath).GetValueOrDefault($"sso-session {ssoSession}");
+            if (ssoSection is not null)
+            {
+                ssoStartUrl = FirstNonEmpty(ssoStartUrl, Get(ssoSection, "sso_start_url"));
+                ssoRegion = FirstNonEmpty(ssoRegion, Get(ssoSection, "sso_region"));
+            }
         }
 
-        return new BedrockProfileCredentials(accessKeyId, secretAccessKey, sessionToken, region);
+        return new BedrockProfileSnapshot
+        {
+            Name = profileName,
+            AccessKeyId = FirstNonEmpty(Get(credentials, "aws_access_key_id"), Get(config, "aws_access_key_id")),
+            SecretAccessKey = FirstNonEmpty(Get(credentials, "aws_secret_access_key"), Get(config, "aws_secret_access_key")),
+            SessionToken = FirstNonEmpty(Get(credentials, "aws_session_token"), Get(config, "aws_session_token")),
+            Region = FirstNonEmpty(Get(config, "region"), Get(credentials, "region")),
+            RoleArn = FirstNonEmpty(Get(credentials, "role_arn"), Get(config, "role_arn")),
+            SourceProfile = FirstNonEmpty(Get(credentials, "source_profile"), Get(config, "source_profile")),
+            CredentialSource = FirstNonEmpty(Get(credentials, "credential_source"), Get(config, "credential_source")),
+            RoleSessionName = FirstNonEmpty(Get(credentials, "role_session_name"), Get(config, "role_session_name")),
+            ExternalId = FirstNonEmpty(Get(credentials, "external_id"), Get(config, "external_id")),
+            WebIdentityTokenFile = FirstNonEmpty(Get(credentials, "web_identity_token_file"), Get(config, "web_identity_token_file")),
+            CredentialProcess = FirstNonEmpty(Get(credentials, "credential_process"), Get(config, "credential_process")),
+            MfaSerial = FirstNonEmpty(Get(credentials, "mfa_serial"), Get(config, "mfa_serial")),
+            SsoSession = ssoSession,
+            SsoStartUrl = ssoStartUrl,
+            SsoRegion = ssoRegion,
+            SsoAccountId = FirstNonEmpty(Get(credentials, "sso_account_id"), Get(config, "sso_account_id")),
+            SsoRoleName = FirstNonEmpty(Get(credentials, "sso_role_name"), Get(config, "sso_role_name"))
+        };
     }
 
     private static Dictionary<string, string>? ReadProfile(string path, string profileName, bool configFile)

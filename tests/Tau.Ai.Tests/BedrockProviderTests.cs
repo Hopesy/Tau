@@ -207,6 +207,567 @@ public sealed class BedrockProviderTests
     }
 
     [Fact]
+    public async Task Stream_SignsRequestUsingCredentialProcessOutputWhenStaticCredentialsAreMissing()
+    {
+        using var env = new TemporaryEnvironment(
+            "AWS_BEARER_TOKEN_BEDROCK",
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_SESSION_TOKEN",
+            "AWS_PROFILE",
+            "AWS_REGION",
+            "AWS_DEFAULT_REGION");
+        var processOutput = """
+            {
+              "Version": 1,
+              "AccessKeyId": "AKIAFROMPROC",
+              "SecretAccessKey": "proc-secret",
+              "SessionToken": "proc-session",
+              "Expiration": "2099-01-01T00:00:00Z"
+            }
+            """;
+        var runner = new RecordingProcessRunner(new BedrockProcessResult(0, processOutput, "", TimedOut: false));
+        HttpRequestMessage? capturedRequest = null;
+        using var handler = new OpenAiResponsesProviderTests.StubHandler(request =>
+        {
+            capturedRequest = request;
+            return EventStreamResponse(
+                EventJson("messageStart", """{"role":"assistant"}"""),
+                EventJson("messageStop", """{"stopReason":"end_turn"}"""));
+        });
+        using var client = new HttpClient(handler);
+        var clock = new DateTimeOffset(2026, 4, 29, 4, 5, 6, TimeSpan.Zero);
+        var provider = new BedrockProvider(client, () => clock, runner);
+
+        await OpenAiResponsesProviderTests.CollectAsync(provider.Stream(
+            BuildModel(),
+            new LlmContext { Messages = [new UserMessage("process")] },
+            new BedrockOptions
+            {
+                Region = "us-east-1",
+                CredentialProcess = "helper --profile dev"
+            }));
+
+        Assert.NotNull(capturedRequest);
+        Assert.Equal("proc-session", capturedRequest!.Headers.GetValues("x-amz-security-token").Single());
+        var authorization = capturedRequest.Headers.GetValues("Authorization").Single();
+        Assert.StartsWith("AWS4-HMAC-SHA256 Credential=AKIAFROMPROC/20260429/us-east-1/bedrock/aws4_request", authorization, StringComparison.Ordinal);
+        Assert.NotNull(runner.LastRequest);
+        Assert.Equal("helper", runner.LastRequest!.FileName);
+        Assert.Equal(new[] { "--profile", "dev" }, runner.LastRequest.Arguments);
+    }
+
+    [Fact]
+    public async Task Stream_LoadsCredentialProcessFromProfileWhenStaticCredentialsAreMissing()
+    {
+        using var env = new TemporaryEnvironment(
+            "AWS_BEARER_TOKEN_BEDROCK",
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_SESSION_TOKEN",
+            "AWS_REGION",
+            "AWS_DEFAULT_REGION",
+            "AWS_PROFILE",
+            "AWS_SHARED_CREDENTIALS_FILE",
+            "AWS_CONFIG_FILE");
+        var tempDir = Directory.CreateTempSubdirectory("tau-bedrock-credprocess-");
+        try
+        {
+            var credentialsPath = Path.Combine(tempDir.FullName, "credentials");
+            var configPath = Path.Combine(tempDir.FullName, "config");
+            await File.WriteAllTextAsync(credentialsPath, "");
+            await File.WriteAllTextAsync(
+                configPath,
+                """
+                [profile dev]
+                region = us-west-2
+                credential_process = "C:/bin/helper.exe" --profile dev
+                """);
+
+            var processOutput = """
+                {
+                  "Version": 1,
+                  "AccessKeyId": "AKIAFROMPROFILEPROC",
+                  "SecretAccessKey": "profile-proc-secret",
+                  "Expiration": "2099-01-01T00:00:00Z"
+                }
+                """;
+            var runner = new RecordingProcessRunner(new BedrockProcessResult(0, processOutput, "", TimedOut: false));
+            HttpRequestMessage? capturedRequest = null;
+            using var handler = new OpenAiResponsesProviderTests.StubHandler(request =>
+            {
+                capturedRequest = request;
+                return EventStreamResponse(
+                    EventJson("messageStart", """{"role":"assistant"}"""),
+                    EventJson("messageStop", """{"stopReason":"end_turn"}"""));
+            });
+            using var client = new HttpClient(handler);
+            var clock = new DateTimeOffset(2026, 4, 29, 5, 6, 7, TimeSpan.Zero);
+            var provider = new BedrockProvider(client, () => clock, runner);
+
+            await OpenAiResponsesProviderTests.CollectAsync(provider.Stream(
+                BuildModel(baseUrl: null),
+                new LlmContext { Messages = [new UserMessage("profile-process")] },
+                new BedrockOptions
+                {
+                    Profile = "dev",
+                    CredentialsFile = credentialsPath,
+                    ConfigFile = configPath
+                }));
+
+            Assert.NotNull(capturedRequest);
+            Assert.Equal("bedrock-runtime.us-west-2.amazonaws.com", capturedRequest!.RequestUri!.Host);
+            Assert.False(capturedRequest.Headers.Contains("x-amz-security-token"));
+            var authorization = capturedRequest.Headers.GetValues("Authorization").Single();
+            Assert.StartsWith("AWS4-HMAC-SHA256 Credential=AKIAFROMPROFILEPROC/20260429/us-west-2/bedrock/aws4_request", authorization, StringComparison.Ordinal);
+            Assert.NotNull(runner.LastRequest);
+            Assert.Equal("C:/bin/helper.exe", runner.LastRequest!.FileName);
+            Assert.Equal(new[] { "--profile", "dev" }, runner.LastRequest.Arguments);
+        }
+        finally
+        {
+            tempDir.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Stream_SurfacesCredentialProcessErrorVerbatim()
+    {
+        using var env = new TemporaryEnvironment(
+            "AWS_BEARER_TOKEN_BEDROCK",
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_SESSION_TOKEN",
+            "AWS_PROFILE");
+        var runner = new RecordingProcessRunner(new BedrockProcessResult(7, "", "helper exploded", TimedOut: false));
+        using var handler = new OpenAiResponsesProviderTests.StubHandler(_ =>
+            throw new InvalidOperationException("HTTP should not be called when credential_process fails"));
+        using var client = new HttpClient(handler);
+        var provider = new BedrockProvider(client, clock: null, runner);
+
+        var events = await OpenAiResponsesProviderTests.CollectAsync(provider.Stream(
+            BuildModel(),
+            new LlmContext { Messages = [new UserMessage("fail")] },
+            new BedrockOptions
+            {
+                Region = "us-east-1",
+                CredentialProcess = "helper"
+            }));
+
+        var error = Assert.Single(events.OfType<ErrorEvent>());
+        Assert.Contains("credential_process exited with status 7", error.Error, StringComparison.Ordinal);
+        Assert.Contains("helper exploded", error.Error, StringComparison.Ordinal);
+        Assert.NotNull(runner.LastRequest);
+    }
+
+    [Fact]
+    public async Task Stream_SignsRequestWithCredentialsFromAssumeRoleWithWebIdentity()
+    {
+        using var env = new TemporaryEnvironment(
+            "AWS_BEARER_TOKEN_BEDROCK",
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_SESSION_TOKEN",
+            "AWS_PROFILE",
+            "AWS_REGION",
+            "AWS_DEFAULT_REGION",
+            "AWS_WEB_IDENTITY_TOKEN_FILE",
+            "AWS_ROLE_ARN",
+            "AWS_ROLE_SESSION_NAME");
+        var tempDir = Directory.CreateTempSubdirectory("tau-bedrock-webidentity-integration-");
+        try
+        {
+            var tokenPath = Path.Combine(tempDir.FullName, "token");
+            await File.WriteAllTextAsync(tokenPath, "jwt-from-pod");
+
+            HttpRequestMessage? bedrockRequest = null;
+            HttpRequestMessage? stsRequest = null;
+            string? stsBody = null;
+            using var handler = new OpenAiResponsesProviderTests.StubHandler(request =>
+            {
+                if (request.RequestUri!.Host.StartsWith("sts.", StringComparison.Ordinal))
+                {
+                    stsRequest = request;
+                    stsBody = request.Content!.ReadAsStringAsync().GetAwaiter().GetResult();
+                    return new HttpResponseMessage(HttpStatusCode.OK)
+                    {
+                        Content = new StringContent(
+                            """
+                            <AssumeRoleWithWebIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
+                              <AssumeRoleWithWebIdentityResult>
+                                <Credentials>
+                                  <AccessKeyId>ASIAWEBID</AccessKeyId>
+                                  <SecretAccessKey>webid-secret</SecretAccessKey>
+                                  <SessionToken>webid-session</SessionToken>
+                                  <Expiration>2099-01-01T00:00:00Z</Expiration>
+                                </Credentials>
+                              </AssumeRoleWithWebIdentityResult>
+                            </AssumeRoleWithWebIdentityResponse>
+                            """,
+                            Encoding.UTF8,
+                            "text/xml")
+                    };
+                }
+
+                bedrockRequest = request;
+                return EventStreamResponse(
+                    EventJson("messageStart", """{"role":"assistant"}"""),
+                    EventJson("messageStop", """{"stopReason":"end_turn"}"""));
+            });
+            using var client = new HttpClient(handler);
+            var clock = new DateTimeOffset(2026, 4, 29, 6, 7, 8, TimeSpan.Zero);
+            var provider = new BedrockProvider(client, () => clock);
+
+            await OpenAiResponsesProviderTests.CollectAsync(provider.Stream(
+                BuildModel(),
+                new LlmContext { Messages = [new UserMessage("webidentity")] },
+                new BedrockOptions
+                {
+                    Region = "us-east-1",
+                    WebIdentityTokenFile = tokenPath,
+                    WebIdentityRoleArn = "arn:aws:iam::123456789012:role/tau",
+                    WebIdentityRoleSessionName = "tau-pod"
+                }));
+
+            Assert.NotNull(stsRequest);
+            Assert.Equal("sts.us-east-1.amazonaws.com", stsRequest!.RequestUri!.Host);
+            Assert.Contains("WebIdentityToken=jwt-from-pod", stsBody, StringComparison.Ordinal);
+            Assert.Contains("RoleSessionName=tau-pod", stsBody, StringComparison.Ordinal);
+
+            Assert.NotNull(bedrockRequest);
+            Assert.Equal("webid-session", bedrockRequest!.Headers.GetValues("x-amz-security-token").Single());
+            var authorization = bedrockRequest.Headers.GetValues("Authorization").Single();
+            Assert.StartsWith("AWS4-HMAC-SHA256 Credential=ASIAWEBID/20260429/us-east-1/bedrock/aws4_request", authorization, StringComparison.Ordinal);
+        }
+        finally
+        {
+            tempDir.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Stream_SurfacesStsErrorWhenAssumeRoleWithWebIdentityFails()
+    {
+        using var env = new TemporaryEnvironment(
+            "AWS_BEARER_TOKEN_BEDROCK",
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_SESSION_TOKEN",
+            "AWS_PROFILE",
+            "AWS_REGION",
+            "AWS_DEFAULT_REGION",
+            "AWS_WEB_IDENTITY_TOKEN_FILE",
+            "AWS_ROLE_ARN",
+            "AWS_ROLE_SESSION_NAME");
+        var tempDir = Directory.CreateTempSubdirectory("tau-bedrock-webidentity-err-");
+        try
+        {
+            var tokenPath = Path.Combine(tempDir.FullName, "token");
+            await File.WriteAllTextAsync(tokenPath, "jwt");
+            var bedrockCalled = false;
+            using var handler = new OpenAiResponsesProviderTests.StubHandler(request =>
+            {
+                if (request.RequestUri!.Host.StartsWith("sts.", StringComparison.Ordinal))
+                {
+                    return new HttpResponseMessage(HttpStatusCode.BadRequest)
+                    {
+                        Content = new StringContent(
+                            """
+                            <ErrorResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
+                              <Error>
+                                <Type>Sender</Type>
+                                <Code>InvalidIdentityToken</Code>
+                                <Message>token expired</Message>
+                              </Error>
+                            </ErrorResponse>
+                            """,
+                            Encoding.UTF8,
+                            "text/xml")
+                    };
+                }
+
+                bedrockCalled = true;
+                return new HttpResponseMessage(HttpStatusCode.OK);
+            });
+            using var client = new HttpClient(handler);
+            var provider = new BedrockProvider(client);
+
+            var events = await OpenAiResponsesProviderTests.CollectAsync(provider.Stream(
+                BuildModel(),
+                new LlmContext { Messages = [new UserMessage("err")] },
+                new BedrockOptions
+                {
+                    Region = "us-east-1",
+                    WebIdentityTokenFile = tokenPath,
+                    WebIdentityRoleArn = "arn:aws:iam::123456789012:role/tau"
+                }));
+
+            var error = Assert.Single(events.OfType<ErrorEvent>());
+            Assert.Contains("InvalidIdentityToken", error.Error, StringComparison.Ordinal);
+            Assert.Contains("token expired", error.Error, StringComparison.Ordinal);
+            Assert.False(bedrockCalled);
+        }
+        finally
+        {
+            tempDir.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Stream_SignsRequestWithEcsContainerCredentials()
+    {
+        using var env = new TemporaryEnvironment(
+            "AWS_BEARER_TOKEN_BEDROCK",
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_SESSION_TOKEN",
+            "AWS_PROFILE",
+            "AWS_REGION",
+            "AWS_DEFAULT_REGION",
+            "AWS_WEB_IDENTITY_TOKEN_FILE",
+            "AWS_ROLE_ARN",
+            "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+            "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+            "AWS_CONTAINER_AUTHORIZATION_TOKEN",
+            "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
+            "AWS_EC2_METADATA_DISABLED");
+
+        HttpRequestMessage? ecsRequest = null;
+        HttpRequestMessage? bedrockRequest = null;
+        using var handler = new OpenAiResponsesProviderTests.StubHandler(request =>
+        {
+            if (request.RequestUri!.Host == "169.254.170.2")
+            {
+                ecsRequest = request;
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(
+                        """
+                        {
+                          "AccessKeyId": "ASIAECS",
+                          "SecretAccessKey": "ecs-secret",
+                          "Token": "ecs-token",
+                          "Expiration": "2099-01-01T00:00:00Z"
+                        }
+                        """,
+                        Encoding.UTF8,
+                        "application/json")
+                };
+            }
+
+            bedrockRequest = request;
+            return EventStreamResponse(
+                EventJson("messageStart", """{"role":"assistant"}"""),
+                EventJson("messageStop", """{"stopReason":"end_turn"}"""));
+        });
+        using var client = new HttpClient(handler);
+        var clock = new DateTimeOffset(2026, 4, 29, 7, 8, 9, TimeSpan.Zero);
+        var provider = new BedrockProvider(client, () => clock);
+
+        await OpenAiResponsesProviderTests.CollectAsync(provider.Stream(
+            BuildModel(),
+            new LlmContext { Messages = [new UserMessage("ecs")] },
+            new BedrockOptions
+            {
+                Region = "us-east-1",
+                ContainerCredentialsRelativeUri = "/v2/credentials/abc",
+                ContainerAuthorizationToken = "Bearer pod-token"
+            }));
+
+        Assert.NotNull(ecsRequest);
+        Assert.Equal("/v2/credentials/abc", ecsRequest!.RequestUri!.AbsolutePath);
+        Assert.Equal("Bearer pod-token", ecsRequest.Headers.GetValues("Authorization").Single());
+
+        Assert.NotNull(bedrockRequest);
+        Assert.Equal("ecs-token", bedrockRequest!.Headers.GetValues("x-amz-security-token").Single());
+        var authorization = bedrockRequest.Headers.GetValues("Authorization").Single();
+        Assert.StartsWith("AWS4-HMAC-SHA256 Credential=ASIAECS/20260429/us-east-1/bedrock/aws4_request", authorization, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Stream_SignsRequestWithAssumeRoleCredentialsFromProfile()
+    {
+        using var env = new TemporaryEnvironment(
+            "AWS_BEARER_TOKEN_BEDROCK",
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_SESSION_TOKEN",
+            "AWS_PROFILE",
+            "AWS_REGION",
+            "AWS_DEFAULT_REGION",
+            "AWS_WEB_IDENTITY_TOKEN_FILE",
+            "AWS_ROLE_ARN");
+        var tempDir = Directory.CreateTempSubdirectory("tau-bedrock-assume-integration-");
+        try
+        {
+            var credentialsPath = Path.Combine(tempDir.FullName, "credentials");
+            var configPath = Path.Combine(tempDir.FullName, "config");
+            await File.WriteAllTextAsync(
+                credentialsPath,
+                """
+                [base]
+                aws_access_key_id = AKIASRC
+                aws_secret_access_key = src-secret
+                """);
+            await File.WriteAllTextAsync(
+                configPath,
+                """
+                [profile dev]
+                region = us-west-2
+                role_arn = arn:aws:iam::123456789012:role/dev
+                source_profile = base
+                """);
+
+            HttpRequestMessage? stsRequest = null;
+            HttpRequestMessage? bedrockRequest = null;
+            using var handler = new OpenAiResponsesProviderTests.StubHandler(request =>
+            {
+                if (request.RequestUri!.Host.StartsWith("sts.", StringComparison.Ordinal))
+                {
+                    stsRequest = request;
+                    return new HttpResponseMessage(HttpStatusCode.OK)
+                    {
+                        Content = new StringContent(
+                            """
+                            <AssumeRoleResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
+                              <AssumeRoleResult>
+                                <Credentials>
+                                  <AccessKeyId>ASIAASSUMED</AccessKeyId>
+                                  <SecretAccessKey>assumed-secret</SecretAccessKey>
+                                  <SessionToken>assumed-token</SessionToken>
+                                  <Expiration>2099-01-01T00:00:00Z</Expiration>
+                                </Credentials>
+                              </AssumeRoleResult>
+                            </AssumeRoleResponse>
+                            """,
+                            Encoding.UTF8,
+                            "text/xml")
+                    };
+                }
+
+                bedrockRequest = request;
+                return EventStreamResponse(
+                    EventJson("messageStart", """{"role":"assistant"}"""),
+                    EventJson("messageStop", """{"stopReason":"end_turn"}"""));
+            });
+            using var client = new HttpClient(handler);
+            var clock = new DateTimeOffset(2026, 4, 29, 11, 12, 13, TimeSpan.Zero);
+            var provider = new BedrockProvider(client, () => clock);
+
+            await OpenAiResponsesProviderTests.CollectAsync(provider.Stream(
+                BuildModel(baseUrl: null),
+                new LlmContext { Messages = [new UserMessage("assume")] },
+                new BedrockOptions
+                {
+                    Profile = "dev",
+                    CredentialsFile = credentialsPath,
+                    ConfigFile = configPath
+                }));
+
+            Assert.NotNull(stsRequest);
+            Assert.Equal("sts.us-west-2.amazonaws.com", stsRequest!.RequestUri!.Host);
+            var stsAuth = stsRequest.Headers.GetValues("Authorization").Single();
+            Assert.StartsWith("AWS4-HMAC-SHA256 Credential=AKIASRC/20260429/us-west-2/sts/aws4_request", stsAuth, StringComparison.Ordinal);
+
+            Assert.NotNull(bedrockRequest);
+            Assert.Equal("bedrock-runtime.us-west-2.amazonaws.com", bedrockRequest!.RequestUri!.Host);
+            Assert.Equal("assumed-token", bedrockRequest.Headers.GetValues("x-amz-security-token").Single());
+            var bedrockAuth = bedrockRequest.Headers.GetValues("Authorization").Single();
+            Assert.StartsWith("AWS4-HMAC-SHA256 Credential=ASIAASSUMED/20260429/us-west-2/bedrock/aws4_request", bedrockAuth, StringComparison.Ordinal);
+        }
+        finally
+        {
+            tempDir.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Stream_SignsRequestWithImdsInstanceProfileCredentials()
+    {
+        using var env = new TemporaryEnvironment(
+            "AWS_BEARER_TOKEN_BEDROCK",
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_SESSION_TOKEN",
+            "AWS_PROFILE",
+            "AWS_REGION",
+            "AWS_DEFAULT_REGION",
+            "AWS_WEB_IDENTITY_TOKEN_FILE",
+            "AWS_ROLE_ARN",
+            "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+            "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+            "AWS_EC2_METADATA_DISABLED",
+            "AWS_EC2_METADATA_V1_DISABLED",
+            "AWS_EC2_METADATA_SERVICE_ENDPOINT");
+
+        HttpRequestMessage? bedrockRequest = null;
+        using var handler = new OpenAiResponsesProviderTests.StubHandler(request =>
+        {
+            if (request.RequestUri!.Host == "169.254.169.254")
+            {
+                if (request.Method == HttpMethod.Put && request.RequestUri.AbsolutePath == "/latest/api/token")
+                {
+                    return new HttpResponseMessage(HttpStatusCode.OK)
+                    {
+                        Content = new StringContent("imds-token-value", Encoding.UTF8, "text/plain")
+                    };
+                }
+
+                if (request.RequestUri.AbsolutePath == "/latest/meta-data/iam/security-credentials/")
+                {
+                    return new HttpResponseMessage(HttpStatusCode.OK)
+                    {
+                        Content = new StringContent("ec2-role\n", Encoding.UTF8, "text/plain")
+                    };
+                }
+
+                if (request.RequestUri.AbsolutePath == "/latest/meta-data/iam/security-credentials/ec2-role")
+                {
+                    return new HttpResponseMessage(HttpStatusCode.OK)
+                    {
+                        Content = new StringContent(
+                            """
+                            {
+                              "Code": "Success",
+                              "AccessKeyId": "ASIAIMDSINT",
+                              "SecretAccessKey": "imds-int-secret",
+                              "Token": "imds-int-token",
+                              "Expiration": "2099-01-01T00:00:00Z"
+                            }
+                            """,
+                            Encoding.UTF8,
+                            "application/json")
+                    };
+                }
+
+                throw new InvalidOperationException($"Unexpected IMDS request: {request.Method} {request.RequestUri}");
+            }
+
+            bedrockRequest = request;
+            return EventStreamResponse(
+                EventJson("messageStart", """{"role":"assistant"}"""),
+                EventJson("messageStop", """{"stopReason":"end_turn"}"""));
+        });
+        using var client = new HttpClient(handler);
+        var clock = new DateTimeOffset(2026, 4, 29, 9, 10, 11, TimeSpan.Zero);
+        var provider = new BedrockProvider(client, () => clock);
+
+        await OpenAiResponsesProviderTests.CollectAsync(provider.Stream(
+            BuildModel(),
+            new LlmContext { Messages = [new UserMessage("imds")] },
+            new BedrockOptions
+            {
+                Region = "us-east-1",
+                Ec2MetadataDisabled = false
+            }));
+
+        Assert.NotNull(bedrockRequest);
+        Assert.Equal("imds-int-token", bedrockRequest!.Headers.GetValues("x-amz-security-token").Single());
+        var authorization = bedrockRequest.Headers.GetValues("Authorization").Single();
+        Assert.StartsWith("AWS4-HMAC-SHA256 Credential=ASIAIMDSINT/20260429/us-east-1/bedrock/aws4_request", authorization, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Stream_ConvertsToolsAndParsesToolCallEvents()
     {
         HttpRequestMessage? capturedRequest = null;
@@ -358,6 +919,24 @@ public sealed class BedrockProviderTests
             {
                 Environment.SetEnvironmentVariable(name, value);
             }
+        }
+    }
+
+    private sealed class RecordingProcessRunner : IBedrockProcessRunner
+    {
+        private readonly BedrockProcessResult _result;
+
+        public RecordingProcessRunner(BedrockProcessResult result)
+        {
+            _result = result;
+        }
+
+        public BedrockProcessRequest? LastRequest { get; private set; }
+
+        public Task<BedrockProcessResult> RunAsync(BedrockProcessRequest request, CancellationToken cancellationToken)
+        {
+            LastRequest = request;
+            return Task.FromResult(_result);
         }
     }
 }

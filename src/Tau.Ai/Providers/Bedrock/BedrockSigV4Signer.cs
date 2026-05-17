@@ -4,12 +4,10 @@ using System.Text;
 
 namespace Tau.Ai.Providers.Bedrock;
 
-internal sealed record BedrockAwsCredentials(string AccessKeyId, string SecretAccessKey, string? SessionToken);
-
 internal static class BedrockSigV4Signer
 {
     private const string Algorithm = "AWS4-HMAC-SHA256";
-    private const string Service = "bedrock";
+    private const string BedrockService = "bedrock";
     private const string TerminationString = "aws4_request";
 
     public static void Sign(
@@ -17,6 +15,15 @@ internal static class BedrockSigV4Signer
         byte[] payload,
         BedrockAwsCredentials credentials,
         string region,
+        DateTimeOffset timestamp)
+        => Sign(request, payload, credentials, region, BedrockService, timestamp);
+
+    public static void Sign(
+        HttpRequestMessage request,
+        byte[] payload,
+        BedrockAwsCredentials credentials,
+        string region,
+        string service,
         DateTimeOffset timestamp)
     {
         var utc = timestamp.ToUniversalTime();
@@ -49,14 +56,14 @@ internal static class BedrockSigV4Signer
             signedHeaders,
             payloadHash);
 
-        var credentialScope = $"{dateStamp}/{region}/{Service}/{TerminationString}";
+        var credentialScope = $"{dateStamp}/{region}/{service}/{TerminationString}";
         var stringToSign = string.Join('\n',
             Algorithm,
             amzDate,
             credentialScope,
             Hex(SHA256.HashData(Encoding.UTF8.GetBytes(canonicalRequest))));
 
-        var signingKey = GetSigningKey(credentials.SecretAccessKey, dateStamp, region, Service);
+        var signingKey = GetSigningKey(credentials.SecretAccessKey, dateStamp, region, service);
         var signature = Hex(Hmac(signingKey, stringToSign));
         var authorization = $"{Algorithm} Credential={credentials.AccessKeyId}/{credentialScope}, SignedHeaders={signedHeaders}, Signature={signature}";
         request.Headers.Remove("Authorization");

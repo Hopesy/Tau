@@ -29,18 +29,18 @@
 
 #### OAuth / auth
 
-- [ ] Anthropic OAuth 真实 login / refresh 流程
-- [ ] GitHub Copilot device flow
-- [ ] OpenAI Codex OAuth flow
-- [ ] Gemini CLI / Antigravity login flow
-- [ ] auth.json 的迁移、写回、刷新后持久化策略
+- [x] Anthropic OAuth 真实 login / refresh 流程
+- [x] GitHub Copilot device flow
+- [x] OpenAI Codex OAuth flow
+- [x] Gemini CLI / Antigravity login flow
+- [x] auth.json 的迁移、写回、刷新后持久化策略
 
 #### 配置 / 安全
 
-- [ ] auth.json schema 明文化
-- [ ] secret 持久化边界和脱敏规则
+- [x] auth.json schema 明文化
+- [~] secret 持久化边界和脱敏规则（已补默认 `./.tau/auth.json` / `./.tau/models.json` / JSONL session 本地状态忽略、`auth.json` Unix 0600 写入、OAuth metadata 保留字段过滤、auth status 不回显密钥、models.json credential header 状态识别，以及 command-backed `apiKey` 状态检查不执行 `!command` 的回归；仍需继续梳理导出/share 与更多运行态日志脱敏边界）
 - [x] provider-specific headers 支持（models.json 已能合并静态 provider/model headers，并在 StreamFunctions 层解析 provider/model request headers）
-- [ ] Bedrock AWS SSO / AssumeRole / credential_process / IMDS / ECS / web identity credential chain
+- [x] Bedrock AWS SSO / AssumeRole / credential_process / IMDS / ECS / web identity credential chain（已覆盖全部六个源：`credential_process`、`web identity`（env/profile）、profile `role_arn` + `source_profile` 的 AssumeRole、ECS container、IMDS v2、SSO（含 `sso_session` 与 legacy inline 两种 profile 形态）；SigV4 签名器泛化到任意 service，STS XML 解析共享，token cache 路径 / portal endpoint / sts endpoint 均可在 BedrockOptions 中显式覆盖；剩余增量：`credential_source`-based AssumeRole、SSO token 自动刷新和真实云端 e2e）
 - [x] 自定义 provider / custom model 配置入口（`TAU_MODELS_FILE`、`./.tau/models.json`、`~/.tau/models.json`，支持 Tau 已注册 API 的 `providers/baseUrl/api/apiKey/authHeader/headers/compat/models/modelOverrides` 子集）
 - [x] models.json 的 `apiKey/authHeader`、shell/env value resolution、运行时 request auth 合并
 
@@ -48,8 +48,8 @@
 
 - [x] flat session 持久化（`TAU_CODING_AGENT_SESSION_FILE` 或 `./.tau/coding-agent-session.json`，启动自动 rehydrate，回合后保存）
 - [x] JSONL session tree baseline（默认 `./.tau/coding-agent-session.jsonl`，`TAU_CODING_AGENT_TREE_SESSION_FILE` 或 `.jsonl` 形式的 `TAU_CODING_AGENT_SESSION_FILE` 可覆盖；已支持 header、append-only message/model/session-info/label entries、entry id/parentId/timestamp、runner diff 同步、current branch restore）
-- [~] session lifecycle（已补 `/new`、`/session` tree stats、估算 token/context usage、auto-compaction threshold budget、JSONL `cwd/parentSession` metadata、`/name`、`/tree` 过滤/搜索模式与 label timestamp、`/label`、`/fork`、`/clone`、`/resume`、`.jsonl` export/import；仍缺真正的 interactive tree navigator 和更完整 session metadata）
-- [x] settings / model selection / provider selection（`/model`、`/provider`、`/models`、`/providers`，默认写入 `TAU_CODING_AGENT_SETTINGS_FILE` 或 `./.tau/coding-agent-settings.json`；同一 settings 文件支持上游兼容 `treeFilterMode` 作为 `/tree` 默认过滤模式）
+- [~] session lifecycle（已补 `/new`、`/session` tree stats、估算 token/context usage、auto-compaction threshold budget、retry policy display、JSONL `cwd/parentSession` metadata、`/name`、`/tree` 过滤/搜索模式与 label timestamp、`/label`、`/fork`、`/clone`、`/resume`、`.jsonl` export/import；仍缺真正的 interactive tree navigator 和更完整 session metadata）
+- [x] settings / model selection / provider selection（`/model`、`/provider`、`/models`、`/providers`，默认写入 `TAU_CODING_AGENT_SETTINGS_FILE` 或 `./.tau/coding-agent-settings.json`；同一 settings 文件支持上游兼容 `treeFilterMode` 作为 `/tree` 默认过滤模式，并支持 retry attempts/base delay 字段供 `/retry` 和生产入口使用）
 - [~] auth 管理入口（已补 `/auth` 状态查看和 `/login` 骨架提示；真实 OAuth/device flow 仍在 Tau.Ai OAuth backlog）
 - [x] slash command router 抽离（`CodingAgentCommandRouter`；当前命令行为不变，为 `/compact` / login flow 等后续命令留 seam）
 - [x] local quit command（`/quit` 结束当前 CLI loop，不调用 runner，不进入 LLM conversation）
@@ -57,14 +57,15 @@
 - [x] slash command catalog（`CodingAgentCommandCatalog` 统一当前本地命令 name/usage/description，`/help` 和 usage 错误共用）
 - [x] local session name command（`/name [display name | clear]` 查看、设置或清空当前 session display name，并写入 session store）
 - [x] local copy command（`/copy` 复制最后一条 assistant 文本到系统剪贴板，clipboard 写入通过 `ICodingAgentClipboard` 隔离）
-- [x] local export command（`/export` 默认导出 standalone HTML transcript；`/export <path>` 对 `.html/.htm` 路径导出 HTML，对 `.jsonl` 路径导出当前 branch JSONL，其他路径导出 Tau 平面 session snapshot JSON；HTML 提供 branch outline 并内嵌可下载 JSONL；仍缺上游 share/Gist export 和 richer HTML template）
+- [x] local export command（`/export` 默认导出 standalone HTML transcript；`/export <path>` 对 `.html/.htm` 路径导出 HTML，对 `.jsonl` 路径导出当前 branch JSONL，其他路径导出 Tau 平面 session snapshot JSON；HTML 提供 branch outline、filter/search、current-branch JSONL timeline、文本 code fence rendering、inline code span rendering、plaintext link rendering、Markdown heading/list/blockquote block rendering、Markdown strong/emphasis span rendering、Markdown pipe table rendering、Markdown task list rendering、image metadata caption、长 tool result folding、tool call JSON argument rendering、长 tool call arguments folding 并内嵌可下载 JSONL）
 - [x] local import command（`/import <path>` 严格导入 Tau snapshot JSON 或 resume JSONL session，并恢复 messages/provider/model/display name；仍缺上游 share/import richer metadata）
-- [~] manual / auto compaction（已补 `/compact [instructions]`，当前使用当前模型生成摘要并把 flat session 压成单条 summary message；JSONL tree 会追加 `compaction` entry，记录 `summary`、`firstKeptEntryId`、估算 `tokensBefore` 和 `fromHook` baseline，并在 branch restore 时由 entry 重建 summary message；已补 `TAU_CODING_AGENT_AUTO_COMPACT_TOKENS` / `TAU_CODING_AGENT_AUTO_COMPACT_INSTRUCTIONS`，普通消息执行前超过阈值会自动 compact 并写 `fromHook=true`，`/session` 会显示当前估算 token、模型 context window 和 auto threshold 剩余量；仍缺 retry/rollback 和上游 retained-message cut-point 语义）
+- [~] manual / auto compaction（已补 `/compact [instructions]`，当前使用当前模型生成摘要并把 flat session 压成 summary message；JSONL tree 会追加 `compaction` entry，记录 `summary`、`firstKeptEntryId`、估算 `tokensBefore`、`fromHook`、`isSplitTurn` 和 `turnPrefixSummary` baseline；manual / auto compaction 默认优先按 `TAU_CODING_AGENT_COMPACT_KEEP_RECENT_TOKENS` 的 token budget 保留 recent messages，再回落到最近 4 条 message，可用 `TAU_CODING_AGENT_COMPACT_KEEP_RECENT_MESSAGES` 调整 fallback，branch restore / resume / clone export 会重建 summary + retained messages + post-compaction messages；如果 retained cut point 落在一个 user turn 中间，恢复 runtime 时会把 split-turn prefix context 拼入 summary message，HTML transcript timeline 也会展示并可搜索该字段；已补 `TAU_CODING_AGENT_AUTO_COMPACT_TOKENS` / `TAU_CODING_AGENT_AUTO_COMPACT_INSTRUCTIONS`，普通消息执行前超过阈值会自动 compact 并写 `fromHook=true`，context overflow 会恢复回合前 snapshot、compact、记录 `fromHook=true` boundary 并重试同一输入；`/session` 会显示当前估算 token、模型 context window 和 auto threshold 剩余量；已升级为上游结构化 summarization prompt（Goal/Progress/Decisions/Next Steps）和 iterative update summarization（前一次 compaction summary 作为 previous-summary 合并新信息）；仍缺上游 LLM-generated split-turn summarization 的独立 LLM 调用、compaction extension events 和 cancellation UI 语义）
+- [~] retry / rollback（已补普通回合失败/取消 rollback baseline：runner exception、取消或错误型 `AgentEndEvent` 会恢复回合前 snapshot，并避免 flat JSON / JSONL tree 持久化失败输入；已补 host-level retryable error auto-retry baseline：settings 优先、`TAU_CODING_AGENT_AUTO_RETRY_ATTEMPTS` / `TAU_CODING_AGENT_AUTO_RETRY_BASE_DELAY_MS` env 兜底控制 429/5xx/rate limit/timeout/network 等 transient error 的有限重试，重试前恢复 snapshot；已补 `/retry [current|default|off|<max attempts> [base delay ms]]` settings command baseline，可持久化并同进程热更新；已补 Tau-native JSONL `auto_retry_start` / `auto_retry_end` audit entries，成功时先持久化成功 attempt messages 再写 retry end，失败或耗尽时只保留 retry audit；已补 retry delay cancellation visibility baseline，取消 delay 时显示明确状态、写 `Retry cancelled` end audit，并保持失败输入不落盘；context overflow 已单独走 compact-and-retry baseline；仍缺上游 RPC/settings UI 控制和完整 retry cancellation UI）
 - [~] JSONL tree navigator / richer session metadata（已补命令行 tree filter/search：`default/no-tools/user-only/labeled-only/all`、settings `treeFilterMode`、`--search query` 与 `--label-time`；仍缺真正的 TUI interactive navigator、overlay search/fold/select 和完整 metadata）
-- [~] dynamic slash command registry / prompt registry / skills/extensions discovery（已补 prompt template discovery/expansion baseline：`~/.tau/prompts`、`./.tau/prompts`、`TAU_CODING_AGENT_PROMPT_PATHS`、`/prompts`、`$1/$@/$ARGUMENTS/${@:N[:L]}` 参数替换；已补 skill command discovery/expansion baseline：`~/.tau/skills`、`./.tau/skills`、`TAU_CODING_AGENT_SKILL_PATHS`、`/skills`、`/skill:<name>`、`disable-model-invocation` 和默认 system prompt inventory；已补 JSON extension command/resource discovery baseline：`~/.tau/extensions`、`./.tau/extensions`、`TAU_CODING_AGENT_EXTENSION_PATHS`、`/extensions`、`response/prompt` 参数替换、`sendToRunner`、重复命令 `name:1/name:2`、`promptPaths/skillPaths` 资源贡献；仍缺完整 TypeScript extension runtime、custom tools/events、theme loader、resource selector 和 diagnostics）
-- [x] standalone HTML transcript export（`/export` 默认 HTML，`/export <path.html|path.htm>` 显式 HTML，覆盖 text/thinking/tool call/tool result/image 内容，并提供 branch outline、cwd/parent metadata 和本地 Download JSONL）
-- [ ] share/Gist export parity 和上游 richer HTML template
-- [ ] richer rendering
+- [~] dynamic slash command registry / prompt registry / skills/extensions discovery（已补 prompt template discovery/expansion baseline：`~/.tau/prompts`、`./.tau/prompts`、`TAU_CODING_AGENT_PROMPT_PATHS`、`/prompts`、`$1/$@/$ARGUMENTS/${@:N[:L]}` 参数替换；已补 skill command discovery/expansion baseline：`~/.tau/skills`、`./.tau/skills`、`TAU_CODING_AGENT_SKILL_PATHS`、`/skills`、`/skill:<name>`、`disable-model-invocation` 和默认 system prompt inventory；已补 JSON extension command/resource/load diagnostics baseline：`~/.tau/extensions`、`./.tau/extensions`、`TAU_CODING_AGENT_EXTENSION_PATHS`、`/extensions`、`response/prompt` 参数替换、`sendToRunner`、重复命令 `name:1/name:2`、`promptPaths/skillPaths` 资源贡献、extension 文件/resource 明细、坏 JSON 和缺失显式路径诊断；仍缺完整 TypeScript extension runtime、custom tools/events、theme loader、interactive resource selector 和 richer runtime diagnostics）
+- [x] standalone HTML transcript export（`/export` 默认 HTML，`/export <path.html|path.htm>` 显式 HTML，覆盖 text/thinking/tool call/tool result/image 内容，并提供 branch outline、filter/search、cwd/parent metadata、current-branch JSONL timeline、label/model/compaction events、本地 Download JSONL、文本 fenced code block 的独立 code rendering baseline、inline code span rendering baseline、plaintext link rendering baseline、Markdown heading/list/blockquote block rendering baseline、Markdown strong/emphasis span rendering baseline、Markdown pipe table rendering baseline、Markdown task list rendering baseline、image metadata caption baseline、长 tool result 默认折叠 baseline、tool call JSON arguments 格式化 baseline 和长 tool call arguments 默认折叠 baseline）
+- [~] share/Gist export parity 和上游 richer HTML template（已补 `/share` secret Gist baseline：复用 HTML transcript export、检查 `gh auth status`、执行 `gh gist create --public=false`，并支持 `TAU_SHARE_VIEWER_URL` 覆盖预览 URL；HTML transcript 已支持 message deep-link/copy-link、branch outline filter/search、label badge、model/label/compaction timeline entries 和 `targetId` 定位；仍缺真实 `gh` smoke、Tau 专属 share viewer 和完整上游 richer HTML template）
+- [~] richer rendering（已补 HTML transcript 文本 fenced code block -> `code-block` / `<code>` baseline、普通文本 backtick inline code span -> `<code class="inline-code">` baseline、普通文本 Markdown-style `[label](http/https...)` 与裸 `http(s)` URL 外链 baseline、普通文本 heading/list/blockquote block rendering baseline、普通文本 strong/emphasis span rendering baseline、普通文本 Markdown pipe table -> 可横向滚动 `<table>` baseline、普通文本 task list -> disabled checkbox baseline、image mime type / byte count caption baseline、长 tool result -> `<details class="tool-result-fold">` 默认折叠 baseline、tool call JSON arguments -> `code-block` / `<code data-language="json">` 格式化 baseline，以及长 tool call arguments -> `<details class="tool-call-arguments-fold">` 默认折叠 baseline；仍缺完整 Markdown/highlight renderer、custom tool renderer 和上游 richer HTML template）
 - [x] 显式 `Create(provider, model, history)` runner 工厂
 - [x] 与 `ModelCatalog` 对齐的默认模型解析层继续收口
 - [x] 把当前 `Tau.CodingAgent` / `Tau.WebUi` / `Tau.Mom` / `Tau.CodingAgent.Tests` / `Tau.Agent.Tests` 的 DLL `HintPath` workaround 收回到更正常的 `ProjectReference` 结构
@@ -85,11 +86,12 @@
 - [x] 最小聊天 UI
 - [x] session 持久化（`output/webui-sessions.json`）
 - [x] provider/model 选择入口（`/api/catalog` + 会话设置）
-- [ ] 流式消息绑定
-- [ ] richer rendering / thinking / tool timeline 展示
-- [ ] auth/settings UX
-- [ ] 附件体系
-- [ ] 更高层的 WebUi 行为测试
+- [x] 流式消息绑定（NDJSON streaming endpoint + 前端 ReadableStream 增量渲染）
+- [x] richer rendering / thinking / tool timeline 展示（fenced code blocks、inline code、links、headings/lists/blockquotes、strong/emphasis、tables、task lists、thinking details、tool call cards with status/input/output）
+- [x] auth/settings UX（`/api/auth/{provider}` 状态查询 + 前端 provider/model 切换时刷新 auth 状态；真实 login flow 仍在 Tau.Ai OAuth backlog）
+- [x] 附件体系（`WebChatAttachmentDto` + 前端 file picker/preview/remove + 发送时 base64 content + text extraction）
+- [x] session lifecycle（session delete / export JSON download / import file upload / title rename / last-opened session restore baseline）
+- [~] 更高层的 WebUi 行为测试（已补 `WebChatService` fake-runner 流式消息、附件 prompt 和持久化行为测试，以及 Minimal API endpoint 的 NDJSON streaming、session 持久化、export/import/delete、rename/restore 和错误状态回归；仍缺 browser 级 WebUi flow 测试）
 
 ### Tau.Mom
 
@@ -130,8 +132,8 @@
 - [x] config init/list/validate/status
 - [x] probe（HTTP endpoint / TCP ssh target）
 - [x] exec（SSH pod remote command execution）
-- [ ] deploy / stop / restart / health
-- [ ] 真正的 CLI 运维命令体系
+- [x] deploy / stop / restart / health（`PodLifecycleService` + CLI commands，SSH-based deploy/stop/restart 和 HTTP/SSH health check）
+- [~] 真正的 CLI 运维命令体系（已补 `health/deploy/stop/restart`、可省略 path 的 target-command 参数解析、SSH lifecycle metadata 命令转义和 CLI 参数回归测试；仍缺更完整模型生命周期、远端 transport hardening 和真实运维 smoke）
 
 ## P2：工程化
 

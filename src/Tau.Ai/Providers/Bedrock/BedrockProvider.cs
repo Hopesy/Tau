@@ -11,11 +11,21 @@ public sealed class BedrockProvider : IStreamProvider
 {
     private readonly HttpClient _httpClient;
     private readonly Func<DateTimeOffset> _clock;
+    private readonly IBedrockProcessRunner _processRunner;
 
     public BedrockProvider(HttpClient? httpClient = null, Func<DateTimeOffset>? clock = null)
+        : this(httpClient, clock, processRunner: null)
+    {
+    }
+
+    internal BedrockProvider(
+        HttpClient? httpClient,
+        Func<DateTimeOffset>? clock,
+        IBedrockProcessRunner? processRunner)
     {
         _httpClient = httpClient ?? new HttpClient();
         _clock = clock ?? (() => DateTimeOffset.UtcNow);
+        _processRunner = processRunner ?? DefaultBedrockProcessRunner.Instance;
     }
 
     public string Api => "bedrock-converse-stream";
@@ -87,14 +97,14 @@ public sealed class BedrockProvider : IStreamProvider
             }
             else
             {
-                var credentials = ResolveCredentials(options, profile);
-                if (credentials is null)
+                var credentialsOutcome = await ResolveCredentialsAsync(options, profile, region).ConfigureAwait(false);
+                if (credentialsOutcome.Credentials is null)
                 {
-                    stream.Push(new ErrorEvent(BuildMissingCredentialsMessage()));
+                    stream.Push(new ErrorEvent(credentialsOutcome.Error ?? BuildMissingCredentialsMessage()));
                     return;
                 }
 
-                BedrockSigV4Signer.Sign(request, payload, credentials, region, _clock());
+                BedrockSigV4Signer.Sign(request, payload, credentialsOutcome.Credentials, region, _clock());
             }
         }
 
@@ -158,7 +168,7 @@ public sealed class BedrockProvider : IStreamProvider
         return new Uri($"{baseUrl}/model/{encodedModelId}/converse-stream", UriKind.Absolute);
     }
 
-    private static string ResolveRegion(BedrockOptions options, BedrockProfileCredentials? profile) => FirstNonEmpty(
+    private static string ResolveRegion(BedrockOptions options, BedrockProfileSnapshot? profile) => FirstNonEmpty(
         options.Region,
         Environment.GetEnvironmentVariable("AWS_REGION"),
         Environment.GetEnvironmentVariable("AWS_DEFAULT_REGION"),
@@ -179,34 +189,151 @@ public sealed class BedrockProvider : IStreamProvider
         return Environment.GetEnvironmentVariable("AWS_BEARER_TOKEN_BEDROCK");
     }
 
-    private static BedrockAwsCredentials? ResolveCredentials(BedrockOptions options, BedrockProfileCredentials? profile)
+    private async Task<BedrockCredentialResolution> ResolveCredentialsAsync(BedrockOptions options, BedrockProfileSnapshot? profile, string region)
+    {
+        var staticCredentials = ResolveStaticCredentials(options, profile);
+        if (staticCredentials is not null)
+        {
+            return BedrockCredentialResolution.Resolved(staticCredentials);
+        }
+
+        var webIdentityOutcome = await BedrockWebIdentityResolver.ResolveAsync(
+            options,
+            profile,
+            region,
+            _httpClient,
+            _clock).ConfigureAwait(false);
+        if (webIdentityOutcome.HasCredentials)
+        {
+            return BedrockCredentialResolution.Resolved(webIdentityOutcome.Credentials!);
+        }
+
+        if (webIdentityOutcome.HasError)
+        {
+            return BedrockCredentialResolution.Failed(webIdentityOutcome.Error!);
+        }
+
+        var assumeRoleOutcome = await BedrockAssumeRoleResolver.ResolveAsync(
+            options,
+            profile,
+            region,
+            _httpClient,
+            _clock).ConfigureAwait(false);
+        if (assumeRoleOutcome.HasCredentials)
+        {
+            return BedrockCredentialResolution.Resolved(assumeRoleOutcome.Credentials!);
+        }
+
+        if (assumeRoleOutcome.HasError)
+        {
+            return BedrockCredentialResolution.Failed(assumeRoleOutcome.Error!);
+        }
+
+        var ssoOutcome = await BedrockSsoResolver.ResolveAsync(
+            options,
+            profile,
+            _httpClient,
+            _clock).ConfigureAwait(false);
+        if (ssoOutcome.HasCredentials)
+        {
+            return BedrockCredentialResolution.Resolved(ssoOutcome.Credentials!);
+        }
+
+        if (ssoOutcome.HasError)
+        {
+            return BedrockCredentialResolution.Failed(ssoOutcome.Error!);
+        }
+
+        var processCommand = ResolveCredentialProcessCommand(options, profile);
+        if (!string.IsNullOrWhiteSpace(processCommand))
+        {
+            var outcome = await BedrockCredentialProcessResolver.ResolveAsync(
+                processCommand!,
+                _processRunner,
+                _clock).ConfigureAwait(false);
+            if (outcome.HasCredentials)
+            {
+                return BedrockCredentialResolution.Resolved(outcome.Credentials!);
+            }
+
+            if (outcome.HasError)
+            {
+                return BedrockCredentialResolution.Failed(outcome.Error!);
+            }
+        }
+
+        var ecsOutcome = await BedrockEcsContainerResolver.ResolveAsync(
+            options,
+            _httpClient,
+            _clock).ConfigureAwait(false);
+        if (ecsOutcome.HasCredentials)
+        {
+            return BedrockCredentialResolution.Resolved(ecsOutcome.Credentials!);
+        }
+
+        if (ecsOutcome.HasError)
+        {
+            return BedrockCredentialResolution.Failed(ecsOutcome.Error!);
+        }
+
+        var imdsOutcome = await BedrockInstanceMetadataResolver.ResolveAsync(
+            options,
+            _httpClient,
+            _clock).ConfigureAwait(false);
+        if (imdsOutcome.HasCredentials)
+        {
+            return BedrockCredentialResolution.Resolved(imdsOutcome.Credentials!);
+        }
+
+        if (imdsOutcome.HasError)
+        {
+            return BedrockCredentialResolution.Failed(imdsOutcome.Error!);
+        }
+
+        return BedrockCredentialResolution.Failed(BuildMissingCredentialsMessage());
+    }
+
+    private static string? ResolveCredentialProcessCommand(BedrockOptions options, BedrockProfileSnapshot? profile)
+    {
+        if (!string.IsNullOrWhiteSpace(options.CredentialProcess))
+        {
+            return options.CredentialProcess;
+        }
+
+        return string.IsNullOrWhiteSpace(profile?.CredentialProcess) ? null : profile!.CredentialProcess;
+    }
+
+    private static BedrockAwsCredentials? ResolveStaticCredentials(BedrockOptions options, BedrockProfileSnapshot? profile)
     {
         var accessKeyId = FirstNonEmpty(options.AccessKeyId, Environment.GetEnvironmentVariable("AWS_ACCESS_KEY_ID"));
         var secretAccessKey = FirstNonEmpty(options.SecretAccessKey, Environment.GetEnvironmentVariable("AWS_SECRET_ACCESS_KEY"));
         var sessionToken = FirstNonEmpty(options.SessionToken, Environment.GetEnvironmentVariable("AWS_SESSION_TOKEN"));
-        if (string.IsNullOrWhiteSpace(accessKeyId) || string.IsNullOrWhiteSpace(secretAccessKey))
+        if (!string.IsNullOrWhiteSpace(accessKeyId) && !string.IsNullOrWhiteSpace(secretAccessKey))
         {
-            if (profile is null ||
-                string.IsNullOrWhiteSpace(profile.AccessKeyId) ||
-                string.IsNullOrWhiteSpace(profile.SecretAccessKey))
-            {
-                return null;
-            }
-
-            return new BedrockAwsCredentials(profile.AccessKeyId, profile.SecretAccessKey, profile.SessionToken);
+            return new BedrockAwsCredentials(accessKeyId!, secretAccessKey!, sessionToken, Source: "static");
         }
 
-        return new BedrockAwsCredentials(accessKeyId, secretAccessKey, sessionToken);
+        // When the active profile defines role_arn, its static credentials are the
+        // source for AssumeRole and must not be returned as the profile's own
+        // credentials.
+        if (profile is not null &&
+            string.IsNullOrWhiteSpace(profile.RoleArn) &&
+            !string.IsNullOrWhiteSpace(profile.AccessKeyId) &&
+            !string.IsNullOrWhiteSpace(profile.SecretAccessKey))
+        {
+            return new BedrockAwsCredentials(
+                profile.AccessKeyId!,
+                profile.SecretAccessKey!,
+                profile.SessionToken,
+                Source: $"profile:{profile.Name}");
+        }
+
+        return null;
     }
 
     private static string BuildMissingCredentialsMessage()
     {
-        if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("AWS_PROFILE")))
-        {
-            return "Amazon Bedrock requires AWS_BEARER_TOKEN_BEDROCK or AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY in Tau. AWS_PROFILE/shared credential loading is not implemented yet.";
-        }
-
-        return "Amazon Bedrock requires AWS_BEARER_TOKEN_BEDROCK or AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY.";
+        return "Amazon Bedrock requires AWS_BEARER_TOKEN_BEDROCK, AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, a shared AWS profile with static credentials, AWS_WEB_IDENTITY_TOKEN_FILE + AWS_ROLE_ARN, a profile-configured credential_process, AWS_CONTAINER_CREDENTIALS_RELATIVE_URI/AWS_CONTAINER_CREDENTIALS_FULL_URI, or AWS_EC2_METADATA_DISABLED=false on an EC2 instance with an IAM role.";
     }
 
     private static void ApplyHeaders(HttpRequestMessage request, IDictionary<string, string>? headers)
@@ -243,12 +370,34 @@ public record BedrockOptions : StreamOptions
     public string? Profile { get; init; }
     public string? CredentialsFile { get; init; }
     public string? ConfigFile { get; init; }
+    public string? CredentialProcess { get; init; }
+    public string? WebIdentityTokenFile { get; init; }
+    public string? WebIdentityRoleArn { get; init; }
+    public string? WebIdentityRoleSessionName { get; init; }
+    public string? StsEndpoint { get; init; }
+    public string? SsoTokenCacheFile { get; init; }
+    public string? SsoTokenCacheDirectory { get; init; }
+    public string? SsoPortalEndpoint { get; init; }
+    public string? ContainerCredentialsRelativeUri { get; init; }
+    public string? ContainerCredentialsFullUri { get; init; }
+    public string? ContainerAuthorizationToken { get; init; }
+    public string? ContainerAuthorizationTokenFile { get; init; }
+    public bool? Ec2MetadataDisabled { get; init; }
+    public bool? Ec2MetadataV1Disabled { get; init; }
+    public string? Ec2MetadataServiceEndpoint { get; init; }
+    public TimeSpan? Ec2MetadataServiceTimeout { get; init; }
     public string? ToolChoice { get; init; }
     public string? ToolName { get; init; }
     public ThinkingLevel? Reasoning { get; init; }
     public int? ThinkingBudgetTokens { get; init; }
     public string? ThinkingDisplay { get; init; }
     public IDictionary<string, string>? RequestMetadata { get; init; }
+}
+
+internal readonly record struct BedrockCredentialResolution(BedrockAwsCredentials? Credentials, string? Error)
+{
+    public static BedrockCredentialResolution Resolved(BedrockAwsCredentials credentials) => new(credentials, null);
+    public static BedrockCredentialResolution Failed(string error) => new(null, error);
 }
 
 [JsonSourceGenerationOptions(DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]
