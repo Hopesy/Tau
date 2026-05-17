@@ -40,7 +40,7 @@
 - [x] auth.json schema 明文化
 - [~] secret 持久化边界和脱敏规则（已补默认 `./.tau/auth.json` / `./.tau/models.json` / JSONL session 本地状态忽略、`auth.json` Unix 0600 写入、OAuth metadata 保留字段过滤、auth status 不回显密钥、models.json credential header 状态识别，以及 command-backed `apiKey` 状态检查不执行 `!command` 的回归；仍需继续梳理导出/share 与更多运行态日志脱敏边界）
 - [x] provider-specific headers 支持（models.json 已能合并静态 provider/model headers，并在 StreamFunctions 层解析 provider/model request headers）
-- [x] Bedrock AWS SSO / AssumeRole / credential_process / IMDS / ECS / web identity credential chain（已覆盖全部六个源：`credential_process`、`web identity`（env/profile）、profile `role_arn` + `source_profile` 的 AssumeRole、ECS container、IMDS v2、SSO（含 `sso_session` 与 legacy inline 两种 profile 形态）；SigV4 签名器泛化到任意 service，STS XML 解析共享，token cache 路径 / portal endpoint / sts endpoint 均可在 BedrockOptions 中显式覆盖；剩余增量：`credential_source`-based AssumeRole、SSO token 自动刷新和真实云端 e2e）
+- [x] Bedrock AWS SSO / AssumeRole / credential_process / IMDS / ECS / web identity credential chain（已覆盖全部六个源 + AssumeRole 的 source_profile 与 credential_source 两种触发方式（Environment / EcsContainer / Ec2InstanceMetadata）；SigV4 签名器泛化到任意 service，STS XML 解析共享，token cache 路径 / portal endpoint / sts endpoint 均可在 BedrockOptions 中显式覆盖；剩余增量：SSO token 自动刷新和真实云端 e2e）
 - [x] 自定义 provider / custom model 配置入口（`TAU_MODELS_FILE`、`./.tau/models.json`、`~/.tau/models.json`，支持 Tau 已注册 API 的 `providers/baseUrl/api/apiKey/authHeader/headers/compat/models/modelOverrides` 子集）
 - [x] models.json 的 `apiKey/authHeader`、shell/env value resolution、运行时 request auth 合并
 

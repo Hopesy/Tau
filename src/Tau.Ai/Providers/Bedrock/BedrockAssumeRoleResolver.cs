@@ -20,39 +20,38 @@ internal static class BedrockAssumeRoleResolver
             return BedrockCredentialProcessOutcome.NotConfigured();
         }
 
-        if (string.IsNullOrWhiteSpace(profile.SourceProfile))
+        BedrockAwsCredentials? sourceCredentials;
+        if (!string.IsNullOrWhiteSpace(profile.SourceProfile))
         {
-            // For now we only support source_profile pointing at a static profile.
-            // credential_source-based AssumeRole (Environment / EcsContainer / Ec2InstanceMetadata)
-            // is left to a follow-up slice.
+            var resolved = await LoadSourceProfileAsync(options, profile.SourceProfile!).ConfigureAwait(false);
+            if (resolved.Error is not null)
+            {
+                return BedrockCredentialProcessOutcome.Failure(resolved.Error);
+            }
+
+            sourceCredentials = resolved.Credentials;
+        }
+        else if (!string.IsNullOrWhiteSpace(profile.CredentialSource))
+        {
+            var resolved = await LoadCredentialSourceAsync(options, profile.CredentialSource!, region, httpClient, clock, cancellationToken).ConfigureAwait(false);
+            if (resolved.Error is not null)
+            {
+                return BedrockCredentialProcessOutcome.Failure(resolved.Error);
+            }
+
+            sourceCredentials = resolved.Credentials;
+        }
+        else
+        {
             return BedrockCredentialProcessOutcome.Failure(
-                $"profile '{profile.Name}' has role_arn but no source_profile; credential_source-based AssumeRole is not yet supported.");
+                $"profile '{profile.Name}' has role_arn but neither source_profile nor credential_source is set.");
         }
 
-        BedrockProfileSnapshot? sourceProfile;
-        try
-        {
-            sourceProfile = BedrockProfileCredentialsResolver.Load(options, profile.SourceProfile);
-        }
-        catch (Exception ex)
+        if (sourceCredentials is null)
         {
             return BedrockCredentialProcessOutcome.Failure(
-                $"failed to load source_profile '{profile.SourceProfile}' for AssumeRole: {ex.Message}");
+                $"AssumeRole source for profile '{profile.Name}' did not yield credentials.");
         }
-
-        if (sourceProfile is null ||
-            string.IsNullOrWhiteSpace(sourceProfile.AccessKeyId) ||
-            string.IsNullOrWhiteSpace(sourceProfile.SecretAccessKey))
-        {
-            return BedrockCredentialProcessOutcome.Failure(
-                $"source_profile '{profile.SourceProfile}' for AssumeRole did not provide static credentials.");
-        }
-
-        var sourceCredentials = new BedrockAwsCredentials(
-            sourceProfile.AccessKeyId!,
-            sourceProfile.SecretAccessKey!,
-            sourceProfile.SessionToken,
-            Source: $"profile:{sourceProfile.Name}");
 
         var sessionName = !string.IsNullOrWhiteSpace(profile.RoleSessionName)
             ? profile.RoleSessionName!
@@ -107,6 +106,87 @@ internal static class BedrockAssumeRoleResolver
                     "STS AssumeRole response did not contain credentials.")
                 : BedrockCredentialProcessOutcome.Success(credentials);
         }
+    }
+
+    private static Task<(BedrockAwsCredentials? Credentials, string? Error)> LoadSourceProfileAsync(
+        BedrockOptions options,
+        string sourceProfileName)
+    {
+        BedrockProfileSnapshot? sourceProfile;
+        try
+        {
+            sourceProfile = BedrockProfileCredentialsResolver.Load(options, sourceProfileName);
+        }
+        catch (Exception ex)
+        {
+            return Task.FromResult<(BedrockAwsCredentials?, string?)>(
+                (null, $"failed to load source_profile '{sourceProfileName}' for AssumeRole: {ex.Message}"));
+        }
+
+        if (sourceProfile is null ||
+            string.IsNullOrWhiteSpace(sourceProfile.AccessKeyId) ||
+            string.IsNullOrWhiteSpace(sourceProfile.SecretAccessKey))
+        {
+            return Task.FromResult<(BedrockAwsCredentials?, string?)>(
+                (null, $"source_profile '{sourceProfileName}' for AssumeRole did not provide static credentials."));
+        }
+
+        return Task.FromResult<(BedrockAwsCredentials?, string?)>((
+            new BedrockAwsCredentials(
+                sourceProfile.AccessKeyId!,
+                sourceProfile.SecretAccessKey!,
+                sourceProfile.SessionToken,
+                Source: $"profile:{sourceProfile.Name}"),
+            null));
+    }
+
+    private static async Task<(BedrockAwsCredentials? Credentials, string? Error)> LoadCredentialSourceAsync(
+        BedrockOptions options,
+        string credentialSource,
+        string region,
+        HttpClient httpClient,
+        Func<DateTimeOffset> clock,
+        CancellationToken cancellationToken)
+    {
+        if (string.Equals(credentialSource, "Environment", StringComparison.OrdinalIgnoreCase))
+        {
+            var accessKey = Environment.GetEnvironmentVariable("AWS_ACCESS_KEY_ID");
+            var secretKey = Environment.GetEnvironmentVariable("AWS_SECRET_ACCESS_KEY");
+            var session = Environment.GetEnvironmentVariable("AWS_SESSION_TOKEN");
+            if (string.IsNullOrWhiteSpace(accessKey) || string.IsNullOrWhiteSpace(secretKey))
+            {
+                return (null, "credential_source=Environment requires AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY.");
+            }
+
+            return (new BedrockAwsCredentials(accessKey, secretKey, session, Source: "static"), null);
+        }
+
+        if (string.Equals(credentialSource, "EcsContainer", StringComparison.OrdinalIgnoreCase))
+        {
+            var outcome = await BedrockEcsContainerResolver.ResolveAsync(options, httpClient, clock, cancellationToken).ConfigureAwait(false);
+            if (outcome.HasCredentials)
+            {
+                return (outcome.Credentials, null);
+            }
+
+            return (null, outcome.Error ?? "credential_source=EcsContainer requires AWS_CONTAINER_CREDENTIALS_RELATIVE_URI or _FULL_URI.");
+        }
+
+        if (string.Equals(credentialSource, "Ec2InstanceMetadata", StringComparison.OrdinalIgnoreCase))
+        {
+            // For credential_source AssumeRole, IMDS is implicitly opt-in regardless of
+            // BedrockOptions.Ec2MetadataDisabled, because the profile explicitly asked for it.
+            var optionsForImds = options with { Ec2MetadataDisabled = false };
+            var outcome = await BedrockInstanceMetadataResolver.ResolveAsync(optionsForImds, httpClient, clock, cancellationToken).ConfigureAwait(false);
+            if (outcome.HasCredentials)
+            {
+                return (outcome.Credentials, null);
+            }
+
+            return (null, outcome.Error ?? "credential_source=Ec2InstanceMetadata could not load credentials from IMDS.");
+        }
+
+        return (null, $"credential_source '{credentialSource}' is not supported; use Environment, EcsContainer, or Ec2InstanceMetadata.");
     }
 
     private static string BuildAssumeRoleFormContent(string roleArn, string sessionName, string? externalId)

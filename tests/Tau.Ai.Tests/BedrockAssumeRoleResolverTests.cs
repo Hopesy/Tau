@@ -25,10 +25,10 @@ public sealed class BedrockAssumeRoleResolverTests
     }
 
     [Fact]
-    public async Task ResolveAsync_FailsWhenRoleArnSetButNoSourceProfile()
+    public async Task ResolveAsync_FailsWhenRoleArnSetButNoSourceProfileOrCredentialSource()
     {
         using var handler = new OpenAiResponsesProviderTests.StubHandler(_ =>
-            throw new InvalidOperationException("HTTP should not be called without source_profile"));
+            throw new InvalidOperationException("HTTP should not be called without source"));
         using var client = new HttpClient(handler);
 
         var outcome = await BedrockAssumeRoleResolver.ResolveAsync(
@@ -39,7 +39,7 @@ public sealed class BedrockAssumeRoleResolverTests
             clock: () => DateTimeOffset.UtcNow);
 
         Assert.True(outcome.HasError);
-        Assert.Contains("credential_source-based AssumeRole is not yet supported", outcome.Error!, StringComparison.Ordinal);
+        Assert.Contains("neither source_profile nor credential_source", outcome.Error!, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -226,6 +226,170 @@ public sealed class BedrockAssumeRoleResolverTests
         finally
         {
             tempDir.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ResolveAsync_AssumeRoleWithCredentialSourceEnvironment()
+    {
+        using var env = new EnvironmentScope(
+            ("AWS_ACCESS_KEY_ID", "AKIAFROMENV"),
+            ("AWS_SECRET_ACCESS_KEY", "env-secret"),
+            ("AWS_SESSION_TOKEN", null));
+
+        HttpRequestMessage? captured = null;
+        using var handler = new OpenAiResponsesProviderTests.StubHandler(request =>
+        {
+            captured = request;
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(
+                    """
+                    <AssumeRoleResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
+                      <AssumeRoleResult>
+                        <Credentials>
+                          <AccessKeyId>ASIACSENV</AccessKeyId>
+                          <SecretAccessKey>cs-env-secret</SecretAccessKey>
+                          <SessionToken>cs-env-token</SessionToken>
+                          <Expiration>2099-01-01T00:00:00Z</Expiration>
+                        </Credentials>
+                      </AssumeRoleResult>
+                    </AssumeRoleResponse>
+                    """,
+                    Encoding.UTF8,
+                    "text/xml")
+            };
+        });
+        using var client = new HttpClient(handler);
+
+        var outcome = await BedrockAssumeRoleResolver.ResolveAsync(
+            new BedrockOptions(),
+            new BedrockProfileSnapshot
+            {
+                Name = "dev",
+                RoleArn = "arn:aws:iam::123:role/r",
+                CredentialSource = "Environment"
+            },
+            region: "us-east-1",
+            httpClient: client,
+            clock: () => new DateTimeOffset(2026, 4, 29, 0, 0, 0, TimeSpan.Zero));
+
+        Assert.True(outcome.HasCredentials);
+        Assert.Equal("ASIACSENV", outcome.Credentials!.AccessKeyId);
+        Assert.Equal("assume_role", outcome.Credentials.Source);
+
+        var authorization = captured!.Headers.GetValues("Authorization").Single();
+        Assert.StartsWith("AWS4-HMAC-SHA256 Credential=AKIAFROMENV/20260429/us-east-1/sts/aws4_request", authorization, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ResolveAsync_FailsWhenCredentialSourceUnknown()
+    {
+        using var handler = new OpenAiResponsesProviderTests.StubHandler(_ =>
+            throw new InvalidOperationException("HTTP should not be called for unknown credential_source"));
+        using var client = new HttpClient(handler);
+
+        var outcome = await BedrockAssumeRoleResolver.ResolveAsync(
+            new BedrockOptions(),
+            new BedrockProfileSnapshot
+            {
+                Name = "dev",
+                RoleArn = "arn:aws:iam::123:role/r",
+                CredentialSource = "Quantum"
+            },
+            region: "us-east-1",
+            httpClient: client,
+            clock: () => DateTimeOffset.UtcNow);
+
+        Assert.True(outcome.HasError);
+        Assert.Contains("'Quantum'", outcome.Error!, StringComparison.Ordinal);
+        Assert.Contains("not supported", outcome.Error!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ResolveAsync_AssumeRoleWithCredentialSourceEcsContainer()
+    {
+        HttpRequestMessage? stsRequest = null;
+        using var handler = new OpenAiResponsesProviderTests.StubHandler(request =>
+        {
+            if (request.RequestUri!.Host == "169.254.170.2")
+            {
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(
+                        """
+                        {
+                          "AccessKeyId": "ASIAECSSRC",
+                          "SecretAccessKey": "ecs-src-secret",
+                          "Token": "ecs-src-token",
+                          "Expiration": "2099-01-01T00:00:00Z"
+                        }
+                        """,
+                        Encoding.UTF8,
+                        "application/json")
+                };
+            }
+
+            stsRequest = request;
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(
+                    """
+                    <AssumeRoleResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
+                      <AssumeRoleResult>
+                        <Credentials>
+                          <AccessKeyId>ASIAVIAECS</AccessKeyId>
+                          <SecretAccessKey>via-ecs-secret</SecretAccessKey>
+                          <SessionToken>via-ecs-token</SessionToken>
+                          <Expiration>2099-01-01T00:00:00Z</Expiration>
+                        </Credentials>
+                      </AssumeRoleResult>
+                    </AssumeRoleResponse>
+                    """,
+                    Encoding.UTF8,
+                    "text/xml")
+            };
+        });
+        using var client = new HttpClient(handler);
+
+        var outcome = await BedrockAssumeRoleResolver.ResolveAsync(
+            new BedrockOptions { ContainerCredentialsRelativeUri = "/v2/credentials/abc" },
+            new BedrockProfileSnapshot
+            {
+                Name = "dev",
+                RoleArn = "arn:aws:iam::123:role/r",
+                CredentialSource = "EcsContainer"
+            },
+            region: "us-east-1",
+            httpClient: client,
+            clock: () => DateTimeOffset.UtcNow);
+
+        Assert.True(outcome.HasCredentials);
+        Assert.Equal("ASIAVIAECS", outcome.Credentials!.AccessKeyId);
+        Assert.NotNull(stsRequest);
+        var authorization = stsRequest!.Headers.GetValues("Authorization").Single();
+        Assert.Contains("Credential=ASIAECSSRC/", authorization, StringComparison.Ordinal);
+    }
+
+    private sealed class EnvironmentScope : IDisposable
+    {
+        private readonly List<(string Name, string? Previous)> _entries = [];
+
+        public EnvironmentScope(params (string Name, string? Value)[] values)
+        {
+            foreach (var (name, value) in values)
+            {
+                _entries.Add((name, Environment.GetEnvironmentVariable(name)));
+                Environment.SetEnvironmentVariable(name, value);
+            }
+        }
+
+        public void Dispose()
+        {
+            foreach (var (name, previous) in _entries)
+            {
+                Environment.SetEnvironmentVariable(name, previous);
+            }
         }
     }
 }
