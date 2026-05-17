@@ -63,26 +63,51 @@ public sealed class InteractiveInputEditor
                     return InputResult.Submitted(committed);
                 }
                 case ConsoleKey.Backspace:
-                    if (cursor > 0)
+                    if ((key.Modifiers & ConsoleModifiers.Control) != 0)
+                    {
+                        var newCursor = FindPreviousWordBoundary(chars, cursor);
+                        if (newCursor < cursor)
+                        {
+                            chars.RemoveRange(newCursor, cursor - newCursor);
+                            cursor = newCursor;
+                        }
+                    }
+                    else if (cursor > 0)
                     {
                         chars.RemoveAt(cursor - 1);
                         cursor--;
                     }
                     break;
                 case ConsoleKey.Delete:
-                    if (cursor < chars.Count)
+                    if ((key.Modifiers & ConsoleModifiers.Control) != 0)
+                    {
+                        var nextBoundary = FindNextWordBoundary(chars, cursor);
+                        if (nextBoundary > cursor)
+                        {
+                            chars.RemoveRange(cursor, nextBoundary - cursor);
+                        }
+                    }
+                    else if (cursor < chars.Count)
                     {
                         chars.RemoveAt(cursor);
                     }
                     break;
                 case ConsoleKey.LeftArrow:
-                    if (cursor > 0)
+                    if ((key.Modifiers & ConsoleModifiers.Control) != 0)
+                    {
+                        cursor = FindPreviousWordBoundary(chars, cursor);
+                    }
+                    else if (cursor > 0)
                     {
                         cursor--;
                     }
                     break;
                 case ConsoleKey.RightArrow:
-                    if (cursor < chars.Count)
+                    if ((key.Modifiers & ConsoleModifiers.Control) != 0)
+                    {
+                        cursor = FindNextWordBoundary(chars, cursor);
+                    }
+                    else if (cursor < chars.Count)
                     {
                         cursor++;
                     }
@@ -138,6 +163,52 @@ public sealed class InteractiveInputEditor
 
             _renderer.Render(new string(chars.ToArray()), cursor);
         }
+    }
+
+    internal static int FindPreviousWordBoundary(IReadOnlyList<char> chars, int cursor)
+    {
+        if (cursor <= 0)
+        {
+            return 0;
+        }
+
+        var index = cursor;
+        // Skip trailing whitespace before the cursor.
+        while (index > 0 && char.IsWhiteSpace(chars[index - 1]))
+        {
+            index--;
+        }
+
+        // Skip the previous run of non-whitespace characters.
+        while (index > 0 && !char.IsWhiteSpace(chars[index - 1]))
+        {
+            index--;
+        }
+
+        return index;
+    }
+
+    internal static int FindNextWordBoundary(IReadOnlyList<char> chars, int cursor)
+    {
+        if (cursor >= chars.Count)
+        {
+            return chars.Count;
+        }
+
+        var index = cursor;
+        // Skip leading whitespace at the cursor.
+        while (index < chars.Count && char.IsWhiteSpace(chars[index]))
+        {
+            index++;
+        }
+
+        // Skip the next run of non-whitespace characters.
+        while (index < chars.Count && !char.IsWhiteSpace(chars[index]))
+        {
+            index++;
+        }
+
+        return index;
     }
 }
 
