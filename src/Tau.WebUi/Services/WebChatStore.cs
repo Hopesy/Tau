@@ -6,6 +6,7 @@ namespace Tau.WebUi.Services;
 public sealed class WebChatStore
 {
     private readonly string _path;
+    private readonly object _gate = new();
 
     public WebChatStore(string path)
     {
@@ -16,31 +17,56 @@ public sealed class WebChatStore
 
     public IReadOnlyList<WebChatSessionDto> Load()
     {
-        if (!File.Exists(_path))
+        lock (_gate)
         {
-            return [];
-        }
+            if (!File.Exists(_path))
+            {
+                return [];
+            }
 
-        var json = File.ReadAllText(_path);
-        if (string.IsNullOrWhiteSpace(json))
-        {
-            return [];
-        }
+            var json = File.ReadAllText(_path);
+            if (string.IsNullOrWhiteSpace(json))
+            {
+                return [];
+            }
 
-        var document = JsonSerializer.Deserialize(json, WebUiJsonContext.Default.WebChatStoreDocument);
-        return document?.Sessions ?? [];
+            var document = JsonSerializer.Deserialize(json, WebUiJsonContext.Default.WebChatStoreDocument);
+            return document?.Sessions ?? [];
+        }
     }
 
     public void Save(IReadOnlyList<WebChatSessionDto> sessions)
     {
-        var directory = System.IO.Path.GetDirectoryName(_path);
-        if (!string.IsNullOrWhiteSpace(directory))
+        lock (_gate)
         {
-            Directory.CreateDirectory(directory);
-        }
+            var directory = System.IO.Path.GetDirectoryName(_path);
+            if (!string.IsNullOrWhiteSpace(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
 
-        var document = new WebChatStoreDocument(sessions);
-        var json = JsonSerializer.Serialize(document, WebUiJsonContext.Default.WebChatStoreDocument);
-        File.WriteAllText(_path, json);
+            var document = new WebChatStoreDocument(sessions);
+            var json = JsonSerializer.Serialize(document, WebUiJsonContext.Default.WebChatStoreDocument);
+            var tempPath = $"{_path}.{Guid.NewGuid():N}.tmp";
+            try
+            {
+                File.WriteAllText(tempPath, json);
+                if (File.Exists(_path))
+                {
+                    File.Replace(tempPath, _path, null);
+                }
+                else
+                {
+                    File.Move(tempPath, _path);
+                }
+            }
+            finally
+            {
+                if (File.Exists(tempPath))
+                {
+                    File.Delete(tempPath);
+                }
+            }
+        }
     }
 }

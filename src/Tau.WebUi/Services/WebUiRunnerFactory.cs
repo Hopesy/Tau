@@ -6,7 +6,7 @@ namespace Tau.WebUi.Services;
 
 public static class WebUiRunnerFactory
 {
-    public static RuntimeCodingAgentRunner Create(string provider, string model, IReadOnlyList<ChatMessage>? history = null)
+    public static ICodingAgentRunner Create(string provider, string model, IReadOnlyList<ChatMessage>? history = null)
     {
         return RuntimeCodingAgentRunner.Create(provider, model, history);
     }

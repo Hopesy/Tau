@@ -147,6 +147,7 @@
 - targeted tests 覆盖 `Tau.Pods` `LogsAsync`：journalctl 命令构造（含 `tau-pod-<name>` unit、`-n <tail>`、回退 `~/.tau_pods/<name>.log`）、缺省 100 行、非 SSH pod 直接拒绝、exec 失败时 surface 错误 summary；CLI 端 `logs` 子命令未 ssh pod 报错、tail 参数非数值时拒绝
 - targeted tests 覆盖 `/history [count|all]` 命令：未提供 snapshot provider 时返回 not-available 错误、`/history` 默认 20 条 newest-first、显式 count 透传给 provider、非数值 argument 报 usage、provider 返回空时显示 empty status
 - targeted tests 覆盖 `/clear` 命令：clearScreen action 被显式调用、未注入 action 时返回 not-supported 错误、附加参数报 usage
+- targeted tests 覆盖 `Tau.WebUi POST /api/sessions/{id}/clear`：清空 messages 后保留 Title/Provider/Model；session 不存在返回 404
 - targeted tests 覆盖 `CodingAgentSecretRedactor`：AWS access key（AKIA/ASIA/AROA）/ GitHub token / Slack token / Anthropic `sk-ant-` / OpenAI `sk-` / `Bearer …` / JWT 三段式都替换为 `[redacted]`、非 secret 文本不动、`enabled=false` 跳过、`IsEnabledFromEnvironment` 对 `0/false/1/true/null/""` 的判定；并覆盖 `/export <html>` 默认对常见 secret pattern 做替换，且非 secret 内容保持不变
 - 真实 CLI smoke：临时 `TAU_CODING_AGENT_SKILL_PATHS` 下执行 `/skills`，确认真实进程能发现并列出 `/skill:<name>`
 - 真实 CLI smoke：临时 `TAU_CODING_AGENT_EXTENSION_PATHS` 下执行 `/extensions` 与 status-only extension command，确认真实进程能发现并执行 JSON extension command；再通过同一 extension JSON 的 `resources.promptPaths/resources.skillPaths` 确认 `/prompts` 和 `/skills` 能发现 extension-contributed resources
