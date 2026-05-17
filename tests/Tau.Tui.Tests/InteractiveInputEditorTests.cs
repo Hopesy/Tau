@@ -287,6 +287,91 @@ public sealed class InteractiveInputEditorTests
         Assert.Equal(expected, InteractiveInputEditor.FindNextWordBoundary(text.ToCharArray(), cursor));
     }
 
+    [Fact]
+    public async Task ReadLineAsync_CtrlAJumpsToLineStart()
+    {
+        var reader = new FakeKeyReader();
+        foreach (var ch in "abc")
+        {
+            reader.Enqueue(ch);
+        }
+        reader.EnqueueRaw(new ConsoleKeyInfo('\x01', ConsoleKey.A, shift: false, alt: false, control: true));
+        reader.Enqueue('!');
+        reader.EnqueueKey(ConsoleKey.Enter);
+
+        var renderer = new FakeRenderer();
+        var editor = new InteractiveInputEditor(reader, renderer);
+
+        var result = await editor.ReadLineAsync("> ");
+
+        Assert.Equal("!abc", result.Text);
+    }
+
+    [Fact]
+    public async Task ReadLineAsync_CtrlEJumpsToLineEnd()
+    {
+        var reader = new FakeKeyReader();
+        foreach (var ch in "abc")
+        {
+            reader.Enqueue(ch);
+        }
+        reader.EnqueueKey(ConsoleKey.Home);
+        reader.EnqueueRaw(new ConsoleKeyInfo('\x05', ConsoleKey.E, shift: false, alt: false, control: true));
+        reader.Enqueue('!');
+        reader.EnqueueKey(ConsoleKey.Enter);
+
+        var renderer = new FakeRenderer();
+        var editor = new InteractiveInputEditor(reader, renderer);
+
+        var result = await editor.ReadLineAsync("> ");
+
+        Assert.Equal("abc!", result.Text);
+    }
+
+    [Fact]
+    public async Task ReadLineAsync_CtrlKKillsToEndOfLine()
+    {
+        var reader = new FakeKeyReader();
+        foreach (var ch in "abc def")
+        {
+            reader.Enqueue(ch);
+        }
+        reader.EnqueueKey(ConsoleKey.LeftArrow);
+        reader.EnqueueKey(ConsoleKey.LeftArrow);
+        reader.EnqueueKey(ConsoleKey.LeftArrow);
+        reader.EnqueueRaw(new ConsoleKeyInfo('\x0B', ConsoleKey.K, shift: false, alt: false, control: true));
+        reader.EnqueueKey(ConsoleKey.Enter);
+
+        var renderer = new FakeRenderer();
+        var editor = new InteractiveInputEditor(reader, renderer);
+
+        var result = await editor.ReadLineAsync("> ");
+
+        Assert.Equal("abc ", result.Text);
+    }
+
+    [Fact]
+    public async Task ReadLineAsync_CtrlUKillsToStartOfLine()
+    {
+        var reader = new FakeKeyReader();
+        foreach (var ch in "abc def")
+        {
+            reader.Enqueue(ch);
+        }
+        reader.EnqueueKey(ConsoleKey.LeftArrow);
+        reader.EnqueueKey(ConsoleKey.LeftArrow);
+        reader.EnqueueKey(ConsoleKey.LeftArrow);
+        reader.EnqueueRaw(new ConsoleKeyInfo('\x15', ConsoleKey.U, shift: false, alt: false, control: true));
+        reader.EnqueueKey(ConsoleKey.Enter);
+
+        var renderer = new FakeRenderer();
+        var editor = new InteractiveInputEditor(reader, renderer);
+
+        var result = await editor.ReadLineAsync("> ");
+
+        Assert.Equal("def", result.Text);
+    }
+
     private sealed class FakeKeyReader : IConsoleKeyReader
     {
         private readonly Queue<ConsoleKeyInfo> _keys = new();

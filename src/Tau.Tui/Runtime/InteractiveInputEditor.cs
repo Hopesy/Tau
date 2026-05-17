@@ -48,6 +48,37 @@ public sealed class InteractiveInputEditor
                 return InputResult.Cancelled;
             }
 
+            // Bash readline-style chord shortcuts.
+            if ((key.Modifiers & ConsoleModifiers.Control) != 0)
+            {
+                switch (key.Key)
+                {
+                    case ConsoleKey.A:
+                        cursor = 0;
+                        _renderer.Render(new string(chars.ToArray()), cursor);
+                        continue;
+                    case ConsoleKey.E:
+                        cursor = chars.Count;
+                        _renderer.Render(new string(chars.ToArray()), cursor);
+                        continue;
+                    case ConsoleKey.K:
+                        if (cursor < chars.Count)
+                        {
+                            chars.RemoveRange(cursor, chars.Count - cursor);
+                        }
+                        _renderer.Render(new string(chars.ToArray()), cursor);
+                        continue;
+                    case ConsoleKey.U:
+                        if (cursor > 0)
+                        {
+                            chars.RemoveRange(0, cursor);
+                            cursor = 0;
+                        }
+                        _renderer.Render(new string(chars.ToArray()), cursor);
+                        continue;
+                }
+            }
+
             switch (key.Key)
             {
                 case ConsoleKey.Enter:
