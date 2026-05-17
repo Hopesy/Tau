@@ -62,6 +62,21 @@ public static class WebUiApplication
                 "text/html; charset=utf-8",
                 $"{SafeFileName(session.Title)}.tau-webui-session.html");
         });
+        app.MapGet("/api/sessions/{id}/export.md", (string id, WebChatService chat) =>
+        {
+            var session = chat.GetSession(id);
+            if (session is null)
+            {
+                return Results.NotFound();
+            }
+
+            var redactor = TauSecretRedactor.ForEnvironmentVariable(TauSecretRedactor.WebUiEnvironmentVariable);
+            var markdown = WebChatMarkdownExporter.Render(session, redactor);
+            return Results.File(
+                Encoding.UTF8.GetBytes(markdown),
+                "text/markdown; charset=utf-8",
+                $"{SafeFileName(session.Title)}.tau-webui-session.md");
+        });
         app.MapPost("/api/sessions", (CreateSessionRequest? request, WebChatService chat) =>
         {
             try

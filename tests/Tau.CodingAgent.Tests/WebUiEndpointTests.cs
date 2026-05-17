@@ -240,6 +240,42 @@ public class WebUiEndpointTests
     }
 
     [Fact]
+    public async Task ExportMarkdownEndpoint_RendersSessionAndRedactsSecrets()
+    {
+        await using var fixture = await WebUiEndpointFixture.StartAsync(StreamOk);
+        var created = await fixture.Client.PostAsync(
+            "/api/sessions",
+            JsonBody(
+                new CreateSessionRequest("Markdown me", "openai", "gpt-5.4"),
+                WebUiEndpointJsonContext.Default.CreateSessionRequest));
+        created.EnsureSuccessStatusCode();
+        var session = JsonSerializer.Deserialize(
+            await created.Content.ReadAsStringAsync(),
+            WebUiEndpointJsonContext.Default.WebChatSessionDto);
+        Assert.NotNull(session);
+
+        var send = await fixture.Client.PostAsync(
+            $"/api/sessions/{session!.Id}/messages",
+            JsonBody(
+                new SendMessageRequest("AKIAIOSFODNN7EXAMPLE belongs in the dust"),
+                WebUiEndpointJsonContext.Default.SendMessageRequest));
+        send.EnsureSuccessStatusCode();
+
+        var exported = await fixture.Client.GetAsync($"/api/sessions/{session.Id}/export.md");
+        exported.EnsureSuccessStatusCode();
+        Assert.Equal("text/markdown", exported.Content.Headers.ContentType?.MediaType);
+        var markdown = await exported.Content.ReadAsStringAsync();
+        Assert.Contains("# Markdown me", markdown, StringComparison.Ordinal);
+        Assert.Contains("Provider: `openai`", markdown, StringComparison.Ordinal);
+        Assert.DoesNotContain("AKIAIOSFODNN7EXAMPLE", markdown, StringComparison.Ordinal);
+        Assert.Contains("[redacted]", markdown, StringComparison.Ordinal);
+        Assert.Contains("belongs in the dust", markdown, StringComparison.Ordinal);
+
+        var missing = await fixture.Client.GetAsync("/api/sessions/does-not-exist/export.md");
+        Assert.Equal(HttpStatusCode.NotFound, missing.StatusCode);
+    }
+
+    [Fact]
     public async Task ExportHtmlEndpoint_RendersSessionAndRedactsSecrets()
     {
         await using var fixture = await WebUiEndpointFixture.StartAsync(StreamOk);
