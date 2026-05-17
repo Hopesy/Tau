@@ -142,6 +142,7 @@ public class InteractiveConsoleSessionTests
 
         public void WritePrompt(string prompt, ConsoleColor? color = null) => Prompts.Add(prompt);
         public void Render(string buffer, int cursorIndex) => Renders.Add((buffer, cursorIndex));
+        public void RenderSearch(string pattern, string? match, int cursorInMatch) { }
         public void Commit() => CommitCalls++;
         public void Cancel() => CancelCalls++;
     }

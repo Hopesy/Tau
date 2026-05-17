@@ -372,6 +372,98 @@ public sealed class InteractiveInputEditorTests
         Assert.Equal("def", result.Text);
     }
 
+    [Fact]
+    public async Task ReadLineAsync_CtrlRFindsHistoryMatchAndEnterSubmits()
+    {
+        var history = new InputHistory();
+        history.Add("git status");
+        history.Add("dotnet build");
+        history.Add("git commit");
+
+        var reader = new FakeKeyReader();
+        reader.EnqueueRaw(new ConsoleKeyInfo('\x12', ConsoleKey.R, shift: false, alt: false, control: true));
+        reader.Enqueue('g');
+        reader.Enqueue('i');
+        reader.Enqueue('t');
+        reader.EnqueueKey(ConsoleKey.Enter);
+
+        var renderer = new FakeRenderer();
+        var editor = new InteractiveInputEditor(reader, renderer, history: history);
+
+        var result = await editor.ReadLineAsync("> ");
+
+        Assert.Equal("git commit", result.Text);
+        Assert.NotEmpty(renderer.SearchRenders);
+        Assert.Contains(renderer.SearchRenders, render => render.Pattern == "git" && render.Match == "git commit");
+    }
+
+    [Fact]
+    public async Task ReadLineAsync_CtrlRTwiceCyclesToOlderMatch()
+    {
+        var history = new InputHistory();
+        history.Add("git status");
+        history.Add("git commit");
+
+        var reader = new FakeKeyReader();
+        reader.EnqueueRaw(new ConsoleKeyInfo('\x12', ConsoleKey.R, shift: false, alt: false, control: true));
+        reader.Enqueue('g');
+        reader.EnqueueRaw(new ConsoleKeyInfo('\x12', ConsoleKey.R, shift: false, alt: false, control: true));
+        reader.EnqueueKey(ConsoleKey.Enter);
+
+        var renderer = new FakeRenderer();
+        var editor = new InteractiveInputEditor(reader, renderer, history: history);
+
+        var result = await editor.ReadLineAsync("> ");
+
+        Assert.Equal("git status", result.Text);
+    }
+
+    [Fact]
+    public async Task ReadLineAsync_CtrlREscapeRestoresOriginalBuffer()
+    {
+        var history = new InputHistory();
+        history.Add("git status");
+
+        var reader = new FakeKeyReader();
+        reader.Enqueue('h');
+        reader.Enqueue('i');
+        reader.EnqueueRaw(new ConsoleKeyInfo('\x12', ConsoleKey.R, shift: false, alt: false, control: true));
+        reader.Enqueue('g');
+        reader.EnqueueKey(ConsoleKey.Escape);
+        reader.EnqueueKey(ConsoleKey.Enter);
+
+        var renderer = new FakeRenderer();
+        var editor = new InteractiveInputEditor(reader, renderer, history: history);
+
+        var result = await editor.ReadLineAsync("> ");
+
+        Assert.Equal("hi", result.Text);
+    }
+
+    [Fact]
+    public async Task ReadLineAsync_CtrlRBackspaceShrinksPattern()
+    {
+        var history = new InputHistory();
+        history.Add("apple");
+        history.Add("apricot");
+
+        var reader = new FakeKeyReader();
+        reader.EnqueueRaw(new ConsoleKeyInfo('\x12', ConsoleKey.R, shift: false, alt: false, control: true));
+        reader.Enqueue('a');
+        reader.Enqueue('p');
+        reader.Enqueue('p');
+        reader.EnqueueKey(ConsoleKey.Backspace);
+        reader.EnqueueKey(ConsoleKey.Enter);
+
+        var renderer = new FakeRenderer();
+        var editor = new InteractiveInputEditor(reader, renderer, history: history);
+
+        var result = await editor.ReadLineAsync("> ");
+
+        // After backspace, pattern is "ap" → newest match wins.
+        Assert.Equal("apricot", result.Text);
+    }
+
     private sealed class FakeKeyReader : IConsoleKeyReader
     {
         private readonly Queue<ConsoleKeyInfo> _keys = new();
@@ -415,6 +507,11 @@ public sealed class InteractiveInputEditorTests
 
         public void Render(string buffer, int cursorIndex) =>
             RenderCalls.Add((buffer, cursorIndex));
+
+        public List<(string Pattern, string? Match, int Cursor)> SearchRenders { get; } = [];
+
+        public void RenderSearch(string pattern, string? match, int cursorInMatch) =>
+            SearchRenders.Add((pattern, match, cursorInMatch));
 
         public void Commit() => CommitCalls++;
         public void Cancel() => CancelCalls++;

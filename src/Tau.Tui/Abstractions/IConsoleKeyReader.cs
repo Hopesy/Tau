@@ -10,6 +10,7 @@ public interface IInteractiveRenderer
     int WindowWidth { get; }
     void WritePrompt(string prompt, ConsoleColor? color = null);
     void Render(string buffer, int cursorIndex);
+    void RenderSearch(string pattern, string? match, int cursorInMatch);
     void Commit();
     void Cancel();
 }

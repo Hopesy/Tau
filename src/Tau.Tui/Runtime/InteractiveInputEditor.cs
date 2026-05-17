@@ -76,6 +76,29 @@ public sealed class InteractiveInputEditor
                         }
                         _renderer.Render(new string(chars.ToArray()), cursor);
                         continue;
+                    case ConsoleKey.R:
+                    {
+                        var searchOutcome = await RunReverseSearchAsync(chars, cancellationToken).ConfigureAwait(false);
+                        chars = new List<char>(searchOutcome.Buffer);
+                        cursor = chars.Count;
+                        historyOffset = -1;
+                        if (searchOutcome.Submit)
+                        {
+                            var committed = new string(chars.ToArray());
+                            _renderer.Commit();
+                            _buffer.SetDraft(committed);
+                            _buffer.Commit();
+                            if (!string.IsNullOrWhiteSpace(committed))
+                            {
+                                _history.Add(committed);
+                            }
+                            return InputResult.Submitted(committed);
+                        }
+
+                        _renderer.WritePrompt(prompt, promptColor);
+                        _renderer.Render(new string(chars.ToArray()), cursor);
+                        continue;
+                    }
                 }
             }
 
@@ -196,6 +219,93 @@ public sealed class InteractiveInputEditor
         }
     }
 
+    private async Task<ReverseSearchOutcome> RunReverseSearchAsync(
+        List<char> startingBuffer,
+        CancellationToken cancellationToken)
+    {
+        var originalBuffer = startingBuffer.ToArray();
+        var pattern = new List<char>();
+        var offset = 0;
+        var currentMatch = (Match: (string?)null, Offset: 0, Index: 0);
+
+        _renderer.RenderSearch(string.Empty, null, 0);
+
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var key = await _reader.ReadKeyAsync(cancellationToken).ConfigureAwait(false);
+
+            if ((key.Modifiers & ConsoleModifiers.Control) != 0 && key.Key == ConsoleKey.G)
+            {
+                return new ReverseSearchOutcome(originalBuffer, Submit: false);
+            }
+
+            if (key.Key == ConsoleKey.Escape)
+            {
+                return new ReverseSearchOutcome(originalBuffer, Submit: false);
+            }
+
+            if (key.Key == ConsoleKey.Enter)
+            {
+                var buffer = currentMatch.Match is null ? originalBuffer : currentMatch.Match.ToCharArray();
+                return new ReverseSearchOutcome(buffer, Submit: true);
+            }
+
+            if ((key.Modifiers & ConsoleModifiers.Control) != 0 && key.Key == ConsoleKey.R)
+            {
+                if (currentMatch.Match is not null)
+                {
+                    offset = currentMatch.Offset + 1;
+                }
+                ApplyMatch();
+                continue;
+            }
+
+            if (key.Key == ConsoleKey.Backspace)
+            {
+                if (pattern.Count > 0)
+                {
+                    pattern.RemoveAt(pattern.Count - 1);
+                }
+                offset = 0;
+                ApplyMatch();
+                continue;
+            }
+
+            if (key.KeyChar != '\0' && !char.IsControl(key.KeyChar))
+            {
+                pattern.Add(key.KeyChar);
+                offset = 0;
+                ApplyMatch();
+                continue;
+            }
+        }
+
+        void ApplyMatch()
+        {
+            var query = new string(pattern.ToArray());
+            if (query.Length == 0)
+            {
+                currentMatch = (null, 0, 0);
+                _renderer.RenderSearch(query, null, 0);
+                return;
+            }
+
+            var found = _history.FindContaining(query, offset);
+            if (found is null)
+            {
+                currentMatch = (null, offset, 0);
+                _renderer.RenderSearch(query, null, 0);
+                return;
+            }
+
+            currentMatch = (found.Value.Match, found.Value.OffsetFromEnd, found.Value.MatchIndex);
+            _renderer.RenderSearch(query, found.Value.Match, found.Value.MatchIndex);
+        }
+    }
+
+    private readonly record struct ReverseSearchOutcome(char[] Buffer, bool Submit);
+
     internal static int FindPreviousWordBoundary(IReadOnlyList<char> chars, int cursor)
     {
         if (cursor <= 0)
@@ -299,5 +409,26 @@ public sealed class InputHistory
         }
 
         return _entries[_entries.Count - 1 - offsetFromEnd];
+    }
+
+    public (string Match, int OffsetFromEnd, int MatchIndex)? FindContaining(string pattern, int startOffsetFromEnd)
+    {
+        if (string.IsNullOrEmpty(pattern))
+        {
+            return null;
+        }
+
+        var start = Math.Max(0, startOffsetFromEnd);
+        for (var offset = start; offset < _entries.Count; offset++)
+        {
+            var entry = _entries[_entries.Count - 1 - offset];
+            var index = entry.IndexOf(pattern, StringComparison.Ordinal);
+            if (index >= 0)
+            {
+                return (entry, offset, index);
+            }
+        }
+
+        return null;
     }
 }

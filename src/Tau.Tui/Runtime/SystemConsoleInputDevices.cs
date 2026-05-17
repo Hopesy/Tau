@@ -112,6 +112,60 @@ public sealed class SystemConsoleInteractiveRenderer : IInteractiveRenderer
         _lastRenderedLength = 0;
     }
 
+    public void RenderSearch(string pattern, string? match, int cursorInMatch)
+    {
+        var prefix = $"(reverse-i-search) `{pattern ?? string.Empty}': ";
+        var rendered = match ?? string.Empty;
+
+        try
+        {
+            Console.CursorVisible = false;
+        }
+        catch
+        {
+            // ignore
+        }
+
+        try
+        {
+            Console.SetCursorPosition(0, Console.CursorTop);
+        }
+        catch
+        {
+            // ignore
+        }
+
+        Console.Write(prefix);
+        Console.Write(rendered);
+
+        var written = prefix.Length + rendered.Length;
+        if (written < _promptLength + _lastRenderedLength)
+        {
+            Console.Write(new string(' ', _promptLength + _lastRenderedLength - written));
+        }
+
+        try
+        {
+            Console.SetCursorPosition(prefix.Length + Math.Clamp(cursorInMatch, 0, rendered.Length), Console.CursorTop);
+        }
+        catch
+        {
+            // ignore
+        }
+
+        try
+        {
+            Console.CursorVisible = true;
+        }
+        catch
+        {
+            // ignore
+        }
+
+        _promptLength = prefix.Length;
+        _lastRenderedLength = rendered.Length;
+    }
+
     private static int SafeGetWindowWidth()
     {
         try
