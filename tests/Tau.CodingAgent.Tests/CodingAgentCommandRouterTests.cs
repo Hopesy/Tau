@@ -200,7 +200,7 @@ public class CodingAgentCommandRouterTests
     public void CommandCatalog_HelpLine_MatchesSupportedCommandNames()
     {
         Assert.Equal(
-            "commands: /help, /name, /copy, /files, /export, /share, /import, /new, /session, /tree, /label, /fork, /clone, /resume, /quit, /model, /provider, /models, /providers, /prompts, /skills, /extensions, /auth, /login, /retry, /compact",
+            "commands: /help, /name, /copy, /files, /export, /share, /import, /new, /session, /tree, /label, /fork, /clone, /resume, /quit, /model, /provider, /models, /providers, /prompts, /skills, /extensions, /auth, /login, /retry, /history, /compact",
             CodingAgentCommandCatalog.HelpLine);
         Assert.All(CodingAgentCommandCatalog.SupportedCommands, command =>
         {
@@ -221,7 +221,7 @@ public class CodingAgentCommandRouterTests
         Assert.True(result.Handled);
         Assert.False(result.IsError);
         Assert.Equal(
-            "commands: /help, /name, /copy, /files, /export, /share, /import, /new, /session, /tree, /label, /fork, /clone, /resume, /quit, /model, /provider, /models, /providers, /prompts, /skills, /extensions, /auth, /login, /retry, /compact",
+            "commands: /help, /name, /copy, /files, /export, /share, /import, /new, /session, /tree, /label, /fork, /clone, /resume, /quit, /model, /provider, /models, /providers, /prompts, /skills, /extensions, /auth, /login, /retry, /history, /compact",
             result.Message);
         Assert.Empty(runner.Inputs);
     }
@@ -1874,6 +1874,86 @@ public class CodingAgentCommandRouterTests
         Assert.True(result.IsError);
         Assert.Equal("unknown command '/wat'", result.Message);
         Assert.Empty(runner.Inputs);
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_HistoryCommand_ReturnsErrorWhenNoProviderSet()
+    {
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var router = new CodingAgentCommandRouter(runner);
+
+        var result = await router.TryHandleAsync("/history");
+
+        Assert.True(result.Handled);
+        Assert.True(result.IsError);
+        Assert.Contains("not available", result.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_HistoryCommand_ListsRecentEntriesNewestFirst()
+    {
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var router = new CodingAgentCommandRouter(
+            runner,
+            historySnapshotProvider: limit => new[] { "third command", "second command", "first command" }.Take(limit).ToArray());
+
+        var result = await router.TryHandleAsync("/history");
+
+        Assert.True(result.Handled);
+        Assert.False(result.IsError);
+        Assert.Contains("Recent inputs (3)", result.Message, StringComparison.Ordinal);
+        Assert.Contains("[ 1] third command", result.Message, StringComparison.Ordinal);
+        Assert.Contains("[ 2] second command", result.Message, StringComparison.Ordinal);
+        Assert.Contains("[ 3] first command", result.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_HistoryCommand_RespectsExplicitCount()
+    {
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var captured = 0;
+        var router = new CodingAgentCommandRouter(
+            runner,
+            historySnapshotProvider: limit =>
+            {
+                captured = limit;
+                return new[] { "only" };
+            });
+
+        var result = await router.TryHandleAsync("/history 5");
+
+        Assert.False(result.IsError);
+        Assert.Equal(5, captured);
+        Assert.Contains("only", result.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_HistoryCommand_RejectsInvalidArgument()
+    {
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var router = new CodingAgentCommandRouter(
+            runner,
+            historySnapshotProvider: _ => Array.Empty<string>());
+
+        var result = await router.TryHandleAsync("/history not-a-number");
+
+        Assert.True(result.IsError);
+        Assert.Contains("Usage:", result.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_HistoryCommand_StatusOnEmpty()
+    {
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var router = new CodingAgentCommandRouter(
+            runner,
+            historySnapshotProvider: _ => Array.Empty<string>());
+
+        var result = await router.TryHandleAsync("/history");
+
+        Assert.True(result.Handled);
+        Assert.False(result.IsError);
+        Assert.Contains("empty", result.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

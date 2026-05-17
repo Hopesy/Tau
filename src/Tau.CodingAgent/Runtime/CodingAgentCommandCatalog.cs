@@ -9,7 +9,9 @@ public static class CodingAgentCommandCatalog
         new("/help", "/help", "Show supported local commands"),
         new("/name", "/name [display name | clear]", "Show, set, or clear the current session display name"),
         new("/copy", "/copy", "Copy the last assistant text message to the clipboard"),
+        new("/files", "/files", "List file operations in the current session"),
         new("/export", "/export [path]", "Export the current session as HTML by default, JSON by path, or the current branch as JSONL"),
+        new("/share", "/share", "Share the current HTML transcript as a secret GitHub gist"),
         new("/import", "/import <path>", "Import a flat JSON snapshot or resume a JSONL session"),
         new("/new", "/new", "Start a new session"),
         new("/session", "/session", "Show current session status"),
@@ -25,9 +27,11 @@ public static class CodingAgentCommandCatalog
         new("/providers", "/providers", "List registered providers"),
         new("/prompts", "/prompts", "List local prompt templates"),
         new("/skills", "/skills", "List local skills and their /skill:name commands"),
-        new("/extensions", "/extensions", "List local extension commands"),
+        new("/extensions", "/extensions", "List local extension commands, resources, and diagnostics"),
         new("/auth", "/auth [provider]", "Show provider auth status"),
         new("/login", "/login [provider]", "Show login guidance for a provider"),
+        new("/retry", "/retry [current|default|off|<max attempts> [base delay ms]]", "Show or configure transient retry behavior"),
+        new("/history", "/history [count|all]", "List recent input history entries"),
         new("/compact", "/compact [instructions]", "Manually compact the current session")
     ];
 

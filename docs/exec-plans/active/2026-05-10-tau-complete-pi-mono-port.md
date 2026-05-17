@@ -145,6 +145,7 @@
 - targeted tests 覆盖 `Tau.Tui` 持久化 history：`IInputHistoryStore` 加载已有 entries 到 `InputHistory`、新提交追加、连续重复 deduped 不写盘；`FileInputHistoryStore` 真实落盘 → 再次构造 `InputHistory` 时正确恢复顺序、超过 `maxEntries` 时尾部截断、缺失文件不抛错
 - targeted tests 覆盖 HTML transcript 嵌套列表：缩进升级时打开新 `<ul>` / `<ol>`、indent 回到外层时关闭嵌套、同 indent 切换 ordered/unordered 时关闭并重开正确 list，嵌套内项目顺序保持正确
 - targeted tests 覆盖 `Tau.Pods` `LogsAsync`：journalctl 命令构造（含 `tau-pod-<name>` unit、`-n <tail>`、回退 `~/.tau_pods/<name>.log`）、缺省 100 行、非 SSH pod 直接拒绝、exec 失败时 surface 错误 summary；CLI 端 `logs` 子命令未 ssh pod 报错、tail 参数非数值时拒绝
+- targeted tests 覆盖 `/history [count|all]` 命令：未提供 snapshot provider 时返回 not-available 错误、`/history` 默认 20 条 newest-first、显式 count 透传给 provider、非数值 argument 报 usage、provider 返回空时显示 empty status
 - 真实 CLI smoke：临时 `TAU_CODING_AGENT_SKILL_PATHS` 下执行 `/skills`，确认真实进程能发现并列出 `/skill:<name>`
 - 真实 CLI smoke：临时 `TAU_CODING_AGENT_EXTENSION_PATHS` 下执行 `/extensions` 与 status-only extension command，确认真实进程能发现并执行 JSON extension command；再通过同一 extension JSON 的 `resources.promptPaths/resources.skillPaths` 确认 `/prompts` 和 `/skills` 能发现 extension-contributed resources
 - 真实 CLI smoke：`/export` 默认 HTML、`/import <snapshot.json>` -> `/export <session.html>`，检查 HTML 包含 user/assistant/thinking/tool call/tool result 内容

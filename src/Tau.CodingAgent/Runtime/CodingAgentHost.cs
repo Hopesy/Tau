@@ -7,6 +7,9 @@ namespace Tau.CodingAgent.Runtime;
 
 public sealed class CodingAgentHost
 {
+    private const string ContextOverflowCompactionInstructions =
+        "Recover from a context overflow. Keep the current goal, decisions, blockers, changed files, and enough recent details to retry the pending user request.";
+
     private readonly InteractiveConsoleSession _ui;
     private readonly ICodingAgentRunner _runner;
     private readonly CodingAgentSessionStore? _sessionStore;
@@ -16,6 +19,7 @@ public sealed class CodingAgentHost
     private readonly CodingAgentExtensionCommandStore? _extensionCommandStore;
     private readonly CodingAgentAutoCompactionOptions _autoCompaction;
     private readonly CodingAgentCommandRouter _commandRouter;
+    private CodingAgentRetryOptions _retryOptions;
     private bool _shutdownRendered;
 
     public CodingAgentHost(
@@ -28,7 +32,9 @@ public sealed class CodingAgentHost
         CodingAgentPromptTemplateStore? promptTemplateStore = null,
         CodingAgentSkillStore? skillStore = null,
         CodingAgentExtensionCommandStore? extensionCommandStore = null,
-        CodingAgentAutoCompactionOptions? autoCompaction = null)
+        CodingAgentAutoCompactionOptions? autoCompaction = null,
+        CodingAgentRetryOptions? retryOptions = null,
+        Func<int, IReadOnlyList<string>>? historySnapshotProvider = null)
     {
         _ui = ui;
         _runner = runner;
@@ -38,16 +44,20 @@ public sealed class CodingAgentHost
         _skillStore = skillStore;
         _extensionCommandStore = extensionCommandStore;
         _autoCompaction = autoCompaction ?? CodingAgentAutoCompactionOptions.Disabled;
+        _retryOptions = retryOptions ?? CodingAgentRetryOptions.Disabled;
         _commandRouter = new CodingAgentCommandRouter(
             runner,
-            settingsStore,
-            sessionStore?.Path,
-            clipboard,
-            treeSessionController,
-            promptTemplateStore,
-            skillStore,
-            extensionCommandStore,
-            _autoCompaction);
+            settingsStore: settingsStore,
+            sessionFile: sessionStore?.Path,
+            clipboard: clipboard,
+            treeSessionController: treeSessionController,
+            promptTemplateStore: promptTemplateStore,
+            skillStore: skillStore,
+            extensionCommandStore: extensionCommandStore,
+            autoCompaction: _autoCompaction,
+            retryOptions: _retryOptions,
+            retryOptionsChanged: options => _retryOptions = options,
+            historySnapshotProvider: historySnapshotProvider);
     }
 
     public async Task<int> RunAsync(CancellationToken cancellationToken = default)
@@ -101,27 +111,8 @@ public sealed class CodingAgentHost
             }
 
             await TryAutoCompactAsync(input, cancellationToken).ConfigureAwait(false);
-            _ui.WriteUserMessage(input);
-
-            try
-            {
-                await foreach (var evt in _runner.RunAsync(input, cancellationToken).ConfigureAwait(false))
-                {
-                    HandleEvent(evt);
-                }
-            }
-            catch (OperationCanceledException)
-            {
-                _ui.WriteCancelled();
-            }
-            catch (Exception ex)
-            {
-                _ui.WriteRuntimeError(ex.Message);
-            }
-            finally
-            {
-                PersistSession();
-            }
+            await RunTurnWithRetryAsync(input, cancellationToken).ConfigureAwait(false);
+            PersistSession();
         }
 
         if (!_shutdownRendered)
@@ -164,8 +155,9 @@ public sealed class CodingAgentHost
                 .CompactAsync(_autoCompaction.Instructions, cancellationToken)
                 .ConfigureAwait(false);
             _treeSessionController?.RecordCompaction(_runner, result with { FromHook = true });
+            var messagesAfter = _treeSessionController is null ? result.MessagesAfter : _runner.Messages.Count;
             _ui.WriteStatus(
-                $"auto-compacted session: {result.MessagesBefore} -> {result.MessagesAfter} messages, estimated {estimatedTokens} tokens");
+                $"auto-compacted session: {result.MessagesBefore} -> {messagesAfter} messages, estimated {estimatedTokens} tokens");
             PersistSession();
         }
         catch (OperationCanceledException)
@@ -175,6 +167,174 @@ public sealed class CodingAgentHost
         catch (Exception ex)
         {
             _ui.WriteRuntimeError($"auto-compaction failed: {ex.Message}");
+        }
+    }
+
+    private async Task RunTurnWithRetryAsync(string input, CancellationToken cancellationToken)
+    {
+        var rollbackSnapshot = CreateRollbackSnapshot();
+        var retryAttempt = 0;
+        var overflowRecoveryAttempted = false;
+        _ui.WriteUserMessage(input);
+
+        while (true)
+        {
+            var result = await RunSingleTurnAttemptAsync(input, cancellationToken).ConfigureAwait(false);
+            if (result.IsSuccess)
+            {
+                if (retryAttempt > 0)
+                {
+                    SyncTreeSessionAfterRecoveredRetry();
+                    RecordAutoRetryEnd(success: true, retryAttempt);
+                    var attemptLabel = retryAttempt == 1 ? "attempt" : "attempts";
+                    _ui.WriteStatus($"auto-retry recovered after {retryAttempt} {attemptLabel}");
+                }
+
+                return;
+            }
+
+            if (result.IsCancelled)
+            {
+                RollbackTurn(rollbackSnapshot, "rolled back cancelled turn");
+                return;
+            }
+
+            if (!overflowRecoveryAttempted && CodingAgentRetryClassifier.IsContextOverflow(result.ErrorMessage))
+            {
+                var recovery = await TryRecoverContextOverflowAsync(rollbackSnapshot, cancellationToken)
+                    .ConfigureAwait(false);
+                if (recovery.IsRecovered)
+                {
+                    rollbackSnapshot = recovery.RollbackSnapshot ?? CreateRollbackSnapshot();
+                    overflowRecoveryAttempted = true;
+                    continue;
+                }
+
+                if (recovery.IsCancelled)
+                {
+                    RollbackTurn(rollbackSnapshot, "rolled back cancelled turn");
+                    return;
+                }
+            }
+
+            var isRetryable = _retryOptions.IsEnabled
+                && CodingAgentRetryClassifier.IsRetryable(result.ErrorMessage, _runner.Model.ContextWindow ?? 0);
+            if (isRetryable && retryAttempt < _retryOptions.MaxAttempts)
+            {
+                retryAttempt++;
+                if (!RestoreTurnSnapshot(rollbackSnapshot))
+                {
+                    return;
+                }
+
+                var delay = _retryOptions.GetDelay(retryAttempt);
+                RecordAutoRetryStart(
+                    retryAttempt,
+                    _retryOptions.MaxAttempts,
+                    (int)delay.TotalMilliseconds,
+                    result.ErrorMessage);
+                _ui.WriteStatus(
+                    $"auto-retry {retryAttempt}/{_retryOptions.MaxAttempts} after {(int)delay.TotalMilliseconds}ms: {result.ErrorMessage}");
+
+                if (delay > TimeSpan.Zero)
+                {
+                    try
+                    {
+                        await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        _ui.WriteCancelled();
+                        _ui.WriteStatus("auto-retry cancelled during delay");
+                        RecordAutoRetryEnd(success: false, retryAttempt, "Retry cancelled");
+                        RollbackTurn(rollbackSnapshot, "rolled back cancelled turn");
+                        return;
+                    }
+                }
+
+                continue;
+            }
+
+            if (!result.ErrorAlreadyRendered && !string.IsNullOrWhiteSpace(result.ErrorMessage))
+            {
+                _ui.WriteRuntimeError(result.ErrorMessage);
+            }
+
+            if (_retryOptions.IsEnabled &&
+                retryAttempt > 0 &&
+                CodingAgentRetryClassifier.IsRetryable(result.ErrorMessage, _runner.Model.ContextWindow ?? 0))
+            {
+                RecordAutoRetryEnd(success: false, retryAttempt, result.ErrorMessage);
+            }
+
+            RollbackTurn(rollbackSnapshot, "rolled back failed turn");
+            return;
+        }
+    }
+
+    private async Task<CodingAgentOverflowRecoveryResult> TryRecoverContextOverflowAsync(
+        CodingAgentSessionSnapshot rollbackSnapshot,
+        CancellationToken cancellationToken)
+    {
+        if (!RestoreTurnSnapshot(rollbackSnapshot))
+        {
+            return CodingAgentOverflowRecoveryResult.Failed();
+        }
+
+        try
+        {
+            _treeSessionController?.SyncFromRunner(_runner);
+            var result = await _runner
+                .CompactAsync(ContextOverflowCompactionInstructions, cancellationToken)
+                .ConfigureAwait(false);
+            _treeSessionController?.RecordCompaction(_runner, result with { FromHook = true });
+            var messagesAfter = _treeSessionController is null ? result.MessagesAfter : _runner.Messages.Count;
+            _ui.WriteStatus(
+                $"context overflow compacted session: {result.MessagesBefore} -> {messagesAfter} messages; retrying turn");
+            PersistSession();
+            return CodingAgentOverflowRecoveryResult.Recovered(CreateRollbackSnapshot());
+        }
+        catch (OperationCanceledException)
+        {
+            _ui.WriteCancelled();
+            return CodingAgentOverflowRecoveryResult.Cancelled();
+        }
+        catch (Exception ex)
+        {
+            _ui.WriteRuntimeError($"context overflow recovery failed: {ex.Message}");
+            return CodingAgentOverflowRecoveryResult.Failed();
+        }
+    }
+
+    private async Task<CodingAgentTurnAttemptResult> RunSingleTurnAttemptAsync(
+        string input,
+        CancellationToken cancellationToken)
+    {
+        var errorAlreadyRendered = false;
+        try
+        {
+            await foreach (var evt in _runner.RunAsync(input, cancellationToken).ConfigureAwait(false))
+            {
+                if (evt is AgentEndEvent { ErrorMessage: not null } end)
+                {
+                    HandleEvent(evt);
+                    errorAlreadyRendered = true;
+                    return CodingAgentTurnAttemptResult.Failed(end.ErrorMessage, errorAlreadyRendered);
+                }
+
+                HandleEvent(evt);
+            }
+
+            return CodingAgentTurnAttemptResult.Success();
+        }
+        catch (OperationCanceledException)
+        {
+            _ui.WriteCancelled();
+            return CodingAgentTurnAttemptResult.Cancelled();
+        }
+        catch (Exception ex)
+        {
+            return CodingAgentTurnAttemptResult.Failed(ex.Message, errorAlreadyRendered: false);
         }
     }
 
@@ -248,6 +408,86 @@ public sealed class CodingAgentHost
         return SlashInvocationPreparation.Expanded;
     }
 
+    private CodingAgentSessionSnapshot CreateRollbackSnapshot() =>
+        new([.. _runner.Messages], _runner.Model.Provider, _runner.Model.Id, _runner.SessionName);
+
+    private bool RestoreTurnSnapshot(CodingAgentSessionSnapshot snapshot)
+    {
+        try
+        {
+            _runner.RestoreSession(snapshot);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _ui.WriteRuntimeError($"turn rollback failed: {ex.Message}");
+            return false;
+        }
+    }
+
+    private void SyncTreeSessionAfterRecoveredRetry()
+    {
+        if (_treeSessionController is null)
+        {
+            return;
+        }
+
+        try
+        {
+            _treeSessionController.SyncFromRunner(_runner);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException)
+        {
+            _ui.WriteRuntimeError($"tree session save failed: {ex.Message}");
+        }
+    }
+
+    private void RollbackTurn(CodingAgentSessionSnapshot snapshot, string message)
+    {
+        if (RestoreTurnSnapshot(snapshot))
+        {
+            _ui.WriteStatus(message);
+        }
+    }
+
+    private void RecordAutoRetryStart(int attempt, int maxAttempts, int delayMs, string? errorMessage)
+    {
+        if (_treeSessionController is null)
+        {
+            return;
+        }
+
+        try
+        {
+            _treeSessionController.AppendAutoRetryStart(
+                attempt,
+                maxAttempts,
+                delayMs,
+                string.IsNullOrWhiteSpace(errorMessage) ? "Unknown error" : errorMessage);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException)
+        {
+            _ui.WriteRuntimeError($"tree retry event save failed: {ex.Message}");
+        }
+    }
+
+    private void RecordAutoRetryEnd(bool success, int attempt, string? finalError = null)
+    {
+        if (_treeSessionController is null)
+        {
+            return;
+        }
+
+        try
+        {
+            _treeSessionController.AppendAutoRetryEnd(success, attempt, finalError);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException)
+        {
+            _ui.WriteRuntimeError($"tree retry event save failed: {ex.Message}");
+        }
+    }
+
     private static string GetSlashCommandName(string input)
     {
         var spaceIndex = input.IndexOf(' ');
@@ -313,5 +553,29 @@ public sealed class CodingAgentHost
         None,
         Expanded,
         Handled
+    }
+
+    private sealed record CodingAgentTurnAttemptResult(
+        bool IsSuccess,
+        bool IsCancelled,
+        string? ErrorMessage,
+        bool ErrorAlreadyRendered)
+    {
+        public static CodingAgentTurnAttemptResult Success() => new(true, false, null, false);
+        public static CodingAgentTurnAttemptResult Cancelled() => new(false, true, null, false);
+        public static CodingAgentTurnAttemptResult Failed(string? errorMessage, bool errorAlreadyRendered) =>
+            new(false, false, errorMessage, errorAlreadyRendered);
+    }
+
+    private sealed record CodingAgentOverflowRecoveryResult(
+        bool IsRecovered,
+        bool IsCancelled,
+        CodingAgentSessionSnapshot? RollbackSnapshot)
+    {
+        public static CodingAgentOverflowRecoveryResult Recovered(CodingAgentSessionSnapshot rollbackSnapshot) =>
+            new(true, false, rollbackSnapshot);
+
+        public static CodingAgentOverflowRecoveryResult Cancelled() => new(false, true, null);
+        public static CodingAgentOverflowRecoveryResult Failed() => new(false, false, null);
     }
 }

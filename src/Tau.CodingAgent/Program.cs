@@ -71,7 +71,8 @@ var host = new CodingAgentHost(
     skillStore: skillStore,
     extensionCommandStore: extensionCommandStore,
     autoCompaction: CodingAgentAutoCompactionOptions.FromEnvironment(),
-    retryOptions: CodingAgentRetryOptions.FromSettingsOrEnvironment(settings));
+    retryOptions: CodingAgentRetryOptions.FromSettingsOrEnvironment(settings),
+    historySnapshotProvider: editor is null ? null : limit => editor.History.Snapshot(limit));
 using var cts = new CancellationTokenSource();
 
 Console.CancelKeyPress += (_, e) =>

@@ -458,4 +458,27 @@ public sealed class InputHistory
 
         return null;
     }
+
+    public IReadOnlyList<string> Snapshot(int limit)
+    {
+        if (limit <= 0)
+        {
+            return Array.Empty<string>();
+        }
+
+        if (_entries.Count == 0)
+        {
+            return Array.Empty<string>();
+        }
+
+        var count = Math.Min(limit, _entries.Count);
+        var result = new string[count];
+        for (var i = 0; i < count; i++)
+        {
+            // Newest first, so index 0 = most recent.
+            result[i] = _entries[_entries.Count - 1 - i];
+        }
+
+        return result;
+    }
 }

@@ -41,7 +41,7 @@ public class CodingAgentHostTests
 
         Assert.Empty(runner.Inputs);
         Assert.Contains(
-            "status> commands: /help, /name, /copy, /export, /import, /new, /session, /tree, /label, /fork, /clone, /resume, /quit, /model, /provider, /models, /providers, /prompts, /skills, /extensions, /auth, /login, /compact",
+            "status> commands: /help, /name, /copy, /files, /export, /share, /import, /new, /session, /tree, /label, /fork, /clone, /resume, /quit, /model, /provider, /models, /providers, /prompts, /skills, /extensions, /auth, /login, /retry, /history, /compact",
             terminal.FlattenedText());
     }
 
@@ -100,21 +100,590 @@ public class CodingAgentHostTests
     }
 
     [Fact]
-    public async Task RunAsync_RunnerThrows_WritesRuntimeError_AndContinuesToExit()
+    public async Task RunAsync_RunnerThrows_RollsBackFailedTurnAndContinuesToExit()
     {
+        var path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"tau-coding-agent-rollback-throw-{Guid.NewGuid():N}.json");
         var terminal = new FakeTerminal();
         terminal.QueueInput("boom");
         terminal.QueueInput("exit");
 
-        var runner = new FakeCodingAgentRunner((_, _) => throw new InvalidOperationException("runner failed"));
-        var host = new CodingAgentHost(new InteractiveConsoleSession(terminal), runner);
+        FakeCodingAgentRunner? runner = null;
+        runner = new FakeCodingAgentRunner((input, _) =>
+        {
+            runner!.MutableMessages.Add(new UserMessage(input));
+            runner.MutableMessages.Add(new AssistantMessage([new TextContent("partial response")]));
+            throw new InvalidOperationException("runner failed");
+        });
+        runner.MutableMessages.Add(new UserMessage("before failure"));
+        var host = new CodingAgentHost(new InteractiveConsoleSession(terminal), runner, new CodingAgentSessionStore(path));
 
-        await host.RunAsync();
+        try
+        {
+            await host.RunAsync();
 
-        var output = terminal.FlattenedText();
+            var output = terminal.FlattenedText();
 
-        Assert.Contains("error> runner failed\n", output);
-        Assert.Contains("Goodbye!\n", output);
+            Assert.Contains("error> runner failed\n", output);
+            Assert.Contains("status> rolled back failed turn\n", output);
+            Assert.Contains("Goodbye!\n", output);
+
+            Assert.Single(runner.Messages);
+            var current = Assert.IsType<UserMessage>(runner.Messages[0]);
+            Assert.Equal("before failure", Assert.IsType<TextContent>(Assert.Single(current.Content)).Text);
+
+            var loaded = new CodingAgentSessionStore(path).Load();
+            var saved = Assert.Single(loaded.Messages);
+            Assert.Equal("before failure", Assert.IsType<TextContent>(Assert.Single(Assert.IsType<UserMessage>(saved).Content)).Text);
+        }
+        finally
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task RunAsync_AgentEndError_RollsBackFlatAndTreeSessions()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-rollback-agent-end-{Guid.NewGuid():N}");
+        var sessionPath = Path.Combine(directory, "session.json");
+        var treePath = Path.Combine(directory, "session.jsonl");
+        var terminal = new FakeTerminal();
+        terminal.QueueInput("bad turn");
+        terminal.QueueInput("exit");
+
+        FakeCodingAgentRunner? runner = null;
+        runner = new FakeCodingAgentRunner((input, _) => RunAndFail(runner!, input));
+        runner.MutableMessages.Add(new UserMessage("stable context"));
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+            var tree = CodingAgentTreeSessionController.OpenOrCreate(treePath);
+            tree.ReplaceWithRunnerSession(runner);
+            var host = new CodingAgentHost(
+                new InteractiveConsoleSession(terminal),
+                runner,
+                new CodingAgentSessionStore(sessionPath),
+                treeSessionController: tree);
+
+            await host.RunAsync();
+
+            var output = terminal.FlattenedText();
+            Assert.Contains("error> provider unavailable\n", output);
+            Assert.Contains("status> rolled back failed turn\n", output);
+
+            Assert.Single(runner.Messages);
+            Assert.Equal(
+                "stable context",
+                Assert.IsType<TextContent>(Assert.Single(Assert.IsType<UserMessage>(runner.Messages[0]).Content)).Text);
+
+            var loaded = new CodingAgentSessionStore(sessionPath).Load();
+            var saved = Assert.Single(loaded.Messages);
+            Assert.Equal("stable context", Assert.IsType<TextContent>(Assert.Single(Assert.IsType<UserMessage>(saved).Content)).Text);
+
+            var treeJsonl = await File.ReadAllTextAsync(treePath);
+            Assert.Contains("stable context", treeJsonl, StringComparison.Ordinal);
+            Assert.DoesNotContain("bad turn", treeJsonl, StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+
+        static async IAsyncEnumerable<AgentEvent> RunAndFail(FakeCodingAgentRunner runner, string input)
+        {
+            runner.MutableMessages.Add(new UserMessage(input));
+            yield return new AgentStartEvent();
+            yield return new AgentEndEvent("provider unavailable");
+            await Task.CompletedTask;
+        }
+    }
+
+    [Fact]
+    public async Task RunAsync_RetryableAgentEndError_RetriesAndPersistsSuccessfulAttempt()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-retry-agent-end-{Guid.NewGuid():N}");
+        var sessionPath = Path.Combine(directory, "session.json");
+        var treePath = Path.Combine(directory, "session.jsonl");
+        var terminal = new FakeTerminal();
+        terminal.QueueInput("retry turn");
+        terminal.QueueInput("exit");
+
+        var attempts = 0;
+        FakeCodingAgentRunner? runner = null;
+        runner = new FakeCodingAgentRunner((input, _) => RunAttempt(runner!, input, ++attempts));
+        runner.MutableMessages.Add(new UserMessage("stable context"));
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+            var tree = CodingAgentTreeSessionController.OpenOrCreate(treePath);
+            tree.ReplaceWithRunnerSession(runner);
+            var host = new CodingAgentHost(
+                new InteractiveConsoleSession(terminal),
+                runner,
+                new CodingAgentSessionStore(sessionPath),
+                treeSessionController: tree,
+                retryOptions: new CodingAgentRetryOptions(2, 0));
+
+            await host.RunAsync();
+
+            Assert.Equal(["retry turn", "retry turn"], runner.Inputs);
+            Assert.Equal(3, runner.Messages.Count);
+            Assert.Equal("stable context", MessageText(Assert.IsType<UserMessage>(runner.Messages[0])));
+            Assert.Equal("retry turn", MessageText(Assert.IsType<UserMessage>(runner.Messages[1])));
+            Assert.Equal("ok", MessageText(Assert.IsType<AssistantMessage>(runner.Messages[2])));
+
+            var output = terminal.FlattenedText();
+            Assert.Contains("error> 429 rate limit\n", output);
+            Assert.Contains("status> auto-retry 1/2 after 0ms: 429 rate limit\n", output);
+            Assert.Contains("status> auto-retry recovered after 1 attempt\n", output);
+
+            var loaded = new CodingAgentSessionStore(sessionPath).Load();
+            Assert.Equal(3, loaded.Messages.Count);
+            Assert.Equal("ok", MessageText(Assert.IsType<AssistantMessage>(loaded.Messages[2])));
+
+            var treeJsonl = await File.ReadAllTextAsync(treePath);
+            Assert.Contains("stable context", treeJsonl, StringComparison.Ordinal);
+            Assert.Contains("retry turn", treeJsonl, StringComparison.Ordinal);
+            Assert.Contains("ok", treeJsonl, StringComparison.Ordinal);
+            Assert.Contains("\"type\":\"auto_retry_start\"", treeJsonl, StringComparison.Ordinal);
+            Assert.Contains("\"attempt\":1", treeJsonl, StringComparison.Ordinal);
+            Assert.Contains("\"maxAttempts\":2", treeJsonl, StringComparison.Ordinal);
+            Assert.Contains("\"delayMs\":0", treeJsonl, StringComparison.Ordinal);
+            Assert.Contains("\"errorMessage\":\"429 rate limit\"", treeJsonl, StringComparison.Ordinal);
+            Assert.Contains("\"type\":\"auto_retry_end\"", treeJsonl, StringComparison.Ordinal);
+            Assert.Contains("\"success\":true", treeJsonl, StringComparison.Ordinal);
+            Assert.DoesNotContain("failed transient", treeJsonl, StringComparison.Ordinal);
+
+            var retryStartIndex = treeJsonl.IndexOf("\"type\":\"auto_retry_start\"", StringComparison.Ordinal);
+            var retryUserIndex = treeJsonl.IndexOf("retry turn", StringComparison.Ordinal);
+            var retryAssistantIndex = treeJsonl.IndexOf("ok", StringComparison.Ordinal);
+            var retryEndIndex = treeJsonl.IndexOf("\"type\":\"auto_retry_end\"", StringComparison.Ordinal);
+            Assert.True(
+                retryStartIndex < retryUserIndex &&
+                retryUserIndex < retryAssistantIndex &&
+                retryAssistantIndex < retryEndIndex,
+                "retry audit should wrap the successful retry attempt in JSONL order");
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+
+        static async IAsyncEnumerable<AgentEvent> RunAttempt(FakeCodingAgentRunner runner, string input, int attempt)
+        {
+            runner.MutableMessages.Add(new UserMessage(input));
+            if (attempt == 1)
+            {
+                runner.MutableMessages.Add(new AssistantMessage([new TextContent("failed transient")]));
+                yield return new AgentEndEvent("429 rate limit");
+                await Task.CompletedTask;
+                yield break;
+            }
+
+            runner.MutableMessages.Add(new AssistantMessage([new TextContent("ok")]));
+            yield return new AgentEndEvent();
+            await Task.CompletedTask;
+        }
+    }
+
+    [Fact]
+    public async Task RunAsync_NonRetryableAgentEndError_DoesNotRetryAndRollsBack()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-nonretry-{Guid.NewGuid():N}.json");
+        var terminal = new FakeTerminal();
+        terminal.QueueInput("bad request");
+        terminal.QueueInput("exit");
+
+        FakeCodingAgentRunner? runner = null;
+        runner = new FakeCodingAgentRunner((input, _) => RunAndFail(runner!, input));
+        runner.MutableMessages.Add(new UserMessage("stable context"));
+        var host = new CodingAgentHost(
+            new InteractiveConsoleSession(terminal),
+            runner,
+            new CodingAgentSessionStore(path),
+            retryOptions: new CodingAgentRetryOptions(2, 0));
+
+        try
+        {
+            await host.RunAsync();
+
+            Assert.Equal(["bad request"], runner.Inputs);
+            Assert.Single(runner.Messages);
+            Assert.Equal("stable context", MessageText(Assert.IsType<UserMessage>(runner.Messages[0])));
+
+            var output = terminal.FlattenedText();
+            Assert.Contains("error> validation failed\n", output);
+            Assert.Contains("status> rolled back failed turn\n", output);
+            Assert.DoesNotContain("auto-retry", output);
+
+            var loaded = new CodingAgentSessionStore(path).Load();
+            var saved = Assert.Single(loaded.Messages);
+            Assert.Equal("stable context", MessageText(Assert.IsType<UserMessage>(saved)));
+        }
+        finally
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+        }
+
+        static async IAsyncEnumerable<AgentEvent> RunAndFail(FakeCodingAgentRunner runner, string input)
+        {
+            runner.MutableMessages.Add(new UserMessage(input));
+            yield return new AgentEndEvent("validation failed");
+            await Task.CompletedTask;
+        }
+    }
+
+    [Fact]
+    public async Task RunAsync_RetryableException_StopsAfterMaxAttemptsAndRollsBack()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-retry-exhausted-{Guid.NewGuid():N}");
+        var sessionPath = Path.Combine(directory, "session.json");
+        var treePath = Path.Combine(directory, "session.jsonl");
+        var terminal = new FakeTerminal();
+        terminal.QueueInput("unstable");
+        terminal.QueueInput("exit");
+
+        FakeCodingAgentRunner? runner = null;
+        runner = new FakeCodingAgentRunner((input, _) =>
+        {
+            runner!.MutableMessages.Add(new UserMessage(input));
+            runner.MutableMessages.Add(new AssistantMessage([new TextContent("partial")]));
+            throw new TimeoutException("timeout");
+        });
+        runner.MutableMessages.Add(new UserMessage("stable context"));
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+            var tree = CodingAgentTreeSessionController.OpenOrCreate(treePath);
+            tree.ReplaceWithRunnerSession(runner);
+            var host = new CodingAgentHost(
+                new InteractiveConsoleSession(terminal),
+                runner,
+                new CodingAgentSessionStore(sessionPath),
+                treeSessionController: tree,
+                retryOptions: new CodingAgentRetryOptions(2, 0));
+
+            await host.RunAsync();
+
+            Assert.Equal(["unstable", "unstable", "unstable"], runner.Inputs);
+            Assert.Single(runner.Messages);
+            Assert.Equal("stable context", MessageText(Assert.IsType<UserMessage>(runner.Messages[0])));
+
+            var output = terminal.FlattenedText();
+            Assert.Contains("status> auto-retry 1/2 after 0ms: timeout\n", output);
+            Assert.Contains("status> auto-retry 2/2 after 0ms: timeout\n", output);
+            Assert.Contains("error> timeout\n", output);
+            Assert.Contains("status> rolled back failed turn\n", output);
+
+            var loaded = new CodingAgentSessionStore(sessionPath).Load();
+            var saved = Assert.Single(loaded.Messages);
+            Assert.Equal("stable context", MessageText(Assert.IsType<UserMessage>(saved)));
+
+            var treeJsonl = await File.ReadAllTextAsync(treePath);
+            Assert.Contains("stable context", treeJsonl, StringComparison.Ordinal);
+            Assert.Equal(2, CountOccurrences(treeJsonl, "\"type\":\"auto_retry_start\""));
+            Assert.Equal(1, CountOccurrences(treeJsonl, "\"type\":\"auto_retry_end\""));
+            Assert.Contains("\"success\":false", treeJsonl, StringComparison.Ordinal);
+            Assert.Contains("\"finalError\":\"timeout\"", treeJsonl, StringComparison.Ordinal);
+            Assert.DoesNotContain("unstable", treeJsonl, StringComparison.Ordinal);
+            Assert.DoesNotContain("partial", treeJsonl, StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task RunAsync_RetryDelayCancellationRecordsRetryEndAndRendersSpecificStatus()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-retry-cancel-{Guid.NewGuid():N}");
+        var sessionPath = Path.Combine(directory, "session.json");
+        var treePath = Path.Combine(directory, "session.jsonl");
+        var terminal = new FakeTerminal();
+        terminal.QueueInput("retry cancel");
+
+        FakeCodingAgentRunner? runner = null;
+        runner = new FakeCodingAgentRunner((input, _) => RunAttempt(runner!, input));
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+            var tree = CodingAgentTreeSessionController.OpenOrCreate(treePath);
+            using var cts = new CancellationTokenSource();
+            cts.CancelAfter(TimeSpan.FromMilliseconds(100));
+            var host = new CodingAgentHost(
+                new InteractiveConsoleSession(terminal),
+                runner,
+                new CodingAgentSessionStore(sessionPath),
+                treeSessionController: tree,
+                retryOptions: new CodingAgentRetryOptions(2, 10_000));
+
+            await host.RunAsync(cts.Token);
+
+            Assert.Equal(["retry cancel"], runner.Inputs);
+            Assert.Empty(runner.Messages);
+
+            var output = terminal.FlattenedText();
+            Assert.Contains("status> auto-retry 1/2 after 10000ms: timeout\n", output);
+            Assert.Contains("[Cancelled]\n", output);
+            Assert.Contains("status> auto-retry cancelled during delay\n", output);
+            Assert.Contains("status> rolled back cancelled turn\n", output);
+
+            var treeJsonl = await File.ReadAllTextAsync(treePath);
+            Assert.Contains("\"type\":\"auto_retry_start\"", treeJsonl, StringComparison.Ordinal);
+            Assert.Contains("\"type\":\"auto_retry_end\"", treeJsonl, StringComparison.Ordinal);
+            Assert.Contains("\"success\":false", treeJsonl, StringComparison.Ordinal);
+            Assert.Contains("\"finalError\":\"Retry cancelled\"", treeJsonl, StringComparison.Ordinal);
+            Assert.DoesNotContain("retry cancel", treeJsonl, StringComparison.Ordinal);
+
+            var loaded = new CodingAgentSessionStore(sessionPath).Load();
+            Assert.Empty(loaded.Messages);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+
+        static async IAsyncEnumerable<AgentEvent> RunAttempt(FakeCodingAgentRunner runner, string input)
+        {
+            runner.MutableMessages.Add(new UserMessage(input));
+            runner.MutableMessages.Add(new AssistantMessage([new TextContent("timeout partial")]));
+            yield return new AgentEndEvent("timeout");
+            await Task.CompletedTask;
+        }
+    }
+
+    [Fact]
+    public async Task RunAsync_RetryOffCommand_DisablesRetryForNextTurnAndPersistsSettings()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-retry-off-{Guid.NewGuid():N}");
+        var sessionPath = Path.Combine(directory, "session.json");
+        var settingsPath = Path.Combine(directory, "settings.json");
+        var terminal = new FakeTerminal();
+        terminal.QueueInput("/retry off");
+        terminal.QueueInput("unstable");
+        terminal.QueueInput("exit");
+
+        FakeCodingAgentRunner? runner = null;
+        runner = new FakeCodingAgentRunner((input, _) =>
+        {
+            runner!.MutableMessages.Add(new UserMessage(input));
+            runner.MutableMessages.Add(new AssistantMessage([new TextContent("partial")]));
+            throw new TimeoutException("timeout");
+        });
+        runner.MutableMessages.Add(new UserMessage("stable context"));
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+            var settingsStore = new CodingAgentSettingsStore(settingsPath);
+            var host = new CodingAgentHost(
+                new InteractiveConsoleSession(terminal),
+                runner,
+                new CodingAgentSessionStore(sessionPath),
+                settingsStore: settingsStore,
+                retryOptions: new CodingAgentRetryOptions(2, 0));
+
+            await host.RunAsync();
+
+            Assert.Equal(["unstable"], runner.Inputs);
+            Assert.Single(runner.Messages);
+            Assert.Equal("stable context", MessageText(Assert.IsType<UserMessage>(runner.Messages[0])));
+
+            var output = terminal.FlattenedText();
+            Assert.Contains("status> retry: off\n", output);
+            Assert.Contains("error> timeout\n", output);
+            Assert.Contains("status> rolled back failed turn\n", output);
+            Assert.DoesNotContain("auto-retry", output);
+
+            var settings = settingsStore.Load();
+            Assert.Equal(0, settings.RetryMaxAttempts);
+            Assert.Equal(0, settings.RetryBaseDelayMilliseconds);
+
+            var loaded = new CodingAgentSessionStore(sessionPath).Load();
+            var saved = Assert.Single(loaded.Messages);
+            Assert.Equal("stable context", MessageText(Assert.IsType<UserMessage>(saved)));
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task RunAsync_ContextOverflowAgentEndError_CompactsAndRetriesSuccessfulAttempt()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-overflow-retry-{Guid.NewGuid():N}");
+        var sessionPath = Path.Combine(directory, "session.json");
+        var treePath = Path.Combine(directory, "session.jsonl");
+        var terminal = new FakeTerminal();
+        terminal.QueueInput("large next turn");
+        terminal.QueueInput("exit");
+
+        var attempts = 0;
+        FakeCodingAgentRunner? runner = null;
+        runner = new FakeCodingAgentRunner((input, _) => RunAttempt(runner!, input, ++attempts));
+        runner.MutableMessages.Add(new UserMessage("old prompt"));
+        runner.MutableMessages.Add(new AssistantMessage([new TextContent("old answer")]));
+        runner.CompactHandler = (instructions, _) =>
+        {
+            Assert.Contains("context overflow", instructions, StringComparison.OrdinalIgnoreCase);
+            Assert.Equal(2, runner.Messages.Count);
+            Assert.Equal("old prompt", MessageText(Assert.IsType<UserMessage>(runner.Messages[0])));
+            runner.MutableMessages.Clear();
+            runner.MutableMessages.Add(CodingAgentCompactionMessages.CreateSummaryMessage("overflow summary"));
+            return Task.FromResult(new CodingAgentCompactionResult("overflow summary", 2, 1, 300));
+        };
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+            var tree = CodingAgentTreeSessionController.OpenOrCreate(
+                treePath,
+                new CodingAgentCompactionRetentionOptions(0, 0));
+            tree.ReplaceWithRunnerSession(runner);
+            var host = new CodingAgentHost(
+                new InteractiveConsoleSession(terminal),
+                runner,
+                new CodingAgentSessionStore(sessionPath),
+                treeSessionController: tree,
+                retryOptions: CodingAgentRetryOptions.Disabled);
+
+            await host.RunAsync();
+
+            Assert.Equal(["large next turn", "large next turn"], runner.Inputs);
+            Assert.Equal(3, runner.Messages.Count);
+            Assert.Contains("overflow summary", MessageText(Assert.IsType<UserMessage>(runner.Messages[0])), StringComparison.Ordinal);
+            Assert.Equal("large next turn", MessageText(Assert.IsType<UserMessage>(runner.Messages[1])));
+            Assert.Equal("ok after compact", MessageText(Assert.IsType<AssistantMessage>(runner.Messages[2])));
+
+            var output = terminal.FlattenedText();
+            Assert.Contains("error> maximum context length exceeded\n", output);
+            Assert.Contains("status> context overflow compacted session: 2 -> 1 messages; retrying turn\n", output);
+
+            var loaded = new CodingAgentSessionStore(sessionPath).Load();
+            Assert.Equal(3, loaded.Messages.Count);
+            Assert.Contains("overflow summary", MessageText(Assert.IsType<UserMessage>(loaded.Messages[0])), StringComparison.Ordinal);
+            Assert.Equal("ok after compact", MessageText(Assert.IsType<AssistantMessage>(loaded.Messages[2])));
+
+            var treeJsonl = await File.ReadAllTextAsync(treePath);
+            Assert.Contains("\"type\":\"compaction\"", treeJsonl, StringComparison.Ordinal);
+            Assert.Contains("\"fromHook\":true", treeJsonl, StringComparison.Ordinal);
+            Assert.Contains("overflow summary", treeJsonl, StringComparison.Ordinal);
+            Assert.Contains("ok after compact", treeJsonl, StringComparison.Ordinal);
+            Assert.DoesNotContain("overflow partial", treeJsonl, StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+
+        static async IAsyncEnumerable<AgentEvent> RunAttempt(FakeCodingAgentRunner runner, string input, int attempt)
+        {
+            runner.MutableMessages.Add(new UserMessage(input));
+            if (attempt == 1)
+            {
+                runner.MutableMessages.Add(new AssistantMessage([new TextContent("overflow partial")]));
+                yield return new AgentEndEvent("maximum context length exceeded");
+                await Task.CompletedTask;
+                yield break;
+            }
+
+            runner.MutableMessages.Add(new AssistantMessage([new TextContent("ok after compact")]));
+            yield return new AgentEndEvent();
+            await Task.CompletedTask;
+        }
+    }
+
+    [Fact]
+    public async Task RunAsync_ContextOverflowCompactionFailure_RollsBackOriginalSnapshot()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-overflow-fail-{Guid.NewGuid():N}");
+        var sessionPath = Path.Combine(directory, "session.json");
+        var treePath = Path.Combine(directory, "session.jsonl");
+        var terminal = new FakeTerminal();
+        terminal.QueueInput("large next turn");
+        terminal.QueueInput("exit");
+
+        FakeCodingAgentRunner? runner = null;
+        runner = new FakeCodingAgentRunner((input, _) => RunAndOverflow(runner!, input));
+        runner.MutableMessages.Add(new UserMessage("stable context"));
+        runner.CompactHandler = (_, _) => throw new InvalidOperationException("summarizer failed");
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+            var tree = CodingAgentTreeSessionController.OpenOrCreate(treePath);
+            tree.ReplaceWithRunnerSession(runner);
+            var host = new CodingAgentHost(
+                new InteractiveConsoleSession(terminal),
+                runner,
+                new CodingAgentSessionStore(sessionPath),
+                treeSessionController: tree,
+                retryOptions: CodingAgentRetryOptions.Disabled);
+
+            await host.RunAsync();
+
+            Assert.Equal(["large next turn"], runner.Inputs);
+            var current = Assert.Single(runner.Messages);
+            Assert.Equal("stable context", MessageText(Assert.IsType<UserMessage>(current)));
+
+            var output = terminal.FlattenedText();
+            Assert.Contains("error> context window exceeded\n", output);
+            Assert.Contains("error> context overflow recovery failed: summarizer failed\n", output);
+            Assert.Contains("status> rolled back failed turn\n", output);
+
+            var loaded = new CodingAgentSessionStore(sessionPath).Load();
+            var saved = Assert.Single(loaded.Messages);
+            Assert.Equal("stable context", MessageText(Assert.IsType<UserMessage>(saved)));
+
+            var treeJsonl = await File.ReadAllTextAsync(treePath);
+            Assert.Contains("stable context", treeJsonl, StringComparison.Ordinal);
+            Assert.DoesNotContain("\"type\":\"compaction\"", treeJsonl, StringComparison.Ordinal);
+            Assert.DoesNotContain("large next turn", treeJsonl, StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+
+        static async IAsyncEnumerable<AgentEvent> RunAndOverflow(FakeCodingAgentRunner runner, string input)
+        {
+            runner.MutableMessages.Add(new UserMessage(input));
+            yield return new AgentEndEvent("context window exceeded");
+            await Task.CompletedTask;
+        }
     }
 
     [Fact]
@@ -644,7 +1213,7 @@ public class CodingAgentHostTests
 
             Assert.Empty(runner.Inputs);
             Assert.Contains(
-                $"status> session: name none, model openai/gpt-5.4, messages 1 (user 1, assistant 0, tool 0, toolCalls 0), tokens ~4/128000 context (127996 remaining), file {path}",
+                $"status> session: name none, model openai/gpt-5.4, messages 1 (user 1, assistant 0, tool 0, toolCalls 0), tokens ~4/128000 context (127996 remaining), retry off, file {path}",
                 terminal.FlattenedText());
         }
         finally
@@ -676,7 +1245,7 @@ public class CodingAgentHostTests
     }
 
     [Fact]
-    public async Task RunAsync_LoginCommand_ReportsUnportedLoginWithoutInvokingRunner()
+    public async Task RunAsync_LoginCommand_WithoutRegisteredProvider_ReportsError()
     {
         var terminal = new FakeTerminal();
         terminal.QueueInput("/login anthropic");
@@ -684,14 +1253,14 @@ public class CodingAgentHostTests
 
         var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>())
         {
-            AuthStatus = new("anthropic", false, "none", false, true, "No credentials found.")
+            AuthStatus = new("anthropic", false, "none", false, false, "No OAuth provider registered.")
         };
         var host = new CodingAgentHost(new InteractiveConsoleSession(terminal), runner);
 
         await host.RunAsync();
 
         Assert.Empty(runner.Inputs);
-        Assert.Contains("error> login anthropic: OAuth login flow is not yet ported in Tau", terminal.FlattenedText());
+        Assert.Contains("error> login anthropic: No OAuth login flow is registered", terminal.FlattenedText());
     }
 
     [Fact]
@@ -758,7 +1327,9 @@ public class CodingAgentHostTests
         try
         {
             Directory.CreateDirectory(directory);
-            var tree = CodingAgentTreeSessionController.OpenOrCreate(treePath);
+            var tree = CodingAgentTreeSessionController.OpenOrCreate(
+                treePath,
+                new CodingAgentCompactionRetentionOptions(20_000, 4));
             var host = new CodingAgentHost(
                 new InteractiveConsoleSession(terminal),
                 runner,
@@ -824,5 +1395,11 @@ public class CodingAgentHostTests
 
         return count;
     }
+
+    private static string MessageText(UserMessage message) =>
+        Assert.IsType<TextContent>(Assert.Single(message.Content)).Text;
+
+    private static string MessageText(AssistantMessage message) =>
+        Assert.IsType<TextContent>(Assert.Single(message.Content)).Text;
 
 }

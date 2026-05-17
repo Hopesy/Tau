@@ -8,32 +8,44 @@ public sealed class CodingAgentCommandRouter
     private readonly ICodingAgentRunner _runner;
     private readonly CodingAgentSettingsStore? _settingsStore;
     private readonly ICodingAgentClipboard _clipboard;
+    private readonly ICodingAgentShareClient _shareClient;
     private readonly CodingAgentTreeSessionController? _treeSessionController;
     private readonly CodingAgentPromptTemplateStore? _promptTemplateStore;
     private readonly CodingAgentSkillStore? _skillStore;
     private readonly CodingAgentExtensionCommandStore? _extensionCommandStore;
     private readonly CodingAgentAutoCompactionOptions _autoCompaction;
+    private readonly Action<CodingAgentRetryOptions>? _retryOptionsChanged;
+    private readonly Func<int, IReadOnlyList<string>>? _historySnapshotProvider;
     private readonly string? _sessionFile;
+    private CodingAgentRetryOptions _retryOptions;
 
     public CodingAgentCommandRouter(
         ICodingAgentRunner runner,
         CodingAgentSettingsStore? settingsStore = null,
         string? sessionFile = null,
         ICodingAgentClipboard? clipboard = null,
+        ICodingAgentShareClient? shareClient = null,
         CodingAgentTreeSessionController? treeSessionController = null,
         CodingAgentPromptTemplateStore? promptTemplateStore = null,
         CodingAgentSkillStore? skillStore = null,
         CodingAgentExtensionCommandStore? extensionCommandStore = null,
-        CodingAgentAutoCompactionOptions? autoCompaction = null)
+        CodingAgentAutoCompactionOptions? autoCompaction = null,
+        CodingAgentRetryOptions? retryOptions = null,
+        Action<CodingAgentRetryOptions>? retryOptionsChanged = null,
+        Func<int, IReadOnlyList<string>>? historySnapshotProvider = null)
     {
         _runner = runner;
         _settingsStore = settingsStore;
         _clipboard = clipboard ?? new SystemCodingAgentClipboard();
+        _shareClient = shareClient ?? new GitHubCliCodingAgentShareClient();
         _treeSessionController = treeSessionController;
         _promptTemplateStore = promptTemplateStore;
         _skillStore = skillStore;
         _extensionCommandStore = extensionCommandStore;
         _autoCompaction = autoCompaction ?? CodingAgentAutoCompactionOptions.Disabled;
+        _retryOptions = retryOptions ?? CodingAgentRetryOptions.Disabled;
+        _retryOptionsChanged = retryOptionsChanged;
+        _historySnapshotProvider = historySnapshotProvider;
         _sessionFile = sessionFile;
     }
 
@@ -60,7 +72,9 @@ public sealed class CodingAgentCommandRouter
                 "/help" => HandleHelpCommand(parts),
                 "/name" => HandleNameCommand(input, parts),
                 "/copy" => await HandleCopyCommandAsync(parts, cancellationToken).ConfigureAwait(false),
+                "/files" => HandleFilesCommand(parts),
                 "/export" => HandleExportCommand(input, parts),
+                "/share" => await HandleShareCommandAsync(parts, cancellationToken).ConfigureAwait(false),
                 "/import" => HandleImportCommand(input, parts),
                 "/new" => HandleNewCommand(parts),
                 "/quit" => HandleQuitCommand(parts),
@@ -78,7 +92,9 @@ public sealed class CodingAgentCommandRouter
                 "/skills" => HandleSkillsCommand(parts),
                 "/extensions" => HandleExtensionsCommand(parts),
                 "/auth" => HandleAuthCommand(parts),
-                "/login" => HandleLoginCommand(parts),
+                "/login" => await HandleLoginCommandAsync(parts, cancellationToken).ConfigureAwait(false),
+                "/retry" => HandleRetryCommand(parts),
+                "/history" => HandleHistoryCommand(parts),
                 "/compact" => await HandleCompactCommandAsync(input, parts, cancellationToken).ConfigureAwait(false),
                 _ => CodingAgentCommandResult.Error($"unknown command '{parts[0]}'")
             };
@@ -132,6 +148,23 @@ public sealed class CodingAgentCommandRouter
         return CodingAgentCommandResult.Status("copied last assistant message to clipboard");
     }
 
+    private CodingAgentCommandResult HandleFilesCommand(IReadOnlyList<string> parts)
+    {
+        if (parts.Count != 1)
+        {
+            return CodingAgentCommandResult.Error(CodingAgentCommandCatalog.Usage("/files"));
+        }
+
+        var files = CodingAgentFileOperationTracker.Collect(_runner.Messages);
+        if (files.Count == 0)
+        {
+            return CodingAgentCommandResult.Status("files: none");
+        }
+
+        var lines = files.Select(file => $"{file.Path} ({CodingAgentFileOperationTracker.FormatCounts(file)})");
+        return CodingAgentCommandResult.Status($"files:{Environment.NewLine}{string.Join(Environment.NewLine, lines)}");
+    }
+
     private CodingAgentCommandResult HandleExportCommand(string input, IReadOnlyList<string> parts)
     {
         var exportPath = parts.Count == 1
@@ -144,33 +177,7 @@ public sealed class CodingAgentCommandRouter
 
         if (CodingAgentHtmlSessionExporter.IsHtmlPath(exportPath))
         {
-            CodingAgentSessionSnapshot snapshot;
-            CodingAgentTreeSessionSummary? treeSummary = null;
-            string? sessionJsonl = null;
-            if (_treeSessionController is not null)
-            {
-                _treeSessionController.SyncFromRunner(_runner);
-                snapshot = _treeSessionController.LoadSnapshot().ToFlatSnapshot();
-                treeSummary = _treeSessionController.GetSummary();
-                sessionJsonl = _treeSessionController.ExportCurrentBranchText();
-            }
-            else
-            {
-                snapshot = new CodingAgentSessionSnapshot(
-                    _runner.Messages,
-                    _runner.Model.Provider,
-                    _runner.Model.Id,
-                    _runner.SessionName);
-            }
-
-            var htmlPath = CodingAgentHtmlSessionExporter.Export(
-                exportPath,
-                snapshot.Messages,
-                snapshot.Provider ?? _runner.Model.Provider,
-                snapshot.Model ?? _runner.Model.Id,
-                snapshot.Name ?? _runner.SessionName,
-                treeSummary,
-                sessionJsonl);
+            var htmlPath = ExportHtmlTranscript(exportPath);
             return CodingAgentCommandResult.Status($"exported session transcript to {htmlPath}");
         }
 
@@ -189,6 +196,81 @@ public sealed class CodingAgentCommandRouter
         var store = new CodingAgentSessionStore(exportPath);
         store.Save(_runner.Messages, _runner.Model, _runner.SessionName);
         return CodingAgentCommandResult.Status($"exported session to {store.Path}");
+    }
+
+    private async Task<CodingAgentCommandResult> HandleShareCommandAsync(
+        IReadOnlyList<string> parts,
+        CancellationToken cancellationToken)
+    {
+        if (parts.Count != 1)
+        {
+            return CodingAgentCommandResult.Error(CodingAgentCommandCatalog.Usage("/share"));
+        }
+
+        if (_runner.Messages.Count == 0)
+        {
+            return CodingAgentCommandResult.Error("nothing to share yet");
+        }
+
+        var tempPath = Path.Combine(Path.GetTempPath(), $"tau-session-share-{Guid.NewGuid():N}.html");
+        try
+        {
+            var htmlPath = ExportHtmlTranscript(tempPath);
+            var result = await _shareClient.ShareAsync(htmlPath, cancellationToken).ConfigureAwait(false);
+            return CodingAgentCommandResult.Status($"Share URL: {result.ShareUrl}\nGist: {result.GistUrl}");
+        }
+        finally
+        {
+            TryDeleteFile(tempPath);
+        }
+    }
+
+    private string ExportHtmlTranscript(string exportPath)
+    {
+        CodingAgentSessionSnapshot snapshot;
+        CodingAgentTreeSessionSummary? treeSummary = null;
+        string? sessionJsonl = null;
+        if (_treeSessionController is not null)
+        {
+            _treeSessionController.SyncFromRunner(_runner);
+            snapshot = _treeSessionController.LoadSnapshot().ToFlatSnapshot();
+            treeSummary = _treeSessionController.GetSummary();
+            sessionJsonl = _treeSessionController.ExportCurrentBranchText();
+        }
+        else
+        {
+            snapshot = new CodingAgentSessionSnapshot(
+                _runner.Messages,
+                _runner.Model.Provider,
+                _runner.Model.Id,
+                _runner.SessionName);
+        }
+
+        return CodingAgentHtmlSessionExporter.Export(
+            exportPath,
+            snapshot.Messages,
+            snapshot.Provider ?? _runner.Model.Provider,
+            snapshot.Model ?? _runner.Model.Id,
+            snapshot.Name ?? _runner.SessionName,
+            treeSummary,
+            sessionJsonl);
+    }
+
+    private static void TryDeleteFile(string path)
+    {
+        try
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+        }
+        catch (IOException)
+        {
+        }
+        catch (UnauthorizedAccessException)
+        {
+        }
     }
 
     private CodingAgentCommandResult HandleImportCommand(string input, IReadOnlyList<string> parts)
@@ -262,11 +344,11 @@ public sealed class CodingAgentCommandRouter
             _treeSessionController.SyncFromRunner(_runner);
             var tree = _treeSessionController.GetSummary();
             return CodingAgentCommandResult.Status(
-                $"session: name {FormatSessionName(stats.SessionName)}, model {stats.Provider}/{stats.Model}, messages {stats.TotalMessages} (user {stats.UserMessages}, assistant {stats.AssistantMessages}, tool {stats.ToolResultMessages}, toolCalls {stats.ToolCalls}), tokens {tokenBudget}, file {file}, tree {tree.FilePath}, leaf {FormatTreeId(tree.LeafId)}, entries {tree.EntryCount}, messages {tree.TotalMessageCount}, branch entries {tree.BranchEntryCount}, branch messages {tree.BranchMessageCount}, branches {tree.BranchPointCount}, labels {tree.LabelCount}, cwd {tree.Cwd}{FormatParentSession(tree.ParentSession)}");
+                $"session: name {FormatSessionName(stats.SessionName)}, model {stats.Provider}/{stats.Model}, messages {stats.TotalMessages} (user {stats.UserMessages}, assistant {stats.AssistantMessages}, tool {stats.ToolResultMessages}, toolCalls {stats.ToolCalls}), tokens {tokenBudget}, retry {FormatRetryPolicy(_retryOptions)}, file {file}, tree {tree.FilePath}, leaf {FormatTreeId(tree.LeafId)}, entries {tree.EntryCount}, messages {tree.TotalMessageCount}, branch entries {tree.BranchEntryCount}, branch messages {tree.BranchMessageCount}, branches {tree.BranchPointCount}, labels {tree.LabelCount}, cwd {tree.Cwd}{FormatParentSession(tree.ParentSession)}");
         }
 
         return CodingAgentCommandResult.Status(
-            $"session: name {FormatSessionName(stats.SessionName)}, model {stats.Provider}/{stats.Model}, messages {stats.TotalMessages} (user {stats.UserMessages}, assistant {stats.AssistantMessages}, tool {stats.ToolResultMessages}, toolCalls {stats.ToolCalls}), tokens {tokenBudget}, file {file}");
+            $"session: name {FormatSessionName(stats.SessionName)}, model {stats.Provider}/{stats.Model}, messages {stats.TotalMessages} (user {stats.UserMessages}, assistant {stats.AssistantMessages}, tool {stats.ToolResultMessages}, toolCalls {stats.ToolCalls}), tokens {tokenBudget}, retry {FormatRetryPolicy(_retryOptions)}, file {file}");
     }
 
     private CodingAgentCommandResult HandleTreeCommand(IReadOnlyList<string> parts)
@@ -504,20 +586,75 @@ public sealed class CodingAgentCommandRouter
             return CodingAgentCommandResult.Error(CodingAgentCommandCatalog.Usage("/extensions"));
         }
 
-        var commands = _extensionCommandStore?.Load() ?? [];
+        var status = _extensionCommandStore?.LoadStatus();
+        var commands = status?.Commands ?? [];
+        var lines = new List<string>();
         if (commands.Count == 0)
         {
-            return CodingAgentCommandResult.Status("extensions: none");
+            lines.Add("extensions: none");
+        }
+        else
+        {
+            var commandList = commands.Select(command =>
+            {
+                var hint = string.IsNullOrWhiteSpace(command.ArgumentHint) ? string.Empty : $" {command.ArgumentHint}";
+                var description = string.IsNullOrWhiteSpace(command.Description) ? string.Empty : $" - {command.Description}";
+                var mode = command.SendToRunner ? ", runner" : string.Empty;
+                return $"/{command.InvocationName}{hint}{description} ({command.Scope}{mode})";
+            });
+            lines.Add($"extensions: {string.Join("; ", commandList)}");
         }
 
-        var commandList = commands.Select(command =>
+        if (status is not null)
         {
-            var hint = string.IsNullOrWhiteSpace(command.ArgumentHint) ? string.Empty : $" {command.ArgumentHint}";
-            var description = string.IsNullOrWhiteSpace(command.Description) ? string.Empty : $" - {command.Description}";
-            var mode = command.SendToRunner ? ", runner" : string.Empty;
-            return $"/{command.InvocationName}{hint}{description} ({command.Scope}{mode})";
-        });
-        return CodingAgentCommandResult.Status($"extensions: {string.Join("; ", commandList)}");
+            AppendExtensionStatusDetails(lines, status);
+        }
+
+        return CodingAgentCommandResult.Status(string.Join('\n', lines));
+    }
+
+    private static void AppendExtensionStatusDetails(ICollection<string> lines, CodingAgentExtensionStatus status)
+    {
+        if (status.Files.Count > 0)
+        {
+            var files = status.Files.Select(file =>
+                $"{file.FilePath} ({file.Scope}, {file.CommandCount} commands, {file.PromptPaths.Count} prompts, {file.SkillPaths.Count} skills)");
+            lines.Add($"extension files: {string.Join("; ", files)}");
+        }
+
+        var duplicateGroups = status.Commands
+            .GroupBy(static command => command.Name, StringComparer.Ordinal)
+            .Where(static group => group.Count() > 1)
+            .Select(static group =>
+                $"{group.Key} -> {string.Join(", ", group.Select(static command => "/" + command.InvocationName))}")
+            .ToArray();
+        if (duplicateGroups.Length > 0)
+        {
+            lines.Add($"extension duplicates: {string.Join("; ", duplicateGroups)}");
+        }
+
+        var resources = new List<string>();
+        if (status.Resources.PromptPaths.Count > 0)
+        {
+            resources.Add($"prompts {string.Join(", ", status.Resources.PromptPaths)}");
+        }
+
+        if (status.Resources.SkillPaths.Count > 0)
+        {
+            resources.Add($"skills {string.Join(", ", status.Resources.SkillPaths)}");
+        }
+
+        if (resources.Count > 0)
+        {
+            lines.Add($"extension resources: {string.Join("; ", resources)}");
+        }
+
+        if (status.Diagnostics.Count > 0)
+        {
+            var issues = status.Diagnostics.Select(static diagnostic =>
+                $"{diagnostic.Severity} {diagnostic.Path} ({diagnostic.Scope}) - {diagnostic.Message}");
+            lines.Add($"extension issues: {string.Join("; ", issues)}");
+        }
     }
 
     private CodingAgentCommandResult HandleAuthCommand(IReadOnlyList<string> parts)
@@ -535,7 +672,7 @@ public sealed class CodingAgentCommandRouter
         return CodingAgentCommandResult.Status($"auth {status.Provider}: {configured} via {status.Source}{oauth}. {status.Message}");
     }
 
-    private CodingAgentCommandResult HandleLoginCommand(IReadOnlyList<string> parts)
+    private async Task<CodingAgentCommandResult> HandleLoginCommandAsync(IReadOnlyList<string> parts, CancellationToken cancellationToken)
     {
         if (parts.Count > 2)
         {
@@ -550,10 +687,125 @@ public sealed class CodingAgentCommandRouter
             return CodingAgentCommandResult.Status($"auth {status.Provider}: already configured via {status.Source}.");
         }
 
-        var guidance = status.CanLogin
-            ? "OAuth login flow is not yet ported in Tau; import credentials into auth.json or configure environment variables."
-            : "No OAuth login flow is registered for this provider; configure environment variables, auth.json, or models.json.";
-        return CodingAgentCommandResult.Error($"login {status.Provider}: {guidance}");
+        if (!status.CanLogin)
+        {
+            return CodingAgentCommandResult.Error(
+                $"login {status.Provider}: No OAuth login flow is registered for this provider; configure environment variables, auth.json, or models.json.");
+        }
+
+        var provider = _runner.GetOAuthProvider(status.Provider);
+        if (provider is null)
+        {
+            return CodingAgentCommandResult.Error($"login {status.Provider}: OAuth provider not found.");
+        }
+
+        var callbacks = new ConsoleOAuthLoginCallbacks();
+        var credentials = await provider.LoginAsync(callbacks, cancellationToken).ConfigureAwait(false);
+        _runner.SaveOAuthCredentials(status.Provider, credentials);
+        return CodingAgentCommandResult.Status($"login {status.Provider}: authenticated successfully. Credentials saved to auth.json.");
+    }
+
+    private CodingAgentCommandResult HandleHistoryCommand(IReadOnlyList<string> parts)
+    {
+        if (_historySnapshotProvider is null)
+        {
+            return CodingAgentCommandResult.Error("Input history is not available in this session.");
+        }
+
+        var limit = 20;
+        if (parts.Count >= 2)
+        {
+            if (parts[1].Equals("all", StringComparison.OrdinalIgnoreCase))
+            {
+                limit = int.MaxValue;
+            }
+            else if (!int.TryParse(parts[1], System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out limit) || limit <= 0)
+            {
+                return CodingAgentCommandResult.Error("Usage: /history [count|all]");
+            }
+        }
+
+        IReadOnlyList<string> entries;
+        try
+        {
+            entries = _historySnapshotProvider(limit);
+        }
+        catch (Exception ex)
+        {
+            return CodingAgentCommandResult.Error($"Failed to load history: {ex.Message}");
+        }
+
+        if (entries.Count == 0)
+        {
+            return CodingAgentCommandResult.Status("History is empty.");
+        }
+
+        var builder = new System.Text.StringBuilder();
+        builder.AppendLine($"Recent inputs ({entries.Count}):");
+        for (var i = 0; i < entries.Count; i++)
+        {
+            var entry = entries[i];
+            // Truncate long entries to keep the listing readable.
+            var preview = entry.Length > 200 ? entry[..200] + "..." : entry;
+            // Replace newlines with markers so each entry stays on one line.
+            preview = preview.Replace("\r\n", " ⏎ ", StringComparison.Ordinal)
+                .Replace('\n', '⏎')
+                .Replace('\r', '⏎');
+            builder.AppendLine($"  [{i + 1,2}] {preview}");
+        }
+
+        return CodingAgentCommandResult.Status(builder.ToString().TrimEnd());
+    }
+
+    private CodingAgentCommandResult HandleRetryCommand(IReadOnlyList<string> parts)
+    {
+        if (parts.Count == 1 || (parts.Count == 2 && IsCurrentKeyword(parts[1])))
+        {
+            return CodingAgentCommandResult.Status($"retry: {FormatRetryPolicy(_retryOptions)}");
+        }
+
+        if (parts.Count == 2 && parts[1].Equals("default", StringComparison.OrdinalIgnoreCase))
+        {
+            return SaveRetryOptions(
+                CodingAgentRetryOptions.FromEnvironment(),
+                configuredMaxAttempts: null,
+                configuredBaseDelayMilliseconds: null);
+        }
+
+        if (parts.Count == 2 && IsRetryOffKeyword(parts[1]))
+        {
+            return SaveRetryOptions(
+                CodingAgentRetryOptions.Disabled,
+                configuredMaxAttempts: 0,
+                configuredBaseDelayMilliseconds: 0);
+        }
+
+        if (parts.Count is < 2 or > 3 ||
+            !int.TryParse(parts[1], out var maxAttempts) ||
+            maxAttempts < 0)
+        {
+            return CodingAgentCommandResult.Error(CodingAgentCommandCatalog.Usage("/retry"));
+        }
+
+        var baseDelayMilliseconds = CodingAgentRetryOptions.Default.BaseDelayMilliseconds;
+        if (parts.Count == 3 &&
+            (!int.TryParse(parts[2], out baseDelayMilliseconds) || baseDelayMilliseconds < 0))
+        {
+            return CodingAgentCommandResult.Error(CodingAgentCommandCatalog.Usage("/retry"));
+        }
+
+        if (maxAttempts == 0)
+        {
+            baseDelayMilliseconds = 0;
+        }
+
+        var options = maxAttempts == 0
+            ? CodingAgentRetryOptions.Disabled
+            : new CodingAgentRetryOptions(maxAttempts, baseDelayMilliseconds);
+        return SaveRetryOptions(
+            options,
+            configuredMaxAttempts: maxAttempts,
+            configuredBaseDelayMilliseconds: baseDelayMilliseconds);
     }
 
     private async Task<CodingAgentCommandResult> HandleCompactCommandAsync(
@@ -569,13 +821,34 @@ public sealed class CodingAgentCommandRouter
             .CompactAsync(string.IsNullOrWhiteSpace(instructions) ? null : instructions, cancellationToken)
             .ConfigureAwait(false);
         _treeSessionController?.RecordCompaction(_runner, result);
+        var messagesAfter = _treeSessionController is null ? result.MessagesAfter : _runner.Messages.Count;
         return CodingAgentCommandResult.Status(
-            $"compacted session: {result.MessagesBefore} -> {result.MessagesAfter} messages");
+            $"compacted session: {result.MessagesBefore} -> {messagesAfter} messages");
     }
 
     private void SaveDefaultModel(Model model)
     {
         _settingsStore?.SaveDefaultModel(model);
+    }
+
+    private CodingAgentCommandResult SaveRetryOptions(
+        CodingAgentRetryOptions options,
+        int? configuredMaxAttempts,
+        int? configuredBaseDelayMilliseconds)
+    {
+        _retryOptions = options;
+        _retryOptionsChanged?.Invoke(options);
+        if (_settingsStore is not null)
+        {
+            var settings = _settingsStore.Load();
+            _settingsStore.Save(settings with
+            {
+                RetryMaxAttempts = configuredMaxAttempts,
+                RetryBaseDelayMilliseconds = configuredBaseDelayMilliseconds
+            });
+        }
+
+        return CodingAgentCommandResult.Status($"retry: {FormatRetryPolicy(_retryOptions)}");
     }
 
     private string GetDefaultHtmlExportPath()
@@ -603,8 +876,18 @@ public sealed class CodingAgentCommandRouter
     private static bool IsCurrentKeyword(string value) =>
         value.Equals("current", StringComparison.OrdinalIgnoreCase);
 
+    private static bool IsRetryOffKeyword(string value) =>
+        value.Equals("off", StringComparison.OrdinalIgnoreCase) ||
+        value.Equals("disable", StringComparison.OrdinalIgnoreCase) ||
+        value.Equals("disabled", StringComparison.OrdinalIgnoreCase);
+
     private static string FormatSessionName(string? name) =>
         string.IsNullOrWhiteSpace(name) ? "none" : name;
+
+    private static string FormatRetryPolicy(CodingAgentRetryOptions options) =>
+        options.IsEnabled
+            ? $"enabled {options.MaxAttempts} attempts, base {options.BaseDelayMilliseconds}ms"
+            : "off";
 
     private static string FormatTreeId(string? id) =>
         string.IsNullOrWhiteSpace(id) ? "root" : id.Length <= 8 ? id : id[..8];
@@ -746,4 +1029,5 @@ public sealed class CodingAgentCommandRouter
                 .Where(content => !string.IsNullOrWhiteSpace(content)));
         return string.IsNullOrWhiteSpace(text) ? null : text;
     }
+
 }
