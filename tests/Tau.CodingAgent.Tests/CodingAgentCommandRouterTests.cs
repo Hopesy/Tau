@@ -644,6 +644,56 @@ public class CodingAgentCommandRouterTests
     }
 
     [Fact]
+    public async Task TryHandleAsync_ExportHtmlCommand_RendersStrikethroughSpans()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-export-strike-{Guid.NewGuid():N}");
+        var htmlPath = Path.Combine(directory, "session.html");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.SessionName = "strike export";
+        runner.MutableMessages.Add(new AssistantMessage(
+            [
+                new TextContent(
+                    """
+                    Inline ~~struck~~ word and ~~**both**~~ together.
+                    Also ~~spaced  ~~ should not strike.
+                    `~~code~~` keeps tildes.
+                    ```md
+                    ~~fenced~~
+                    ```
+                    """)
+            ]));
+        var router = new CodingAgentCommandRouter(runner);
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+
+            var result = await router.TryHandleAsync($"/export {htmlPath}");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+
+            var html = File.ReadAllText(htmlPath);
+            Assert.Contains("<del>struck</del>", html, StringComparison.Ordinal);
+            // Nested emphasis inside strikethrough renders both wrappers.
+            Assert.Contains("<del><strong>both</strong></del>", html, StringComparison.Ordinal);
+            // Spaced strike with trailing space should not be wrapped.
+            Assert.DoesNotContain("<del>spaced", html, StringComparison.Ordinal);
+            // Inline code keeps the literal tildes.
+            Assert.Contains("<code class=\"inline-code\">~~code~~</code>", html, StringComparison.Ordinal);
+            // Fenced code stays as code, no strikethrough.
+            Assert.Contains("<code data-language=\"md\">~~fenced~~</code>", html, StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
     public async Task TryHandleAsync_ExportHtmlCommand_RendersHorizontalRules()
     {
         var directory = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-export-hr-{Guid.NewGuid():N}");

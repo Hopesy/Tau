@@ -1276,6 +1276,17 @@ public static class CodingAgentHtmlSessionExporter
                 continue;
             }
 
+            if (TryParseStrikethroughSpan(text, index, out var strikeText, out var strikeEnd))
+            {
+                builder.Append(Html(text[plainStart..index]));
+                builder.Append("<del>");
+                builder.AppendPlainTextMarkup(strikeText);
+                builder.Append("</del>");
+                index = strikeEnd;
+                plainStart = index;
+                continue;
+            }
+
             if (TryParseBareUrl(text, index, out var bareUrl, out var bareEnd))
             {
                 builder.Append(Html(text[plainStart..index]));
@@ -1532,6 +1543,73 @@ public static class CodingAgentHtmlSessionExporter
         }
 
         return -1;
+    }
+
+    private static bool TryParseStrikethroughSpan(
+        string text,
+        int start,
+        out string strikeText,
+        out int end)
+    {
+        strikeText = string.Empty;
+        end = start;
+
+        if (start + 2 > text.Length || text[start] != '~' || text[start + 1] != '~')
+        {
+            return false;
+        }
+
+        if (!HasEmphasisBoundaryBefore(text, start))
+        {
+            return false;
+        }
+
+        var contentStart = start + 2;
+        if (contentStart >= text.Length || char.IsWhiteSpace(text[contentStart]))
+        {
+            return false;
+        }
+
+        var search = contentStart;
+        while (search < text.Length - 1)
+        {
+            var current = text[search];
+            if (current == '\n' || current == '\r')
+            {
+                return false;
+            }
+
+            if (current == '~' && text[search + 1] == '~')
+            {
+                if (search > contentStart && !char.IsWhiteSpace(text[search - 1]))
+                {
+                    var content = text[contentStart..search];
+                    var after = search + 2;
+                    if (after < text.Length && !HasEmphasisBoundaryAfter(text, after))
+                    {
+                        search++;
+                        continue;
+                    }
+
+                    if (content.Length == 0)
+                    {
+                        search++;
+                        continue;
+                    }
+
+                    strikeText = content;
+                    end = after;
+                    return true;
+                }
+
+                search += 2;
+                continue;
+            }
+
+            search++;
+        }
+
+        return false;
     }
 
     private static bool TryParseEmphasisSpan(
