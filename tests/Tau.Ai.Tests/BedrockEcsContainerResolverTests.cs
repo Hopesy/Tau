@@ -4,6 +4,7 @@ using Tau.Ai.Providers.Bedrock;
 
 namespace Tau.Ai.Tests;
 
+[Collection("BedrockEnvironment")]
 public sealed class BedrockEcsContainerResolverTests
 {
     [Fact]
