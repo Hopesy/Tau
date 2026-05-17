@@ -276,7 +276,8 @@ public static class CodingAgentHtmlSessionExporter
         string? model,
         string? sessionName,
         CodingAgentTreeSessionSummary? treeSummary = null,
-        string? sessionJsonl = null)
+        string? sessionJsonl = null,
+        CodingAgentSecretRedactor? redactor = null)
     {
         var exportPath = Path.GetFullPath(path);
         var directory = Path.GetDirectoryName(exportPath);
@@ -285,9 +286,80 @@ public static class CodingAgentHtmlSessionExporter
             Directory.CreateDirectory(directory);
         }
 
-        var html = Render(messages, provider, model, sessionName, treeSummary, sessionJsonl);
+        var effectiveRedactor = redactor ?? CodingAgentSecretRedactor.Default;
+        var redactedMessages = effectiveRedactor.Enabled
+            ? RedactMessages(messages, effectiveRedactor)
+            : messages;
+        var redactedJsonl = effectiveRedactor.Enabled && !string.IsNullOrEmpty(sessionJsonl)
+            ? effectiveRedactor.Redact(sessionJsonl)
+            : sessionJsonl;
+
+        var html = Render(redactedMessages, provider, model, sessionName, treeSummary, redactedJsonl);
         File.WriteAllText(exportPath, html, Encoding.UTF8);
         return exportPath;
+    }
+
+    private static IReadOnlyList<ChatMessage> RedactMessages(
+        IReadOnlyList<ChatMessage> messages,
+        CodingAgentSecretRedactor redactor)
+    {
+        var result = new ChatMessage[messages.Count];
+        for (var i = 0; i < messages.Count; i++)
+        {
+            result[i] = RedactMessage(messages[i], redactor);
+        }
+
+        return result;
+    }
+
+    private static ChatMessage RedactMessage(ChatMessage message, CodingAgentSecretRedactor redactor)
+    {
+        return message switch
+        {
+            UserMessage user => user with { Content = RedactContent(user.Content, redactor) },
+            AssistantMessage assistant => assistant with
+            {
+                Content = RedactContent(assistant.Content, redactor),
+                ErrorMessage = redactor.Redact(assistant.ErrorMessage)
+            },
+            ToolResultMessage toolResult => new ToolResultMessage(
+                toolResult.ToolCallId,
+                RedactContent(toolResult.Content, redactor),
+                toolResult.IsError),
+            _ => message
+        };
+    }
+
+    private static IReadOnlyList<ContentBlock> RedactContent(
+        IReadOnlyList<ContentBlock> content,
+        CodingAgentSecretRedactor redactor)
+    {
+        var result = new ContentBlock[content.Count];
+        for (var i = 0; i < content.Count; i++)
+        {
+            result[i] = content[i] switch
+            {
+                TextContent text => new TextContent(redactor.Redact(text.Text))
+                {
+                    TextSignature = text.TextSignature
+                },
+                ThinkingContent thinking => new ThinkingContent(redactor.Redact(thinking.Thinking))
+                {
+                    ThinkingSignature = thinking.ThinkingSignature,
+                    Redacted = thinking.Redacted
+                },
+                ToolCallContent toolCall => new ToolCallContent(
+                    toolCall.Id,
+                    toolCall.Name,
+                    redactor.Redact(toolCall.Arguments))
+                {
+                    ThoughtSignature = toolCall.ThoughtSignature
+                },
+                _ => content[i]
+            };
+        }
+
+        return result;
     }
 
     private static string Render(

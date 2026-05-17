@@ -1877,6 +1877,49 @@ public class CodingAgentCommandRouterTests
     }
 
     [Fact]
+    public async Task TryHandleAsync_ExportHtmlCommand_RedactsSecretsByDefault()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-export-redact-{Guid.NewGuid():N}");
+        var htmlPath = Path.Combine(directory, "session.html");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.SessionName = "redaction export";
+        runner.MutableMessages.Add(new AssistantMessage(
+            [
+                new TextContent(
+                    """
+                    Set AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
+                    Auth: Bearer abcdef1234567890abcdef1234567890
+                    Anthropic: sk-ant-api03-EXAMPLE-SECRET-TOKEN-9999
+                    keep this line intact
+                    """)
+            ]));
+        var router = new CodingAgentCommandRouter(runner);
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+
+            var result = await router.TryHandleAsync($"/export {htmlPath}");
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+
+            var html = File.ReadAllText(htmlPath);
+            Assert.DoesNotContain("AKIAIOSFODNN7EXAMPLE", html, StringComparison.Ordinal);
+            Assert.DoesNotContain("Bearer abcdef1234567890", html, StringComparison.Ordinal);
+            Assert.DoesNotContain("sk-ant-api03-EXAMPLE-SECRET-TOKEN", html, StringComparison.Ordinal);
+            Assert.Contains("[redacted]", html, StringComparison.Ordinal);
+            Assert.Contains("keep this line intact", html, StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
     public async Task TryHandleAsync_HistoryCommand_ReturnsErrorWhenNoProviderSet()
     {
         var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());

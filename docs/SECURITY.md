@@ -24,14 +24,17 @@ Tau 当前是本地开发者工具链项目，安全边界要围绕“**本地 A
 
 ### 当前现实
 
-- `Tau.CodingAgent` 当前默认使用 `OPENAI_API_KEY`
-- OAuth provider、集中认证和多 provider 凭证管理都还未完成
+- `Tau.Ai` 当前按 explicit API key、环境变量、`auth.json`、`models.json` 的顺序解析 provider 凭证
+- `auth.json` 支持 API key 与 OAuth 条目，OAuth login/refresh 会写回本地凭证文件
+- `models.json` 支持自定义 provider/model、request `apiKey`、`authHeader` 和 provider/model headers
 
 ### 约束
 
 - 不把真实密钥写入仓库
 - 不在日志、history、计划文档里直接回显密钥
-- 如果未来引入本地配置文件，要提供示例配置与忽略规则
+- 默认本地 `./.tau/auth.json` 和 `./.tau/models.json` 都必须忽略；需要版本化时只提交无密钥示例文件
+- `auth.json` 是 credential write-back store；`models.json` 是 request-time 配置，不承载 OAuth refresh 写回
+- HTML transcript 导出（`/export`、`/share`）默认走 `CodingAgentSecretRedactor`：匹配常见 AWS access key、GitHub token、Slack token、Anthropic / OpenAI key、`Bearer …` header、JWT 模式时替换为 `[redacted]`；可通过 `TAU_CODING_AGENT_REDACT_SECRETS=0` 显式关闭以备调试
 
 ## 文件与命令工具边界
 
@@ -64,7 +67,12 @@ Tau 当前还缺少的是：
 
 - .NET / NuGet 真实构建链进入 CI
 - 与真实发布产物对应的 SBOM / provenance
-- 更清晰的配置与 secrets 边界
+- 导出/share、运行态日志和跨运行态配置迁移的进一步脱敏边界
+
+## 本地配置参考
+
+- `docs/references/auth-json-schema.md`
+- `docs/references/models-json-schema.md`
 
 ## 后续进入更高风险模块时的要求
 
