@@ -240,6 +240,71 @@ public class WebUiEndpointTests
     }
 
     [Fact]
+    public async Task SearchSessionsEndpoint_MatchesByTitleCaseInsensitive()
+    {
+        await using var fixture = await WebUiEndpointFixture.StartAsync(StreamOk);
+
+        await fixture.Client.PostAsync(
+            "/api/sessions",
+            JsonBody(
+                new CreateSessionRequest("Tauri rewrite plan", "openai", "gpt-5.4"),
+                WebUiEndpointJsonContext.Default.CreateSessionRequest));
+        await fixture.Client.PostAsync(
+            "/api/sessions",
+            JsonBody(
+                new CreateSessionRequest("Database migrations", "openai", "gpt-5.4"),
+                WebUiEndpointJsonContext.Default.CreateSessionRequest));
+        await fixture.Client.PostAsync(
+            "/api/sessions",
+            JsonBody(
+                new CreateSessionRequest("tauri integration", "openai", "gpt-5.4"),
+                WebUiEndpointJsonContext.Default.CreateSessionRequest));
+
+        var search = await fixture.Client.GetAsync("/api/sessions/search?q=tauri");
+        search.EnsureSuccessStatusCode();
+        var matches = JsonSerializer.Deserialize(
+            await search.Content.ReadAsStringAsync(),
+            WebUiEndpointJsonContext.Default.WebChatSessionDtoArray);
+        Assert.NotNull(matches);
+        var titles = matches!.Select(m => m.Title).ToArray();
+        Assert.Contains("Tauri rewrite plan", titles);
+        Assert.Contains("tauri integration", titles);
+        Assert.DoesNotContain("Database migrations", titles);
+    }
+
+    [Fact]
+    public async Task SearchSessionsEndpoint_ReturnsEmptyArrayWhenNoMatch()
+    {
+        await using var fixture = await WebUiEndpointFixture.StartAsync(StreamOk);
+
+        await fixture.Client.PostAsync(
+            "/api/sessions",
+            JsonBody(
+                new CreateSessionRequest("Only session", "openai", "gpt-5.4"),
+                WebUiEndpointJsonContext.Default.CreateSessionRequest));
+
+        var search = await fixture.Client.GetAsync("/api/sessions/search?q=missing");
+        search.EnsureSuccessStatusCode();
+        var matches = JsonSerializer.Deserialize(
+            await search.Content.ReadAsStringAsync(),
+            WebUiEndpointJsonContext.Default.WebChatSessionDtoArray);
+        Assert.NotNull(matches);
+        Assert.Empty(matches!);
+    }
+
+    [Fact]
+    public async Task SearchSessionsEndpoint_RejectsEmptyQuery()
+    {
+        await using var fixture = await WebUiEndpointFixture.StartAsync(StreamOk);
+
+        var search = await fixture.Client.GetAsync("/api/sessions/search?q=");
+        Assert.Equal(HttpStatusCode.BadRequest, search.StatusCode);
+
+        var noParam = await fixture.Client.GetAsync("/api/sessions/search");
+        Assert.Equal(HttpStatusCode.BadRequest, noParam.StatusCode);
+    }
+
+    [Fact]
     public async Task ExportMarkdownEndpoint_RendersSessionAndRedactsSecrets()
     {
         await using var fixture = await WebUiEndpointFixture.StartAsync(StreamOk);

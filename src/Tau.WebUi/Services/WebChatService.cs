@@ -110,6 +110,21 @@ public sealed class WebChatService
             .ToArray();
     }
 
+    public IReadOnlyList<WebChatSessionDto> SearchSessions(string query)
+    {
+        if (string.IsNullOrWhiteSpace(query))
+        {
+            return Array.Empty<WebChatSessionDto>();
+        }
+
+        var trimmed = query.Trim();
+        return _sessions.Values
+            .Where(s => s.Title.Contains(trimmed, StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(s => s.UpdatedAt)
+            .Select(s => s.ToDto(persisted: true))
+            .ToArray();
+    }
+
     public WebChatSessionDto? GetSession(string id)
     {
         return _sessions.TryGetValue(id, out var session) ? session.ToDto(persisted: true) : null;

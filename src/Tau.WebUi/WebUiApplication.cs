@@ -28,6 +28,15 @@ public static class WebUiApplication
             }
         });
         app.MapGet("/api/sessions", (WebChatService chat) => Results.Ok(chat.ListSessions()));
+        app.MapGet("/api/sessions/search", (string? q, WebChatService chat) =>
+        {
+            if (string.IsNullOrWhiteSpace(q))
+            {
+                return Results.BadRequest("Query parameter 'q' is required.");
+            }
+
+            return Results.Ok(chat.SearchSessions(q));
+        });
         app.MapGet("/api/sessions/{id}", (string id, WebChatService chat) =>
         {
             var session = chat.GetSession(id);
