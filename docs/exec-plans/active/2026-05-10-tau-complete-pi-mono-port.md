@@ -150,6 +150,7 @@
 - targeted tests 覆盖 `Tau.WebUi POST /api/sessions/{id}/clear`：清空 messages 后保留 Title/Provider/Model；session 不存在返回 404
 - targeted tests 覆盖 `TauSecretRedactor`（Tau.Ai）：AWS access key（AKIA/ASIA/AROA）/ GitHub token / Slack token / Anthropic `sk-ant-` / OpenAI `sk-` / `Bearer …` / JWT 三段式都替换为 `[redacted]`、非 secret 文本不动、`enabled=false` 跳过、`IsEnabledFromEnvironment` truth table；并覆盖 `Tau.WebUi GET /api/sessions/{id}/export.html` 与 `export.md` 默认对消息正文做替换、返回 `text/html` / `text/markdown`；不存在的 session 返回 404
 - targeted tests 覆盖 `Tau.WebUi GET /api/sessions/search?q=...`：大小写不敏感 substring 命中按 UpdatedAt 排序、无匹配返回空数组、缺 `q` 或空 `q` 报 400
+- targeted tests 覆盖 `Tau.WebUi POST /api/sessions/{id}/clone`：克隆 messages / provider / model、Title 加 `Copy of ` 前缀、新 Id；源 session 不存在返回 404
 - targeted tests 覆盖 `CodingAgentSecretRedactor`：AWS access key（AKIA/ASIA/AROA）/ GitHub token / Slack token / Anthropic `sk-ant-` / OpenAI `sk-` / `Bearer …` / JWT 三段式都替换为 `[redacted]`、非 secret 文本不动、`enabled=false` 跳过、`IsEnabledFromEnvironment` 对 `0/false/1/true/null/""` 的判定；并覆盖 `/export <html>` 默认对常见 secret pattern 做替换，且非 secret 内容保持不变
 - 真实 CLI smoke：临时 `TAU_CODING_AGENT_SKILL_PATHS` 下执行 `/skills`，确认真实进程能发现并列出 `/skill:<name>`
 - 真实 CLI smoke：临时 `TAU_CODING_AGENT_EXTENSION_PATHS` 下执行 `/extensions` 与 status-only extension command，确认真实进程能发现并执行 JSON extension command；再通过同一 extension JSON 的 `resources.promptPaths/resources.skillPaths` 确认 `/prompts` 和 `/skills` 能发现 extension-contributed resources

@@ -240,6 +240,47 @@ public class WebUiEndpointTests
     }
 
     [Fact]
+    public async Task CloneSessionEndpoint_DuplicatesMessagesAndPrefixesTitle()
+    {
+        await using var fixture = await WebUiEndpointFixture.StartAsync(StreamOk);
+        var created = await fixture.Client.PostAsync(
+            "/api/sessions",
+            JsonBody(
+                new CreateSessionRequest("Source", "openai", "gpt-5.4"),
+                WebUiEndpointJsonContext.Default.CreateSessionRequest));
+        created.EnsureSuccessStatusCode();
+        var source = JsonSerializer.Deserialize(
+            await created.Content.ReadAsStringAsync(),
+            WebUiEndpointJsonContext.Default.WebChatSessionDto);
+        Assert.NotNull(source);
+
+        var send = await fixture.Client.PostAsync(
+            $"/api/sessions/{source!.Id}/messages",
+            JsonBody(new SendMessageRequest("hello"), WebUiEndpointJsonContext.Default.SendMessageRequest));
+        send.EnsureSuccessStatusCode();
+
+        var cloned = await fixture.Client.PostAsync(
+            $"/api/sessions/{source.Id}/clone",
+            content: new StringContent(string.Empty));
+        cloned.EnsureSuccessStatusCode();
+        var clone = JsonSerializer.Deserialize(
+            await cloned.Content.ReadAsStringAsync(),
+            WebUiEndpointJsonContext.Default.WebChatSessionDto);
+        Assert.NotNull(clone);
+        Assert.NotEqual(source.Id, clone!.Id);
+        Assert.Equal("Copy of Source", clone.Title);
+        Assert.Equal(source.Provider, clone.Provider);
+        Assert.Equal(source.Model, clone.Model);
+        // Source had at least the user message; the clone should mirror it.
+        Assert.NotEmpty(clone.Messages);
+
+        var missing = await fixture.Client.PostAsync(
+            "/api/sessions/does-not-exist/clone",
+            content: new StringContent(string.Empty));
+        Assert.Equal(HttpStatusCode.NotFound, missing.StatusCode);
+    }
+
+    [Fact]
     public async Task SearchSessionsEndpoint_MatchesByTitleCaseInsensitive()
     {
         await using var fixture = await WebUiEndpointFixture.StartAsync(StreamOk);

@@ -129,6 +129,11 @@ public static class WebUiApplication
             var session = chat.ClearSessionMessages(id);
             return session is null ? Results.NotFound() : Results.Ok(session);
         });
+        app.MapPost("/api/sessions/{id}/clone", (string id, WebChatService chat) =>
+        {
+            var session = chat.CloneSession(id);
+            return session is null ? Results.NotFound() : Results.Ok(session);
+        });
         app.MapPost("/api/sessions/{id}/messages", async (string id, SendMessageRequest request, WebChatService chat, CancellationToken cancellationToken) =>
         {
             if (!HasMessageInput(request))

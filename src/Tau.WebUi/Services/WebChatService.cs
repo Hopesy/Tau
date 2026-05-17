@@ -152,6 +152,28 @@ public sealed class WebChatService
         return session.ToDto(persisted: true);
     }
 
+    public WebChatSessionDto? CloneSession(string id)
+    {
+        if (!_sessions.TryGetValue(id, out var existing))
+        {
+            return null;
+        }
+
+        var sourceDto = existing.ToDto(persisted: true);
+        var cloneDto = sourceDto with
+        {
+            Id = Guid.NewGuid().ToString("N"),
+            Title = $"Copy of {sourceDto.Title}",
+            CreatedAt = DateTimeOffset.UtcNow,
+            UpdatedAt = DateTimeOffset.UtcNow,
+            Persisted = false
+        };
+        var clone = WebChatSession.FromImportedDto(cloneDto, sourceDto.Provider, sourceDto.Model, _runnerFactory);
+        _sessions[clone.Id] = clone;
+        Persist();
+        return clone.ToDto(persisted: true);
+    }
+
     public WebChatSessionDto? UpdateSessionSettings(string id, UpdateSessionSettingsRequest request)
     {
         if (!_sessions.TryGetValue(id, out var session))
