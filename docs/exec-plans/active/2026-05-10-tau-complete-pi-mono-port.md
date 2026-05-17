@@ -143,6 +143,7 @@
 - targeted tests 覆盖 HTML transcript 普通文本 Markdown strikethrough (`~~text~~`) -> `<del>`：内嵌 `**strong**` 时同时输出 `<del><strong>...</strong></del>`、紧邻空格的 `~~` 不闭合、inline code 内 `~~` 保持字面量、fenced code 内 `~~` 保持代码块，且 `~~...~~` 不跨行
 - targeted tests 覆盖 HTML transcript 普通文本 angle-bracket autolink `<http(s)://...>`：渲染为 `target=_blank rel=noreferrer noopener` 的外链；inline code 与 fenced code 内仍保持 `&lt;...&gt;` 字面量
 - targeted tests 覆盖 `Tau.Tui` 持久化 history：`IInputHistoryStore` 加载已有 entries 到 `InputHistory`、新提交追加、连续重复 deduped 不写盘；`FileInputHistoryStore` 真实落盘 → 再次构造 `InputHistory` 时正确恢复顺序、超过 `maxEntries` 时尾部截断、缺失文件不抛错
+- targeted tests 覆盖 HTML transcript 嵌套列表：缩进升级时打开新 `<ul>` / `<ol>`、indent 回到外层时关闭嵌套、同 indent 切换 ordered/unordered 时关闭并重开正确 list，嵌套内项目顺序保持正确
 - 真实 CLI smoke：临时 `TAU_CODING_AGENT_SKILL_PATHS` 下执行 `/skills`，确认真实进程能发现并列出 `/skill:<name>`
 - 真实 CLI smoke：临时 `TAU_CODING_AGENT_EXTENSION_PATHS` 下执行 `/extensions` 与 status-only extension command，确认真实进程能发现并执行 JSON extension command；再通过同一 extension JSON 的 `resources.promptPaths/resources.skillPaths` 确认 `/prompts` 和 `/skills` 能发现 extension-contributed resources
 - 真实 CLI smoke：`/export` 默认 HTML、`/import <snapshot.json>` -> `/export <session.html>`，检查 HTML 包含 user/assistant/thinking/tool call/tool result 内容

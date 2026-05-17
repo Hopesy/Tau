@@ -916,7 +916,7 @@ public static class CodingAgentHtmlSessionExporter
     private static void RenderMarkdownBlockContent(StringBuilder builder, string text)
     {
         var paragraph = new StringBuilder();
-        var listKind = MarkdownListKind.None;
+        var listStack = new List<(MarkdownListKind Kind, int Indent)>();
         var inQuote = false;
 
         builder.AppendLine("<div class=\"content-text rich-text\">");
@@ -966,20 +966,20 @@ public static class CodingAgentHtmlSessionExporter
                 continue;
             }
 
-            if (TryParseUnorderedListItem(line, out var unorderedItem))
+            if (TryParseUnorderedListItem(line, out var unorderedItem, out var unorderedIndent))
             {
                 FlushParagraph();
                 CloseQuote();
-                EnsureList(MarkdownListKind.Unordered);
+                AdjustListStack(MarkdownListKind.Unordered, unorderedIndent);
                 AppendMarkdownListItem(builder, unorderedItem);
                 continue;
             }
 
-            if (TryParseOrderedListItem(line, out var orderedItem))
+            if (TryParseOrderedListItem(line, out var orderedItem, out var orderedIndent))
             {
                 FlushParagraph();
                 CloseQuote();
-                EnsureList(MarkdownListKind.Ordered);
+                AdjustListStack(MarkdownListKind.Ordered, orderedIndent);
                 AppendMarkdownListItem(builder, orderedItem);
                 continue;
             }
@@ -1023,27 +1023,40 @@ public static class CodingAgentHtmlSessionExporter
             paragraph.Clear();
         }
 
-        void EnsureList(MarkdownListKind kind)
+        void AdjustListStack(MarkdownListKind kind, int indent)
         {
-            if (listKind == kind)
+            // Pop deeper-or-equal indents that no longer fit the new line.
+            while (listStack.Count > 0 && listStack[^1].Indent > indent)
             {
-                return;
+                var popped = listStack[^1];
+                listStack.RemoveAt(listStack.Count - 1);
+                builder.AppendLine(popped.Kind == MarkdownListKind.Ordered ? "</ol>" : "</ul>");
             }
 
-            CloseList();
-            listKind = kind;
-            builder.AppendLine(kind == MarkdownListKind.Ordered ? "<ol>" : "<ul>");
+            // If the deepest open list has the same indent but a different kind,
+            // close it before opening the new one.
+            if (listStack.Count > 0 && listStack[^1].Indent == indent && listStack[^1].Kind != kind)
+            {
+                var popped = listStack[^1];
+                listStack.RemoveAt(listStack.Count - 1);
+                builder.AppendLine(popped.Kind == MarkdownListKind.Ordered ? "</ol>" : "</ul>");
+            }
+
+            if (listStack.Count == 0 || listStack[^1].Indent < indent)
+            {
+                listStack.Add((kind, indent));
+                builder.AppendLine(kind == MarkdownListKind.Ordered ? "<ol>" : "<ul>");
+            }
         }
 
         void CloseList()
         {
-            if (listKind == MarkdownListKind.None)
+            while (listStack.Count > 0)
             {
-                return;
+                var popped = listStack[^1];
+                listStack.RemoveAt(listStack.Count - 1);
+                builder.AppendLine(popped.Kind == MarkdownListKind.Ordered ? "</ol>" : "</ul>");
             }
-
-            builder.AppendLine(listKind == MarkdownListKind.Ordered ? "</ol>" : "</ul>");
-            listKind = MarkdownListKind.None;
         }
 
         void EnsureQuote()
@@ -1379,7 +1392,13 @@ public static class CodingAgentHtmlSessionExporter
 
     private static bool TryParseUnorderedListItem(string line, out string itemText)
     {
+        return TryParseUnorderedListItem(line, out itemText, out _);
+    }
+
+    private static bool TryParseUnorderedListItem(string line, out string itemText, out int indent)
+    {
         itemText = string.Empty;
+        indent = 0;
         var trimmed = line.TrimStart();
         if (trimmed.Length < 3 ||
             trimmed[0] is not ('-' or '*' or '+') ||
@@ -1388,13 +1407,20 @@ public static class CodingAgentHtmlSessionExporter
             return false;
         }
 
+        indent = line.Length - trimmed.Length;
         itemText = trimmed[2..].Trim();
         return itemText.Length > 0;
     }
 
     private static bool TryParseOrderedListItem(string line, out string itemText)
     {
+        return TryParseOrderedListItem(line, out itemText, out _);
+    }
+
+    private static bool TryParseOrderedListItem(string line, out string itemText, out int indent)
+    {
         itemText = string.Empty;
+        indent = 0;
         var trimmed = line.TrimStart();
         var index = 0;
         while (index < trimmed.Length && char.IsDigit(trimmed[index]))
@@ -1410,6 +1436,7 @@ public static class CodingAgentHtmlSessionExporter
             return false;
         }
 
+        indent = line.Length - trimmed.Length;
         itemText = trimmed[(index + 2)..].Trim();
         return itemText.Length > 0;
     }
