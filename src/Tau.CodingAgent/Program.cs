@@ -17,7 +17,27 @@ static InteractiveInputEditor? CreateInteractiveEditorIfAttached()
         return null;
     }
 
-    return new InteractiveInputEditor(new SystemConsoleKeyReader(), new SystemConsoleInteractiveRenderer());
+    var historyPath = ResolveHistoryPath();
+    var history = historyPath is not null
+        ? new InputHistory(new FileInputHistoryStore(historyPath))
+        : new InputHistory();
+
+    return new InteractiveInputEditor(
+        new SystemConsoleKeyReader(),
+        new SystemConsoleInteractiveRenderer(),
+        history: history);
+}
+
+static string? ResolveHistoryPath()
+{
+    var explicitPath = Environment.GetEnvironmentVariable("TAU_CODING_AGENT_HISTORY_FILE");
+    if (!string.IsNullOrWhiteSpace(explicitPath))
+    {
+        return explicitPath;
+    }
+
+    var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+    return string.IsNullOrWhiteSpace(home) ? null : Path.Combine(home, ".tau", "coding-agent-history");
 }
 var sessionFile = Environment.GetEnvironmentVariable("TAU_CODING_AGENT_SESSION_FILE");
 var sessionStore = CodingAgentTreeSessionStore.IsJsonlPath(sessionFile)

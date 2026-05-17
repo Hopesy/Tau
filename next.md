@@ -73,7 +73,7 @@
 
 ### Tau.Tui
 
-- [~] 真正的输入编辑器（`InteractiveInputEditor` baseline 已落：key-by-key 读取、char append、backspace/delete、左/右光标、Home/End、Ctrl+Left/Right 词级跳转、Ctrl+Backspace 删除前一个词、Ctrl+Delete 删除下一个词、Ctrl-A/E 行首行尾跳转、Ctrl-K/U kill-to-end/start、Ctrl-R 反向 history 搜索（再按 R 切到更旧匹配，Esc/Ctrl-G 取消，Enter 提交）、Enter 提交、Ctrl-C 取消、`InputHistory` Up/Down 历史回放（去重 + capacity）；`Tau.CodingAgent` 在交互式 console（无 redirected stdin/stdout、未设 `TAU_CODING_AGENT_DISABLE_INPUT_EDITOR=1`）下默认使用 editor，非交互回退 `Console.ReadLine`；通过 `IConsoleKeyReader`/`IInteractiveRenderer` seam 测试；仍缺多行/wrap 渲染）
+- [~] 真正的输入编辑器（`InteractiveInputEditor` baseline 已落：key-by-key 读取、char append、backspace/delete、左/右光标、Home/End、Ctrl+Left/Right 词级跳转、Ctrl+Backspace 删除前一个词、Ctrl+Delete 删除下一个词、Ctrl-A/E 行首行尾跳转、Ctrl-K/U kill-to-end/start、Ctrl-R 反向 history 搜索（再按 R 切到更旧匹配，Esc/Ctrl-G 取消，Enter 提交）、Enter 提交、Ctrl-C 取消、`InputHistory` Up/Down 历史回放（去重 + capacity）；`Tau.CodingAgent` 在交互式 console（无 redirected stdin/stdout、未设 `TAU_CODING_AGENT_DISABLE_INPUT_EDITOR=1`）下默认使用 editor，非交互回退 `Console.ReadLine`；history 通过 `FileInputHistoryStore` 持久化到 `~/.tau/coding-agent-history`（可被 `TAU_CODING_AGENT_HISTORY_FILE` 覆盖），启动加载 / 提交追加 / 超 capacity 截断；通过 `IConsoleKeyReader`/`IInteractiveRenderer` seam 测试；仍缺多行/wrap 渲染）
 - [ ] 组件系统
 - [ ] 消息区 / 状态区
 - [~] 键盘体系（`SystemConsoleKeyReader` + `InteractiveInputEditor` 已支持主要导航/编辑键 + 词级跳转/删除 + Ctrl-A/E/K/U readline 习惯 + Ctrl-R 反向搜索；仍缺自定义绑定层）

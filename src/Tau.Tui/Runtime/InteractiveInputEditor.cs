@@ -369,8 +369,19 @@ public sealed class InputHistory
 {
     private readonly List<string> _entries = [];
     private readonly int _capacity;
+    private readonly IInputHistoryStore? _store;
 
     public InputHistory(int capacity = 200)
+        : this(capacity, store: null)
+    {
+    }
+
+    public InputHistory(IInputHistoryStore store, int capacity = 200)
+        : this(capacity, store)
+    {
+    }
+
+    private InputHistory(int capacity, IInputHistoryStore? store)
     {
         if (capacity <= 0)
         {
@@ -378,11 +389,22 @@ public sealed class InputHistory
         }
 
         _capacity = capacity;
+        _store = store;
+
+        if (_store is not null)
+        {
+            foreach (var entry in _store.Load())
+            {
+                AddInternal(entry, persist: false);
+            }
+        }
     }
 
     public int Count => _entries.Count;
 
-    public void Add(string entry)
+    public void Add(string entry) => AddInternal(entry, persist: true);
+
+    private void AddInternal(string entry, bool persist)
     {
         if (string.IsNullOrEmpty(entry))
         {
@@ -398,6 +420,11 @@ public sealed class InputHistory
         if (_entries.Count > _capacity)
         {
             _entries.RemoveAt(0);
+        }
+
+        if (persist)
+        {
+            _store?.Append(entry);
         }
     }
 
