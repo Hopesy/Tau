@@ -1258,6 +1258,15 @@ public static class CodingAgentHtmlSessionExporter
                 continue;
             }
 
+            if (TryParseAutolink(text, index, out var autolinkUrl, out var autolinkEnd))
+            {
+                builder.Append(Html(text[plainStart..index]));
+                AppendAnchor(builder, autolinkUrl, autolinkUrl);
+                index = autolinkEnd;
+                plainStart = index;
+                continue;
+            }
+
             if (TryParseInlineCodeSpan(text, index, out var code, out var codeEnd))
             {
                 builder.Append(Html(text[plainStart..index]));
@@ -1703,6 +1712,48 @@ public static class CodingAgentHtmlSessionExporter
         }
 
         return !char.IsLetterOrDigit(text[end]);
+    }
+
+    private static bool TryParseAutolink(string text, int start, out string url, out int end)
+    {
+        url = string.Empty;
+        end = start;
+
+        if (start >= text.Length || text[start] != '<')
+        {
+            return false;
+        }
+
+        if (!StartsWithHttpScheme(text, start + 1))
+        {
+            return false;
+        }
+
+        var scan = start + 1;
+        while (scan < text.Length)
+        {
+            var ch = text[scan];
+            if (ch == '>')
+            {
+                if (scan == start + 1)
+                {
+                    return false;
+                }
+
+                url = text[(start + 1)..scan];
+                end = scan + 1;
+                return !string.IsNullOrWhiteSpace(url);
+            }
+
+            if (char.IsWhiteSpace(ch) || ch == '<')
+            {
+                return false;
+            }
+
+            scan++;
+        }
+
+        return false;
     }
 
     private static bool TryParseBareUrl(

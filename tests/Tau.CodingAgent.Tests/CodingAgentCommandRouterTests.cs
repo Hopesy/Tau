@@ -644,6 +644,52 @@ public class CodingAgentCommandRouterTests
     }
 
     [Fact]
+    public async Task TryHandleAsync_ExportHtmlCommand_RendersAutolinkAngles()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-export-autolink-{Guid.NewGuid():N}");
+        var htmlPath = Path.Combine(directory, "session.html");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.SessionName = "autolink export";
+        runner.MutableMessages.Add(new AssistantMessage(
+            [
+                new TextContent(
+                    """
+                    See <https://example.com/docs> and <http://intranet/login>.
+                    Inline code: `<https://no-link.example/>` keeps angles.
+                    ```md
+                    <https://fenced.example/>
+                    ```
+                    """)
+            ]));
+        var router = new CodingAgentCommandRouter(runner);
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+
+            var result = await router.TryHandleAsync($"/export {htmlPath}");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+
+            var html = File.ReadAllText(htmlPath);
+            Assert.Contains("<a href=\"https://example.com/docs\" target=\"_blank\" rel=\"noreferrer noopener\">https://example.com/docs</a>", html, StringComparison.Ordinal);
+            Assert.Contains("<a href=\"http://intranet/login\" target=\"_blank\" rel=\"noreferrer noopener\">http://intranet/login</a>", html, StringComparison.Ordinal);
+            // Inline code keeps the literal angle-bracket form.
+            Assert.Contains("<code class=\"inline-code\">&lt;https://no-link.example/&gt;</code>", html, StringComparison.Ordinal);
+            // Fenced code keeps the literal angle-bracket form.
+            Assert.Contains("<code data-language=\"md\">&lt;https://fenced.example/&gt;</code>", html, StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
     public async Task TryHandleAsync_ExportHtmlCommand_RendersStrikethroughSpans()
     {
         var directory = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-export-strike-{Guid.NewGuid():N}");
