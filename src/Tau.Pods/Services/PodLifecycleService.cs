@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text;
 using System.Net.Http;
+using System.Text.Json;
 using Tau.Pods.Models;
 
 namespace Tau.Pods.Services;
@@ -126,6 +127,80 @@ public sealed class PodLifecycleService
             $"Fetched {LineCount(output)} log line(s) for '{deployName}' on {pod.Id}.",
             output);
     }
+
+    public async Task<PodDeploymentsResult> ListDeploymentsAsync(
+        PodDefinition pod, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(pod.SshHost))
+        {
+            return new PodDeploymentsResult(pod.Id, false, "Deployments require SSH-based pod.", Array.Empty<PodDeploymentInfo>());
+        }
+
+        const string command =
+            "for f in ~/.tau_pods/*.json; do [ -f \"$f\" ] && cat \"$f\" && echo; done";
+
+        var result = await _execService.ExecuteAsync(pod, command, cancellationToken).ConfigureAwait(false);
+        if (!result.Success)
+        {
+            return new PodDeploymentsResult(
+                pod.Id,
+                false,
+                $"Deployments failed: {result.Summary}",
+                Array.Empty<PodDeploymentInfo>());
+        }
+
+        var deployments = ParseDeployments(result.StdOut);
+        var summary = deployments.Count == 0
+            ? $"No deployments on {pod.Id}."
+            : $"Found {deployments.Count} deployment(s) on {pod.Id}.";
+
+        return new PodDeploymentsResult(pod.Id, true, summary, deployments);
+    }
+
+    private static IReadOnlyList<PodDeploymentInfo> ParseDeployments(string output)
+    {
+        if (string.IsNullOrWhiteSpace(output))
+        {
+            return Array.Empty<PodDeploymentInfo>();
+        }
+
+        var list = new List<PodDeploymentInfo>();
+        foreach (var rawLine in output.Split('\n'))
+        {
+            var trimmed = rawLine.Trim();
+            if (trimmed.Length == 0 || trimmed[0] != '{')
+            {
+                continue;
+            }
+
+            try
+            {
+                using var doc = JsonDocument.Parse(trimmed);
+                var root = doc.RootElement;
+                if (root.ValueKind != JsonValueKind.Object)
+                {
+                    continue;
+                }
+
+                list.Add(new PodDeploymentInfo(
+                    Name: GetString(root, "name") ?? string.Empty,
+                    Model: GetString(root, "model"),
+                    Status: GetString(root, "status"),
+                    Timestamp: GetString(root, "ts")));
+            }
+            catch (JsonException)
+            {
+                // skip malformed deployment files
+            }
+        }
+
+        return list;
+    }
+
+    private static string? GetString(JsonElement element, string name) =>
+        element.TryGetProperty(name, out var prop) && prop.ValueKind == JsonValueKind.String
+            ? prop.GetString()
+            : null;
 
     private static int LineCount(string text)
     {

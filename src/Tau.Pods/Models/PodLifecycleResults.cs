@@ -23,3 +23,15 @@ public sealed record PodLogsResult(
     bool Success,
     string Summary,
     string? Output = null);
+
+public sealed record PodDeploymentInfo(
+    string Name,
+    string? Model,
+    string? Status,
+    string? Timestamp);
+
+public sealed record PodDeploymentsResult(
+    string PodId,
+    bool Success,
+    string Summary,
+    IReadOnlyList<PodDeploymentInfo> Deployments);

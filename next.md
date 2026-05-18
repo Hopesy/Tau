@@ -135,8 +135,8 @@
 - [x] config init/list/validate/status
 - [x] probe（HTTP endpoint / TCP ssh target）
 - [x] exec（SSH pod remote command execution）
-- [x] deploy / stop / restart / health / logs（`PodLifecycleService` + CLI commands，SSH-based deploy/stop/restart/logs 和 HTTP/SSH health check；logs 通过 journalctl 拉 `tau-pod-<name>` unit，回退 `~/.tau_pods/<name>.log`，可配置 tail）
-- [~] 真正的 CLI 运维命令体系（已补 `health/deploy/stop/restart/logs`、可省略 path 的 target-command 参数解析、SSH lifecycle metadata 命令转义和 CLI 参数回归测试；仍缺更完整模型生命周期、远端 transport hardening 和真实运维 smoke）
+- [x] deploy / stop / restart / health / logs / deployments（`PodLifecycleService` + CLI commands，SSH-based deploy/stop/restart/logs/deployments 和 HTTP/SSH health check；logs 通过 journalctl 拉 `tau-pod-<name>` unit，回退 `~/.tau_pods/<name>.log`，可配置 tail；deployments 通过 SSH 列出并解析 `~/.tau_pods/*.json` metadata，输出 name/model/status/ts）
+- [~] 真正的 CLI 运维命令体系（已补 `health/deploy/stop/restart/logs/deployments`、可省略 path 的 target-command 参数解析、SSH lifecycle metadata 命令转义和 CLI 参数回归测试；仍缺更完整模型生命周期、远端 transport hardening 和真实运维 smoke）
 
 ## P2：工程化
 

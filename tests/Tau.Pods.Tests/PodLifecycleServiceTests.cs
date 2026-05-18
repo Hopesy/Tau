@@ -206,4 +206,93 @@ public class PodLifecycleServiceTests
         Assert.False(result.Success);
         Assert.Contains("Logs failed", result.Summary);
     }
+
+    [Fact]
+    public async Task ListDeploymentsAsync_NonSshPod_RejectsRequest()
+    {
+        var exec = CreateFakeExecService();
+        var service = new PodLifecycleService(exec);
+        var pod = new PodDefinition { Id = "http-pod", Endpoint = "http://localhost:8000" };
+
+        var result = await service.ListDeploymentsAsync(pod);
+
+        Assert.False(result.Success);
+        Assert.Empty(result.Deployments);
+        Assert.Contains("SSH-based pod", result.Summary);
+    }
+
+    [Fact]
+    public async Task ListDeploymentsAsync_ParsesMetadataJsonLines()
+    {
+        System.Diagnostics.ProcessStartInfo? captured = null;
+        var stdout = "{\"model\":\"meta/llama-3.1-70b\",\"name\":\"llama70b\",\"status\":\"deployed\",\"ts\":\"2026-05-18T01:02:03Z\"}\n"
+                     + "{\"model\":\"qwen/qwen2-7b\",\"name\":\"qwen7\",\"status\":\"deployed\",\"ts\":\"2026-05-18T02:00:00Z\"}\n";
+        var exec = new PodExecService((psi, _) =>
+        {
+            captured = psi;
+            return Task.FromResult(new PodExecService.ProcessExecutionResult(0, stdout, ""));
+        });
+        var service = new PodLifecycleService(exec);
+        var pod = new PodDefinition { Id = "gpu-1", SshHost = "host.example.com" };
+
+        var result = await service.ListDeploymentsAsync(pod);
+
+        Assert.True(result.Success);
+        Assert.Equal(2, result.Deployments.Count);
+        Assert.Equal("llama70b", result.Deployments[0].Name);
+        Assert.Equal("meta/llama-3.1-70b", result.Deployments[0].Model);
+        Assert.Equal("deployed", result.Deployments[0].Status);
+        Assert.Equal("2026-05-18T01:02:03Z", result.Deployments[0].Timestamp);
+        Assert.Equal("qwen7", result.Deployments[1].Name);
+        Assert.Contains("Found 2", result.Summary);
+        Assert.NotNull(captured);
+        Assert.Contains("~/.tau_pods/*.json", captured!.Arguments, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ListDeploymentsAsync_EmptyOutput_ReturnsNoDeployments()
+    {
+        var exec = CreateFakeExecService(0, "", "");
+        var service = new PodLifecycleService(exec);
+        var pod = new PodDefinition { Id = "gpu-1", SshHost = "host.example.com" };
+
+        var result = await service.ListDeploymentsAsync(pod);
+
+        Assert.True(result.Success);
+        Assert.Empty(result.Deployments);
+        Assert.Contains("No deployments", result.Summary);
+    }
+
+    [Fact]
+    public async Task ListDeploymentsAsync_SkipsMalformedLines()
+    {
+        var stdout = "not-json\n"
+                     + "{\"name\":\"only-name\"}\n"
+                     + "{ malformed json\n"
+                     + "\n";
+        var exec = CreateFakeExecService(0, stdout, "");
+        var service = new PodLifecycleService(exec);
+        var pod = new PodDefinition { Id = "gpu-1", SshHost = "host.example.com" };
+
+        var result = await service.ListDeploymentsAsync(pod);
+
+        Assert.True(result.Success);
+        Assert.Single(result.Deployments);
+        Assert.Equal("only-name", result.Deployments[0].Name);
+        Assert.Null(result.Deployments[0].Model);
+    }
+
+    [Fact]
+    public async Task ListDeploymentsAsync_FailureSurfacesExecSummary()
+    {
+        var exec = CreateFakeExecService(exitCode: 1, stdout: "", stderr: "permission denied");
+        var service = new PodLifecycleService(exec);
+        var pod = new PodDefinition { Id = "gpu-1", SshHost = "host.example.com" };
+
+        var result = await service.ListDeploymentsAsync(pod);
+
+        Assert.False(result.Success);
+        Assert.Empty(result.Deployments);
+        Assert.Contains("Deployments failed", result.Summary);
+    }
 }

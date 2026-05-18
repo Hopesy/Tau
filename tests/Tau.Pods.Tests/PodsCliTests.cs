@@ -138,6 +138,86 @@ public class PodsCliTests
         }
     }
 
+    [Fact]
+    public async Task Deployments_WithoutConfigPath_RejectsNonSshPod()
+    {
+        await CurrentDirectoryGate.WaitAsync();
+        var previousDirectory = Environment.CurrentDirectory;
+        var tempDir = Directory.CreateTempSubdirectory("tau-pods-cli-deployments-");
+        var stdout = new StringWriter();
+        var stderr = new StringWriter();
+        var previousOut = Console.Out;
+        var previousError = Console.Error;
+
+        try
+        {
+            Environment.CurrentDirectory = tempDir.FullName;
+            Console.SetOut(stdout);
+            Console.SetError(stderr);
+            new PodsConfigStore().Save("tau.pods.json", ConfigWithHttpPod());
+
+            var exitCode = await PodsCli.RunAsync(["deployments", "http-pod"]);
+
+            Assert.Equal(1, exitCode);
+            Assert.Contains("http-pod | ok=False | Deployments require SSH-based pod.", stdout.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            Console.SetOut(previousOut);
+            Console.SetError(previousError);
+            Environment.CurrentDirectory = previousDirectory;
+            tempDir.Delete(recursive: true);
+            CurrentDirectoryGate.Release();
+        }
+    }
+
+    [Fact]
+    public async Task Deployments_MissingPodId_PrintsUsage()
+    {
+        var stderr = new StringWriter();
+        var previousError = Console.Error;
+        try
+        {
+            Console.SetError(stderr);
+            var exitCode = await PodsCli.RunAsync(["deployments"]);
+            Assert.Equal(1, exitCode);
+            Assert.Contains("Usage: deployments", stderr.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            Console.SetError(previousError);
+        }
+    }
+
+    [Fact]
+    public async Task Deployments_UnknownPod_ReportsNotFound()
+    {
+        await CurrentDirectoryGate.WaitAsync();
+        var previousDirectory = Environment.CurrentDirectory;
+        var tempDir = Directory.CreateTempSubdirectory("tau-pods-cli-deployments-unknown-");
+        var stderr = new StringWriter();
+        var previousError = Console.Error;
+
+        try
+        {
+            Environment.CurrentDirectory = tempDir.FullName;
+            Console.SetError(stderr);
+            new PodsConfigStore().Save("tau.pods.json", ConfigWithHttpPod());
+
+            var exitCode = await PodsCli.RunAsync(["deployments", "missing-pod"]);
+
+            Assert.Equal(1, exitCode);
+            Assert.Contains("Pod not found: missing-pod", stderr.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            Console.SetError(previousError);
+            Environment.CurrentDirectory = previousDirectory;
+            tempDir.Delete(recursive: true);
+            CurrentDirectoryGate.Release();
+        }
+    }
+
     private static PodsConfig ConfigWithHttpPod() => new()
     {
         Pods =

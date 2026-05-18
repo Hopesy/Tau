@@ -38,6 +38,7 @@ public static class PodsCli
             "stop" => await StopAsync(args, path, store, validator, lifecycleService).ConfigureAwait(false),
             "restart" => await RestartAsync(args, path, store, validator, lifecycleService).ConfigureAwait(false),
             "logs" => await LogsAsync(args, path, store, validator, lifecycleService).ConfigureAwait(false),
+            "deployments" => await DeploymentsAsync(args, path, store, validator, lifecycleService).ConfigureAwait(false),
             _ => Unknown(command)
         };
     }
@@ -307,6 +308,50 @@ public static class PodsCli
         return result.Success ? 0 : 1;
     }
 
+    private static async Task<int> DeploymentsAsync(string[] args, string path, PodsConfigStore store, PodsConfigValidator validator, PodLifecycleService lifecycleService)
+    {
+        var configPath = DefaultConfigPath;
+        string? podId = null;
+
+        if (args.Length >= 3 && LooksLikeConfigPath(args[1]))
+        {
+            configPath = args[1];
+            podId = args[2];
+        }
+        else if (args.Length >= 2)
+        {
+            podId = args[1];
+        }
+        else
+        {
+            Console.Error.WriteLine("Usage: deployments [path] <pod-id>");
+            return 1;
+        }
+
+        path = configPath;
+        var config = LoadOrReport(path, store, validator, out var exitCode);
+        if (config is null) return exitCode;
+
+        var pod = config.Pods.FirstOrDefault(p => p.Id.Equals(podId, StringComparison.OrdinalIgnoreCase));
+        if (pod is null)
+        {
+            Console.Error.WriteLine($"Pod not found: {podId}");
+            return 1;
+        }
+
+        var result = await lifecycleService.ListDeploymentsAsync(pod).ConfigureAwait(false);
+        Console.WriteLine($"{result.PodId} | ok={result.Success} | {result.Summary}");
+        foreach (var deployment in result.Deployments)
+        {
+            var model = deployment.Model ?? "-";
+            var status = deployment.Status ?? "-";
+            var ts = deployment.Timestamp ?? "-";
+            Console.WriteLine($"- {deployment.Name} | model={model} | status={status} | ts={ts}");
+        }
+
+        return result.Success ? 0 : 1;
+    }
+
     private static PodsConfig? LoadOrReport(string path, PodsConfigStore store, PodsConfigValidator validator, out int exitCode)
     {
         exitCode = 0;
@@ -394,6 +439,7 @@ public static class PodsCli
         Console.WriteLine("  stop [path] <id> <name>        Stop a deployment on a pod");
         Console.WriteLine("  restart [path] <id> <name>     Restart a deployment on a pod");
         Console.WriteLine("  logs [path] <id> <name> [tail] Fetch deployment logs from a pod");
+        Console.WriteLine("  deployments [path] <id>        List deployments on a pod");
     }
 
     private sealed record TargetCommandArguments(string ConfigPath, string PodId, IReadOnlyList<string> Values);
