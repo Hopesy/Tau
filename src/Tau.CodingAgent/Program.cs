@@ -1,3 +1,4 @@
+using Tau.Ai.Observability;
 using Tau.CodingAgent.Runtime;
 using Tau.Tui.Abstractions;
 using Tau.Tui.Runtime;
@@ -6,6 +7,16 @@ var terminal = new SystemConsoleTerminal();
 var keyReader = new SystemConsoleKeyReader();
 var editor = CreateInteractiveEditorIfAttached(keyReader);
 var ui = new InteractiveConsoleSession(terminal, editor);
+JsonlTauLogSink? logSink;
+try
+{
+    logSink = JsonlTauLogSink.FromEnvironment();
+}
+catch
+{
+    // A misconfigured log path must not prevent the CLI from starting.
+    logSink = null;
+}
 
 static InteractiveInputEditor? CreateInteractiveEditorIfAttached(IConsoleKeyReader keyReader)
 {
@@ -87,7 +98,7 @@ var providerId = Environment.GetEnvironmentVariable("TAU_PROVIDER") ?? session.P
 var modelId = Environment.GetEnvironmentVariable("TAU_MODEL")
               ?? (string.Equals(providerId, session.Provider, StringComparison.OrdinalIgnoreCase) ? session.Model : null)
               ?? (string.Equals(providerId, settings.DefaultProvider, StringComparison.OrdinalIgnoreCase) ? settings.DefaultModel : null);
-var runner = RuntimeCodingAgentRunner.Create(providerId, modelId, session.Messages, skills: skillStore.Load());
+var runner = RuntimeCodingAgentRunner.Create(providerId, modelId, session.Messages, skills: skillStore.Load(), logSink: logSink);
 runner.SessionName = session.Name;
 var host = new CodingAgentHost(
     ui,

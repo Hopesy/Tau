@@ -1,4 +1,7 @@
+using System.Runtime.CompilerServices;
+using Tau.Agent;
 using Tau.Ai;
+using Tau.Ai.Observability;
 using Tau.Ai.Providers;
 using Tau.Ai.Streaming;
 using Tau.Agent.Runtime;
@@ -189,6 +192,97 @@ public class RuntimeCodingAgentRunnerTests
         Assert.Contains("The conversation history before this point was compacted", text);
         Assert.Contains("summary result", text);
     }
+
+    [Fact]
+    public async Task RunAsync_EmitsRunStartAndRunEndOnHappyPath()
+    {
+        var sink = new RecordingLogSink();
+        var runner = CreateInstrumentedRunner(sink, () =>
+        {
+            var stream = new AssistantMessageStream();
+            stream.Push(new DoneEvent(new AssistantMessage([new TextContent("ok")])));
+            return stream;
+        });
+
+        var events = new List<AgentEvent>();
+        await foreach (var evt in runner.RunAsync("hello"))
+        {
+            events.Add(evt);
+        }
+
+        var startEvent = Assert.Single(sink.Events, e => e.Event == "run.start");
+        Assert.Equal("agent", startEvent.Category);
+        Assert.Equal("test-provider", startEvent.Fields["provider"]);
+        Assert.Equal("test-model", startEvent.Fields["model"]);
+        Assert.Equal("5", startEvent.Fields["inputBytes"]);
+
+        var endEvent = Assert.Single(sink.Events, e => e.Event == "run.end");
+        Assert.Equal("agent", endEvent.Category);
+        Assert.True(int.Parse(endEvent.Fields["elapsedMs"]!, System.Globalization.CultureInfo.InvariantCulture) >= 0);
+
+        Assert.DoesNotContain(sink.Events, e => e.Event == "run.error" || e.Event == "run.cancel");
+    }
+
+    [Fact]
+    public async Task RunAsync_EmitsRunErrorWhenProviderThrows()
+    {
+        var sink = new RecordingLogSink();
+        var runner = CreateInstrumentedRunner(sink, () => throw new InvalidOperationException("boom"));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+        {
+            await foreach (var _ in runner.RunAsync("hi")) { }
+        });
+
+        Assert.Contains(sink.Events, e => e.Event == "run.start");
+        var errorEvent = Assert.Single(sink.Events, e => e.Event == "run.error");
+        Assert.Equal("InvalidOperationException", errorEvent.Fields["error"]);
+        Assert.Equal("boom", errorEvent.Fields["message"]);
+        Assert.DoesNotContain(sink.Events, e => e.Event == "run.end");
+    }
+
+    private static RuntimeCodingAgentRunner CreateInstrumentedRunner(
+        ITauLogSink sink,
+        Func<AssistantMessageStream> streamFactory)
+    {
+        var model = new Model
+        {
+            Provider = "test-provider",
+            Id = "test-model",
+            Name = "Test",
+            Api = "instrumented-test"
+        };
+        var registry = new ProviderRegistry();
+        registry.Register("instrumented-test", () => new FactoryStreamProvider(streamFactory), sourceId: "test");
+        var runtime = new AgentRuntime();
+        return new RuntimeCodingAgentRunner(
+            runtime,
+            new AgentLoopConfig
+            {
+                Model = model,
+                ProviderRegistry = registry,
+                Tools = [],
+                SystemPrompt = "test",
+                StreamOptions = new SimpleStreamOptions { MaxTokens = 256 }
+            },
+            new Tau.Ai.Registry.ModelCatalog(),
+            logSink: sink);
+    }
+}
+
+file sealed class RecordingLogSink : ITauLogSink
+{
+    public List<TauLogEvent> Events { get; } = [];
+    public void Log(TauLogEvent evt) => Events.Add(evt);
+}
+
+file sealed class FactoryStreamProvider : IStreamProvider
+{
+    private readonly Func<AssistantMessageStream> _factory;
+    public FactoryStreamProvider(Func<AssistantMessageStream> factory) => _factory = factory;
+    public string Api => "instrumented-test";
+    public AssistantMessageStream Stream(Model model, LlmContext context, StreamOptions options) => _factory();
+    public AssistantMessageStream StreamSimple(Model model, LlmContext context, SimpleStreamOptions options) => _factory();
 }
 
 file sealed class CompactingTestProvider : IStreamProvider
@@ -244,5 +338,77 @@ public class WebChatStoreTests
                 File.Delete(path);
             }
         }
+    }
+
+    [Fact]
+    public async Task SendMessageStreamAsync_PersistsAssistantAndBuildsAttachmentPrompt()
+    {
+        var path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"tau-webui-{Guid.NewGuid():N}.json");
+        var store = new WebChatStore(path);
+        FakeCodingAgentRunner? runner = null;
+        var service = new WebChatService(
+            store,
+            (_, _, _) =>
+            {
+                runner = new FakeCodingAgentRunner(StreamOk);
+                return runner;
+            });
+        var session = service.CreateSession("Web stream", "openai", "gpt-5.4");
+        var attachment = new WebChatAttachmentDto(
+            "att-1",
+            "document",
+            "notes.txt",
+            "text/plain",
+            5,
+            "aGVsbG8=",
+            "hello from attachment");
+        var events = new List<WebChatStreamEventDto>();
+
+        try
+        {
+            await foreach (var streamEvent in service.SendMessageStreamAsync(
+                               session.Id,
+                               "please inspect",
+                               [attachment]))
+            {
+                events.Add(streamEvent);
+            }
+
+            Assert.Equal("user", events[0].Type);
+            Assert.Contains(events, evt => evt is { Type: "text_delta", Text: "stream ok" });
+            var done = Assert.Single(events, evt => evt.Type == "done");
+            Assert.True(done.Session?.Persisted);
+            Assert.Equal(2, done.Session?.Messages.Count);
+
+            Assert.NotNull(runner);
+            var content = Assert.Single(runner!.ContentInputs);
+            var prompt = Assert.IsType<TextContent>(content[0]).Text;
+            Assert.Contains("please inspect", prompt, StringComparison.Ordinal);
+            Assert.Contains("<file name=\"notes.txt\" mimeType=\"text/plain\" size=\"5\">", prompt, StringComparison.Ordinal);
+            Assert.Contains("hello from attachment", prompt, StringComparison.Ordinal);
+
+            var stored = Assert.Single(new WebChatStore(path).Load());
+            Assert.Equal(session.Id, stored.Id);
+            Assert.Equal(2, stored.Messages.Count);
+            Assert.Equal("stream ok", stored.Messages[1].Text);
+            Assert.Single(stored.Messages[0].Attachments!);
+        }
+        finally
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+        }
+    }
+
+    private static async IAsyncEnumerable<AgentEvent> StreamOk(
+        string input,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        await Task.Yield();
+        var partial = new AssistantMessage([new TextContent("stream ok")]);
+        yield return new MessageUpdateEvent(new TextDeltaEvent(0, "stream ok", partial));
+        yield return new AgentEndEvent();
     }
 }

@@ -144,7 +144,7 @@
 - [ ] solution build 的环境异常诊断文档化
 - [ ] provider e2e 测试（当前 Bedrock 已有 StubHandler 级 bearer/SigV4/shared profile/eventstream 回归，Vertex 已有 ADC token/SSE 回归，Gemini CLI/Antigravity 已有 headers/fallback/retry/empty-stream 回归，仍缺真实云端 e2e）
 - [ ] coding-agent 默认路径的更高层回归测试
-- [ ] 可观测性：provider 调用、auth、tool execution、session / delegation / pod probe 的最小日志
+- [~] 可观测性：provider 调用、auth、tool execution、session / delegation / pod probe 的最小日志（已补 `Tau.Ai.Observability.ITauLogSink`/`JsonlTauLogSink`/`NullTauLogSink` baseline，默认写 `./.tau/log.jsonl`，可被 `TAU_LOG_FILE` 覆盖或 `TAU_LOG_DISABLED=1` 关闭；`RuntimeCodingAgentRunner.RunAsync` 已 emit `agent/run.start|run.end|run.cancel|run.error` 含 provider/model/inputBytes/elapsedMs/error 字段；仍缺 auth status、tool execution、session 持久化、Mom delegation、Pod probe 几个面的事件）
 - [ ] `scripts/verify-dotnet.sh` 对运行态 smoke 的进一步自动化
 - [x] `scripts/verify-dotnet.ps1` 对运行态 smoke 的进一步自动化（`-RunSmoke` 已覆盖 `WebUi` 与 `Mom --once`）
 - [ ] 把 `verify-dotnet.ps1 -RunSmoke` 接到 CI 或补 bash 等价 smoke
