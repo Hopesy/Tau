@@ -8,17 +8,20 @@ public sealed class InteractiveInputEditor
     private readonly IInteractiveRenderer _renderer;
     private readonly InputHistory _history;
     private readonly InputBuffer _buffer;
+    private readonly IKeyBindingMap _bindings;
 
     public InteractiveInputEditor(
         IConsoleKeyReader reader,
         IInteractiveRenderer renderer,
         InputBuffer? buffer = null,
-        InputHistory? history = null)
+        InputHistory? history = null,
+        IKeyBindingMap? bindings = null)
     {
         _reader = reader;
         _renderer = renderer;
         _buffer = buffer ?? new InputBuffer();
         _history = history ?? new InputHistory();
+        _bindings = bindings ?? KeyBindingMap.Default;
     }
 
     public InputBuffer Buffer => _buffer;
@@ -39,72 +42,15 @@ public sealed class InteractiveInputEditor
         {
             cancellationToken.ThrowIfCancellationRequested();
             var key = await _reader.ReadKeyAsync(cancellationToken).ConfigureAwait(false);
+            var action = _bindings.Resolve(key);
 
-            // Ctrl-C cancels the line.
-            if ((key.Modifiers & ConsoleModifiers.Control) != 0 && key.Key == ConsoleKey.C)
+            switch (action)
             {
-                _renderer.Cancel();
-                _buffer.SetDraft(new string(chars.ToArray()));
-                return InputResult.Cancelled;
-            }
-
-            // Bash readline-style chord shortcuts.
-            if ((key.Modifiers & ConsoleModifiers.Control) != 0)
-            {
-                switch (key.Key)
-                {
-                    case ConsoleKey.A:
-                        cursor = 0;
-                        _renderer.Render(new string(chars.ToArray()), cursor);
-                        continue;
-                    case ConsoleKey.E:
-                        cursor = chars.Count;
-                        _renderer.Render(new string(chars.ToArray()), cursor);
-                        continue;
-                    case ConsoleKey.K:
-                        if (cursor < chars.Count)
-                        {
-                            chars.RemoveRange(cursor, chars.Count - cursor);
-                        }
-                        _renderer.Render(new string(chars.ToArray()), cursor);
-                        continue;
-                    case ConsoleKey.U:
-                        if (cursor > 0)
-                        {
-                            chars.RemoveRange(0, cursor);
-                            cursor = 0;
-                        }
-                        _renderer.Render(new string(chars.ToArray()), cursor);
-                        continue;
-                    case ConsoleKey.R:
-                    {
-                        var searchOutcome = await RunReverseSearchAsync(chars, cancellationToken).ConfigureAwait(false);
-                        chars = new List<char>(searchOutcome.Buffer);
-                        cursor = chars.Count;
-                        historyOffset = -1;
-                        if (searchOutcome.Submit)
-                        {
-                            var committed = new string(chars.ToArray());
-                            _renderer.Commit();
-                            _buffer.SetDraft(committed);
-                            _buffer.Commit();
-                            if (!string.IsNullOrWhiteSpace(committed))
-                            {
-                                _history.Add(committed);
-                            }
-                            return InputResult.Submitted(committed);
-                        }
-
-                        _renderer.WritePrompt(prompt, promptColor);
-                        _renderer.Render(new string(chars.ToArray()), cursor);
-                        continue;
-                    }
-                }
-            }
-
-            switch (key.Key)
-            {
-                case ConsoleKey.Enter:
+                case EditorAction.Cancel:
+                    _renderer.Cancel();
+                    _buffer.SetDraft(new string(chars.ToArray()));
+                    return InputResult.Cancelled;
+                case EditorAction.Submit:
                 {
                     var committed = new string(chars.ToArray());
                     _renderer.Commit();
@@ -116,63 +62,93 @@ public sealed class InteractiveInputEditor
                     }
                     return InputResult.Submitted(committed);
                 }
-                case ConsoleKey.Backspace:
-                    if ((key.Modifiers & ConsoleModifiers.Control) != 0)
+                case EditorAction.ReverseSearch:
+                {
+                    var searchOutcome = await RunReverseSearchAsync(chars, cancellationToken).ConfigureAwait(false);
+                    chars = new List<char>(searchOutcome.Buffer);
+                    cursor = chars.Count;
+                    historyOffset = -1;
+                    if (searchOutcome.Submit)
                     {
-                        var newCursor = FindPreviousWordBoundary(chars, cursor);
-                        if (newCursor < cursor)
+                        var committed = new string(chars.ToArray());
+                        _renderer.Commit();
+                        _buffer.SetDraft(committed);
+                        _buffer.Commit();
+                        if (!string.IsNullOrWhiteSpace(committed))
                         {
-                            chars.RemoveRange(newCursor, cursor - newCursor);
-                            cursor = newCursor;
+                            _history.Add(committed);
                         }
+                        return InputResult.Submitted(committed);
                     }
-                    else if (cursor > 0)
+
+                    _renderer.WritePrompt(prompt, promptColor);
+                    _renderer.Render(new string(chars.ToArray()), cursor);
+                    continue;
+                }
+                case EditorAction.KillToLineEnd:
+                    if (cursor < chars.Count)
+                    {
+                        chars.RemoveRange(cursor, chars.Count - cursor);
+                    }
+                    break;
+                case EditorAction.KillToLineStart:
+                    if (cursor > 0)
+                    {
+                        chars.RemoveRange(0, cursor);
+                        cursor = 0;
+                    }
+                    break;
+                case EditorAction.DeletePrevChar:
+                    if (cursor > 0)
                     {
                         chars.RemoveAt(cursor - 1);
                         cursor--;
                     }
                     break;
-                case ConsoleKey.Delete:
-                    if ((key.Modifiers & ConsoleModifiers.Control) != 0)
+                case EditorAction.DeletePrevWord:
+                {
+                    var newCursor = FindPreviousWordBoundary(chars, cursor);
+                    if (newCursor < cursor)
                     {
-                        var nextBoundary = FindNextWordBoundary(chars, cursor);
-                        if (nextBoundary > cursor)
-                        {
-                            chars.RemoveRange(cursor, nextBoundary - cursor);
-                        }
+                        chars.RemoveRange(newCursor, cursor - newCursor);
+                        cursor = newCursor;
                     }
-                    else if (cursor < chars.Count)
+                    break;
+                }
+                case EditorAction.DeleteNextChar:
+                    if (cursor < chars.Count)
                     {
                         chars.RemoveAt(cursor);
                     }
                     break;
-                case ConsoleKey.LeftArrow:
-                    if ((key.Modifiers & ConsoleModifiers.Control) != 0)
+                case EditorAction.DeleteNextWord:
+                {
+                    var nextBoundary = FindNextWordBoundary(chars, cursor);
+                    if (nextBoundary > cursor)
                     {
-                        cursor = FindPreviousWordBoundary(chars, cursor);
-                    }
-                    else if (cursor > 0)
-                    {
-                        cursor--;
+                        chars.RemoveRange(cursor, nextBoundary - cursor);
                     }
                     break;
-                case ConsoleKey.RightArrow:
-                    if ((key.Modifiers & ConsoleModifiers.Control) != 0)
-                    {
-                        cursor = FindNextWordBoundary(chars, cursor);
-                    }
-                    else if (cursor < chars.Count)
-                    {
-                        cursor++;
-                    }
+                }
+                case EditorAction.CursorLeft:
+                    if (cursor > 0) cursor--;
                     break;
-                case ConsoleKey.Home:
+                case EditorAction.CursorRight:
+                    if (cursor < chars.Count) cursor++;
+                    break;
+                case EditorAction.CursorPrevWord:
+                    cursor = FindPreviousWordBoundary(chars, cursor);
+                    break;
+                case EditorAction.CursorNextWord:
+                    cursor = FindNextWordBoundary(chars, cursor);
+                    break;
+                case EditorAction.CursorLineStart:
                     cursor = 0;
                     break;
-                case ConsoleKey.End:
+                case EditorAction.CursorLineEnd:
                     cursor = chars.Count;
                     break;
-                case ConsoleKey.UpArrow:
+                case EditorAction.HistoryPrev:
                 {
                     var snapshot = _history.Peek(historyOffset + 1);
                     if (snapshot is not null)
@@ -184,7 +160,7 @@ public sealed class InteractiveInputEditor
                     }
                     break;
                 }
-                case ConsoleKey.DownArrow:
+                case EditorAction.HistoryNext:
                 {
                     if (historyOffset > 0)
                     {
@@ -207,7 +183,8 @@ public sealed class InteractiveInputEditor
                     break;
                 }
                 default:
-                    if (key.KeyChar != '\0' && !char.IsControl(key.KeyChar))
+                    if (key.KeyChar != '\0' && !char.IsControl(key.KeyChar) &&
+                        (key.Modifiers & ConsoleModifiers.Control) == 0)
                     {
                         chars.Insert(cursor, key.KeyChar);
                         cursor++;

@@ -464,6 +464,50 @@ public sealed class InteractiveInputEditorTests
         Assert.Equal("apricot", result.Text);
     }
 
+    [Fact]
+    public async Task ReadLineAsync_CustomBindingMapRebindsF1ToSubmit()
+    {
+        var reader = new FakeKeyReader();
+        reader.Enqueue('h');
+        reader.Enqueue('i');
+        reader.EnqueueKey(ConsoleKey.F1);
+
+        var renderer = new FakeRenderer();
+        var bindings = KeyBindingMap.WithOverrides(new Dictionary<KeyBinding, EditorAction>
+        {
+            [new KeyBinding(ConsoleKey.F1, ConsoleModifiers.None)] = EditorAction.Submit
+        });
+        var editor = new InteractiveInputEditor(reader, renderer, bindings: bindings);
+
+        var result = await editor.ReadLineAsync("> ");
+
+        Assert.Equal(InputResultKind.Submitted, result.Kind);
+        Assert.Equal("hi", result.Text);
+    }
+
+    [Fact]
+    public async Task ReadLineAsync_CustomBindingMapDisablesEnterSubmit()
+    {
+        var reader = new FakeKeyReader();
+        reader.Enqueue('x');
+        reader.EnqueueKey(ConsoleKey.Enter);
+        reader.Enqueue('y');
+        reader.EnqueueRaw(new ConsoleKeyInfo('\x03', ConsoleKey.C, shift: false, alt: false, control: true));
+
+        var renderer = new FakeRenderer();
+        var bindings = KeyBindingMap.WithOverrides(new Dictionary<KeyBinding, EditorAction>
+        {
+            [new KeyBinding(ConsoleKey.Enter, ConsoleModifiers.None)] = EditorAction.None
+        });
+        var editor = new InteractiveInputEditor(reader, renderer, bindings: bindings);
+
+        var result = await editor.ReadLineAsync("> ");
+
+        // Enter no longer submits, so the buffer carries until Ctrl-C cancels.
+        Assert.Equal(InputResultKind.Cancelled, result.Kind);
+        Assert.Equal("xy", editor.Buffer.Draft);
+    }
+
     private sealed class FakeKeyReader : IConsoleKeyReader
     {
         private readonly Queue<ConsoleKeyInfo> _keys = new();

@@ -22,10 +22,13 @@ static InteractiveInputEditor? CreateInteractiveEditorIfAttached()
         ? new InputHistory(new FileInputHistoryStore(historyPath))
         : new InputHistory();
 
+    var bindings = KeyBindingFileStore.LoadOrDefault(ResolveKeyBindingsPath());
+
     return new InteractiveInputEditor(
         new SystemConsoleKeyReader(),
         new SystemConsoleInteractiveRenderer(),
-        history: history);
+        history: history,
+        bindings: bindings);
 }
 
 static string? ResolveHistoryPath()
@@ -38,6 +41,18 @@ static string? ResolveHistoryPath()
 
     var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
     return string.IsNullOrWhiteSpace(home) ? null : Path.Combine(home, ".tau", "coding-agent-history");
+}
+
+static string? ResolveKeyBindingsPath()
+{
+    var explicitPath = Environment.GetEnvironmentVariable("TAU_CODING_AGENT_KEYBINDINGS_FILE");
+    if (!string.IsNullOrWhiteSpace(explicitPath))
+    {
+        return explicitPath;
+    }
+
+    var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+    return string.IsNullOrWhiteSpace(home) ? null : Path.Combine(home, ".tau", "coding-agent-keybindings.json");
 }
 var sessionFile = Environment.GetEnvironmentVariable("TAU_CODING_AGENT_SESSION_FILE");
 var sessionStore = CodingAgentTreeSessionStore.IsJsonlPath(sessionFile)
