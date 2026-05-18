@@ -94,7 +94,7 @@
 - [x] auth/settings UX（`/api/auth/{provider}` 状态查询 + 前端 provider/model 切换时刷新 auth 状态；真实 login flow 仍在 Tau.Ai OAuth backlog）
 - [x] 附件体系（`WebChatAttachmentDto` + 前端 file picker/preview/remove + 发送时 base64 content + text extraction）
 - [x] session lifecycle（session delete / export JSON download / export.html / export.md / clone / search by title / import file upload / title rename / last-opened session restore baseline / clear messages 端点）
-- [~] 更高层的 WebUi 行为测试（已补 `WebChatService` fake-runner 流式消息、附件 prompt 和持久化行为测试，以及 Minimal API endpoint 的 NDJSON streaming、session 持久化、export/import/delete、rename/restore 和错误状态回归；仍缺 browser 级 WebUi flow 测试）
+- [x] 更高层的 WebUi 行为测试（已补 `WebChatService` fake-runner 流式消息、附件 prompt 和持久化行为测试、Minimal API endpoint 的 NDJSON streaming/session 持久化/export/import/delete/rename/restore/错误状态回归，以及 `tests/Tau.WebUi.Tests` 用 Microsoft.Playwright 真实 headless Chromium 跑 create session/streaming send/rename 的 browser-级 flow 测试）
 
 ### Tau.Mom
 

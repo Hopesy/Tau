@@ -14,5 +14,6 @@
     <Project Path="tests/Tau.CodingAgent.Tests/Tau.CodingAgent.Tests.csproj" />
     <Project Path="tests/Tau.Pods.Tests/Tau.Pods.Tests.csproj" />
     <Project Path="tests/Tau.Tui.Tests/Tau.Tui.Tests.csproj" />
+    <Project Path="tests/Tau.WebUi.Tests/Tau.WebUi.Tests.csproj" />
   </Folder>
 </Solution>
