@@ -1612,7 +1612,7 @@ public class CodingAgentCommandRouterTests
             Assert.Contains("tree has no entries matching filter", noMatchResult.Message, StringComparison.Ordinal);
 
             Assert.True(badSearchResult.IsError);
-            Assert.Equal("usage: /tree [max entries] [default|no-tools|user-only|labeled-only|all] [--label-time] [--search query]", badSearchResult.Message);
+            Assert.Equal("usage: /tree [max entries] [default|no-tools|user-only|labeled-only|all] [--label-time] [--search query] [--interactive]", badSearchResult.Message);
             Assert.Empty(runner.Inputs);
         }
         finally
@@ -2482,6 +2482,120 @@ public class CodingAgentCommandRouterTests
             content
                 .OfType<TextContent>()
                 .Select(static text => text.Text));
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_TreeInteractiveCommand_InvokesNavigatorAndReturnsSelection()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-coding-agent-tree-interactive-" + Guid.NewGuid().ToString("N"));
+        var treePath = Path.Combine(directory, "session.jsonl");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.MutableMessages.Add(new UserMessage("first task"));
+        runner.MutableMessages.Add(new AssistantMessage([new TextContent("ack")]));
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+            var tree = CodingAgentTreeSessionController.OpenOrCreate(treePath);
+            tree.SyncFromRunner(runner);
+
+            IReadOnlyList<CodingAgentTreeViewItem>? capturedItems = null;
+            Func<IReadOnlyList<CodingAgentTreeViewItem>, CancellationToken, Task<CodingAgentTreeInteractiveNavigator.Result>> navigator =
+                (items, _) =>
+                {
+                    capturedItems = items;
+                    return Task.FromResult(new CodingAgentTreeInteractiveNavigator.Result(items[0].EntryId, 0, 1));
+                };
+
+            var router = new CodingAgentCommandRouter(runner, treeSessionController: tree, treeNavigator: navigator);
+            var result = await router.TryHandleAsync("/tree --interactive");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.NotNull(capturedItems);
+            Assert.Equal(capturedItems![0].EntryId, ExtractSelectedEntryId(result.Message));
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_TreeInteractiveCommand_WithNavigatorCancelled_ReturnsCancelledStatus()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-coding-agent-tree-cancel-" + Guid.NewGuid().ToString("N"));
+        var treePath = Path.Combine(directory, "session.jsonl");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.MutableMessages.Add(new UserMessage("just a message"));
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+            var tree = CodingAgentTreeSessionController.OpenOrCreate(treePath);
+            tree.SyncFromRunner(runner);
+
+            var router = new CodingAgentCommandRouter(
+                runner,
+                treeSessionController: tree,
+                treeNavigator: (_, _) => Task.FromResult(new CodingAgentTreeInteractiveNavigator.Result(null, 0, 1)));
+
+            var result = await router.TryHandleAsync("/tree -i");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Contains("cancelled", result.Message, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_TreeInteractiveCommand_WithoutNavigator_ReturnsError()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-coding-agent-tree-no-nav-" + Guid.NewGuid().ToString("N"));
+        var treePath = Path.Combine(directory, "session.jsonl");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+            var tree = CodingAgentTreeSessionController.OpenOrCreate(treePath);
+            var router = new CodingAgentCommandRouter(runner, treeSessionController: tree);
+
+            var result = await router.TryHandleAsync("/tree --interactive");
+
+            Assert.True(result.Handled);
+            Assert.True(result.IsError);
+            Assert.Contains("interactive tree navigator is not available", result.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    private static string? ExtractSelectedEntryId(string? message)
+    {
+        if (string.IsNullOrEmpty(message))
+        {
+            return null;
+        }
+
+        const string prefix = "selected entry ";
+        var index = message.IndexOf(prefix, StringComparison.Ordinal);
+        return index < 0 ? null : message[(index + prefix.Length)..].Trim();
     }
 
     private static bool MessageContains(JsonElement message, string text)

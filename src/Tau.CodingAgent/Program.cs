@@ -1,11 +1,13 @@
 using Tau.CodingAgent.Runtime;
+using Tau.Tui.Abstractions;
 using Tau.Tui.Runtime;
 
 var terminal = new SystemConsoleTerminal();
-var editor = CreateInteractiveEditorIfAttached();
+var keyReader = new SystemConsoleKeyReader();
+var editor = CreateInteractiveEditorIfAttached(keyReader);
 var ui = new InteractiveConsoleSession(terminal, editor);
 
-static InteractiveInputEditor? CreateInteractiveEditorIfAttached()
+static InteractiveInputEditor? CreateInteractiveEditorIfAttached(IConsoleKeyReader keyReader)
 {
     if (Console.IsInputRedirected || Console.IsOutputRedirected)
     {
@@ -25,7 +27,7 @@ static InteractiveInputEditor? CreateInteractiveEditorIfAttached()
     var bindings = KeyBindingFileStore.LoadOrDefault(ResolveKeyBindingsPath());
 
     return new InteractiveInputEditor(
-        new SystemConsoleKeyReader(),
+        keyReader,
         new SystemConsoleInteractiveRenderer(),
         history: history,
         bindings: bindings);
@@ -53,6 +55,17 @@ static string? ResolveKeyBindingsPath()
 
     var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
     return string.IsNullOrWhiteSpace(home) ? null : Path.Combine(home, ".tau", "coding-agent-keybindings.json");
+}
+
+static Func<IReadOnlyList<CodingAgentTreeViewItem>, CancellationToken, Task<CodingAgentTreeInteractiveNavigator.Result>> CreateTreeNavigator(IConsoleKeyReader keyReader)
+{
+    var navigator = new CodingAgentTreeInteractiveNavigator();
+    return (items, cancellationToken) => navigator.NavigateAsync(
+        items,
+        keyReader,
+        Console.Out,
+        clearScreen: () => Console.Write("[2J[H"),
+        cancellationToken);
 }
 var sessionFile = Environment.GetEnvironmentVariable("TAU_CODING_AGENT_SESSION_FILE");
 var sessionStore = CodingAgentTreeSessionStore.IsJsonlPath(sessionFile)
@@ -87,7 +100,8 @@ var host = new CodingAgentHost(
     extensionCommandStore: extensionCommandStore,
     autoCompaction: CodingAgentAutoCompactionOptions.FromEnvironment(),
     retryOptions: CodingAgentRetryOptions.FromSettingsOrEnvironment(settings),
-    historySnapshotProvider: editor is null ? null : limit => editor.History.Snapshot(limit));
+    historySnapshotProvider: editor is null ? null : limit => editor.History.Snapshot(limit),
+    treeNavigator: editor is null ? null : CreateTreeNavigator(keyReader));
 using var cts = new CancellationTokenSource();
 
 Console.CancelKeyPress += (_, e) =>

@@ -17,6 +17,7 @@ public sealed class CodingAgentCommandRouter
     private readonly Action<CodingAgentRetryOptions>? _retryOptionsChanged;
     private readonly Func<int, IReadOnlyList<string>>? _historySnapshotProvider;
     private readonly Action? _clearScreenAction;
+    private readonly Func<IReadOnlyList<CodingAgentTreeViewItem>, CancellationToken, Task<CodingAgentTreeInteractiveNavigator.Result>>? _treeNavigator;
     private readonly string? _sessionFile;
     private CodingAgentRetryOptions _retryOptions;
 
@@ -34,7 +35,8 @@ public sealed class CodingAgentCommandRouter
         CodingAgentRetryOptions? retryOptions = null,
         Action<CodingAgentRetryOptions>? retryOptionsChanged = null,
         Func<int, IReadOnlyList<string>>? historySnapshotProvider = null,
-        Action? clearScreenAction = null)
+        Action? clearScreenAction = null,
+        Func<IReadOnlyList<CodingAgentTreeViewItem>, CancellationToken, Task<CodingAgentTreeInteractiveNavigator.Result>>? treeNavigator = null)
     {
         _runner = runner;
         _settingsStore = settingsStore;
@@ -49,6 +51,7 @@ public sealed class CodingAgentCommandRouter
         _retryOptionsChanged = retryOptionsChanged;
         _historySnapshotProvider = historySnapshotProvider;
         _clearScreenAction = clearScreenAction;
+        _treeNavigator = treeNavigator;
         _sessionFile = sessionFile;
     }
 
@@ -363,12 +366,32 @@ public sealed class CodingAgentCommandRouter
             return CodingAgentCommandResult.Error("tree sessions are not enabled");
         }
 
-        if (!TryParseTreeOptions(parts, GetDefaultTreeFilterMode(), out var options))
+        if (!TryParseTreeOptions(parts, GetDefaultTreeFilterMode(), out var options, out var interactive))
         {
             return CodingAgentCommandResult.Error(CodingAgentCommandCatalog.Usage("/tree"));
         }
 
         _treeSessionController.SyncFromRunner(_runner);
+
+        if (interactive)
+        {
+            if (_treeNavigator is null)
+            {
+                return CodingAgentCommandResult.Error("interactive tree navigator is not available in this mode");
+            }
+
+            var items = _treeSessionController.EnumerateView(options);
+            if (items.Count == 0)
+            {
+                return CodingAgentCommandResult.Status("tree has no entries matching filter");
+            }
+
+            var result = _treeNavigator(items, CancellationToken.None).GetAwaiter().GetResult();
+            return result.SelectedEntryId is null
+                ? CodingAgentCommandResult.Status("tree navigator cancelled")
+                : CodingAgentCommandResult.Status($"selected entry {result.SelectedEntryId}");
+        }
+
         return CodingAgentCommandResult.Status(_treeSessionController.FormatTree(options));
     }
 
@@ -1011,8 +1034,10 @@ public sealed class CodingAgentCommandRouter
     private static bool TryParseTreeOptions(
         IReadOnlyList<string> parts,
         CodingAgentTreeFilterMode defaultFilterMode,
-        out CodingAgentTreeFormatOptions options)
+        out CodingAgentTreeFormatOptions options,
+        out bool interactive)
     {
+        interactive = false;
         var maxEntries = 24;
         var filterMode = defaultFilterMode;
         var showLabelTimestamps = false;
@@ -1023,6 +1048,12 @@ public sealed class CodingAgentCommandRouter
         for (var i = 1; i < parts.Count; i++)
         {
             var part = parts[i];
+            if (IsInteractiveOption(part))
+            {
+                interactive = true;
+                continue;
+            }
+
             if (IsSearchOption(part))
             {
                 if (!string.IsNullOrWhiteSpace(searchQuery) || i == parts.Count - 1)
@@ -1087,6 +1118,10 @@ public sealed class CodingAgentCommandRouter
     private static bool IsSearchOption(string value) =>
         value.Equals("--search", StringComparison.OrdinalIgnoreCase) ||
         value.Equals("-s", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsInteractiveOption(string value) =>
+        value.Equals("--interactive", StringComparison.OrdinalIgnoreCase) ||
+        value.Equals("-i", StringComparison.OrdinalIgnoreCase);
 
     private static bool IsLabelTimestampOption(string value) =>
         value.Equals("--label-time", StringComparison.OrdinalIgnoreCase) ||

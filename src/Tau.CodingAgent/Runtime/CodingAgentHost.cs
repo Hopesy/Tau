@@ -34,7 +34,8 @@ public sealed class CodingAgentHost
         CodingAgentExtensionCommandStore? extensionCommandStore = null,
         CodingAgentAutoCompactionOptions? autoCompaction = null,
         CodingAgentRetryOptions? retryOptions = null,
-        Func<int, IReadOnlyList<string>>? historySnapshotProvider = null)
+        Func<int, IReadOnlyList<string>>? historySnapshotProvider = null,
+        Func<IReadOnlyList<CodingAgentTreeViewItem>, CancellationToken, Task<CodingAgentTreeInteractiveNavigator.Result>>? treeNavigator = null)
     {
         _ui = ui;
         _runner = runner;
@@ -58,7 +59,8 @@ public sealed class CodingAgentHost
             retryOptions: _retryOptions,
             retryOptionsChanged: options => _retryOptions = options,
             historySnapshotProvider: historySnapshotProvider,
-            clearScreenAction: () => _ui.ClearScreen());
+            clearScreenAction: () => _ui.ClearScreen(),
+            treeNavigator: treeNavigator);
     }
 
     public async Task<int> RunAsync(CancellationToken cancellationToken = default)

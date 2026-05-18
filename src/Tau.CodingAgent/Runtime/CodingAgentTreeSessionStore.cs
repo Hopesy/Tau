@@ -46,16 +46,58 @@ public sealed record CodingAgentTreeFormatOptions(
     bool ShowLabelTimestamps = false,
     string? SearchQuery = null);
 
+public sealed record CodingAgentTreeViewItem(
+    string EntryId,
+    string DisplayLine,
+    bool IsCurrentLeaf,
+    bool IsOnBranch);
+
+public sealed record CodingAgentCompactionRetentionOptions(
+    int KeepRecentTokens = 20_000,
+    int KeepRecentMessages = 4)
+{
+    private const int DefaultCompactionRetainedMessageCount = 4;
+    private const int DefaultCompactionRetainedTokenCount = 20_000;
+    private const string CompactionRetainedMessageCountEnvironmentVariable = "TAU_CODING_AGENT_COMPACT_KEEP_RECENT_MESSAGES";
+    private const string CompactionRetainedTokenCountEnvironmentVariable = "TAU_CODING_AGENT_COMPACT_KEEP_RECENT_TOKENS";
+
+    public static CodingAgentCompactionRetentionOptions FromEnvironment() =>
+        new(
+            ReadNonNegativeEnvironmentInt(
+                CompactionRetainedTokenCountEnvironmentVariable,
+                DefaultCompactionRetainedTokenCount),
+            ReadNonNegativeEnvironmentInt(
+                CompactionRetainedMessageCountEnvironmentVariable,
+                DefaultCompactionRetainedMessageCount));
+
+    private static int ReadNonNegativeEnvironmentInt(string name, int defaultValue)
+    {
+        var configured = Environment.GetEnvironmentVariable(name);
+        if (string.IsNullOrWhiteSpace(configured))
+        {
+            return defaultValue;
+        }
+
+        return int.TryParse(configured, out var parsed)
+            ? Math.Max(0, parsed)
+            : defaultValue;
+    }
+}
+
 public sealed class CodingAgentTreeSessionController
 {
+    private readonly CodingAgentCompactionRetentionOptions _compactionRetention;
     private int _persistedMessageCount;
     private string? _persistedProvider;
     private string? _persistedModel;
     private string? _persistedName;
 
-    public CodingAgentTreeSessionController(CodingAgentTreeSessionStore store)
+    public CodingAgentTreeSessionController(
+        CodingAgentTreeSessionStore store,
+        CodingAgentCompactionRetentionOptions? compactionRetention = null)
     {
         Store = store;
+        _compactionRetention = compactionRetention ?? CodingAgentCompactionRetentionOptions.FromEnvironment();
         MarkSnapshot(Store.LoadCurrentBranchSnapshot());
     }
 
@@ -63,8 +105,10 @@ public sealed class CodingAgentTreeSessionController
 
     public string Path => Store.Path;
 
-    public static CodingAgentTreeSessionController OpenOrCreate(string? path = null) =>
-        new(new CodingAgentTreeSessionStore(path));
+    public static CodingAgentTreeSessionController OpenOrCreate(
+        string? path = null,
+        CodingAgentCompactionRetentionOptions? compactionRetention = null) =>
+        new(new CodingAgentTreeSessionStore(path), compactionRetention);
 
     public CodingAgentTreeSessionSnapshot LoadSnapshot()
     {
@@ -128,15 +172,22 @@ public sealed class CodingAgentTreeSessionController
 
     public string RecordCompaction(ICodingAgentRunner runner, CodingAgentCompactionResult result)
     {
+        var firstKeptEntryId = string.IsNullOrWhiteSpace(result.FirstKeptEntryId)
+            ? Store.FindCompactionFirstKeptEntryId(
+                _compactionRetention.KeepRecentTokens,
+                _compactionRetention.KeepRecentMessages)
+            : result.FirstKeptEntryId;
+        var turnPrefixSummary = Store.CreateSplitTurnPrefixSummary(firstKeptEntryId);
         var id = Store.AppendCompaction(
             result.Summary,
-            result.FirstKeptEntryId,
+            firstKeptEntryId,
             result.TokensBefore,
-            result.FromHook);
-        _persistedMessageCount = runner.Messages.Count;
-        _persistedProvider = runner.Model.Provider;
-        _persistedModel = runner.Model.Id;
-        _persistedName = NormalizeName(runner.SessionName);
+            result.FromHook,
+            turnPrefixSummary);
+
+        var snapshot = Store.LoadCurrentBranchSnapshot();
+        runner.RestoreSession(snapshot.ToFlatSnapshot());
+        MarkSnapshot(snapshot);
         return id;
     }
 
@@ -177,6 +228,12 @@ public sealed class CodingAgentTreeSessionController
 
     public string AppendLabelChange(string entryId, string? label) => Store.AppendLabelChange(entryId, label);
 
+    public string AppendAutoRetryStart(int attempt, int maxAttempts, int delayMs, string errorMessage) =>
+        Store.AppendAutoRetryStart(attempt, maxAttempts, delayMs, errorMessage);
+
+    public string AppendAutoRetryEnd(bool success, int attempt, string? finalError = null) =>
+        Store.AppendAutoRetryEnd(success, attempt, finalError);
+
     public string? GetLabel(string entryId) => Store.GetLabel(entryId);
 
     public CodingAgentTreeSessionSummary GetSummary() => Store.GetSummary();
@@ -184,6 +241,9 @@ public sealed class CodingAgentTreeSessionController
     public string FormatTree(int maxEntries = 24) => Store.FormatTree(maxEntries);
 
     public string FormatTree(CodingAgentTreeFormatOptions options) => Store.FormatTree(options);
+
+    public IReadOnlyList<CodingAgentTreeViewItem> EnumerateView(CodingAgentTreeFormatOptions options) =>
+        Store.EnumerateView(options);
 
     private void MarkSnapshot(CodingAgentTreeSessionSnapshot snapshot)
     {
@@ -206,6 +266,8 @@ public sealed class CodingAgentTreeSessionStore
     private const string SessionInfoType = "session_info";
     private const string LabelType = "label";
     private const string CompactionType = "compaction";
+    private const string AutoRetryStartType = "auto_retry_start";
+    private const string AutoRetryEndType = "auto_retry_end";
 
     private readonly string _path;
     private readonly string _cwd;
@@ -394,7 +456,12 @@ public sealed class CodingAgentTreeSessionStore
         return state.LabelsById.TryGetValue(target.Id, out var label) ? label : null;
     }
 
-    public string AppendCompaction(string summary, string? firstKeptEntryId, int tokensBefore, bool fromHook = false)
+    public string AppendCompaction(
+        string summary,
+        string? firstKeptEntryId,
+        int tokensBefore,
+        bool fromHook = false,
+        string? turnPrefixSummary = null)
     {
         if (string.IsNullOrWhiteSpace(summary))
         {
@@ -410,12 +477,277 @@ public sealed class CodingAgentTreeSessionStore
             ParentId = state.LeafId,
             Timestamp = DateTimeOffset.UtcNow,
             Summary = summary.Trim(),
-            FirstKeptEntryId = firstKeptEntryId ?? string.Empty,
+            FirstKeptEntryId = NormalizeName(firstKeptEntryId) ?? string.Empty,
             TokensBefore = Math.Max(0, tokensBefore),
-            FromHook = fromHook ? true : null
+            FromHook = fromHook ? true : null,
+            IsSplitTurn = string.IsNullOrWhiteSpace(turnPrefixSummary) ? null : true,
+            TurnPrefixSummary = NormalizeName(turnPrefixSummary)
         };
         AppendEntry(entry);
         return id;
+    }
+
+    public string AppendAutoRetryStart(int attempt, int maxAttempts, int delayMs, string errorMessage)
+    {
+        var state = ReadState();
+        var id = CreateEntryId(state.EntryIds);
+        var entry = new CodingAgentTreeSessionEntry
+        {
+            Type = AutoRetryStartType,
+            Id = id,
+            ParentId = state.LeafId,
+            Timestamp = DateTimeOffset.UtcNow,
+            Attempt = Math.Max(1, attempt),
+            MaxAttempts = Math.Max(1, maxAttempts),
+            DelayMs = Math.Max(0, delayMs),
+            ErrorMessage = NormalizeName(errorMessage) ?? "Unknown error"
+        };
+        AppendEntry(entry);
+        return id;
+    }
+
+    public string AppendAutoRetryEnd(bool success, int attempt, string? finalError = null)
+    {
+        var state = ReadState();
+        var id = CreateEntryId(state.EntryIds);
+        var entry = new CodingAgentTreeSessionEntry
+        {
+            Type = AutoRetryEndType,
+            Id = id,
+            ParentId = state.LeafId,
+            Timestamp = DateTimeOffset.UtcNow,
+            Success = success,
+            Attempt = Math.Max(0, attempt),
+            FinalError = NormalizeName(finalError)
+        };
+        AppendEntry(entry);
+        return id;
+    }
+
+    public string? FindCompactionFirstKeptEntryId(int retainRecentTokenCount, int retainRecentMessageCount)
+    {
+        if (retainRecentTokenCount <= 0 && retainRecentMessageCount <= 0)
+        {
+            return null;
+        }
+
+        var state = ReadState();
+        var branch = state.GetBranch(state.LeafId);
+        var boundaryIndex = -1;
+        for (var i = branch.Count - 1; i >= 0; i--)
+        {
+            if (branch[i].Type == CompactionType)
+            {
+                boundaryIndex = i;
+                break;
+            }
+        }
+
+        var messageEntries = branch
+            .Skip(boundaryIndex + 1)
+            .Where(static entry => entry.Type == MessageType && entry.Message is not null)
+            .ToArray();
+
+        var tokenCutPoint = FindTokenRetentionCutPoint(messageEntries, retainRecentTokenCount);
+        if (!string.IsNullOrWhiteSpace(tokenCutPoint))
+        {
+            return tokenCutPoint;
+        }
+
+        if (retainRecentMessageCount <= 0)
+        {
+            return null;
+        }
+
+        if (messageEntries.Length <= retainRecentMessageCount)
+        {
+            return null;
+        }
+
+        return messageEntries[^retainRecentMessageCount].Id;
+    }
+
+    public string? CreateSplitTurnPrefixSummary(string? firstKeptEntryId)
+    {
+        if (string.IsNullOrWhiteSpace(firstKeptEntryId))
+        {
+            return null;
+        }
+
+        var state = ReadState();
+        var branch = state.GetBranch(state.LeafId);
+        var firstKeptIndex = -1;
+        for (var i = 0; i < branch.Count; i++)
+        {
+            if (branch[i].Id.Equals(firstKeptEntryId, StringComparison.OrdinalIgnoreCase))
+            {
+                firstKeptIndex = i;
+                break;
+            }
+        }
+
+        if (firstKeptIndex <= 0 || branch[firstKeptIndex].Type != MessageType)
+        {
+            return null;
+        }
+
+        var boundaryStart = 0;
+        for (var i = firstKeptIndex - 1; i >= 0; i--)
+        {
+            if (branch[i].Type == CompactionType)
+            {
+                boundaryStart = i + 1;
+                break;
+            }
+        }
+
+        var turnStartIndex = -1;
+        for (var i = firstKeptIndex; i >= boundaryStart; i--)
+        {
+            var entryMessage = branch[i].Message;
+            if (branch[i].Type != MessageType || entryMessage is null)
+            {
+                continue;
+            }
+
+            if (string.Equals(entryMessage.Role, "user", StringComparison.OrdinalIgnoreCase))
+            {
+                turnStartIndex = i;
+                break;
+            }
+        }
+
+        if (turnStartIndex < boundaryStart || turnStartIndex >= firstKeptIndex)
+        {
+            return null;
+        }
+
+        var prefixEntries = branch
+            .Skip(turnStartIndex)
+            .Take(firstKeptIndex - turnStartIndex)
+            .Where(static entry => entry.Type == MessageType && entry.Message is not null)
+            .ToArray();
+        if (prefixEntries.Length == 0)
+        {
+            return null;
+        }
+
+        return BuildSplitTurnPrefixSummary(prefixEntries, branch[firstKeptIndex]);
+    }
+
+    private static string? FindTokenRetentionCutPoint(
+        IReadOnlyList<CodingAgentTreeSessionEntry> messageEntries,
+        int retainRecentTokenCount)
+    {
+        if (retainRecentTokenCount <= 0)
+        {
+            return null;
+        }
+
+        var accumulatedTokens = 0;
+        for (var i = messageEntries.Count - 1; i >= 0; i--)
+        {
+            var message = CodingAgentSessionStore.ToMessage(messageEntries[i].Message!);
+            if (message is null)
+            {
+                continue;
+            }
+
+            accumulatedTokens += CodingAgentTokenEstimator.Estimate([message]);
+            if (accumulatedTokens >= retainRecentTokenCount)
+            {
+                return messageEntries[i].Id;
+            }
+        }
+
+        return null;
+    }
+
+    private static string BuildSplitTurnPrefixSummary(
+        IReadOnlyList<CodingAgentTreeSessionEntry> prefixEntries,
+        CodingAgentTreeSessionEntry firstKeptEntry)
+    {
+        var builder = new StringBuilder();
+        var originalRequest = prefixEntries
+            .Select(static entry => CodingAgentSessionStore.ToMessage(entry.Message!))
+            .OfType<UserMessage>()
+            .Select(PreviewMessage)
+            .FirstOrDefault(static text => !string.IsNullOrWhiteSpace(text));
+
+        builder.AppendLine("## Original Request");
+        builder.AppendLine(string.IsNullOrWhiteSpace(originalRequest) ? "- unavailable" : originalRequest);
+        builder.AppendLine();
+        builder.AppendLine("## Early Progress");
+
+        foreach (var entry in prefixEntries.Take(8))
+        {
+            var message = CodingAgentSessionStore.ToMessage(entry.Message!);
+            if (message is null)
+            {
+                continue;
+            }
+
+            builder.Append("- ")
+                .Append(DescribeRole(message))
+                .Append(": ")
+                .AppendLine(PreviewMessage(message));
+        }
+
+        if (prefixEntries.Count > 8)
+        {
+            builder.Append("- ... ")
+                .Append(prefixEntries.Count - 8)
+                .AppendLine(" earlier prefix messages omitted");
+        }
+
+        builder.AppendLine();
+        builder.AppendLine("## Context for Suffix");
+        builder.Append("- Retained suffix starts at ")
+            .Append(DescribeEntry(firstKeptEntry))
+            .Append(" (")
+            .Append(ShortId(firstKeptEntry.Id))
+            .AppendLine(").");
+
+        return builder.ToString().Trim();
+    }
+
+    private static string DescribeRole(ChatMessage message) =>
+        message switch
+        {
+            UserMessage => "user",
+            AssistantMessage => "assistant",
+            ToolResultMessage => "tool result",
+            _ => message.Role
+        };
+
+    private static string PreviewMessage(ChatMessage message)
+    {
+        var content = message switch
+        {
+            UserMessage user => user.Content,
+            AssistantMessage assistant => assistant.Content,
+            ToolResultMessage toolResult => toolResult.Content,
+            _ => []
+        };
+        var text = string.Join(
+                " ",
+                content.Select(static block => block switch
+                {
+                    TextContent text => text.Text,
+                    ThinkingContent thinking => thinking.Thinking,
+                    ToolCallContent toolCall => $"tool call {toolCall.Name} {toolCall.Arguments}",
+                    ImageContent image => $"image {image.MimeType}",
+                    _ => block.Type
+                }))
+            .ReplaceLineEndings(" ")
+            .Trim();
+
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            text = "(no text content)";
+        }
+
+        return text.Length <= 220 ? text : string.Concat(text.AsSpan(0, 217), "...");
     }
 
     public string StartNew(string provider, string model, string? name)
@@ -548,21 +880,54 @@ public sealed class CodingAgentTreeSessionStore
             return string.Join('\n', lines);
         }
 
+        var items = BuildViewItems(state, branchIds, options);
+        if (items.Count == 0)
+        {
+            lines.Add("tree has no entries matching filter");
+        }
+        else
+        {
+            foreach (var item in items)
+            {
+                lines.Add(item.DisplayLine);
+            }
+        }
+
+        return string.Join('\n', lines);
+    }
+
+    public IReadOnlyList<CodingAgentTreeViewItem> EnumerateView(CodingAgentTreeFormatOptions options)
+    {
+        var state = ReadState();
+        if (state.Entries.Count == 0)
+        {
+            return Array.Empty<CodingAgentTreeViewItem>();
+        }
+
+        var branchIds = state.GetBranch(state.LeafId)
+            .Select(static entry => entry.Id)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return BuildViewItems(state, branchIds, options);
+    }
+
+    private List<CodingAgentTreeViewItem> BuildViewItems(
+        TreeState state,
+        HashSet<string> branchIds,
+        CodingAgentTreeFormatOptions options)
+    {
         var filteredEntries = state.Entries
             .Where(entry => ShouldShowEntry(entry, state, options.FilterMode))
             .Where(entry => MatchesSearch(entry, state, options.SearchQuery))
             .ToArray();
         var visibleEntries = filteredEntries
             .Skip(Math.Max(0, filteredEntries.Length - Math.Max(1, options.MaxEntries)));
-        var wroteEntry = false;
+
+        var items = new List<CodingAgentTreeViewItem>();
         foreach (var entry in visibleEntries)
         {
-            wroteEntry = true;
-            var marker = entry.Id.Equals(state.LeafId, StringComparison.OrdinalIgnoreCase)
-                ? ">"
-                : branchIds.Contains(entry.Id)
-                    ? "*"
-                    : " ";
+            var isLeaf = entry.Id.Equals(state.LeafId, StringComparison.OrdinalIgnoreCase);
+            var onBranch = branchIds.Contains(entry.Id);
+            var marker = isLeaf ? ">" : onBranch ? "*" : " ";
             var depth = Math.Min(GetDepth(entry, state.ById), 16);
             var indent = new string(' ', depth * 2);
             var label = state.LabelsById.TryGetValue(entry.Id, out var resolvedLabel)
@@ -572,15 +937,11 @@ public sealed class CodingAgentTreeSessionStore
                             state.LabelTimestampsById.TryGetValue(entry.Id, out var timestamp)
                 ? $" @{timestamp}"
                 : string.Empty;
-            lines.Add($"{marker} {indent}{ShortId(entry.Id)} <- {ShortId(entry.ParentId)} {DescribeEntry(entry)}{label}{labelTime}");
+            var line = $"{marker} {indent}{ShortId(entry.Id)} <- {ShortId(entry.ParentId)} {DescribeEntry(entry)}{label}{labelTime}";
+            items.Add(new CodingAgentTreeViewItem(entry.Id, line, isLeaf, onBranch));
         }
 
-        if (!wroteEntry)
-        {
-            lines.Add("tree has no entries matching filter");
-        }
-
-        return string.Join('\n', lines);
+        return items;
     }
 
     private void EnsureSessionFile()
@@ -658,21 +1019,11 @@ public sealed class CodingAgentTreeSessionStore
         string? provider = null;
         string? model = null;
         string? name = null;
-        var messages = new List<ChatMessage>();
 
         foreach (var entry in branch)
         {
             switch (entry.Type)
             {
-                case MessageType when entry.Message is not null:
-                    var message = CodingAgentSessionStore.ToMessage(entry.Message);
-                    if (message is not null)
-                    {
-                        messages.Add(message);
-                    }
-
-                    break;
-
                 case ModelChangeType:
                     provider = entry.Provider ?? provider;
                     model = entry.Model ?? model;
@@ -688,16 +1039,10 @@ public sealed class CodingAgentTreeSessionStore
                     provider = entry.Provider ?? provider;
                     model = entry.Model ?? model;
                     break;
-                case LabelType:
-                    break;
-
-                case CompactionType:
-                    messages.Clear();
-                    messages.Add(CodingAgentCompactionMessages.CreateSummaryMessage(entry.Summary ?? string.Empty));
-                    break;
             }
         }
 
+        var messages = BuildSnapshotMessages(branch);
         return new CodingAgentTreeSessionSnapshot(
             messages,
             provider,
@@ -707,6 +1052,74 @@ public sealed class CodingAgentTreeSessionStore
             _path,
             state.LeafId,
             state.Entries.Count);
+    }
+
+    private static IReadOnlyList<ChatMessage> BuildSnapshotMessages(IReadOnlyList<CodingAgentTreeSessionEntry> branch)
+    {
+        var messages = new List<ChatMessage>();
+        var compactionIndex = -1;
+        for (var i = branch.Count - 1; i >= 0; i--)
+        {
+            if (branch[i].Type == CompactionType)
+            {
+                compactionIndex = i;
+                break;
+            }
+        }
+
+        if (compactionIndex < 0)
+        {
+            foreach (var entry in branch)
+            {
+                AppendSnapshotMessage(messages, entry);
+            }
+
+            return messages;
+        }
+
+        var compaction = branch[compactionIndex];
+        messages.Add(CodingAgentCompactionMessages.CreateSummaryMessage(
+            compaction.Summary ?? string.Empty,
+            compaction.TurnPrefixSummary));
+
+        if (!string.IsNullOrWhiteSpace(compaction.FirstKeptEntryId))
+        {
+            var foundFirstKept = false;
+            for (var i = 0; i < compactionIndex; i++)
+            {
+                var entry = branch[i];
+                if (entry.Id.Equals(compaction.FirstKeptEntryId, StringComparison.OrdinalIgnoreCase))
+                {
+                    foundFirstKept = true;
+                }
+
+                if (foundFirstKept)
+                {
+                    AppendSnapshotMessage(messages, entry);
+                }
+            }
+        }
+
+        for (var i = compactionIndex + 1; i < branch.Count; i++)
+        {
+            AppendSnapshotMessage(messages, branch[i]);
+        }
+
+        return messages;
+    }
+
+    private static void AppendSnapshotMessage(ICollection<ChatMessage> messages, CodingAgentTreeSessionEntry entry)
+    {
+        if (entry.Type != MessageType || entry.Message is null)
+        {
+            return;
+        }
+
+        var message = CodingAgentSessionStore.ToMessage(entry.Message);
+        if (message is not null)
+        {
+            messages.Add(message);
+        }
     }
 
     private void AppendEntry(CodingAgentTreeSessionEntry entry)
@@ -908,6 +1321,36 @@ public sealed class CodingAgentTreeSessionStore
             parts.Add(entry.Summary);
         }
 
+        if (!string.IsNullOrWhiteSpace(entry.ErrorMessage))
+        {
+            parts.Add(entry.ErrorMessage);
+        }
+
+        if (!string.IsNullOrWhiteSpace(entry.FinalError))
+        {
+            parts.Add(entry.FinalError);
+        }
+
+        if (entry.Attempt is not null)
+        {
+            parts.Add(entry.Attempt.Value.ToString());
+        }
+
+        if (entry.MaxAttempts is not null)
+        {
+            parts.Add(entry.MaxAttempts.Value.ToString());
+        }
+
+        if (entry.DelayMs is not null)
+        {
+            parts.Add(entry.DelayMs.Value.ToString());
+        }
+
+        if (entry.Success is not null)
+        {
+            parts.Add(entry.Success.Value ? "success" : "failed");
+        }
+
         if (entry.Message is { } message)
         {
             parts.Add(message.Role);
@@ -1004,6 +1447,8 @@ public sealed class CodingAgentTreeSessionStore
             MessageType when entry.Message is not null => $"message {entry.Message.Role} {PreviewMessage(entry.Message)}",
             ModelChangeType => $"model {entry.Provider}/{entry.Model}",
             CompactionType => $"compaction {entry.TokensBefore.GetValueOrDefault()} tokens {PreviewText(entry.Summary)}",
+            AutoRetryStartType => $"auto-retry start {entry.Attempt.GetValueOrDefault()}/{entry.MaxAttempts.GetValueOrDefault()} {entry.DelayMs.GetValueOrDefault()}ms {PreviewText(entry.ErrorMessage)}",
+            AutoRetryEndType => $"auto-retry end {(entry.Success == true ? "success" : "failed")} attempt {entry.Attempt.GetValueOrDefault()} {PreviewText(entry.FinalError)}",
             LabelType => $"label {ShortId(entry.TargetId)} {NormalizeName(entry.Label) ?? "clear"}",
             SessionInfoType when string.Equals(entry.Action, "branch", StringComparison.OrdinalIgnoreCase) => "branch",
             SessionInfoType when entry.Action is not null => $"{entry.Action} name {NormalizeName(entry.Name) ?? "none"}",
@@ -1161,6 +1606,14 @@ internal sealed class CodingAgentTreeSessionEntry
     public string? FirstKeptEntryId { get; init; }
     public int? TokensBefore { get; init; }
     public bool? FromHook { get; init; }
+    public bool? IsSplitTurn { get; init; }
+    public string? TurnPrefixSummary { get; init; }
+    public int? Attempt { get; init; }
+    public int? MaxAttempts { get; init; }
+    public int? DelayMs { get; init; }
+    public string? ErrorMessage { get; init; }
+    public bool? Success { get; init; }
+    public string? FinalError { get; init; }
 
     public CodingAgentTreeSessionEntry Clone(
         string id,
@@ -1183,7 +1636,15 @@ internal sealed class CodingAgentTreeSessionEntry
             Summary = Summary,
             FirstKeptEntryId = firstKeptEntryId ?? FirstKeptEntryId,
             TokensBefore = TokensBefore,
-            FromHook = FromHook
+            FromHook = FromHook,
+            IsSplitTurn = IsSplitTurn,
+            TurnPrefixSummary = TurnPrefixSummary,
+            Attempt = Attempt,
+            MaxAttempts = MaxAttempts,
+            DelayMs = DelayMs,
+            ErrorMessage = ErrorMessage,
+            Success = Success,
+            FinalError = FinalError
         };
 }
 
