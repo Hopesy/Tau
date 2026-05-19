@@ -129,6 +129,103 @@ public class CodingAgentTreeInteractiveNavigatorTests
     private static IReadOnlyList<CodingAgentTreeViewItem> MakeItems(params string[] ids) =>
         ids.Select(id => new CodingAgentTreeViewItem(id, $">  {id}  <- _ message", id == ids[^1], true)).ToArray();
 
+    private static IReadOnlyList<CodingAgentTreeViewItem> MakeFilterableItems() =>
+    [
+        new("u1", ">  u1  <- _ message user hello", false, true),
+        new("a1", "*  a1  <- u1 message assistant [tool-only] read_file", false, true),
+        new("t1", "*  t1  <- a1 message toolResult done", false, true),
+        new("u2", ">  u2  <- t1 message user [labeled] world", true, true),
+    ];
+
+    [Fact]
+    public async Task NavigateAsync_SlashSearchFiltersVisibleItems()
+    {
+        var items = MakeFilterableItems();
+        var reader = new FakeKeyReader();
+        // '/' triggers search, type "user", Enter confirms, then Enter selects
+        reader.EnqueueRaw(new ConsoleKeyInfo('/', ConsoleKey.Oem2, shift: false, alt: false, control: false));
+        reader.EnqueueRaw(new ConsoleKeyInfo('u', ConsoleKey.U, shift: false, alt: false, control: false));
+        reader.EnqueueRaw(new ConsoleKeyInfo('s', ConsoleKey.S, shift: false, alt: false, control: false));
+        reader.EnqueueRaw(new ConsoleKeyInfo('e', ConsoleKey.E, shift: false, alt: false, control: false));
+        reader.EnqueueRaw(new ConsoleKeyInfo('r', ConsoleKey.R, shift: false, alt: false, control: false));
+        reader.EnqueueKey(ConsoleKey.Enter); // confirm search
+        reader.EnqueueKey(ConsoleKey.Enter); // select
+
+        var navigator = new CodingAgentTreeInteractiveNavigator();
+        var result = await navigator.NavigateAsync(items, reader, new StringWriter());
+
+        // Only user entries match "user", last one selected by default
+        Assert.Equal("u2", result.SelectedEntryId);
+    }
+
+    [Fact]
+    public async Task NavigateAsync_EscapeClearsSearchAndRestoresFullList()
+    {
+        var items = MakeFilterableItems();
+        var reader = new FakeKeyReader();
+        // Search for "user"
+        reader.EnqueueRaw(new ConsoleKeyInfo('/', ConsoleKey.Oem2, shift: false, alt: false, control: false));
+        reader.EnqueueRaw(new ConsoleKeyInfo('u', ConsoleKey.U, shift: false, alt: false, control: false));
+        reader.EnqueueRaw(new ConsoleKeyInfo('s', ConsoleKey.S, shift: false, alt: false, control: false));
+        reader.EnqueueRaw(new ConsoleKeyInfo('e', ConsoleKey.E, shift: false, alt: false, control: false));
+        reader.EnqueueRaw(new ConsoleKeyInfo('r', ConsoleKey.R, shift: false, alt: false, control: false));
+        reader.EnqueueKey(ConsoleKey.Enter); // confirm search
+        // Escape clears search
+        reader.EnqueueKey(ConsoleKey.Escape);
+        // Now select — should be back to full list
+        reader.EnqueueKey(ConsoleKey.Enter);
+
+        var writer = new StringWriter();
+        var navigator = new CodingAgentTreeInteractiveNavigator();
+        var result = await navigator.NavigateAsync(items, reader, writer);
+
+        // After clearing search, last item in full list is selected
+        Assert.Equal("u2", result.SelectedEntryId);
+        var rendered = writer.ToString();
+        Assert.Contains("4 entries", rendered, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task NavigateAsync_FCyclesFilterModes()
+    {
+        var items = MakeFilterableItems();
+        var reader = new FakeKeyReader();
+        // Press 'f' once → no-tools (removes toolResult and tool-only assistant)
+        reader.EnqueueRaw(new ConsoleKeyInfo('f', ConsoleKey.F, shift: false, alt: false, control: false));
+        reader.EnqueueKey(ConsoleKey.Enter);
+
+        var writer = new StringWriter();
+        var navigator = new CodingAgentTreeInteractiveNavigator();
+        var result = await navigator.NavigateAsync(items, reader, writer);
+
+        // no-tools filter removes a1 (tool-only) and t1 (toolResult), leaves u1 and u2
+        Assert.Equal("u2", result.SelectedEntryId);
+        var rendered = writer.ToString();
+        Assert.Contains("filter=notools", rendered, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("2 entries", rendered, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task NavigateAsync_NMovesToNextMatchInFilteredList()
+    {
+        var items = MakeFilterableItems();
+        var reader = new FakeKeyReader();
+        // Search for "message"
+        reader.EnqueueRaw(new ConsoleKeyInfo('/', ConsoleKey.Oem2, shift: false, alt: false, control: false));
+        reader.EnqueueRaw(new ConsoleKeyInfo('m', ConsoleKey.M, shift: false, alt: false, control: false));
+        reader.EnqueueRaw(new ConsoleKeyInfo('e', ConsoleKey.E, shift: false, alt: false, control: false));
+        reader.EnqueueRaw(new ConsoleKeyInfo('s', ConsoleKey.S, shift: false, alt: false, control: false));
+        reader.EnqueueKey(ConsoleKey.Enter); // confirm search — all 4 match
+        // n wraps forward from last (index 3) to first (index 0)
+        reader.EnqueueRaw(new ConsoleKeyInfo('n', ConsoleKey.N, shift: false, alt: false, control: false));
+        reader.EnqueueKey(ConsoleKey.Enter);
+
+        var navigator = new CodingAgentTreeInteractiveNavigator();
+        var result = await navigator.NavigateAsync(items, reader, new StringWriter());
+
+        Assert.Equal("u1", result.SelectedEntryId);
+    }
+
     private sealed class FakeKeyReader : IConsoleKeyReader
     {
         private readonly Queue<ConsoleKeyInfo> _keys = new();
