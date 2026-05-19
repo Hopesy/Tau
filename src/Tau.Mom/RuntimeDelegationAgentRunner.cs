@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Text;
 using Tau.Agent;
 using Tau.Ai;
+using Tau.Ai.Observability;
 using Tau.Ai.Registry;
 using Tau.CodingAgent.Runtime;
 
@@ -11,6 +12,7 @@ public sealed class RuntimeDelegationAgentRunner : IDelegationAgentRunner
 {
     private readonly Func<string, string, string, Action<string, string?>, ICodingAgentRunner> _runnerFactory;
     private readonly MomOptions _options;
+    private readonly ITauLogSink _logSink;
 
     public RuntimeDelegationAgentRunner()
         : this(new MomOptions())
@@ -40,9 +42,18 @@ public sealed class RuntimeDelegationAgentRunner : IDelegationAgentRunner
     public RuntimeDelegationAgentRunner(
         MomOptions options,
         Func<string, string, string, Action<string, string?>, ICodingAgentRunner> runnerFactory)
+        : this(options, runnerFactory, logSink: null)
+    {
+    }
+
+    public RuntimeDelegationAgentRunner(
+        MomOptions options,
+        Func<string, string, string, Action<string, string?>, ICodingAgentRunner> runnerFactory,
+        ITauLogSink? logSink)
     {
         _options = options;
         _runnerFactory = runnerFactory;
+        _logSink = logSink ?? NullTauLogSink.Instance;
     }
 
     public async Task<DelegationExecution> ExecuteAsync(DelegationRequest request, CancellationToken cancellationToken = default)
@@ -63,6 +74,18 @@ public sealed class RuntimeDelegationAgentRunner : IDelegationAgentRunner
         var workingDirectory = string.IsNullOrWhiteSpace(request.WorkingDirectory)
             ? Directory.GetCurrentDirectory()
             : Path.GetFullPath(request.WorkingDirectory);
+
+        _logSink.Log(new TauLogEvent(
+            "mom",
+            "delegation.start",
+            DateTimeOffset.UtcNow,
+            new Dictionary<string, string?>
+            {
+                ["provider"] = provider,
+                ["model"] = model,
+                ["workingDirectory"] = workingDirectory,
+                ["title"] = request.Title
+            }));
 
         try
         {
@@ -152,6 +175,20 @@ public sealed class RuntimeDelegationAgentRunner : IDelegationAgentRunner
             error = ex.Message;
             stopReason ??= "error";
         }
+
+        _logSink.Log(new TauLogEvent(
+            "mom",
+            "delegation.end",
+            DateTimeOffset.UtcNow,
+            new Dictionary<string, string?>
+            {
+                ["provider"] = provider,
+                ["model"] = model,
+                ["stopReason"] = stopReason,
+                ["error"] = error,
+                ["elapsedMs"] = stopwatch.ElapsedMilliseconds.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                ["toolCalls"] = toolEvents.Count(e => e.Phase == "start").ToString(System.Globalization.CultureInfo.InvariantCulture)
+            }));
 
         return new DelegationExecution(
             responseBuilder.ToString(),
