@@ -5,6 +5,8 @@ namespace Tau.CodingAgent.Runtime;
 
 public sealed class CodingAgentTreeInteractiveNavigator
 {
+    private const int PageStep = 5;
+
     private static readonly CodingAgentTreeFilterMode[] FilterCycle =
     [
         CodingAgentTreeFilterMode.Default,
@@ -66,6 +68,53 @@ public sealed class CodingAgentTreeInteractiveNavigator
                 case ConsoleKey.End:
                     selected = visibleItems.Count - 1;
                     break;
+                case ConsoleKey.LeftArrow:
+                    if (IsBranchNavigationModifier(key))
+                    {
+                        var currentEntryId = visibleItems.Count > 0 ? visibleItems[selected].EntryId : null;
+                        var navigation = BuildVisibleNavigation(items, visibleItems);
+                        if (currentEntryId is not null && IsSegmentFoldable(currentEntryId, navigation) && !foldedEntryIds.Contains(currentEntryId))
+                        {
+                            foldedEntryIds.Add(currentEntryId);
+                            visibleItems = ApplyFilter(items, FilterCycle[filterIndex], searchPattern, foldedEntryIds);
+                            selected = FindIndexById(visibleItems, currentEntryId);
+                        }
+                        else if (visibleItems.Count > 0)
+                        {
+                            selected = FindBranchSegmentStart(visibleItems, selected, navigation, direction: -1);
+                        }
+                    }
+                    else if (visibleItems.Count > 0)
+                    {
+                        selected = Math.Max(0, selected - PageStep);
+                    }
+                    break;
+                case ConsoleKey.RightArrow:
+                    if (IsBranchNavigationModifier(key))
+                    {
+                        var currentEntryId = visibleItems.Count > 0 ? visibleItems[selected].EntryId : null;
+                        var navigation = BuildVisibleNavigation(items, visibleItems);
+                        if (currentEntryId is not null && foldedEntryIds.Remove(currentEntryId))
+                        {
+                            visibleItems = ApplyFilter(items, FilterCycle[filterIndex], searchPattern, foldedEntryIds);
+                            selected = FindIndexById(visibleItems, currentEntryId);
+                        }
+                        else if (visibleItems.Count > 0)
+                        {
+                            selected = FindBranchSegmentStart(visibleItems, selected, navigation, direction: 1);
+                        }
+                    }
+                    else if (visibleItems.Count > 0)
+                    {
+                        selected = Math.Min(visibleItems.Count - 1, selected + PageStep);
+                    }
+                    break;
+                case ConsoleKey.PageUp:
+                    if (visibleItems.Count > 0) selected = Math.Max(0, selected - PageStep);
+                    break;
+                case ConsoleKey.PageDown:
+                    if (visibleItems.Count > 0) selected = Math.Min(visibleItems.Count - 1, selected + PageStep);
+                    break;
                 case ConsoleKey.Enter:
                     writer.WriteLine();
                     return visibleItems.Count == 0
@@ -79,6 +128,7 @@ public sealed class CodingAgentTreeInteractiveNavigator
                     {
                         var currentId = visibleItems.Count > 0 ? visibleItems[selected].EntryId : null;
                         searchPattern = null;
+                        foldedEntryIds.Clear();
                         visibleItems = ApplyFilter(items, FilterCycle[filterIndex], null, foldedEntryIds);
                         selected = FindIndexById(visibleItems, currentId);
                     }
@@ -93,6 +143,7 @@ public sealed class CodingAgentTreeInteractiveNavigator
                     {
                         var currentEntryId = visibleItems.Count > 0 ? visibleItems[selected].EntryId : null;
                         filterIndex = (filterIndex + 1) % FilterCycle.Length;
+                        foldedEntryIds.Clear();
                         visibleItems = ApplyFilter(items, FilterCycle[filterIndex], searchPattern, foldedEntryIds);
                         selected = FindIndexById(visibleItems, currentEntryId);
                     }
@@ -106,6 +157,7 @@ public sealed class CodingAgentTreeInteractiveNavigator
                     searchPattern = await ReadSearchPatternAsync(reader, writer, cancellationToken).ConfigureAwait(false);
                     if (searchPattern is not null)
                     {
+                        foldedEntryIds.Clear();
                         visibleItems = ApplyFilter(items, FilterCycle[filterIndex], searchPattern, foldedEntryIds);
                         selected = visibleItems.Count > 0 ? visibleItems.Count - 1 : 0;
                     }
@@ -218,6 +270,144 @@ public sealed class CodingAgentTreeInteractiveNavigator
         return filtered.ToArray();
     }
 
+    private sealed record VisibleNavigation(
+        IReadOnlyDictionary<string, CodingAgentTreeViewItem> AllById,
+        IReadOnlyDictionary<string, string?> VisibleParentById,
+        IReadOnlyDictionary<string, IReadOnlyList<string>> VisibleChildrenById);
+
+    private static bool IsBranchNavigationModifier(ConsoleKeyInfo key) =>
+        (key.Modifiers & (ConsoleModifiers.Control | ConsoleModifiers.Alt)) != 0;
+
+    private static VisibleNavigation BuildVisibleNavigation(
+        IReadOnlyList<CodingAgentTreeViewItem> allItems,
+        IReadOnlyList<CodingAgentTreeViewItem> visibleItems)
+    {
+        var allById = allItems.ToDictionary(static item => item.EntryId, StringComparer.OrdinalIgnoreCase);
+        var visibleIds = visibleItems.Select(static item => item.EntryId).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var visibleParentById = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+        var visibleChildrenById = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+
+        static void AddChild(IDictionary<string, List<string>> childrenById, string? parentId, string childId)
+        {
+            var key = parentId ?? string.Empty;
+            if (!childrenById.TryGetValue(key, out var children))
+            {
+                children = [];
+                childrenById[key] = children;
+            }
+
+            children.Add(childId);
+        }
+
+        foreach (var item in visibleItems)
+        {
+            var parentId = FindNearestVisibleParent(item, allById, visibleIds);
+            visibleParentById[item.EntryId] = parentId;
+            AddChild(visibleChildrenById, parentId, item.EntryId);
+        }
+
+        var readonlyChildren = visibleChildrenById.ToDictionary(
+            static pair => pair.Key,
+            static pair => (IReadOnlyList<string>)pair.Value,
+            StringComparer.OrdinalIgnoreCase);
+
+        return new VisibleNavigation(allById, visibleParentById, readonlyChildren);
+    }
+
+    private static string? FindNearestVisibleParent(
+        CodingAgentTreeViewItem item,
+        IReadOnlyDictionary<string, CodingAgentTreeViewItem> allById,
+        IReadOnlySet<string> visibleIds)
+    {
+        var parentId = item.ParentEntryId;
+        var guard = 0;
+        while (!string.IsNullOrWhiteSpace(parentId) && guard++ < 256)
+        {
+            if (visibleIds.Contains(parentId))
+            {
+                return parentId;
+            }
+
+            parentId = allById.TryGetValue(parentId, out var parent) ? parent.ParentEntryId : null;
+        }
+
+        return null;
+    }
+
+    private static bool IsSegmentFoldable(string entryId, VisibleNavigation navigation)
+    {
+        if (!GetVisibleChildren(navigation, entryId).Any())
+        {
+            return false;
+        }
+
+        if (!navigation.VisibleParentById.TryGetValue(entryId, out var parentId) || parentId is null)
+        {
+            return true;
+        }
+
+        return GetVisibleChildren(navigation, parentId).Count > 1;
+    }
+
+    private static int FindBranchSegmentStart(
+        IReadOnlyList<CodingAgentTreeViewItem> visibleItems,
+        int selected,
+        VisibleNavigation navigation,
+        int direction)
+    {
+        if (visibleItems.Count == 0)
+        {
+            return 0;
+        }
+
+        var indexById = visibleItems
+            .Select(static (item, index) => new { item.EntryId, index })
+            .ToDictionary(static item => item.EntryId, static item => item.index, StringComparer.OrdinalIgnoreCase);
+        var currentId = visibleItems[selected].EntryId;
+
+        if (direction > 0)
+        {
+            while (true)
+            {
+                var children = GetVisibleChildren(navigation, currentId);
+                if (children.Count == 0)
+                {
+                    return indexById[currentId];
+                }
+
+                if (children.Count > 1)
+                {
+                    return indexById[children[0]];
+                }
+
+                currentId = children[0];
+            }
+        }
+
+        while (true)
+        {
+            if (!navigation.VisibleParentById.TryGetValue(currentId, out var parentId) || parentId is null)
+            {
+                return indexById[currentId];
+            }
+
+            var siblings = GetVisibleChildren(navigation, parentId);
+            if (siblings.Count > 1)
+            {
+                var segmentIndex = indexById[currentId];
+                if (segmentIndex < selected)
+                {
+                    return segmentIndex;
+                }
+            }
+
+            currentId = parentId;
+        }
+    }
+
+    private static IReadOnlyList<string> GetVisibleChildren(VisibleNavigation navigation, string? parentId) =>
+        navigation.VisibleChildrenById.TryGetValue(parentId ?? string.Empty, out var children) ? children : [];
+
     private static void ToggleFold(
         IReadOnlyList<CodingAgentTreeViewItem> items,
         string entryId,
@@ -309,7 +499,7 @@ public sealed class CodingAgentTreeInteractiveNavigator
             ? $", entry {items[selected].EntryId}, type {FormatEntryType(items[selected])}, depth {items[selected].Depth}{FormatSelectedFlags(items[selected])}"
             : string.Empty;
         var foldedLabel = foldedEntryIds.Count > 0 ? $", folded {foldedEntryIds.Count}" : string.Empty;
-        builder.AppendLine($"tree navigator: {items.Count} entries, {countLabel}{selectedMeta}, filter={filterLabel}{searchLabel}{foldedLabel} - j/k move, f filter, / search, n/N next/prev, Space fold, Enter select, q quit");
+        builder.AppendLine($"tree navigator: {items.Count} entries, {countLabel}{selectedMeta}, filter={filterLabel}{searchLabel}{foldedLabel} - j/k move, Left/Right page, Ctrl/Alt+Left/Right branch, f filter, / search, n/N next/prev, Space fold, Enter select, q quit");
 
         if (items.Count == 0)
         {

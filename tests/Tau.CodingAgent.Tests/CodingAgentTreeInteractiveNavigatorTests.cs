@@ -145,6 +145,16 @@ public class CodingAgentTreeInteractiveNavigatorTests
         new("sibling", ">    sibling <- root message user follow-up", true, true, "root", 1, "message"),
     ];
 
+    private static IReadOnlyList<CodingAgentTreeViewItem> MakeBranchItems() =>
+    [
+        new("root", ">  root <- _ message user root", false, true, null, 0, "message"),
+        new("a1", "*    a1 <- root message user branch-a", false, true, "root", 1, "message"),
+        new("a2", "*      a2 <- a1 message assistant branch-a-response", false, true, "a1", 2, "message"),
+        new("a3", "*      a3 <- a2 message user branch-a-deep", true, true, "a2", 2, "message"),
+        new("b1", ">    b1 <- root message user branch-b", false, false, "root", 1, "message"),
+        new("b2", ">      b2 <- b1 message assistant branch-b-response", false, false, "b1", 2, "message"),
+    ];
+
     [Fact]
     public async Task NavigateAsync_SlashSearchFiltersVisibleItems()
     {
@@ -293,6 +303,152 @@ public class CodingAgentTreeInteractiveNavigatorTests
         var rendered = writer.ToString();
         Assert.Contains("4 entries", rendered, StringComparison.Ordinal);
         Assert.Contains("entry sibling, type message, depth 1, leaf", rendered, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task NavigateAsync_PageKeysMoveByWindowStep()
+    {
+        var items = MakeItems("a", "b", "c", "d", "e", "f", "g");
+        var reader = new FakeKeyReader();
+        reader.EnqueueKey(ConsoleKey.PageUp);
+        reader.EnqueueKey(ConsoleKey.Enter);
+
+        var navigator = new CodingAgentTreeInteractiveNavigator();
+        var result = await navigator.NavigateAsync(items, reader, new StringWriter());
+
+        Assert.Equal("b", result.SelectedEntryId);
+
+        reader = new FakeKeyReader();
+        reader.EnqueueRaw(new ConsoleKeyInfo('g', ConsoleKey.G, shift: false, alt: false, control: false));
+        reader.EnqueueKey(ConsoleKey.PageDown);
+        reader.EnqueueKey(ConsoleKey.Enter);
+
+        result = await navigator.NavigateAsync(items, reader, new StringWriter());
+
+        Assert.Equal("f", result.SelectedEntryId);
+    }
+
+    [Fact]
+    public async Task NavigateAsync_LeftRightArrowsPageSelection()
+    {
+        var items = MakeItems("a", "b", "c", "d", "e", "f", "g");
+        var reader = new FakeKeyReader();
+        reader.EnqueueKey(ConsoleKey.LeftArrow);
+        reader.EnqueueKey(ConsoleKey.Enter);
+
+        var navigator = new CodingAgentTreeInteractiveNavigator();
+        var result = await navigator.NavigateAsync(items, reader, new StringWriter());
+
+        Assert.Equal("b", result.SelectedEntryId);
+
+        reader = new FakeKeyReader();
+        reader.EnqueueRaw(new ConsoleKeyInfo('g', ConsoleKey.G, shift: false, alt: false, control: false));
+        reader.EnqueueKey(ConsoleKey.RightArrow);
+        reader.EnqueueKey(ConsoleKey.Enter);
+
+        result = await navigator.NavigateAsync(items, reader, new StringWriter());
+
+        Assert.Equal("f", result.SelectedEntryId);
+    }
+
+    [Fact]
+    public async Task NavigateAsync_CtrlLeftFoldsOrJumpsToPreviousBranchSegment()
+    {
+        var items = MakeBranchItems();
+        var reader = new FakeKeyReader();
+        reader.EnqueueRaw(new ConsoleKeyInfo('\0', ConsoleKey.LeftArrow, shift: false, alt: false, control: true));
+        reader.EnqueueRaw(new ConsoleKeyInfo('\0', ConsoleKey.LeftArrow, shift: false, alt: false, control: true));
+        reader.EnqueueRaw(new ConsoleKeyInfo('\0', ConsoleKey.LeftArrow, shift: false, alt: false, control: true));
+        reader.EnqueueKey(ConsoleKey.Enter);
+
+        var writer = new StringWriter();
+        var navigator = new CodingAgentTreeInteractiveNavigator();
+        var result = await navigator.NavigateAsync(items, reader, writer);
+
+        Assert.Equal("root", result.SelectedEntryId);
+        var rendered = writer.ToString();
+        Assert.Contains("b1 <- root message user branch-b [folded]", rendered, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task NavigateAsync_CtrlRightUnfoldsOrJumpsToNextBranchSegmentEnd()
+    {
+        var items = MakeBranchItems();
+        var reader = new FakeKeyReader();
+        reader.EnqueueRaw(new ConsoleKeyInfo('g', ConsoleKey.G, shift: false, alt: false, control: false));
+        reader.EnqueueKey(ConsoleKey.DownArrow);
+        reader.EnqueueRaw(new ConsoleKeyInfo('\0', ConsoleKey.LeftArrow, shift: false, alt: false, control: true));
+        reader.EnqueueKey(ConsoleKey.DownArrow);
+        reader.EnqueueKey(ConsoleKey.UpArrow);
+        reader.EnqueueRaw(new ConsoleKeyInfo('\0', ConsoleKey.RightArrow, shift: false, alt: false, control: true));
+        reader.EnqueueKey(ConsoleKey.DownArrow);
+        reader.EnqueueRaw(new ConsoleKeyInfo('\0', ConsoleKey.RightArrow, shift: false, alt: false, control: true));
+        reader.EnqueueKey(ConsoleKey.Enter);
+
+        var writer = new StringWriter();
+        var navigator = new CodingAgentTreeInteractiveNavigator();
+        var result = await navigator.NavigateAsync(items, reader, writer);
+
+        Assert.Equal("a3", result.SelectedEntryId);
+        var rendered = writer.ToString();
+        Assert.Contains("6 entries", rendered, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task NavigateAsync_AltLeftRightAreBranchNavigationAliases()
+    {
+        var items = MakeBranchItems();
+        var reader = new FakeKeyReader();
+        reader.EnqueueRaw(new ConsoleKeyInfo('\0', ConsoleKey.LeftArrow, shift: false, alt: true, control: false));
+        reader.EnqueueRaw(new ConsoleKeyInfo('\0', ConsoleKey.LeftArrow, shift: false, alt: true, control: false));
+        reader.EnqueueRaw(new ConsoleKeyInfo('\0', ConsoleKey.RightArrow, shift: false, alt: true, control: false));
+        reader.EnqueueKey(ConsoleKey.Enter);
+
+        var navigator = new CodingAgentTreeInteractiveNavigator();
+        var result = await navigator.NavigateAsync(items, reader, new StringWriter());
+
+        Assert.Equal("b1", result.SelectedEntryId);
+    }
+
+    [Fact]
+    public async Task NavigateAsync_SearchAndFilterResetFoldState()
+    {
+        var items = MakeBranchItems();
+        var reader = new FakeKeyReader();
+        reader.EnqueueRaw(new ConsoleKeyInfo('g', ConsoleKey.G, shift: false, alt: false, control: false));
+        reader.EnqueueKey(ConsoleKey.DownArrow);
+        reader.EnqueueRaw(new ConsoleKeyInfo(' ', ConsoleKey.Spacebar, shift: false, alt: false, control: false));
+        reader.EnqueueRaw(new ConsoleKeyInfo('/', ConsoleKey.Oem2, shift: false, alt: false, control: false));
+        reader.EnqueueRaw(new ConsoleKeyInfo('b', ConsoleKey.B, shift: false, alt: false, control: false));
+        reader.EnqueueKey(ConsoleKey.Enter);
+        reader.EnqueueKey(ConsoleKey.Escape);
+        reader.EnqueueRaw(new ConsoleKeyInfo('g', ConsoleKey.G, shift: false, alt: false, control: false));
+        reader.EnqueueKey(ConsoleKey.DownArrow);
+        reader.EnqueueKey(ConsoleKey.DownArrow);
+        reader.EnqueueKey(ConsoleKey.Enter);
+
+        var navigator = new CodingAgentTreeInteractiveNavigator();
+        var result = await navigator.NavigateAsync(items, reader, new StringWriter());
+
+        Assert.Equal("a2", result.SelectedEntryId);
+
+        reader = new FakeKeyReader();
+        reader.EnqueueRaw(new ConsoleKeyInfo('g', ConsoleKey.G, shift: false, alt: false, control: false));
+        reader.EnqueueKey(ConsoleKey.DownArrow);
+        reader.EnqueueRaw(new ConsoleKeyInfo(' ', ConsoleKey.Spacebar, shift: false, alt: false, control: false));
+        reader.EnqueueRaw(new ConsoleKeyInfo('f', ConsoleKey.F, shift: false, alt: false, control: false));
+        reader.EnqueueRaw(new ConsoleKeyInfo('f', ConsoleKey.F, shift: false, alt: false, control: false));
+        reader.EnqueueRaw(new ConsoleKeyInfo('f', ConsoleKey.F, shift: false, alt: false, control: false));
+        reader.EnqueueRaw(new ConsoleKeyInfo('f', ConsoleKey.F, shift: false, alt: false, control: false));
+        reader.EnqueueRaw(new ConsoleKeyInfo('f', ConsoleKey.F, shift: false, alt: false, control: false));
+        reader.EnqueueRaw(new ConsoleKeyInfo('g', ConsoleKey.G, shift: false, alt: false, control: false));
+        reader.EnqueueKey(ConsoleKey.DownArrow);
+        reader.EnqueueKey(ConsoleKey.DownArrow);
+        reader.EnqueueKey(ConsoleKey.Enter);
+
+        result = await navigator.NavigateAsync(items, reader, new StringWriter());
+
+        Assert.Equal("a2", result.SelectedEntryId);
     }
 
     private sealed class FakeKeyReader : IConsoleKeyReader
