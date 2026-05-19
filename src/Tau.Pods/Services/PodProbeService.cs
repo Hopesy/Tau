@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Net.Sockets;
+using Tau.Ai.Observability;
 using Tau.Pods.Models;
 
 namespace Tau.Pods.Services;
@@ -7,10 +8,12 @@ namespace Tau.Pods.Services;
 public sealed class PodProbeService
 {
     private readonly HttpClient _httpClient;
+    private readonly ITauLogSink _logSink;
 
-    public PodProbeService(HttpClient? httpClient = null)
+    public PodProbeService(HttpClient? httpClient = null, ITauLogSink? logSink = null)
     {
         _httpClient = httpClient ?? new HttpClient();
+        _logSink = logSink ?? NullTauLogSink.Instance;
     }
 
     public Task<IReadOnlyList<PodProbeResult>> ProbeAsync(PodsConfig config, CancellationToken cancellationToken = default)
@@ -26,12 +29,39 @@ public sealed class PodProbeService
 
     public async Task<PodProbeResult> ProbePodAsync(PodDefinition pod, CancellationToken cancellationToken = default)
     {
+        _logSink.Log(new TauLogEvent(
+            "pod",
+            "probe.start",
+            DateTimeOffset.UtcNow,
+            new Dictionary<string, string?>
+            {
+                ["podId"] = pod.Id,
+                ["transport"] = !string.IsNullOrWhiteSpace(pod.Endpoint) ? "http" : "tcp"
+            }));
+
+        PodProbeResult result;
         if (!string.IsNullOrWhiteSpace(pod.Endpoint))
         {
-            return await ProbeEndpointAsync(pod, cancellationToken).ConfigureAwait(false);
+            result = await ProbeEndpointAsync(pod, cancellationToken).ConfigureAwait(false);
+        }
+        else
+        {
+            result = await ProbeSshAsync(pod, cancellationToken).ConfigureAwait(false);
         }
 
-        return await ProbeSshAsync(pod, cancellationToken).ConfigureAwait(false);
+        _logSink.Log(new TauLogEvent(
+            "pod",
+            "probe.end",
+            DateTimeOffset.UtcNow,
+            new Dictionary<string, string?>
+            {
+                ["podId"] = pod.Id,
+                ["success"] = result.Success ? "true" : "false",
+                ["transport"] = result.Transport,
+                ["latencyMs"] = result.Latency?.TotalMilliseconds.ToString("F0", System.Globalization.CultureInfo.InvariantCulture)
+            }));
+
+        return result;
     }
 
     private async Task<PodProbeResult> ProbeEndpointAsync(PodDefinition pod, CancellationToken cancellationToken)

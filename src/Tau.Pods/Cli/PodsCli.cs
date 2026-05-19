@@ -12,7 +12,16 @@ public static class PodsCli
     {
         var store = new PodsConfigStore();
         var validator = new PodsConfigValidator();
-        var probeService = new PodProbeService();
+        Tau.Ai.Observability.JsonlTauLogSink? logSink;
+        try
+        {
+            logSink = Tau.Ai.Observability.JsonlTauLogSink.FromEnvironment();
+        }
+        catch
+        {
+            logSink = null;
+        }
+        var probeService = new PodProbeService(logSink: logSink);
         var execService = new PodExecService();
         var lifecycleService = new PodLifecycleService(execService);
 

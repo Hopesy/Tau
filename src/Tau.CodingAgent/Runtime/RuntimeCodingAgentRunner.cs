@@ -29,7 +29,7 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner
         _runtime = runtime;
         _config = config;
         _modelCatalog = modelCatalog;
-        _authResolver = authResolver ?? new ProviderAuthResolver();
+        _authResolver = authResolver ?? new ProviderAuthResolver(logSink: logSink);
         _logSink = logSink ?? NullTauLogSink.Instance;
     }
 

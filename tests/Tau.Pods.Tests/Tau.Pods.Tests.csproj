@@ -20,6 +20,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Tau.Pods\Tau.Pods.csproj" />
+    <ProjectReference Include="..\..\src\Tau.Ai\Tau.Ai.csproj" />
   </ItemGroup>
 
 </Project>

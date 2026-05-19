@@ -1,4 +1,5 @@
 using Tau.Ai.Auth.OAuth;
+using Tau.Ai.Observability;
 using Tau.Ai.Registry;
 
 namespace Tau.Ai.Auth;
@@ -7,13 +8,16 @@ public sealed class ProviderAuthResolver
 {
     private readonly OAuthProviderRegistry _oauthProviders;
     private readonly OAuthCredentialStore _credentialStore;
+    private readonly ITauLogSink _logSink;
 
     public ProviderAuthResolver(
         OAuthProviderRegistry? oauthProviders = null,
-        OAuthCredentialStore? credentialStore = null)
+        OAuthCredentialStore? credentialStore = null,
+        ITauLogSink? logSink = null)
     {
         _oauthProviders = oauthProviders ?? new OAuthProviderRegistry();
         _credentialStore = credentialStore ?? new OAuthCredentialStore();
+        _logSink = logSink ?? NullTauLogSink.Instance;
     }
 
 
@@ -24,6 +28,24 @@ public sealed class ProviderAuthResolver
     }
 
     public ProviderAuthStatus GetStatus(string provider, Model? model = null, string? explicitApiKey = null)
+    {
+        var status = ResolveStatus(provider, model, explicitApiKey);
+        _logSink.Log(new TauLogEvent(
+            "auth",
+            "status.checked",
+            DateTimeOffset.UtcNow,
+            new Dictionary<string, string?>
+            {
+                ["provider"] = provider,
+                ["configured"] = status.IsConfigured ? "true" : "false",
+                ["source"] = status.Source,
+                ["usesOAuth"] = status.UsesOAuth ? "true" : "false",
+                ["canLogin"] = status.CanLogin ? "true" : "false"
+            }));
+        return status;
+    }
+
+    private ProviderAuthStatus ResolveStatus(string provider, Model? model = null, string? explicitApiKey = null)
     {
         if (!string.IsNullOrWhiteSpace(explicitApiKey))
         {
@@ -64,10 +86,13 @@ public sealed class ProviderAuthResolver
 
         if (model is not null)
         {
-            var requestConfig = new ModelConfigurationStore().ResolveRequestConfiguration(model);
-            if (!string.IsNullOrWhiteSpace(requestConfig.ApiKey))
+            var requestConfig = new ModelConfigurationStore().InspectRequestConfigurationStatus(model);
+            if (requestConfig.IsConfigured)
             {
-                return new ProviderAuthStatus(provider, true, "models.json", false, false, "API key resolved from models.json provider/model configuration.");
+                var detail = requestConfig.HasCommandBackedSecret
+                    ? "models.json contains command-backed credential configuration; status checks do not execute it or reveal its value."
+                    : "models.json contains request credential configuration; status checks do not reveal its value.";
+                return new ProviderAuthStatus(provider, true, "models.json", false, false, detail);
             }
         }
 
@@ -119,6 +144,7 @@ public sealed class ProviderAuthResolver
             try
             {
                 oauthCredentials = oauthProvider.RefreshTokenAsync(oauthCredentials).GetAwaiter().GetResult();
+                _credentialStore.Save(provider, oauthCredentials);
             }
             catch
             {
@@ -140,4 +166,9 @@ public sealed class ProviderAuthResolver
         var provider = _oauthProviders.TryGet(model.Provider);
         return provider?.ModifyModel(model, entry.OAuth) ?? model;
     }
+
+    public IOAuthProvider? GetOAuthProvider(string providerId) => _oauthProviders.TryGet(providerId);
+
+    public void SaveOAuthCredentials(string providerId, OAuthCredentials credentials) =>
+        _credentialStore.Save(providerId, credentials);
 }
