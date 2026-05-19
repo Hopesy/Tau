@@ -37,8 +37,9 @@ public sealed class CodingAgentTreeInteractiveNavigator
         var frames = 0;
         string? searchPattern = null;
         var filterIndex = 0;
+        var foldedEntryIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        Render(visibleItems, selected, writer, clearScreen, searchPattern, FilterCycle[filterIndex]);
+        Render(visibleItems, selected, writer, clearScreen, searchPattern, FilterCycle[filterIndex], foldedEntryIds);
         frames++;
 
         while (true)
@@ -67,7 +68,9 @@ public sealed class CodingAgentTreeInteractiveNavigator
                     break;
                 case ConsoleKey.Enter:
                     writer.WriteLine();
-                    return new Result(visibleItems[selected].EntryId, selected, frames);
+                    return visibleItems.Count == 0
+                        ? new Result(null, selected, frames)
+                        : new Result(visibleItems[selected].EntryId, selected, frames);
                 case ConsoleKey.Q:
                     writer.WriteLine();
                     return new Result(null, selected, frames);
@@ -76,7 +79,7 @@ public sealed class CodingAgentTreeInteractiveNavigator
                     {
                         var currentId = visibleItems.Count > 0 ? visibleItems[selected].EntryId : null;
                         searchPattern = null;
-                        visibleItems = ApplyFilter(items, FilterCycle[filterIndex], null);
+                        visibleItems = ApplyFilter(items, FilterCycle[filterIndex], null, foldedEntryIds);
                         selected = FindIndexById(visibleItems, currentId);
                     }
                     else
@@ -90,7 +93,7 @@ public sealed class CodingAgentTreeInteractiveNavigator
                     {
                         var currentEntryId = visibleItems.Count > 0 ? visibleItems[selected].EntryId : null;
                         filterIndex = (filterIndex + 1) % FilterCycle.Length;
-                        visibleItems = ApplyFilter(items, FilterCycle[filterIndex], searchPattern);
+                        visibleItems = ApplyFilter(items, FilterCycle[filterIndex], searchPattern, foldedEntryIds);
                         selected = FindIndexById(visibleItems, currentEntryId);
                     }
                     else
@@ -103,8 +106,17 @@ public sealed class CodingAgentTreeInteractiveNavigator
                     searchPattern = await ReadSearchPatternAsync(reader, writer, cancellationToken).ConfigureAwait(false);
                     if (searchPattern is not null)
                     {
-                        visibleItems = ApplyFilter(items, FilterCycle[filterIndex], searchPattern);
+                        visibleItems = ApplyFilter(items, FilterCycle[filterIndex], searchPattern, foldedEntryIds);
                         selected = visibleItems.Count > 0 ? visibleItems.Count - 1 : 0;
+                    }
+                    break;
+                case ConsoleKey.Spacebar:
+                    if (visibleItems.Count > 0)
+                    {
+                        var currentEntryId = visibleItems[selected].EntryId;
+                        ToggleFold(items, currentEntryId, foldedEntryIds);
+                        visibleItems = ApplyFilter(items, FilterCycle[filterIndex], searchPattern, foldedEntryIds);
+                        selected = FindIndexById(visibleItems, currentEntryId);
                     }
                     break;
                 case ConsoleKey.N:
@@ -121,11 +133,11 @@ public sealed class CodingAgentTreeInteractiveNavigator
 
             if (visibleItems.Count == 0)
             {
-                Render(visibleItems, 0, writer, clearScreen, searchPattern, FilterCycle[filterIndex]);
+                Render(visibleItems, 0, writer, clearScreen, searchPattern, FilterCycle[filterIndex], foldedEntryIds);
             }
             else
             {
-                Render(visibleItems, selected, writer, clearScreen, searchPattern, FilterCycle[filterIndex]);
+                Render(visibleItems, selected, writer, clearScreen, searchPattern, FilterCycle[filterIndex], foldedEntryIds);
             }
             frames++;
         }
@@ -181,7 +193,8 @@ public sealed class CodingAgentTreeInteractiveNavigator
     private static IReadOnlyList<CodingAgentTreeViewItem> ApplyFilter(
         IReadOnlyList<CodingAgentTreeViewItem> items,
         CodingAgentTreeFilterMode filterMode,
-        string? searchPattern)
+        string? searchPattern,
+        IReadOnlySet<string> foldedEntryIds)
     {
         IEnumerable<CodingAgentTreeViewItem> filtered = items;
 
@@ -196,7 +209,52 @@ public sealed class CodingAgentTreeInteractiveNavigator
                 item.DisplayLine.Contains(searchPattern, StringComparison.OrdinalIgnoreCase));
         }
 
+        if (foldedEntryIds.Count > 0)
+        {
+            var byId = items.ToDictionary(static item => item.EntryId, StringComparer.OrdinalIgnoreCase);
+            filtered = filtered.Where(item => !IsHiddenByFold(item, byId, foldedEntryIds));
+        }
+
         return filtered.ToArray();
+    }
+
+    private static void ToggleFold(
+        IReadOnlyList<CodingAgentTreeViewItem> items,
+        string entryId,
+        ISet<string> foldedEntryIds)
+    {
+        if (!HasDescendants(items, entryId))
+        {
+            return;
+        }
+
+        if (!foldedEntryIds.Remove(entryId))
+        {
+            foldedEntryIds.Add(entryId);
+        }
+    }
+
+    private static bool HasDescendants(IReadOnlyList<CodingAgentTreeViewItem> items, string entryId) =>
+        items.Any(item => string.Equals(item.ParentEntryId, entryId, StringComparison.OrdinalIgnoreCase));
+
+    private static bool IsHiddenByFold(
+        CodingAgentTreeViewItem item,
+        IReadOnlyDictionary<string, CodingAgentTreeViewItem> byId,
+        IReadOnlySet<string> foldedEntryIds)
+    {
+        var parentId = item.ParentEntryId;
+        var guard = 0;
+        while (!string.IsNullOrWhiteSpace(parentId) && guard++ < 256)
+        {
+            if (foldedEntryIds.Contains(parentId))
+            {
+                return true;
+            }
+
+            parentId = byId.TryGetValue(parentId, out var parent) ? parent.ParentEntryId : null;
+        }
+
+        return false;
     }
 
     private static int FindIndexById(IReadOnlyList<CodingAgentTreeViewItem> items, string? entryId)
@@ -238,7 +296,8 @@ public sealed class CodingAgentTreeInteractiveNavigator
         TextWriter writer,
         Action? clearScreen,
         string? searchPattern,
-        CodingAgentTreeFilterMode filterMode)
+        CodingAgentTreeFilterMode filterMode,
+        IReadOnlySet<string> foldedEntryIds)
     {
         clearScreen?.Invoke();
 
@@ -246,7 +305,11 @@ public sealed class CodingAgentTreeInteractiveNavigator
         var filterLabel = filterMode.ToString().ToLowerInvariant();
         var searchLabel = searchPattern is not null ? $" search=\"{searchPattern}\"" : "";
         var countLabel = items.Count > 0 ? $"selected {selected + 1}/{items.Count}" : "no matches";
-        builder.AppendLine($"tree navigator: {items.Count} entries, {countLabel}, filter={filterLabel}{searchLabel} — j/k move, f filter, / search, n/N next/prev, Enter select, q quit");
+        var selectedMeta = items.Count > 0
+            ? $", entry {items[selected].EntryId}, type {FormatEntryType(items[selected])}, depth {items[selected].Depth}{FormatSelectedFlags(items[selected])}"
+            : string.Empty;
+        var foldedLabel = foldedEntryIds.Count > 0 ? $", folded {foldedEntryIds.Count}" : string.Empty;
+        builder.AppendLine($"tree navigator: {items.Count} entries, {countLabel}{selectedMeta}, filter={filterLabel}{searchLabel}{foldedLabel} - j/k move, f filter, / search, n/N next/prev, Space fold, Enter select, q quit");
 
         if (items.Count == 0)
         {
@@ -257,11 +320,25 @@ public sealed class CodingAgentTreeInteractiveNavigator
             for (var i = 0; i < items.Count; i++)
             {
                 var prefix = i == selected ? ">>" : "  ";
-                builder.AppendLine($"{prefix} {items[i].DisplayLine}");
+                var folded = foldedEntryIds.Contains(items[i].EntryId) ? " [folded]" : string.Empty;
+                builder.AppendLine($"{prefix} {items[i].DisplayLine}{folded}");
             }
         }
 
         writer.Write(builder.ToString());
         writer.Flush();
+    }
+
+    private static string FormatEntryType(CodingAgentTreeViewItem item) =>
+        string.IsNullOrWhiteSpace(item.EntryType) ? "entry" : item.EntryType;
+
+    private static string FormatSelectedFlags(CodingAgentTreeViewItem item)
+    {
+        if (item.IsCurrentLeaf)
+        {
+            return ", leaf";
+        }
+
+        return item.IsOnBranch ? ", branch" : string.Empty;
     }
 }

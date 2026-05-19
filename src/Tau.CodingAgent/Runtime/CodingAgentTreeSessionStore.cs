@@ -50,7 +50,10 @@ public sealed record CodingAgentTreeViewItem(
     string EntryId,
     string DisplayLine,
     bool IsCurrentLeaf,
-    bool IsOnBranch);
+    bool IsOnBranch,
+    string? ParentEntryId = null,
+    int Depth = 0,
+    string EntryType = "");
 
 public sealed record CodingAgentCompactionRetentionOptions(
     int KeepRecentTokens = 20_000,
@@ -938,7 +941,7 @@ public sealed class CodingAgentTreeSessionStore
                 ? $" @{timestamp}"
                 : string.Empty;
             var line = $"{marker} {indent}{ShortId(entry.Id)} <- {ShortId(entry.ParentId)} {DescribeEntry(entry)}{label}{labelTime}";
-            items.Add(new CodingAgentTreeViewItem(entry.Id, line, isLeaf, onBranch));
+            items.Add(new CodingAgentTreeViewItem(entry.Id, line, isLeaf, onBranch, entry.ParentId, depth, entry.Type));
         }
 
         return items;

@@ -137,6 +137,14 @@ public class CodingAgentTreeInteractiveNavigatorTests
         new("u2", ">  u2  <- t1 message user [labeled] world", true, true),
     ];
 
+    private static IReadOnlyList<CodingAgentTreeViewItem> MakeNestedItems() =>
+    [
+        new("root", ">  root <- _ session name none", false, true, null, 0, "session_info"),
+        new("child", "*    child <- root message user hello", false, true, "root", 1, "message"),
+        new("grandchild", "*      grandchild <- child message assistant answer", false, true, "child", 2, "message"),
+        new("sibling", ">    sibling <- root message user follow-up", true, true, "root", 1, "message"),
+    ];
+
     [Fact]
     public async Task NavigateAsync_SlashSearchFiltersVisibleItems()
     {
@@ -224,6 +232,67 @@ public class CodingAgentTreeInteractiveNavigatorTests
         var result = await navigator.NavigateAsync(items, reader, new StringWriter());
 
         Assert.Equal("u1", result.SelectedEntryId);
+    }
+
+    [Fact]
+    public async Task NavigateAsync_EnterWithNoSearchMatches_ReturnsNullSelection()
+    {
+        var items = MakeFilterableItems();
+        var reader = new FakeKeyReader();
+        reader.EnqueueRaw(new ConsoleKeyInfo('/', ConsoleKey.Oem2, shift: false, alt: false, control: false));
+        reader.EnqueueRaw(new ConsoleKeyInfo('z', ConsoleKey.Z, shift: false, alt: false, control: false));
+        reader.EnqueueRaw(new ConsoleKeyInfo('z', ConsoleKey.Z, shift: false, alt: false, control: false));
+        reader.EnqueueRaw(new ConsoleKeyInfo('z', ConsoleKey.Z, shift: false, alt: false, control: false));
+        reader.EnqueueKey(ConsoleKey.Enter);
+        reader.EnqueueKey(ConsoleKey.Enter);
+
+        var writer = new StringWriter();
+        var navigator = new CodingAgentTreeInteractiveNavigator();
+        var result = await navigator.NavigateAsync(items, reader, writer);
+
+        Assert.Null(result.SelectedEntryId);
+        Assert.Contains("no matches", writer.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task NavigateAsync_SpaceFoldsSelectedEntryDescendants()
+    {
+        var items = MakeNestedItems();
+        var reader = new FakeKeyReader();
+        reader.EnqueueRaw(new ConsoleKeyInfo('g', ConsoleKey.G, shift: false, alt: false, control: false));
+        reader.EnqueueRaw(new ConsoleKeyInfo(' ', ConsoleKey.Spacebar, shift: false, alt: false, control: false));
+        reader.EnqueueKey(ConsoleKey.Enter);
+
+        var writer = new StringWriter();
+        var navigator = new CodingAgentTreeInteractiveNavigator();
+        var result = await navigator.NavigateAsync(items, reader, writer);
+
+        Assert.Equal("root", result.SelectedEntryId);
+        var rendered = writer.ToString();
+        Assert.Contains("folded 1", rendered, StringComparison.Ordinal);
+        Assert.Contains("root <- _ session name none [folded]", rendered, StringComparison.Ordinal);
+        Assert.Contains("1 entries", rendered, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task NavigateAsync_SpaceExpandsFoldedEntry()
+    {
+        var items = MakeNestedItems();
+        var reader = new FakeKeyReader();
+        reader.EnqueueRaw(new ConsoleKeyInfo('g', ConsoleKey.G, shift: false, alt: false, control: false));
+        reader.EnqueueRaw(new ConsoleKeyInfo(' ', ConsoleKey.Spacebar, shift: false, alt: false, control: false));
+        reader.EnqueueRaw(new ConsoleKeyInfo(' ', ConsoleKey.Spacebar, shift: false, alt: false, control: false));
+        reader.EnqueueRaw(new ConsoleKeyInfo('G', ConsoleKey.G, shift: true, alt: false, control: false));
+        reader.EnqueueKey(ConsoleKey.Enter);
+
+        var writer = new StringWriter();
+        var navigator = new CodingAgentTreeInteractiveNavigator();
+        var result = await navigator.NavigateAsync(items, reader, writer);
+
+        Assert.Equal("sibling", result.SelectedEntryId);
+        var rendered = writer.ToString();
+        Assert.Contains("4 entries", rendered, StringComparison.Ordinal);
+        Assert.Contains("entry sibling, type message, depth 1, leaf", rendered, StringComparison.Ordinal);
     }
 
     private sealed class FakeKeyReader : IConsoleKeyReader
