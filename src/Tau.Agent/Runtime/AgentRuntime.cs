@@ -120,7 +120,7 @@ public sealed class AgentRuntime
 
                         await foreach (var toolEvt in ToolExecutor.ExecuteToolCallsAsync(
                             toolCalls, config.Tools, config.Interceptors,
-                            State.Messages, config.DefaultExecutionMode, token))
+                            State.Messages, config.DefaultExecutionMode, config.LogSink, token))
                         {
                             yield return toolEvt;
 

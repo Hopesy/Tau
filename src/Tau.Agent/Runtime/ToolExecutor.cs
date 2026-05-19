@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Tau.Ai;
+using Tau.Ai.Observability;
 
 namespace Tau.Agent.Runtime;
 
@@ -15,6 +16,7 @@ internal static class ToolExecutor
         IReadOnlyList<IToolInterceptor> interceptors,
         IReadOnlyList<ChatMessage> conversationHistory,
         ToolExecutionMode defaultMode,
+        ITauLogSink logSink,
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
     {
         var toolMap = tools.ToDictionary(t => t.Name);
@@ -25,12 +27,12 @@ internal static class ToolExecutor
 
         if (hasSequential || defaultMode == ToolExecutionMode.Sequential)
         {
-            await foreach (var evt in ExecuteSequentialAsync(toolCalls, toolMap, interceptors, conversationHistory, ct))
+            await foreach (var evt in ExecuteSequentialAsync(toolCalls, toolMap, interceptors, conversationHistory, logSink, ct))
                 yield return evt;
         }
         else
         {
-            await foreach (var evt in ExecuteParallelAsync(toolCalls, toolMap, interceptors, conversationHistory, ct))
+            await foreach (var evt in ExecuteParallelAsync(toolCalls, toolMap, interceptors, conversationHistory, logSink, ct))
                 yield return evt;
         }
     }
@@ -40,11 +42,12 @@ internal static class ToolExecutor
         Dictionary<string, IAgentTool> toolMap,
         IReadOnlyList<IToolInterceptor> interceptors,
         IReadOnlyList<ChatMessage> conversationHistory,
+        ITauLogSink logSink,
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
     {
         foreach (var tc in toolCalls)
         {
-            await foreach (var evt in ExecuteSingleAsync(tc, toolMap, interceptors, conversationHistory, ct))
+            await foreach (var evt in ExecuteSingleAsync(tc, toolMap, interceptors, conversationHistory, logSink, ct))
                 yield return evt;
         }
     }
@@ -54,10 +57,11 @@ internal static class ToolExecutor
         Dictionary<string, IAgentTool> toolMap,
         IReadOnlyList<IToolInterceptor> interceptors,
         IReadOnlyList<ChatMessage> conversationHistory,
+        ITauLogSink logSink,
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
     {
         var tasks = toolCalls.Select(tc =>
-            CollectEventsAsync(ExecuteSingleAsync(tc, toolMap, interceptors, conversationHistory, ct))).ToList();
+            CollectEventsAsync(ExecuteSingleAsync(tc, toolMap, interceptors, conversationHistory, logSink, ct))).ToList();
 
         var results = await Task.WhenAll(tasks).ConfigureAwait(false);
 
@@ -71,12 +75,24 @@ internal static class ToolExecutor
         Dictionary<string, IAgentTool> toolMap,
         IReadOnlyList<IToolInterceptor> interceptors,
         IReadOnlyList<ChatMessage> conversationHistory,
+        ITauLogSink logSink,
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
     {
+        logSink.Log(new TauLogEvent(
+            "tool",
+            "execution.start",
+            DateTimeOffset.UtcNow,
+            new Dictionary<string, string?> { ["toolCallId"] = tc.Id, ["toolName"] = tc.Name }));
+
         yield return new ToolExecutionStartEvent(tc.Id, tc.Name);
 
         if (!toolMap.TryGetValue(tc.Name, out var tool))
         {
+            logSink.Log(new TauLogEvent(
+                "tool",
+                "execution.end",
+                DateTimeOffset.UtcNow,
+                new Dictionary<string, string?> { ["toolCallId"] = tc.Id, ["toolName"] = tc.Name, ["error"] = "not_found" }));
             yield return new ToolExecutionEndEvent(tc.Id, new ToolResult(
                 [new TextContent($"Tool '{tc.Name}' not found.")], IsError: true));
             yield break;
@@ -89,6 +105,11 @@ internal static class ToolExecutor
             var decision = await interceptor.BeforeToolCallAsync(callContext, ct).ConfigureAwait(false);
             if (decision.Blocked)
             {
+                logSink.Log(new TauLogEvent(
+                    "tool",
+                    "execution.end",
+                    DateTimeOffset.UtcNow,
+                    new Dictionary<string, string?> { ["toolCallId"] = tc.Id, ["toolName"] = tc.Name, ["error"] = "blocked", ["reason"] = decision.Reason }));
                 yield return new ToolExecutionEndEvent(tc.Id, new ToolResult(
                     [new TextContent($"Tool call blocked: {decision.Reason}")], IsError: true));
                 yield break;
@@ -104,6 +125,17 @@ internal static class ToolExecutor
         {
             result = await interceptor.AfterToolCallAsync(callContext, result, ct).ConfigureAwait(false);
         }
+
+        logSink.Log(new TauLogEvent(
+            "tool",
+            "execution.end",
+            DateTimeOffset.UtcNow,
+            new Dictionary<string, string?>
+            {
+                ["toolCallId"] = tc.Id,
+                ["toolName"] = tc.Name,
+                ["isError"] = result.IsError ? "true" : "false"
+            }));
 
         yield return new ToolExecutionEndEvent(tc.Id, result);
     }

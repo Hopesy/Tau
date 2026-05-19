@@ -327,6 +327,7 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner
             Model = model,
             ProviderRegistry = registry,
             Tools = tools,
+            LogSink = logSink ?? NullTauLogSink.Instance,
             SystemPrompt = string.IsNullOrWhiteSpace(systemPromptOverride) ? BuildSystemPrompt(tools, skills ?? []) : systemPromptOverride,
             StreamOptions = new SimpleStreamOptions { MaxTokens = 16_384 }
         };

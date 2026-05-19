@@ -1,4 +1,5 @@
 using Tau.Ai;
+using Tau.Ai.Observability;
 using Tau.Ai.Providers;
 using Tau.Ai.Streaming;
 
@@ -13,6 +14,7 @@ public record AgentLoopConfig
     public required ProviderRegistry ProviderRegistry { get; init; }
     public required IReadOnlyList<IAgentTool> Tools { get; init; }
     public IReadOnlyList<IToolInterceptor> Interceptors { get; init; } = [];
+    public ITauLogSink LogSink { get; init; } = NullTauLogSink.Instance;
     public string? SystemPrompt { get; init; }
     public SimpleStreamOptions? StreamOptions { get; init; }
     public ToolExecutionMode DefaultExecutionMode { get; init; } = ToolExecutionMode.Parallel;
