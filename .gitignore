@@ -22,8 +22,15 @@ temp/
 .env
 .env.local
 .env.*.local
+.tau/auth.json
+.tau/auth.json.*.tmp
+.tau/models.json
+.tau/models.json.*.tmp
 .tau/coding-agent-session.json
 .tau/coding-agent-session.json.tmp
+.tau/coding-agent-session.jsonl
+.tau/coding-agent-session.jsonl.tmp
+.tau/coding-agent-sessions/
 .tau/coding-agent-settings.json.tmp
 .tau/coding-agent-settings.json
 
@@ -52,6 +59,7 @@ output/
 packages/
 *.trx
 *.binlog
+*.csproj.lscache
 
 # Python
 __pycache__/

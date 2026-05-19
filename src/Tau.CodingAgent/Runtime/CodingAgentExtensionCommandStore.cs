@@ -34,6 +34,25 @@ public sealed record CodingAgentExtensionResources(
     IReadOnlyList<string> SkillPaths,
     IReadOnlyList<string> PromptPaths);
 
+public sealed record CodingAgentExtensionFileStatus(
+    string FilePath,
+    string Scope,
+    int CommandCount,
+    IReadOnlyList<string> SkillPaths,
+    IReadOnlyList<string> PromptPaths);
+
+public sealed record CodingAgentExtensionDiagnostic(
+    string Severity,
+    string Message,
+    string Path,
+    string Scope);
+
+public sealed record CodingAgentExtensionStatus(
+    IReadOnlyList<CodingAgentExtensionCommand> Commands,
+    CodingAgentExtensionResources Resources,
+    IReadOnlyList<CodingAgentExtensionFileStatus> Files,
+    IReadOnlyList<CodingAgentExtensionDiagnostic> Diagnostics);
+
 public sealed class CodingAgentExtensionCommandStore
 {
     public const string ExtensionPathsEnvironmentVariable = "TAU_CODING_AGENT_EXTENSION_PATHS";
@@ -59,37 +78,25 @@ public sealed class CodingAgentExtensionCommandStore
 
     public IReadOnlyList<CodingAgentExtensionCommand> Load()
     {
-        var definitions = new List<CommandDefinition>();
-        if (_includeDefaults)
-        {
-            definitions.AddRange(LoadFromDirectory(_userExtensionsDirectory, "user"));
-            definitions.AddRange(LoadFromDirectory(Path.Combine(_cwd, ".tau", "extensions"), "project"));
-        }
-
-        foreach (var path in _explicitPaths)
-        {
-            var resolved = ResolvePath(path, _cwd);
-            if (Directory.Exists(resolved))
-            {
-                definitions.AddRange(LoadFromDirectory(resolved, "path"));
-            }
-            else if (File.Exists(resolved) && Path.GetExtension(resolved).Equals(".json", StringComparison.OrdinalIgnoreCase))
-            {
-                definitions.AddRange(LoadFromFile(resolved, "path"));
-            }
-        }
-
-        return ResolveInvocationNames(definitions);
+        return LoadStatus().Commands;
     }
 
     public CodingAgentExtensionResources LoadResources()
     {
+        return LoadStatus().Resources;
+    }
+
+    public CodingAgentExtensionStatus LoadStatus()
+    {
+        var definitions = new List<CommandDefinition>();
         var skillPaths = new List<string>();
         var promptPaths = new List<string>();
+        var files = new List<CodingAgentExtensionFileStatus>();
+        var diagnostics = new List<CodingAgentExtensionDiagnostic>();
         if (_includeDefaults)
         {
-            AddResourcesFromDirectory(_userExtensionsDirectory, skillPaths, promptPaths);
-            AddResourcesFromDirectory(Path.Combine(_cwd, ".tau", "extensions"), skillPaths, promptPaths);
+            LoadSourceDirectory(_userExtensionsDirectory, "user", definitions, skillPaths, promptPaths, files, diagnostics);
+            LoadSourceDirectory(Path.Combine(_cwd, ".tau", "extensions"), "project", definitions, skillPaths, promptPaths, files, diagnostics);
         }
 
         foreach (var path in _explicitPaths)
@@ -97,17 +104,39 @@ public sealed class CodingAgentExtensionCommandStore
             var resolved = ResolvePath(path, _cwd);
             if (Directory.Exists(resolved))
             {
-                AddResourcesFromDirectory(resolved, skillPaths, promptPaths);
+                LoadSourceDirectory(resolved, "path", definitions, skillPaths, promptPaths, files, diagnostics, reportMissing: true);
             }
             else if (File.Exists(resolved) && Path.GetExtension(resolved).Equals(".json", StringComparison.OrdinalIgnoreCase))
             {
-                AddResourcesFromFile(resolved, skillPaths, promptPaths);
+                LoadSourceFile(resolved, "path", definitions, skillPaths, promptPaths, files, diagnostics);
+            }
+            else if (File.Exists(resolved))
+            {
+                diagnostics.Add(new CodingAgentExtensionDiagnostic(
+                    "warning",
+                    "extension path is not a json file",
+                    resolved,
+                    "path"));
+            }
+            else
+            {
+                diagnostics.Add(new CodingAgentExtensionDiagnostic(
+                    "warning",
+                    "extension path does not exist",
+                    resolved,
+                    "path"));
             }
         }
 
-        return new CodingAgentExtensionResources(
+        var resources = new CodingAgentExtensionResources(
             skillPaths.Distinct(StringComparer.OrdinalIgnoreCase).ToArray(),
             promptPaths.Distinct(StringComparer.OrdinalIgnoreCase).ToArray());
+
+        return new CodingAgentExtensionStatus(
+            ResolveInvocationNames(definitions),
+            resources,
+            files,
+            diagnostics);
     }
 
     public bool TryInvoke(string input, out CodingAgentExtensionCommandInvocation? invocation)
@@ -159,36 +188,62 @@ public sealed class CodingAgentExtensionCommandStore
         return true;
     }
 
-    private IEnumerable<CommandDefinition> LoadFromDirectory(string directory, string scope)
+    private static void LoadSourceDirectory(
+        string directory,
+        string scope,
+        ICollection<CommandDefinition> definitions,
+        ICollection<string> skillPaths,
+        ICollection<string> promptPaths,
+        ICollection<CodingAgentExtensionFileStatus> fileStatuses,
+        ICollection<CodingAgentExtensionDiagnostic> diagnostics,
+        bool reportMissing = false)
     {
         if (!Directory.Exists(directory))
         {
-            yield break;
+            if (reportMissing)
+            {
+                diagnostics.Add(new CodingAgentExtensionDiagnostic(
+                    "warning",
+                    "extension directory does not exist",
+                    directory,
+                    scope));
+            }
+
+            return;
         }
 
-        IEnumerable<string> files;
+        IEnumerable<string> jsonFiles;
         try
         {
-            files = Directory.EnumerateFiles(directory, "*.json", SearchOption.AllDirectories)
+            jsonFiles = Directory.EnumerateFiles(directory, "*.json", SearchOption.AllDirectories)
                 .Where(static file => !IsIgnoredExtensionPath(file))
                 .Order(StringComparer.OrdinalIgnoreCase)
                 .ToArray();
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            yield break;
+            diagnostics.Add(new CodingAgentExtensionDiagnostic(
+                "warning",
+                $"extension directory could not be read: {ex.Message}",
+                directory,
+                scope));
+            return;
         }
 
-        foreach (var file in files)
+        foreach (var file in jsonFiles)
         {
-            foreach (var command in LoadFromFile(file, scope))
-            {
-                yield return command;
-            }
+            LoadSourceFile(file, scope, definitions, skillPaths, promptPaths, fileStatuses, diagnostics);
         }
     }
 
-    private static IReadOnlyList<CommandDefinition> LoadFromFile(string filePath, string scope)
+    private static void LoadSourceFile(
+        string filePath,
+        string scope,
+        ICollection<CommandDefinition> definitions,
+        ICollection<string> skillPaths,
+        ICollection<string> promptPaths,
+        ICollection<CodingAgentExtensionFileStatus> files,
+        ICollection<CodingAgentExtensionDiagnostic> diagnostics)
     {
         JsonDocument document;
         try
@@ -201,18 +256,40 @@ public sealed class CodingAgentExtensionCommandStore
                     CommentHandling = JsonCommentHandling.Skip
                 });
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+        catch (JsonException ex)
         {
-            return [];
+            diagnostics.Add(new CodingAgentExtensionDiagnostic(
+                "error",
+                $"failed to load extension json: {ex.Message}",
+                Path.GetFullPath(filePath),
+                scope));
+            return;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            diagnostics.Add(new CodingAgentExtensionDiagnostic(
+                "warning",
+                $"extension file could not be read: {ex.Message}",
+                Path.GetFullPath(filePath),
+                scope));
+            return;
         }
 
         using (document)
         {
             if (document.RootElement.ValueKind != JsonValueKind.Object)
             {
-                return [];
+                diagnostics.Add(new CodingAgentExtensionDiagnostic(
+                    "warning",
+                    "extension json root must be an object",
+                    Path.GetFullPath(filePath),
+                    scope));
+                return;
             }
 
+            var commandCountBefore = definitions.Count;
+            var fileSkillPaths = new List<string>();
+            var filePromptPaths = new List<string>();
             var commands = new List<CommandDefinition>();
             if (document.RootElement.TryGetProperty("commands", out var commandArray)
                 && commandArray.ValueKind == JsonValueKind.Array)
@@ -225,85 +302,51 @@ public sealed class CodingAgentExtensionCommandStore
                         commands.Add(command);
                     }
                 }
-
-                return commands;
             }
-
-            var singleCommand = ReadCommand(document.RootElement, filePath, scope);
-            return singleCommand is null ? [] : [singleCommand];
-        }
-    }
-
-    private static void AddResourcesFromDirectory(
-        string directory,
-        ICollection<string> skillPaths,
-        ICollection<string> promptPaths)
-    {
-        if (!Directory.Exists(directory))
-        {
-            return;
-        }
-
-        IEnumerable<string> files;
-        try
-        {
-            files = Directory.EnumerateFiles(directory, "*.json", SearchOption.AllDirectories)
-                .Where(static file => !IsIgnoredExtensionPath(file))
-                .Order(StringComparer.OrdinalIgnoreCase)
-                .ToArray();
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            return;
-        }
-
-        foreach (var file in files)
-        {
-            AddResourcesFromFile(file, skillPaths, promptPaths);
-        }
-    }
-
-    private static void AddResourcesFromFile(
-        string filePath,
-        ICollection<string> skillPaths,
-        ICollection<string> promptPaths)
-    {
-        JsonDocument document;
-        try
-        {
-            document = JsonDocument.Parse(
-                File.ReadAllText(filePath),
-                new JsonDocumentOptions
-                {
-                    AllowTrailingCommas = true,
-                    CommentHandling = JsonCommentHandling.Skip
-                });
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
-        {
-            return;
-        }
-
-        using (document)
-        {
-            if (document.RootElement.ValueKind != JsonValueKind.Object)
+            else
             {
-                return;
+                var singleCommand = ReadCommand(document.RootElement, filePath, scope);
+                if (singleCommand is not null)
+                {
+                    commands.Add(singleCommand);
+                }
             }
 
             var baseDirectory = Path.GetDirectoryName(Path.GetFullPath(filePath)) ?? Environment.CurrentDirectory;
-            AddPathArray(document.RootElement, "skillPaths", baseDirectory, skillPaths);
-            AddPathArray(document.RootElement, "skill-paths", baseDirectory, skillPaths);
-            AddPathArray(document.RootElement, "promptPaths", baseDirectory, promptPaths);
-            AddPathArray(document.RootElement, "prompt-paths", baseDirectory, promptPaths);
+            AddPathArray(document.RootElement, "skillPaths", baseDirectory, fileSkillPaths);
+            AddPathArray(document.RootElement, "skill-paths", baseDirectory, fileSkillPaths);
+            AddPathArray(document.RootElement, "promptPaths", baseDirectory, filePromptPaths);
+            AddPathArray(document.RootElement, "prompt-paths", baseDirectory, filePromptPaths);
             if (document.RootElement.TryGetProperty("resources", out var resources)
                 && resources.ValueKind == JsonValueKind.Object)
             {
-                AddPathArray(resources, "skillPaths", baseDirectory, skillPaths);
-                AddPathArray(resources, "skill-paths", baseDirectory, skillPaths);
-                AddPathArray(resources, "promptPaths", baseDirectory, promptPaths);
-                AddPathArray(resources, "prompt-paths", baseDirectory, promptPaths);
+                AddPathArray(resources, "skillPaths", baseDirectory, fileSkillPaths);
+                AddPathArray(resources, "skill-paths", baseDirectory, fileSkillPaths);
+                AddPathArray(resources, "promptPaths", baseDirectory, filePromptPaths);
+                AddPathArray(resources, "prompt-paths", baseDirectory, filePromptPaths);
             }
+
+            foreach (var command in commands)
+            {
+                definitions.Add(command);
+            }
+
+            foreach (var path in fileSkillPaths)
+            {
+                skillPaths.Add(path);
+            }
+
+            foreach (var path in filePromptPaths)
+            {
+                promptPaths.Add(path);
+            }
+
+            files.Add(new CodingAgentExtensionFileStatus(
+                Path.GetFullPath(filePath),
+                scope,
+                definitions.Count - commandCountBefore,
+                fileSkillPaths.Distinct(StringComparer.OrdinalIgnoreCase).ToArray(),
+                filePromptPaths.Distinct(StringComparer.OrdinalIgnoreCase).ToArray()));
         }
     }
 

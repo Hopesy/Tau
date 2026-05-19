@@ -7,7 +7,9 @@ namespace Tau.CodingAgent.Runtime;
 public sealed record CodingAgentSettingsSnapshot(
     string? DefaultProvider,
     string? DefaultModel,
-    string? TreeFilterMode = null);
+    string? TreeFilterMode = null,
+    int? RetryMaxAttempts = null,
+    int? RetryBaseDelayMilliseconds = null);
 
 public sealed class CodingAgentSettingsStore
 {
@@ -42,7 +44,12 @@ public sealed class CodingAgentSettingsStore
         {
             using var stream = File.OpenRead(_path);
             var document = JsonSerializer.Deserialize(stream, CodingAgentSettingsJsonContext.Default.CodingAgentSettingsDocument);
-            return new CodingAgentSettingsSnapshot(document?.DefaultProvider, document?.DefaultModel, document?.TreeFilterMode);
+            return new CodingAgentSettingsSnapshot(
+                document?.DefaultProvider,
+                document?.DefaultModel,
+                document?.TreeFilterMode,
+                NormalizeNonNegative(document?.RetryMaxAttempts),
+                NormalizeNonNegative(document?.RetryBaseDelayMilliseconds));
         }
         catch (JsonException)
         {
@@ -71,6 +78,8 @@ public sealed class CodingAgentSettingsStore
             DefaultProvider = snapshot.DefaultProvider,
             DefaultModel = snapshot.DefaultModel,
             TreeFilterMode = snapshot.TreeFilterMode,
+            RetryMaxAttempts = NormalizeNonNegative(snapshot.RetryMaxAttempts),
+            RetryBaseDelayMilliseconds = NormalizeNonNegative(snapshot.RetryBaseDelayMilliseconds),
             UpdatedAt = DateTimeOffset.UtcNow
         };
 
@@ -93,6 +102,9 @@ public sealed class CodingAgentSettingsStore
 
         File.Move(tempPath, _path);
     }
+
+    private static int? NormalizeNonNegative(int? value) =>
+        value is null ? null : Math.Max(0, value.Value);
 }
 
 internal sealed class CodingAgentSettingsDocument
@@ -100,6 +112,8 @@ internal sealed class CodingAgentSettingsDocument
     public string? DefaultProvider { get; init; }
     public string? DefaultModel { get; init; }
     public string? TreeFilterMode { get; init; }
+    public int? RetryMaxAttempts { get; init; }
+    public int? RetryBaseDelayMilliseconds { get; init; }
     public DateTimeOffset UpdatedAt { get; init; }
 }
 

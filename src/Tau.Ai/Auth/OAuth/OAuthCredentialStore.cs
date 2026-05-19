@@ -21,6 +21,73 @@ public sealed class OAuthCredentialStore
                 StringComparer.OrdinalIgnoreCase);
     }
 
+    public void Save(string providerId, OAuthCredentials credentials)
+    {
+        var path = _searchPaths.FirstOrDefault(File.Exists) ?? _searchPaths.First();
+        var directory = Path.GetDirectoryName(path);
+        if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
+        {
+            Directory.CreateDirectory(directory);
+        }
+
+        Dictionary<string, JsonElement> existing = new(StringComparer.OrdinalIgnoreCase);
+        if (File.Exists(path))
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(File.ReadAllText(path));
+                if (doc.RootElement.ValueKind == JsonValueKind.Object)
+                {
+                    foreach (var prop in doc.RootElement.EnumerateObject())
+                    {
+                        existing[prop.Name] = prop.Value.Clone();
+                    }
+                }
+            }
+            catch
+            {
+            }
+        }
+
+        using var stream = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(stream, new JsonWriterOptions { Indented = true }))
+        {
+            writer.WriteStartObject();
+
+            foreach (var (key, value) in existing)
+            {
+                if (string.Equals(key, providerId, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                writer.WritePropertyName(key);
+                value.WriteTo(writer);
+            }
+
+            writer.WritePropertyName(providerId);
+            writer.WriteStartObject();
+            writer.WriteString("type", "oauth");
+            writer.WriteString("refresh", credentials.Refresh);
+            writer.WriteString("access", credentials.Access);
+            writer.WriteString("expiresAt", credentials.ExpiresAt.ToString("O"));
+            foreach (var (metaKey, metaValue) in credentials.Metadata)
+            {
+                if (IsReservedCredentialProperty(metaKey))
+                {
+                    continue;
+                }
+
+                writer.WriteString(metaKey, metaValue);
+            }
+            writer.WriteEndObject();
+
+            writer.WriteEndObject();
+        }
+
+        WriteAuthFile(path, stream.ToArray());
+    }
+
     public IReadOnlyDictionary<string, StoredProviderAuth> LoadEntries()
     {
         var path = _searchPaths.FirstOrDefault(File.Exists);
@@ -174,6 +241,40 @@ public sealed class OAuthCredentialStore
 
         value = property.GetString();
         return !string.IsNullOrWhiteSpace(value);
+    }
+
+    private static bool IsReservedCredentialProperty(string propertyName) =>
+        propertyName.Equals("type", StringComparison.OrdinalIgnoreCase) ||
+        propertyName.Equals("refresh", StringComparison.OrdinalIgnoreCase) ||
+        propertyName.Equals("access", StringComparison.OrdinalIgnoreCase) ||
+        propertyName.Equals("expires", StringComparison.OrdinalIgnoreCase) ||
+        propertyName.Equals("expiresAt", StringComparison.OrdinalIgnoreCase) ||
+        propertyName.Equals("key", StringComparison.OrdinalIgnoreCase) ||
+        propertyName.Equals("apiKey", StringComparison.OrdinalIgnoreCase);
+
+    private static void WriteAuthFile(string path, byte[] content)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            File.WriteAllBytes(path, content);
+            return;
+        }
+
+        var tempPath = $"{path}.{Guid.NewGuid():N}.tmp";
+        try
+        {
+            File.WriteAllBytes(tempPath, content);
+            File.SetUnixFileMode(tempPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+            File.Move(tempPath, path, overwrite: true);
+            File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        }
+        finally
+        {
+            if (File.Exists(tempPath))
+            {
+                File.Delete(tempPath);
+            }
+        }
     }
 
     private static IEnumerable<string> GetDefaultSearchPaths()

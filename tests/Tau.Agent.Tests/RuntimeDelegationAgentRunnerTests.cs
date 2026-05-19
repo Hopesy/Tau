@@ -416,6 +416,8 @@ public class RuntimeDelegationAgentRunnerTests
         public Model SelectModel(string? providerId, string? modelId) => Model;
         public ProviderAuthStatus GetAuthStatus(string? providerId = null) =>
             new(providerId ?? Model.Provider, false, "none", false, false, "test");
+        public Tau.Ai.Auth.OAuth.IOAuthProvider? GetOAuthProvider(string providerId) => null;
+        public void SaveOAuthCredentials(string providerId, Tau.Ai.Auth.OAuth.OAuthCredentials credentials) { }
         public CodingAgentSessionStats GetSessionStats(string? sessionFile = null) =>
             new(Model.Provider, Model.Id, 0, 0, 0, 0, 0, 0, Model.ContextWindow, null, sessionFile);
         public Task<CodingAgentCompactionResult> CompactAsync(string? customInstructions = null, CancellationToken cancellationToken = default) =>
@@ -452,6 +454,12 @@ public class RuntimeDelegationAgentRunnerTests
 
                 yield return evt;
             }
+        }
+
+        public IAsyncEnumerable<AgentEvent> RunAsync(IReadOnlyList<ContentBlock> input, CancellationToken cancellationToken = default)
+        {
+            var text = string.Join(Environment.NewLine, input.OfType<TextContent>().Select(content => content.Text));
+            return RunAsync(text, cancellationToken);
         }
     }
 }

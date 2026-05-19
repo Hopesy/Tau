@@ -82,6 +82,109 @@ public sealed class ProviderAuthResolverTests
     }
 
     [Fact]
+    public void GetStatus_ReportsCommandBackedModelsJsonCredentialWithoutExecutingCommand()
+    {
+        using var scope = EnvironmentVariableScope.Acquire();
+        var tempDir = Path.Combine(Path.GetTempPath(), $"tau-auth-status-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+
+        try
+        {
+            var markerPath = Path.Combine(tempDir, "command-ran.txt");
+            var command = CreateSecretCommand(tempDir, markerPath);
+            var commandValue = EscapeJson("!" + command);
+            var modelsPath = Path.Combine(tempDir, "models.json");
+            var authPath = Path.Combine(tempDir, "auth.json");
+            File.WriteAllText(authPath, "{}");
+            File.WriteAllText(modelsPath, $$"""
+                {
+                  "providers": {
+                    "custom-provider": {
+                      "apiKey": "{{commandValue}}",
+                      "models": [
+                        { "id": "custom-model" }
+                      ]
+                    }
+                  }
+                }
+                """);
+            scope.Set("TAU_AUTH_FILE", authPath);
+            scope.Set("TAU_MODELS_FILE", modelsPath);
+
+            var model = new Model
+            {
+                Provider = "custom-provider",
+                Id = "custom-model",
+                Name = "Custom Model",
+                Api = "openai-chat-completions"
+            };
+            var resolver = new ProviderAuthResolver();
+
+            var status = resolver.GetStatus(model);
+
+            Assert.True(status.IsConfigured);
+            Assert.Equal("models.json", status.Source);
+            Assert.Contains("do not execute", status.Message, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("secret-from-command", status.Message, StringComparison.Ordinal);
+            Assert.False(File.Exists(markerPath));
+        }
+        finally
+        {
+            Directory.Delete(tempDir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void GetStatus_ReportsModelsJsonCredentialHeadersWithoutLeakingSecret()
+    {
+        using var scope = EnvironmentVariableScope.Acquire();
+        var tempDir = Path.Combine(Path.GetTempPath(), $"tau-auth-status-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+
+        try
+        {
+            var modelsPath = Path.Combine(tempDir, "models.json");
+            var authPath = Path.Combine(tempDir, "auth.json");
+            File.WriteAllText(authPath, "{}");
+            File.WriteAllText(modelsPath, """
+                {
+                  "providers": {
+                    "custom-provider": {
+                      "headers": {
+                        "Authorization": "Bearer header-secret"
+                      },
+                      "models": [
+                        { "id": "custom-model" }
+                      ]
+                    }
+                  }
+                }
+                """);
+            scope.Set("TAU_AUTH_FILE", authPath);
+            scope.Set("TAU_MODELS_FILE", modelsPath);
+
+            var model = new Model
+            {
+                Provider = "custom-provider",
+                Id = "custom-model",
+                Name = "Custom Model",
+                Api = "openai-chat-completions"
+            };
+            var resolver = new ProviderAuthResolver();
+
+            var status = resolver.GetStatus(model);
+
+            Assert.True(status.IsConfigured);
+            Assert.Equal("models.json", status.Source);
+            Assert.DoesNotContain("header-secret", status.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(tempDir, recursive: true);
+        }
+    }
+
+    [Fact]
     public void ResolveApiKey_UsesAuthFileApiKeyEntry()
     {
         var tempDir = Path.Combine(Path.GetTempPath(), $"tau-auth-{Guid.NewGuid():N}");
@@ -196,7 +299,7 @@ public sealed class ProviderAuthResolverTests
         public string Id => "custom-oauth";
         public string Name => "Custom OAuth";
 
-        public Task<OAuthCredentials> LoginAsync(CancellationToken cancellationToken = default) =>
+        public Task<OAuthCredentials> LoginAsync(IOAuthLoginCallbacks callbacks, CancellationToken cancellationToken = default) =>
             throw new NotSupportedException();
 
         public Task<OAuthCredentials> RefreshTokenAsync(OAuthCredentials credentials, CancellationToken cancellationToken = default)
@@ -213,4 +316,34 @@ public sealed class ProviderAuthResolverTests
         public Model ModifyModel(Model model, OAuthCredentials credentials) =>
             model with { BaseUrl = "https://mutated.example.com" };
     }
+
+    private static string CreateSecretCommand(string tempDir, string markerPath)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            var scriptPath = Path.Combine(tempDir, "secret-command.cmd");
+            File.WriteAllText(scriptPath, $"""
+                @echo off
+                echo ran>"{markerPath}"
+                echo secret-from-command
+                """);
+            return $"\"{scriptPath}\"";
+        }
+
+        var shellPath = Path.Combine(tempDir, "secret-command.sh");
+        File.WriteAllText(shellPath, $"""
+            #!/usr/bin/env sh
+            echo ran > "{markerPath}"
+            echo secret-from-command
+            """);
+        File.SetUnixFileMode(
+            shellPath,
+            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        return $"\"{shellPath}\"";
+    }
+
+    private static string EscapeJson(string value) =>
+        value
+            .Replace("\\", "\\\\", StringComparison.Ordinal)
+            .Replace("\"", "\\\"", StringComparison.Ordinal);
 }

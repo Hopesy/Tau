@@ -9,3 +9,8 @@
 - 对外标准、合作方协议或外部文档的简要整理版。
 
 不要把大段供应商文档原样塞进来。这里应该是经过筛选和整理后的资料。
+
+## 当前参考
+
+- `auth-json-schema.md`：本地 `auth.json` OAuth/API key 凭证格式和安全边界。
+- `models-json-schema.md`：本地 `models.json` 模型目录、request auth/header 配置和 secret 解析边界。

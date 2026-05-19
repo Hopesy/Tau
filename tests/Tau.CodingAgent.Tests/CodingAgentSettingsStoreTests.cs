@@ -6,7 +6,7 @@ namespace Tau.CodingAgent.Tests;
 public class CodingAgentSettingsStoreTests
 {
     [Fact]
-    public void SaveAndLoad_RoundTripsDefaultModelAndTreeFilterMode()
+    public void SaveAndLoad_RoundTripsDefaultModelTreeFilterModeAndRetryPolicy()
     {
         var path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"tau-coding-agent-settings-{Guid.NewGuid():N}.json");
         var store = new CodingAgentSettingsStore(path);
@@ -20,12 +20,14 @@ public class CodingAgentSettingsStoreTests
 
         try
         {
-            store.Save(new CodingAgentSettingsSnapshot("openai", "gpt-5.4", "no-tools"));
+            store.Save(new CodingAgentSettingsSnapshot("openai", "gpt-5.4", "no-tools", 4, 125));
 
             var seeded = store.Load();
             Assert.Equal("openai", seeded.DefaultProvider);
             Assert.Equal("gpt-5.4", seeded.DefaultModel);
             Assert.Equal("no-tools", seeded.TreeFilterMode);
+            Assert.Equal(4, seeded.RetryMaxAttempts);
+            Assert.Equal(125, seeded.RetryBaseDelayMilliseconds);
 
             store.SaveDefaultModel(model);
 
@@ -34,6 +36,8 @@ public class CodingAgentSettingsStoreTests
             Assert.Equal("google", loaded.DefaultProvider);
             Assert.Equal("gemini-2.5-pro", loaded.DefaultModel);
             Assert.Equal("no-tools", loaded.TreeFilterMode);
+            Assert.Equal(4, loaded.RetryMaxAttempts);
+            Assert.Equal(125, loaded.RetryBaseDelayMilliseconds);
         }
         finally
         {
@@ -58,6 +62,8 @@ public class CodingAgentSettingsStoreTests
             Assert.Null(loaded.DefaultProvider);
             Assert.Null(loaded.DefaultModel);
             Assert.Null(loaded.TreeFilterMode);
+            Assert.Null(loaded.RetryMaxAttempts);
+            Assert.Null(loaded.RetryBaseDelayMilliseconds);
         }
         finally
         {

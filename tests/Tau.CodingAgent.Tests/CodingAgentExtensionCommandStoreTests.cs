@@ -165,4 +165,67 @@ public class CodingAgentExtensionCommandStoreTests
             Directory.Delete(directory, recursive: true);
         }
     }
+
+    [Fact]
+    public void LoadStatus_ReportsFilesResourcesDuplicatesAndDiagnostics()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-status-details-" + Guid.NewGuid().ToString("N"));
+        var extensionDirectory = Path.Combine(directory, ".tau", "extensions");
+        Directory.CreateDirectory(extensionDirectory);
+        var extensionFile = Path.Combine(extensionDirectory, "commands.json");
+        var badFile = Path.Combine(extensionDirectory, "bad.json");
+        File.WriteAllText(
+            extensionFile,
+            """
+            {
+              "commands": [
+                {
+                  "name": "hello",
+                  "description": "Say hello",
+                  "response": "Hello"
+                },
+                {
+                  "name": "hello",
+                  "description": "Say hello again",
+                  "prompt": "Again",
+                  "sendToRunner": true
+                }
+              ],
+              "resources": {
+                "promptPaths": ["./prompts"],
+                "skillPaths": ["./skills"]
+              }
+            }
+            """);
+        File.WriteAllText(badFile, "{ invalid");
+
+        try
+        {
+            var store = new CodingAgentExtensionCommandStore(cwd: directory);
+
+            var status = store.LoadStatus();
+
+            Assert.Equal(2, status.Commands.Count);
+            Assert.Equal(["hello:1", "hello:2"], status.Commands.Select(static command => command.InvocationName).ToArray());
+
+            var file = Assert.Single(status.Files);
+            Assert.Equal(extensionFile, file.FilePath);
+            Assert.Equal("project", file.Scope);
+            Assert.Equal(2, file.CommandCount);
+            Assert.Equal(Path.Combine(extensionDirectory, "prompts"), Assert.Single(file.PromptPaths));
+            Assert.Equal(Path.Combine(extensionDirectory, "skills"), Assert.Single(file.SkillPaths));
+            Assert.Equal(file.PromptPaths, status.Resources.PromptPaths);
+            Assert.Equal(file.SkillPaths, status.Resources.SkillPaths);
+
+            var diagnostic = Assert.Single(status.Diagnostics);
+            Assert.Equal("error", diagnostic.Severity);
+            Assert.Equal(badFile, diagnostic.Path);
+            Assert.Equal("project", diagnostic.Scope);
+            Assert.Contains("failed to load extension json:", diagnostic.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
 }

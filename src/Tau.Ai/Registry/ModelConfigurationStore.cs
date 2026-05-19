@@ -86,6 +86,61 @@ public sealed class ModelConfigurationStore
         }
     }
 
+    internal ModelRequestConfigurationStatus InspectRequestConfigurationStatus(Model model)
+    {
+        var doc = LoadDocument();
+        if (doc is null)
+        {
+            return ModelRequestConfigurationStatus.Empty;
+        }
+
+        using (doc)
+        {
+            if (!TryGetProviders(doc.RootElement, out var providers) ||
+                !TryGetObjectProperty(providers, model.Provider, out var providerConfig))
+            {
+                return ModelRequestConfigurationStatus.Empty;
+            }
+
+            var hasApiKey = HasConfiguredValue(GetString(providerConfig, "apiKey"));
+            var hasCredentialHeader = HasCredentialHeader(ParseStringDictionary(providerConfig, "headers"));
+            var hasCommandBackedSecret =
+                IsCommandBackedValue(GetString(providerConfig, "apiKey")) ||
+                HasCommandBackedCredentialHeader(ParseStringDictionary(providerConfig, "headers"));
+
+            if (providerConfig.TryGetProperty("modelOverrides", out var overrides) &&
+                overrides.ValueKind == JsonValueKind.Object &&
+                TryGetObjectProperty(overrides, model.Id, out var overrideConfig))
+            {
+                var overrideHeaders = ParseStringDictionary(overrideConfig, "headers");
+                hasCredentialHeader |= HasCredentialHeader(overrideHeaders);
+                hasCommandBackedSecret |= HasCommandBackedCredentialHeader(overrideHeaders);
+            }
+
+            if (providerConfig.TryGetProperty("models", out var configuredModels) &&
+                configuredModels.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var configuredModel in configuredModels.EnumerateArray())
+                {
+                    if (configuredModel.ValueKind == JsonValueKind.Object &&
+                        TryGetString(configuredModel, "id", out var modelId) &&
+                        model.Id.Equals(modelId, StringComparison.OrdinalIgnoreCase))
+                    {
+                        var modelHeaders = ParseStringDictionary(configuredModel, "headers");
+                        hasCredentialHeader |= HasCredentialHeader(modelHeaders);
+                        hasCommandBackedSecret |= HasCommandBackedCredentialHeader(modelHeaders);
+                        break;
+                    }
+                }
+            }
+
+            return new ModelRequestConfigurationStatus(
+                hasApiKey,
+                hasCredentialHeader,
+                hasCommandBackedSecret);
+        }
+    }
+
     private static void ApplyProvider(
         string providerName,
         JsonElement providerConfig,
@@ -533,6 +588,56 @@ public sealed class ModelConfigurationStore
         return result.Count == 0 ? null : result;
     }
 
+    private static bool HasConfiguredValue(string? value) => !string.IsNullOrWhiteSpace(value);
+
+    private static bool HasCredentialHeader(IDictionary<string, string>? headers)
+    {
+        if (headers is null || headers.Count == 0)
+        {
+            return false;
+        }
+
+        foreach (var (key, value) in headers)
+        {
+            if (HasConfiguredValue(value) && IsCredentialHeaderName(key))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool HasCommandBackedCredentialHeader(IDictionary<string, string>? headers)
+    {
+        if (headers is null || headers.Count == 0)
+        {
+            return false;
+        }
+
+        foreach (var (key, value) in headers)
+        {
+            if (IsCredentialHeaderName(key) && IsCommandBackedValue(value))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool IsCredentialHeaderName(string headerName)
+    {
+        return headerName.Equals("Authorization", StringComparison.OrdinalIgnoreCase) ||
+               headerName.Equals("api-key", StringComparison.OrdinalIgnoreCase) ||
+               headerName.Equals("x-api-key", StringComparison.OrdinalIgnoreCase) ||
+               headerName.Equals("x-goog-api-key", StringComparison.OrdinalIgnoreCase) ||
+               headerName.Contains("token", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsCommandBackedValue(string? value) =>
+        !string.IsNullOrWhiteSpace(value) && value.TrimStart().StartsWith('!');
+
     private static string? ResolveConfigValue(string? value)
     {
         if (string.IsNullOrWhiteSpace(value))
@@ -673,4 +778,14 @@ internal sealed record ModelRequestConfiguration(
     bool AuthHeader)
 {
     public static ModelRequestConfiguration Empty { get; } = new(null, null, false);
+}
+
+internal sealed record ModelRequestConfigurationStatus(
+    bool HasApiKey,
+    bool HasCredentialHeader,
+    bool HasCommandBackedSecret)
+{
+    public static ModelRequestConfigurationStatus Empty { get; } = new(false, false, false);
+
+    public bool IsConfigured => HasApiKey || HasCredentialHeader;
 }

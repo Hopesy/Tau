@@ -41,6 +41,7 @@ public sealed class FakeCodingAgentRunner : ICodingAgentRunner
     }
 
     public List<string> Inputs { get; } = [];
+    public List<IReadOnlyList<ContentBlock>> ContentInputs { get; } = [];
     public List<ChatMessage> MutableMessages { get; } = [];
     public IReadOnlyList<ChatMessage> Messages => MutableMessages;
     public Model Model { get; private set; }
@@ -79,6 +80,16 @@ public sealed class FakeCodingAgentRunner : ICodingAgentRunner
 
     public ProviderAuthStatus GetAuthStatus(string? providerId = null) =>
         AuthStatus with { Provider = string.IsNullOrWhiteSpace(providerId) ? Model.Provider : providerId };
+
+    public Tau.Ai.Auth.OAuth.IOAuthProvider? GetOAuthProvider(string providerId) => OAuthProvider;
+
+    public void SaveOAuthCredentials(string providerId, Tau.Ai.Auth.OAuth.OAuthCredentials credentials)
+    {
+        SavedOAuthCredentials = (providerId, credentials);
+    }
+
+    public Tau.Ai.Auth.OAuth.IOAuthProvider? OAuthProvider { get; set; }
+    public (string ProviderId, Tau.Ai.Auth.OAuth.OAuthCredentials Credentials)? SavedOAuthCredentials { get; private set; }
 
     public CodingAgentSessionStats GetSessionStats(string? sessionFile = null)
     {
@@ -125,5 +136,12 @@ public sealed class FakeCodingAgentRunner : ICodingAgentRunner
     {
         Inputs.Add(input);
         return _run(input, cancellationToken);
+    }
+
+    public IAsyncEnumerable<AgentEvent> RunAsync(IReadOnlyList<ContentBlock> input, CancellationToken cancellationToken = default)
+    {
+        ContentInputs.Add(input);
+        var text = string.Join(Environment.NewLine, input.OfType<TextContent>().Select(content => content.Text));
+        return _run(text, cancellationToken);
     }
 }

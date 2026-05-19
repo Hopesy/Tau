@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using Tau.Ai.Observability;
 using Tau.Pods.Models;
 using Tau.Pods.Services;
 
@@ -12,15 +13,7 @@ public static class PodsCli
     {
         var store = new PodsConfigStore();
         var validator = new PodsConfigValidator();
-        Tau.Ai.Observability.JsonlTauLogSink? logSink;
-        try
-        {
-            logSink = Tau.Ai.Observability.JsonlTauLogSink.FromEnvironment();
-        }
-        catch
-        {
-            logSink = null;
-        }
+        using var logSink = CreateLogSink();
         var probeService = new PodProbeService(logSink: logSink);
         var execService = new PodExecService();
         var lifecycleService = new PodLifecycleService(execService);
@@ -50,6 +43,18 @@ public static class PodsCli
             "deployments" => await DeploymentsAsync(args, path, store, validator, lifecycleService).ConfigureAwait(false),
             _ => Unknown(command)
         };
+    }
+
+    private static JsonlTauLogSink? CreateLogSink()
+    {
+        try
+        {
+            return JsonlTauLogSink.FromEnvironment();
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private static int Init(string path, PodsConfigStore store)
