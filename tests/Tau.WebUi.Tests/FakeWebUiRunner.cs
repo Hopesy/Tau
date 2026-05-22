@@ -1,4 +1,5 @@
 using Tau.Agent;
+using Tau.Agent.Runtime;
 using Tau.Ai;
 using Tau.Ai.Auth;
 using Tau.CodingAgent.Runtime;
@@ -26,6 +27,9 @@ internal sealed class FakeWebUiRunner : ICodingAgentRunner
     public IReadOnlyList<ChatMessage> Messages => MutableMessages;
     public Model Model { get; private set; }
     public string? SessionName { get; set; }
+    public ThinkingLevel? ThinkingLevel { get; set; }
+    public AgentQueueMode SteeringMode { get; set; } = AgentQueueMode.OneAtATime;
+    public AgentQueueMode FollowUpMode { get; set; } = AgentQueueMode.OneAtATime;
 
     public IReadOnlyList<string> GetProviders() => [Model.Provider];
 
@@ -52,11 +56,29 @@ internal sealed class FakeWebUiRunner : ICodingAgentRunner
 
     public void SaveOAuthCredentials(string providerId, Tau.Ai.Auth.OAuth.OAuthCredentials credentials) { }
 
+    public bool Logout(string providerId) => false;
+
+    public bool RefreshSkills(IReadOnlyList<CodingAgentSkill> skills) => false;
+
+    public bool RefreshSystemPromptResources(
+        IReadOnlyList<CodingAgentSkill> skills,
+        IReadOnlyList<CodingAgentContextFile> contextFiles) => false;
+
     public CodingAgentSessionStats GetSessionStats(string? sessionFile = null) =>
         new(Model.Provider, Model.Id, Messages.Count, 0, 0, 0, 0, 0, Model.ContextWindow, SessionName, sessionFile);
 
     public Task<CodingAgentCompactionResult> CompactAsync(string? customInstructions = null, CancellationToken cancellationToken = default) =>
         throw new InvalidOperationException("Compaction is not configured for browser tests.");
+
+    public Task<CodingAgentBranchSummaryResult> SummarizeBranchAsync(
+        IReadOnlyList<ChatMessage> messages,
+        string? customInstructions = null,
+        CancellationToken cancellationToken = default) =>
+        throw new InvalidOperationException("Branch summarization is not configured for browser tests.");
+
+    public void Steer(string input) { }
+
+    public void FollowUp(string input) { }
 
     public void ResetSession()
     {

@@ -19,6 +19,8 @@ public sealed class AgentRuntime
     private readonly TaskCompletionSource _idleTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     public AgentState State { get; } = new();
+    public AgentQueueMode SteeringMode { get; set; } = AgentQueueMode.OneAtATime;
+    public AgentQueueMode FollowUpMode { get; set; } = AgentQueueMode.OneAtATime;
 
     public void AddMessage(ChatMessage message) => State.AddMessage(message);
     public void Steer(ChatMessage message) => _steeringQueue.Writer.TryWrite(message);
@@ -56,12 +58,7 @@ public sealed class AgentRuntime
                 {
                     hasMoreWork = false;
 
-                    // Drain steering messages
-                    while (_steeringQueue.Reader.TryRead(out var steeringMsg))
-                    {
-                        State.AddMessage(steeringMsg);
-                        hasMoreWork = true;
-                    }
+                    DrainQueuedMessages(_steeringQueue, SteeringMode);
 
                     yield return new TurnStartEvent(turnIndex);
 
@@ -147,9 +144,8 @@ public sealed class AgentRuntime
 
                 } while (hasMoreWork && !token.IsCancellationRequested);
 
-            } while (_followUpQueue.Reader.TryRead(out var followUp) &&
-                     !token.IsCancellationRequested &&
-                     TryInjectFollowUp(followUp));
+            } while (!token.IsCancellationRequested &&
+                     DrainQueuedMessages(_followUpQueue, FollowUpMode));
 
             yield return new AgentEndEvent();
         }
@@ -160,9 +156,26 @@ public sealed class AgentRuntime
         }
     }
 
-    private bool TryInjectFollowUp(ChatMessage message)
+    private bool DrainQueuedMessages(Channel<ChatMessage> channel, AgentQueueMode mode)
     {
-        State.AddMessage(message);
+        if (mode == AgentQueueMode.All)
+        {
+            var drainedAny = false;
+            while (channel.Reader.TryRead(out var message))
+            {
+                State.AddMessage(message);
+                drainedAny = true;
+            }
+
+            return drainedAny;
+        }
+
+        if (!channel.Reader.TryRead(out var next))
+        {
+            return false;
+        }
+
+        State.AddMessage(next);
         return true;
     }
 

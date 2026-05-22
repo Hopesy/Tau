@@ -1,8 +1,11 @@
 using System.Globalization;
 using System.Text.Json;
 using Tau.Agent;
+using Tau.Agent.Runtime;
 using Tau.Ai;
 using Tau.CodingAgent.Runtime;
+using Tau.Tui.Abstractions;
+using Tau.Tui.Runtime;
 
 namespace Tau.CodingAgent.Tests;
 
@@ -47,6 +50,360 @@ public class CodingAgentCommandRouterTests
         Assert.True(result.IsError);
         Assert.Equal("usage: /providers", result.Message);
         Assert.Empty(runner.Inputs);
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_ScopedModelsCommand_ShowsAllModelsWhenUnset()
+    {
+        var settingsPath = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-scoped-models-{Guid.NewGuid():N}.json");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var settingsStore = new CodingAgentSettingsStore(settingsPath);
+        var router = new CodingAgentCommandRouter(runner, settingsStore);
+
+        try
+        {
+            var result = await router.TryHandleAsync("/scoped-models");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Contains("scoped models: all enabled (2/2)", result.Message, StringComparison.Ordinal);
+            Assert.Contains($"settings: {settingsPath}", result.Message, StringComparison.Ordinal);
+            Assert.Contains("google/gemini-2.5-pro (enabled)", result.Message, StringComparison.Ordinal);
+            Assert.Contains("openai/gpt-5.4 (enabled)", result.Message, StringComparison.Ordinal);
+            Assert.Empty(runner.Inputs);
+        }
+        finally
+        {
+            if (File.Exists(settingsPath))
+            {
+                File.Delete(settingsPath);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_ScopedModelsCommand_SetsAddsRemovesAndClearsEnabledModels()
+    {
+        var settingsPath = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-scoped-models-set-{Guid.NewGuid():N}.json");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var settingsStore = new CodingAgentSettingsStore(settingsPath);
+        var router = new CodingAgentCommandRouter(runner, settingsStore);
+
+        try
+        {
+            settingsStore.Save(new CodingAgentSettingsSnapshot(
+                "openai",
+                "gpt-5.4",
+                "no-tools",
+                RetryMaxAttempts: 4,
+                RetryBaseDelayMilliseconds: 125,
+                DefaultThinkingLevel: "high"));
+
+            var set = await router.TryHandleAsync("/scoped-models set google/gemini-2.5-pro");
+            var afterSet = settingsStore.Load();
+            var add = await router.TryHandleAsync("/scoped-models add openai/gpt-5.4");
+            var afterAdd = settingsStore.Load();
+            var remove = await router.TryHandleAsync("/scoped-models remove google/gemini-2.5-pro");
+            var afterRemove = settingsStore.Load();
+            var clear = await router.TryHandleAsync("/scoped-models clear");
+            var afterClear = settingsStore.Load();
+
+            Assert.False(set.IsError);
+            Assert.Contains("scoped models: 1/2 enabled", set.Message, StringComparison.Ordinal);
+            Assert.Contains("order: google/gemini-2.5-pro", set.Message, StringComparison.Ordinal);
+            Assert.Equal(["google/gemini-2.5-pro"], afterSet.EnabledModels);
+
+            Assert.False(add.IsError);
+            Assert.Contains("scoped models: all enabled (2/2)", add.Message, StringComparison.Ordinal);
+            Assert.Null(afterAdd.EnabledModels);
+
+            Assert.False(remove.IsError);
+            Assert.Contains("scoped models: 1/2 enabled", remove.Message, StringComparison.Ordinal);
+            Assert.Contains("order: openai/gpt-5.4", remove.Message, StringComparison.Ordinal);
+            Assert.Equal(["openai/gpt-5.4"], afterRemove.EnabledModels);
+
+            Assert.False(clear.IsError);
+            Assert.Contains("scoped models: all enabled (2/2)", clear.Message, StringComparison.Ordinal);
+            Assert.Null(afterClear.EnabledModels);
+
+            Assert.Equal("openai", afterClear.DefaultProvider);
+            Assert.Equal("gpt-5.4", afterClear.DefaultModel);
+            Assert.Equal("no-tools", afterClear.TreeFilterMode);
+            Assert.Equal(4, afterClear.RetryMaxAttempts);
+            Assert.Equal(125, afterClear.RetryBaseDelayMilliseconds);
+            Assert.Equal("high", afterClear.DefaultThinkingLevel);
+            Assert.Empty(runner.Inputs);
+        }
+        finally
+        {
+            if (File.Exists(settingsPath))
+            {
+                File.Delete(settingsPath);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_ScopedModelsCommand_ReturnsUsageOrModelErrors()
+    {
+        var settingsPath = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-scoped-models-invalid-{Guid.NewGuid():N}.json");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var settingsStore = new CodingAgentSettingsStore(settingsPath);
+        var router = new CodingAgentCommandRouter(runner, settingsStore);
+
+        try
+        {
+            var missingAction = await router.TryHandleAsync("/scoped-models set");
+            var invalidAction = await router.TryHandleAsync("/scoped-models toggle openai/gpt-5.4");
+            var extraClear = await router.TryHandleAsync("/scoped-models clear openai/gpt-5.4");
+            var missingModel = await router.TryHandleAsync("/scoped-models set openai/nope");
+
+            Assert.All(
+                [missingAction, invalidAction, extraClear],
+                result =>
+                {
+                    Assert.True(result.Handled);
+                    Assert.True(result.IsError);
+                    Assert.Equal("usage: /scoped-models [set|add|remove|clear|all] [provider/model ...]", result.Message);
+                });
+
+            Assert.True(missingModel.Handled);
+            Assert.True(missingModel.IsError);
+            Assert.Equal("model 'openai/nope' is not registered", missingModel.Message);
+            Assert.Empty(runner.Inputs);
+        }
+        finally
+        {
+            if (File.Exists(settingsPath))
+            {
+                File.Delete(settingsPath);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_SettingsCommand_ShowsCurrentSettingsSnapshotWithoutInvokingRunner()
+    {
+        var settingsPath = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-settings-summary-{Guid.NewGuid():N}.json");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>())
+        {
+            ThinkingLevel = ThinkingLevel.High
+        };
+        var settingsStore = new CodingAgentSettingsStore(settingsPath);
+        var router = new CodingAgentCommandRouter(runner, settingsStore);
+
+        try
+        {
+            settingsStore.Save(new CodingAgentSettingsSnapshot(
+                "openai",
+                "gpt-5.4",
+                "no-tools",
+                RetryMaxAttempts: 4,
+                RetryBaseDelayMilliseconds: 125,
+                DefaultThinkingLevel: "low",
+                EnabledModels: ["google/gemini-2.5-pro"],
+                SteeringMode: "all",
+                FollowUpMode: "one-at-a-time",
+                AutoCompactionEnabled: false));
+
+            var result = await router.TryHandleAsync("/settings");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Contains($"settings: {settingsPath}", result.Message, StringComparison.Ordinal);
+            Assert.Contains("current model: openai/gpt-5.4", result.Message, StringComparison.Ordinal);
+            Assert.Contains("current thinking: high", result.Message, StringComparison.Ordinal);
+            Assert.Contains("default model: openai/gpt-5.4", result.Message, StringComparison.Ordinal);
+            Assert.Contains("tree filter: no-tools", result.Message, StringComparison.Ordinal);
+            Assert.Contains("retry: enabled 4 attempts, base 125ms", result.Message, StringComparison.Ordinal);
+            Assert.Contains("default thinking: low", result.Message, StringComparison.Ordinal);
+            Assert.Contains("steering mode: all", result.Message, StringComparison.Ordinal);
+            Assert.Contains("follow-up mode: one-at-a-time", result.Message, StringComparison.Ordinal);
+            Assert.Contains("auto compaction: disabled", result.Message, StringComparison.Ordinal);
+            Assert.Contains("theme: dark", result.Message, StringComparison.Ordinal);
+            Assert.Contains("scoped models: 1 enabled (google/gemini-2.5-pro)", result.Message, StringComparison.Ordinal);
+            Assert.Empty(runner.Inputs);
+        }
+        finally
+        {
+            if (File.Exists(settingsPath))
+            {
+                File.Delete(settingsPath);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_SettingsCommand_PathUnavailableAndUsage()
+    {
+        var settingsPath = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-settings-path-{Guid.NewGuid():N}.json");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var settingsStore = new CodingAgentSettingsStore(settingsPath);
+        var router = new CodingAgentCommandRouter(runner, settingsStore);
+        var unavailableRouter = new CodingAgentCommandRouter(runner);
+
+        try
+        {
+            var path = await router.TryHandleAsync("/settings path");
+            var current = await router.TryHandleAsync("/settings current");
+            var unavailable = await unavailableRouter.TryHandleAsync("/settings");
+            var invalid = await router.TryHandleAsync("/settings edit");
+
+            Assert.True(path.Handled);
+            Assert.False(path.IsError);
+            Assert.Equal($"settings: {settingsPath}", path.Message);
+
+            Assert.True(current.Handled);
+            Assert.False(current.IsError);
+            Assert.Contains("default model: unset", current.Message, StringComparison.Ordinal);
+            Assert.Contains("tree filter: default", current.Message, StringComparison.Ordinal);
+            Assert.Contains("default thinking: off", current.Message, StringComparison.Ordinal);
+            Assert.Contains("steering mode: one-at-a-time", current.Message, StringComparison.Ordinal);
+            Assert.Contains("follow-up mode: one-at-a-time", current.Message, StringComparison.Ordinal);
+            Assert.Contains("auto compaction: default", current.Message, StringComparison.Ordinal);
+            Assert.Contains("theme: dark", current.Message, StringComparison.Ordinal);
+            Assert.Contains("scoped models: all enabled", current.Message, StringComparison.Ordinal);
+
+            Assert.True(unavailable.Handled);
+            Assert.True(unavailable.IsError);
+            Assert.Equal("settings are not available in this session", unavailable.Message);
+
+            Assert.True(invalid.Handled);
+            Assert.True(invalid.IsError);
+            Assert.Equal("usage: /settings [current|path]", invalid.Message);
+            Assert.Empty(runner.Inputs);
+        }
+        finally
+        {
+            if (File.Exists(settingsPath))
+            {
+                File.Delete(settingsPath);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_ThemeCommand_ListsSetsAndClearsPersistedTheme()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-theme-router-" + Guid.NewGuid().ToString("N"));
+        var projectThemes = Path.Combine(directory, ".tau", "themes");
+        Directory.CreateDirectory(projectThemes);
+        var themeFile = Path.Combine(projectThemes, "solarized.json");
+        await File.WriteAllTextAsync(themeFile, CodingAgentThemeStoreTests.CreateThemeJson("solarized"));
+        var settingsPath = Path.Combine(directory, "settings.json");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var settingsStore = new CodingAgentSettingsStore(settingsPath);
+        var themeStore = new CodingAgentThemeStore(
+            cwd: directory,
+            userThemesDirectory: Path.Combine(directory, "missing-user-themes"),
+            explicitPaths: []);
+        var router = new CodingAgentCommandRouter(runner, settingsStore, themeStore: themeStore);
+
+        try
+        {
+            settingsStore.Save(new CodingAgentSettingsSnapshot(
+                "openai",
+                "gpt-5.4",
+                "no-tools",
+                RetryMaxAttempts: 4,
+                RetryBaseDelayMilliseconds: 125,
+                DefaultThinkingLevel: "high",
+                EnabledModels: ["google/gemini-2.5-pro"]));
+
+            var list = await router.TryHandleAsync("/theme list");
+            var set = await router.TryHandleAsync("/theme set solarized");
+            var afterSet = settingsStore.Load();
+            var current = await router.TryHandleAsync("/theme current");
+            var settings = await router.TryHandleAsync("/settings");
+            var clear = await router.TryHandleAsync("/theme clear");
+            var afterClear = settingsStore.Load();
+
+            Assert.True(list.Handled);
+            Assert.False(list.IsError);
+            Assert.Contains("themes: 3, current dark", list.Message, StringComparison.Ordinal);
+            Assert.Contains("* dark (builtin)", list.Message, StringComparison.Ordinal);
+            Assert.Contains($"- solarized (project {themeFile})", list.Message, StringComparison.Ordinal);
+
+            Assert.False(set.IsError);
+            Assert.Equal("theme: solarized", set.Message);
+            Assert.Equal("solarized", afterSet.Theme);
+            Assert.Equal("openai", afterSet.DefaultProvider);
+            Assert.Equal("gpt-5.4", afterSet.DefaultModel);
+            Assert.Equal("no-tools", afterSet.TreeFilterMode);
+            Assert.Equal(4, afterSet.RetryMaxAttempts);
+            Assert.Equal(125, afterSet.RetryBaseDelayMilliseconds);
+            Assert.Equal("high", afterSet.DefaultThinkingLevel);
+            Assert.Equal(["google/gemini-2.5-pro"], afterSet.EnabledModels);
+
+            Assert.False(current.IsError);
+            Assert.Equal($"theme: solarized (project {themeFile})", current.Message);
+            Assert.Contains("theme: solarized", settings.Message, StringComparison.Ordinal);
+
+            Assert.False(clear.IsError);
+            Assert.Equal("theme: dark", clear.Message);
+            Assert.Null(afterClear.Theme);
+            Assert.Equal("openai", afterClear.DefaultProvider);
+            Assert.Equal("gpt-5.4", afterClear.DefaultModel);
+            Assert.Empty(runner.Inputs);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_ThemeCommand_ReturnsUsageAvailabilityAndMissingThemeErrors()
+    {
+        var settingsPath = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-theme-errors-{Guid.NewGuid():N}.json");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var settingsStore = new CodingAgentSettingsStore(settingsPath);
+        var unavailableRouter = new CodingAgentCommandRouter(runner);
+        var noThemeStoreRouter = new CodingAgentCommandRouter(runner, settingsStore);
+        var themeStore = new CodingAgentThemeStore(
+            cwd: Path.GetTempPath(),
+            userThemesDirectory: Path.Combine(Path.GetTempPath(), "missing-user-themes-" + Guid.NewGuid().ToString("N")),
+            explicitPaths: [],
+            includeDefaults: false);
+        var router = new CodingAgentCommandRouter(runner, settingsStore, themeStore: themeStore);
+
+        try
+        {
+            var unavailableSettings = await unavailableRouter.TryHandleAsync("/theme");
+            var unavailableDiscovery = await noThemeStoreRouter.TryHandleAsync("/theme list");
+            var missingTheme = await router.TryHandleAsync("/theme set missing");
+            var invalid = await router.TryHandleAsync("/theme set");
+            var extra = await router.TryHandleAsync("/theme clear dark");
+
+            Assert.True(unavailableSettings.Handled);
+            Assert.True(unavailableSettings.IsError);
+            Assert.Equal("theme settings are not available in this session", unavailableSettings.Message);
+
+            Assert.True(unavailableDiscovery.Handled);
+            Assert.True(unavailableDiscovery.IsError);
+            Assert.Equal("theme discovery is not available in this session", unavailableDiscovery.Message);
+
+            Assert.True(missingTheme.Handled);
+            Assert.True(missingTheme.IsError);
+            Assert.Equal("theme 'missing' is not available", missingTheme.Message);
+
+            Assert.All(
+                [invalid, extra],
+                result =>
+                {
+                    Assert.True(result.Handled);
+                    Assert.True(result.IsError);
+                    Assert.Equal("usage: /theme [current|list|set|clear] [name]", result.Message);
+                });
+            Assert.Empty(runner.Inputs);
+        }
+        finally
+        {
+            if (File.Exists(settingsPath))
+            {
+                File.Delete(settingsPath);
+            }
+        }
     }
 
     [Fact]
@@ -145,7 +502,9 @@ public class CodingAgentCommandRouterTests
             }
             """);
         var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
-        var extensionStore = new CodingAgentExtensionCommandStore(cwd: directory);
+        var extensionStore = new CodingAgentExtensionCommandStore(
+            cwd: directory,
+            userExtensionsDirectory: Path.Combine(directory, "missing-user-extensions"));
         var router = new CodingAgentCommandRouter(runner, extensionCommandStore: extensionStore);
 
         try
@@ -155,7 +514,7 @@ public class CodingAgentCommandRouterTests
             Assert.True(result.Handled);
             Assert.False(result.IsError);
             Assert.Contains("extensions: /hello <name> - Say hello (project); /review - Review source (project, runner)", result.Message, StringComparison.Ordinal);
-            Assert.Contains($"extension files: {extensionFile} (project, 2 commands, 0 prompts, 0 skills)", result.Message, StringComparison.Ordinal);
+            Assert.Contains($"extension files: {extensionFile} (project, 2 commands, 0 prompts, 0 skills, 0 themes)", result.Message, StringComparison.Ordinal);
             Assert.Empty(runner.Inputs);
         }
         finally
@@ -200,7 +559,7 @@ public class CodingAgentCommandRouterTests
     public void CommandCatalog_HelpLine_MatchesSupportedCommandNames()
     {
         Assert.Equal(
-            "commands: /help, /name, /copy, /files, /export, /share, /import, /new, /session, /tree, /label, /fork, /clone, /resume, /quit, /model, /provider, /models, /providers, /prompts, /skills, /extensions, /auth, /login, /retry, /history, /find, /clear, /compact",
+            "commands: /help, /reload, /hotkeys, /settings, /theme, /name, /copy, /files, /export, /share, /import, /new, /session, /tree, /label, /fork, /clone, /resume, /quit, /model, /provider, /models, /providers, /scoped-models, /prompts, /skills, /extensions, /auth, /login, /logout, /changelog, /retry, /thinking, /history, /find, /clear, /compact",
             CodingAgentCommandCatalog.HelpLine);
         Assert.All(CodingAgentCommandCatalog.SupportedCommands, command =>
         {
@@ -221,7 +580,7 @@ public class CodingAgentCommandRouterTests
         Assert.True(result.Handled);
         Assert.False(result.IsError);
         Assert.Equal(
-            "commands: /help, /name, /copy, /files, /export, /share, /import, /new, /session, /tree, /label, /fork, /clone, /resume, /quit, /model, /provider, /models, /providers, /prompts, /skills, /extensions, /auth, /login, /retry, /history, /find, /clear, /compact",
+            "commands: /help, /reload, /hotkeys, /settings, /theme, /name, /copy, /files, /export, /share, /import, /new, /session, /tree, /label, /fork, /clone, /resume, /quit, /model, /provider, /models, /providers, /scoped-models, /prompts, /skills, /extensions, /auth, /login, /logout, /changelog, /retry, /thinking, /history, /find, /clear, /compact",
             result.Message);
         Assert.Empty(runner.Inputs);
     }
@@ -237,6 +596,373 @@ public class CodingAgentCommandRouterTests
         Assert.True(result.Handled);
         Assert.True(result.IsError);
         Assert.Equal("usage: /help", result.Message);
+        Assert.Empty(runner.Inputs);
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_LogoutCommand_RemovesDefaultProviderAuthJsonCredentials()
+    {
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>())
+        {
+            AuthStatus = new("openai", true, "auth.json api_key", false, false, "API key entry found in auth.json."),
+            LogoutResult = true
+        };
+        var router = new CodingAgentCommandRouter(runner);
+
+        var result = await router.TryHandleAsync("/logout");
+
+        Assert.True(result.Handled);
+        Assert.False(result.IsError);
+        Assert.Equal(
+            "logout openai: auth.json credentials removed. Environment variables and models.json credentials are unchanged.",
+            result.Message);
+        Assert.Equal(["openai"], runner.LoggedOutProviders);
+        Assert.Empty(runner.Inputs);
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_LogoutCommand_UsesExplicitProviderAndReportsMissingAuthJsonEntry()
+    {
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>())
+        {
+            AuthStatus = new("openai", false, "none", false, false, "No credentials found."),
+            LogoutResult = false
+        };
+        var router = new CodingAgentCommandRouter(runner);
+
+        var result = await router.TryHandleAsync("/logout anthropic");
+
+        Assert.True(result.Handled);
+        Assert.False(result.IsError);
+        Assert.Equal(
+            "logout anthropic: no auth.json credentials found. Environment variables and models.json credentials are unchanged.",
+            result.Message);
+        Assert.Equal(["anthropic"], runner.LoggedOutProviders);
+        Assert.Empty(runner.Inputs);
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_LogoutCommandWithExtraArgs_ReturnsUsage()
+    {
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var router = new CodingAgentCommandRouter(runner);
+
+        var result = await router.TryHandleAsync("/logout anthropic now");
+
+        Assert.True(result.Handled);
+        Assert.True(result.IsError);
+        Assert.Equal("usage: /logout [provider]", result.Message);
+        Assert.Empty(runner.LoggedOutProviders);
+        Assert.Empty(runner.Inputs);
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_ChangelogCommand_ListsRecentReleaseNotesWithoutInvokingRunner()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-changelog-router-" + Guid.NewGuid().ToString("N"));
+        var changelog = Path.Combine(directory, "feature-release-notes.md");
+        Directory.CreateDirectory(directory);
+        await File.WriteAllTextAsync(
+            changelog,
+            """
+            # 功能发布记录
+
+            ## 2026-05
+
+            | 日期 | 功能域 | 用户价值 | 变更摘要 |
+            | --- | --- | --- | --- |
+            | 2026-05-21 | CodingAgent | 用户可以查看最近变更。 | 新增 /changelog baseline。 |
+            | 2026-05-20 | CodingAgent | 用户可以刷新本地资源。 | 新增 /reload baseline。 |
+            """);
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var router = new CodingAgentCommandRouter(
+            runner,
+            changelogStore: new CodingAgentChangelogStore(changelog));
+
+        try
+        {
+            var result = await router.TryHandleAsync("/changelog 1");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Contains($"changelog: 1/2 entries from {changelog}", result.Message, StringComparison.Ordinal);
+            Assert.Contains("[1] 2026-05-21 CodingAgent", result.Message, StringComparison.Ordinal);
+            Assert.Contains("用户价值: 用户可以查看最近变更。", result.Message, StringComparison.Ordinal);
+            Assert.Contains("Use /changelog all to show all entries.", result.Message, StringComparison.Ordinal);
+            Assert.DoesNotContain("2026-05-20", result.Message, StringComparison.Ordinal);
+            Assert.Empty(runner.Inputs);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_ChangelogCommand_AllListsEveryReleaseNote()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-changelog-router-all-" + Guid.NewGuid().ToString("N"));
+        var changelog = Path.Combine(directory, "feature-release-notes.md");
+        Directory.CreateDirectory(directory);
+        await File.WriteAllTextAsync(
+            changelog,
+            """
+            | 日期 | 功能域 | 用户价值 | 变更摘要 |
+            | --- | --- | --- | --- |
+            | 2026-05-21 | CodingAgent | 用户可以查看最近变更。 | 新增 /changelog baseline。 |
+            | 2026-05-20 | CodingAgent | 用户可以刷新本地资源。 | 新增 /reload baseline。 |
+            """);
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var router = new CodingAgentCommandRouter(
+            runner,
+            changelogStore: new CodingAgentChangelogStore(changelog));
+
+        try
+        {
+            var result = await router.TryHandleAsync("/changelog all");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Contains("changelog: 2/2 entries", result.Message, StringComparison.Ordinal);
+            Assert.Contains("2026-05-21", result.Message, StringComparison.Ordinal);
+            Assert.Contains("2026-05-20", result.Message, StringComparison.Ordinal);
+            Assert.DoesNotContain("Use /changelog all", result.Message, StringComparison.Ordinal);
+            Assert.Empty(runner.Inputs);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_ChangelogCommand_ReturnsUsageForInvalidArguments()
+    {
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var router = new CodingAgentCommandRouter(runner);
+
+        var invalid = await router.TryHandleAsync("/changelog nope");
+        var extra = await router.TryHandleAsync("/changelog 1 extra");
+
+        Assert.True(invalid.Handled);
+        Assert.True(invalid.IsError);
+        Assert.Equal("usage: /changelog [count|all]", invalid.Message);
+        Assert.True(extra.Handled);
+        Assert.True(extra.IsError);
+        Assert.Equal("usage: /changelog [count|all]", extra.Message);
+        Assert.Empty(runner.Inputs);
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_ReloadCommand_ReloadsSettingsResourcesSkillsAndKeybindings()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-reload-router-" + Guid.NewGuid().ToString("N"));
+        var extensions = Path.Combine(directory, ".tau", "extensions");
+        var extensionPrompts = Path.Combine(extensions, "prompts");
+        var extensionSkills = Path.Combine(extensions, "skills", "reload-skill");
+        var extensionThemes = Path.Combine(directory, ".tau", "theme-resources");
+        Directory.CreateDirectory(extensionPrompts);
+        Directory.CreateDirectory(extensionSkills);
+        Directory.CreateDirectory(extensionThemes);
+        await File.WriteAllTextAsync(
+            Path.Combine(extensions, "reload.json"),
+            """
+            {
+              "name": "reload-ext",
+              "description": "Reload extension",
+              "response": "ok",
+              "resources": {
+                "promptPaths": ["./prompts"],
+                "skillPaths": ["./skills"],
+                "themePaths": ["../theme-resources"]
+              }
+            }
+            """);
+        await File.WriteAllTextAsync(
+            Path.Combine(extensionPrompts, "from-extension.md"),
+            """
+            ---
+            description: From extension
+            ---
+            Prompt from extension.
+            """);
+        await File.WriteAllTextAsync(
+            Path.Combine(extensionSkills, "SKILL.md"),
+            """
+            ---
+            name: reload-skill
+            description: Skill from extension
+            ---
+            Reloaded skill body.
+            """);
+        await File.WriteAllTextAsync(
+            Path.Combine(directory, "AGENTS.md"),
+            "Reload context rules.");
+        await File.WriteAllTextAsync(
+            Path.Combine(extensionThemes, "reload-theme.json"),
+            CodingAgentThemeStoreTests.CreateThemeJson("reload-theme"));
+
+        var settingsPath = Path.Combine(directory, "settings.json");
+        var settingsStore = new CodingAgentSettingsStore(settingsPath);
+        settingsStore.Save(new CodingAgentSettingsSnapshot(
+            null,
+            null,
+            RetryMaxAttempts: 4,
+            RetryBaseDelayMilliseconds: 25,
+            DefaultThinkingLevel: "high",
+            SteeringMode: "all",
+            FollowUpMode: "all",
+            Theme: "reload-theme"));
+        var extensionResourceState = new CodingAgentExtensionResourceState();
+        var extensionStore = new CodingAgentExtensionCommandStore(
+            cwd: directory,
+            userExtensionsDirectory: Path.Combine(directory, "missing-user-extensions"),
+            explicitPaths: []);
+        var promptStore = new CodingAgentPromptTemplateStore(
+            cwd: directory,
+            explicitPaths: [],
+            additionalPathsProvider: () => extensionResourceState.PromptPaths);
+        var skillStore = new CodingAgentSkillStore(
+            cwd: directory,
+            explicitPaths: [],
+            additionalPathsProvider: () => extensionResourceState.SkillPaths);
+        var contextFileStore = new CodingAgentContextFileStore(
+            cwd: directory,
+            userContextDirectory: Path.Combine(directory, "missing-user"));
+        var themeStore = new CodingAgentThemeStore(
+            cwd: directory,
+            userThemesDirectory: Path.Combine(directory, "missing-user-themes"),
+            explicitPaths: [],
+            additionalPathsProvider: () => extensionResourceState.ThemePaths);
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>())
+        {
+            ThinkingLevel = ThinkingLevel.Low
+        };
+        CodingAgentRetryOptions? changedRetry = null;
+        var reloadedBindings = KeyBindingMap.WithOverrides(new Dictionary<KeyBinding, EditorAction>
+        {
+            [new KeyBinding(ConsoleKey.F2, ConsoleModifiers.None)] = EditorAction.Submit,
+            [new KeyBinding(ConsoleKey.Enter, ConsoleModifiers.None)] = EditorAction.None
+        });
+        var router = new CodingAgentCommandRouter(
+            runner,
+            settingsStore,
+            retryOptions: CodingAgentRetryOptions.Disabled,
+            retryOptionsChanged: options => changedRetry = options,
+            promptTemplateStore: promptStore,
+            skillStore: skillStore,
+            contextFileStore: contextFileStore,
+            themeStore: themeStore,
+            extensionCommandStore: extensionStore,
+            keyBindings: KeyBindingMap.Default,
+            extensionResourceState: extensionResourceState,
+            reloadKeyBindings: () => reloadedBindings);
+
+        try
+        {
+            var result = await router.TryHandleAsync("/reload");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Contains("reload complete:", result.Message, StringComparison.Ordinal);
+            Assert.Contains("settings: loaded, retry enabled 4 attempts, base 25ms, thinking high", result.Message, StringComparison.Ordinal);
+            Assert.Contains("steering all, follow-up all", result.Message, StringComparison.Ordinal);
+            Assert.Contains("extensions: 1 commands, 1 files, 0 issues", result.Message, StringComparison.Ordinal);
+            Assert.Contains("prompts: 1", result.Message, StringComparison.Ordinal);
+            Assert.Contains("skills: 1, runner prompt refreshed", result.Message, StringComparison.Ordinal);
+            Assert.Contains("context files: 1, runner prompt refreshed", result.Message, StringComparison.Ordinal);
+            Assert.Contains("keybindings:", result.Message, StringComparison.Ordinal);
+            Assert.Contains("themes: 3, current reload-theme, issues 0", result.Message, StringComparison.Ordinal);
+            Assert.Equal(ThinkingLevel.High, runner.ThinkingLevel);
+            Assert.Equal(AgentQueueMode.All, runner.SteeringMode);
+            Assert.Equal(AgentQueueMode.All, runner.FollowUpMode);
+            Assert.Equal(new CodingAgentRetryOptions(4, 25), changedRetry);
+            var refreshedSkill = Assert.Single(runner.LastRefreshedSkills ?? []);
+            Assert.Equal("reload-skill", refreshedSkill.Name);
+            var refreshedContextFile = Assert.Single(runner.LastRefreshedContextFiles ?? []);
+            Assert.Equal(Path.Combine(directory, "AGENTS.md"), refreshedContextFile.FilePath);
+            Assert.Equal("Reload context rules.", refreshedContextFile.Content);
+
+            var prompts = await router.TryHandleAsync("/prompts");
+            Assert.Equal("prompts: /from-extension - From extension", prompts.Message);
+
+            var skills = await router.TryHandleAsync("/skills");
+            Assert.Equal("skills: /skill:reload-skill - Skill from extension", skills.Message);
+
+            var hotkeys = await router.TryHandleAsync("/hotkeys");
+            Assert.Contains("F2", hotkeys.Message, StringComparison.Ordinal);
+            Assert.DoesNotContain("Enter", hotkeys.Message, StringComparison.Ordinal);
+            Assert.Empty(runner.Inputs);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_ReloadCommand_RejectsExtraArguments()
+    {
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var router = new CodingAgentCommandRouter(runner);
+
+        var result = await router.TryHandleAsync("/reload all");
+
+        Assert.True(result.Handled);
+        Assert.True(result.IsError);
+        Assert.Equal("usage: /reload", result.Message);
+        Assert.Empty(runner.Inputs);
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_HotkeysCommand_ListsCurrentEditorBindingsWithoutInvokingRunner()
+    {
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var bindings = KeyBindingMap.WithOverrides(new Dictionary<KeyBinding, EditorAction>
+        {
+            [new KeyBinding(ConsoleKey.F1, ConsoleModifiers.None)] = EditorAction.Submit,
+            [new KeyBinding(ConsoleKey.Enter, ConsoleModifiers.None)] = EditorAction.None
+        });
+        var router = new CodingAgentCommandRouter(runner, keyBindings: bindings);
+
+        var result = await router.TryHandleAsync("/hotkeys");
+
+        Assert.True(result.Handled);
+        Assert.False(result.IsError);
+        Assert.Contains("hotkeys:", result.Message, StringComparison.Ordinal);
+        Assert.Contains("submit", result.Message, StringComparison.Ordinal);
+        Assert.Contains("F1", result.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("Enter", result.Message, StringComparison.Ordinal);
+        Assert.Contains("cancel", result.Message, StringComparison.Ordinal);
+        Assert.Contains("Ctrl+C", result.Message, StringComparison.Ordinal);
+        Assert.Empty(runner.Inputs);
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_HotkeysCommand_WithoutBindingsReturnsError()
+    {
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var router = new CodingAgentCommandRouter(runner);
+
+        var result = await router.TryHandleAsync("/hotkeys");
+
+        Assert.True(result.Handled);
+        Assert.True(result.IsError);
+        Assert.Contains("not available", result.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(runner.Inputs);
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_HotkeysCommand_RejectsExtraArguments()
+    {
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var router = new CodingAgentCommandRouter(runner, keyBindings: KeyBindingMap.Default);
+
+        var result = await router.TryHandleAsync("/hotkeys all");
+
+        Assert.True(result.Handled);
+        Assert.True(result.IsError);
+        Assert.Equal("usage: /hotkeys", result.Message);
         Assert.Empty(runner.Inputs);
     }
 
@@ -1666,6 +2392,86 @@ public class CodingAgentCommandRouterTests
     }
 
     [Fact]
+    public async Task TryHandleAsync_ForkCommandWithSummarize_AppendsBranchSummaryAndRestoresContext()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-coding-agent-branch-summary-" + Guid.NewGuid().ToString("N"));
+        var treePath = Path.Combine(directory, "session.jsonl");
+        var exportPath = Path.Combine(directory, "session.html");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.MutableMessages.Add(new UserMessage("root task"));
+        runner.MutableMessages.Add(new AssistantMessage([new TextContent("root answer")]));
+        runner.MutableMessages.Add(new UserMessage("abandoned branch request"));
+        runner.MutableMessages.Add(new AssistantMessage(
+        [
+            new TextContent("abandoned branch progress"),
+            new ToolCallContent("call-1", "edit_file", """{"path":"src/Branch.cs"}""")
+        ]));
+        runner.BranchSummaryHandler = (messages, instructions, _) =>
+        {
+            Assert.Equal("focus decisions", instructions);
+            Assert.Equal(3, messages.Count);
+            Assert.Equal("root answer", ReadText(messages[0]));
+            Assert.Equal("abandoned branch request", ReadText(messages[1]));
+            Assert.Contains("abandoned branch progress", ReadText(messages[2]), StringComparison.Ordinal);
+            return Task.FromResult(new CodingAgentBranchSummaryResult(
+                "branch summary body",
+                messages.Count,
+                123,
+                ["docs/readme.md"],
+                ["src/Branch.cs"]));
+        };
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+            var tree = CodingAgentTreeSessionController.OpenOrCreate(treePath);
+            tree.SyncFromRunner(runner);
+            var targetEntryId = ReadMessageEntryId(treePath, "user", "root task");
+            var router = new CodingAgentCommandRouter(runner, treeSessionController: tree);
+
+            var result = await router.TryHandleAsync($"/fork {targetEntryId} --summarize focus decisions");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Contains("branch summary 3 entries, tokens ~123", result.Message, StringComparison.Ordinal);
+            Assert.Equal("focus decisions", runner.LastBranchSummaryInstructions);
+            Assert.Equal(2, runner.Messages.Count);
+            Assert.Equal("root task", ReadText(runner.Messages[0]));
+            Assert.Contains("Branch summary from", ReadText(runner.Messages[1]), StringComparison.Ordinal);
+            Assert.Contains("branch summary body", ReadText(runner.Messages[1]), StringComparison.Ordinal);
+
+            var branchSummary = ReadBranchSummaryEntry(treePath);
+            Assert.Equal("branch_summary", branchSummary.GetProperty("type").GetString());
+            Assert.Equal(targetEntryId, branchSummary.GetProperty("parentId").GetString());
+            Assert.Equal(targetEntryId, branchSummary.GetProperty("fromId").GetString());
+            Assert.Equal("branch summary body", branchSummary.GetProperty("summary").GetString());
+            Assert.Equal("docs/readme.md", branchSummary.GetProperty("readFiles")[0].GetString());
+            Assert.Equal("src/Branch.cs", branchSummary.GetProperty("modifiedFiles")[0].GetString());
+
+            var treeResult = await router.TryHandleAsync("/tree 20 all --search branch summary body");
+            Assert.False(treeResult.IsError);
+            Assert.Contains("branch summary from", treeResult.Message, StringComparison.Ordinal);
+            Assert.Contains("branch summary body", treeResult.Message, StringComparison.Ordinal);
+
+            var exportResult = await router.TryHandleAsync($"/export {exportPath}");
+            Assert.False(exportResult.IsError);
+            var html = File.ReadAllText(exportPath);
+            Assert.Contains("branch summary", html, StringComparison.Ordinal);
+            Assert.Contains("branch summary body", html, StringComparison.Ordinal);
+            Assert.Contains("docs/readme.md", html, StringComparison.Ordinal);
+            Assert.Contains("src/Branch.cs", html, StringComparison.Ordinal);
+            Assert.Empty(runner.Inputs);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
     public async Task TryHandleAsync_CloneCommand_DuplicatesCurrentBranchIntoNewSession()
     {
         var directory = Path.Combine(Path.GetTempPath(), "tau-coding-agent-tree-clone-" + Guid.NewGuid().ToString("N"));
@@ -1858,6 +2664,133 @@ public class CodingAgentCommandRouterTests
                 Assert.True(result.Handled);
                 Assert.True(result.IsError);
                 Assert.Equal("usage: /retry [current|default|off|<max attempts> [base delay ms]]", result.Message);
+        });
+        Assert.Empty(runner.Inputs);
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_ThinkingCommand_ShowsDefaultOffSetsLevelAndPersistsSettings()
+    {
+        var settingsPath = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-thinking-settings-{Guid.NewGuid():N}.json");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var settingsStore = new CodingAgentSettingsStore(settingsPath);
+        var router = new CodingAgentCommandRouter(runner, settingsStore);
+
+        try
+        {
+            settingsStore.Save(new CodingAgentSettingsSnapshot("openai", "gpt-5.4", "no-tools"));
+
+            var current = await router.TryHandleAsync("/thinking");
+            var configured = await router.TryHandleAsync("/thinking high");
+
+            Assert.True(current.Handled);
+            Assert.False(current.IsError);
+            Assert.Equal("thinking: off", current.Message);
+
+            Assert.False(configured.IsError);
+            Assert.Equal("thinking: high", configured.Message);
+            Assert.Equal(ThinkingLevel.High, runner.ThinkingLevel);
+
+            var settings = settingsStore.Load();
+            Assert.Equal("openai", settings.DefaultProvider);
+            Assert.Equal("gpt-5.4", settings.DefaultModel);
+            Assert.Equal("no-tools", settings.TreeFilterMode);
+            Assert.Equal("high", settings.DefaultThinkingLevel);
+            Assert.Empty(runner.Inputs);
+        }
+        finally
+        {
+            if (File.Exists(settingsPath))
+            {
+                File.Delete(settingsPath);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_ThinkingCommand_CyclesAndClearsSettingsAtOff()
+    {
+        var settingsPath = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-thinking-cycle-{Guid.NewGuid():N}.json");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var settingsStore = new CodingAgentSettingsStore(settingsPath);
+        var router = new CodingAgentCommandRouter(runner, settingsStore);
+
+        try
+        {
+            var current = await router.TryHandleAsync("/thinking current");
+            var low = await router.TryHandleAsync("/thinking cycle");
+            var medium = await router.TryHandleAsync("/thinking cycle");
+            var high = await router.TryHandleAsync("/thinking cycle");
+            var xhigh = await router.TryHandleAsync("/thinking cycle");
+            var off = await router.TryHandleAsync("/thinking cycle");
+
+            Assert.Equal("thinking: off", current.Message);
+            Assert.Equal("thinking: low", low.Message);
+            Assert.Equal("thinking: medium", medium.Message);
+            Assert.Equal("thinking: high", high.Message);
+            Assert.Equal("thinking: xhigh", xhigh.Message);
+            Assert.Equal("thinking: off", off.Message);
+            Assert.Null(runner.ThinkingLevel);
+            Assert.Null(settingsStore.Load().DefaultThinkingLevel);
+            Assert.Empty(runner.Inputs);
+        }
+        finally
+        {
+            if (File.Exists(settingsPath))
+            {
+                File.Delete(settingsPath);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_ThinkingCommand_OffClearsRuntimeAndSettings()
+    {
+        var settingsPath = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-thinking-off-{Guid.NewGuid():N}.json");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>())
+        {
+            ThinkingLevel = ThinkingLevel.ExtraHigh
+        };
+        var settingsStore = new CodingAgentSettingsStore(settingsPath);
+        settingsStore.Save(new CodingAgentSettingsSnapshot(null, null, DefaultThinkingLevel: "xhigh"));
+        var router = new CodingAgentCommandRouter(runner, settingsStore);
+
+        try
+        {
+            var result = await router.TryHandleAsync("/thinking off");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Equal("thinking: off", result.Message);
+            Assert.Null(runner.ThinkingLevel);
+            Assert.Null(settingsStore.Load().DefaultThinkingLevel);
+            Assert.Empty(runner.Inputs);
+        }
+        finally
+        {
+            if (File.Exists(settingsPath))
+            {
+                File.Delete(settingsPath);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_ThinkingCommand_InvalidArgumentsReturnUsage()
+    {
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var router = new CodingAgentCommandRouter(runner);
+
+        var invalidLevel = await router.TryHandleAsync("/thinking turbo");
+        var extraArgs = await router.TryHandleAsync("/thinking high now");
+
+        Assert.All(
+            [invalidLevel, extraArgs],
+            result =>
+            {
+                Assert.True(result.Handled);
+                Assert.True(result.IsError);
+                Assert.Equal("usage: /thinking [current|cycle|off|minimal|low|medium|high|xhigh]", result.Message);
             });
         Assert.Empty(runner.Inputs);
     }
@@ -2466,6 +3399,22 @@ public class CodingAgentCommandRouterTests
         }
 
         throw new InvalidOperationException("compaction entry not found");
+    }
+
+    private static JsonElement ReadBranchSummaryEntry(string path)
+    {
+        foreach (var line in File.ReadLines(path).Skip(1))
+        {
+            using var document = JsonDocument.Parse(line);
+            var root = document.RootElement;
+            if (root.TryGetProperty("type", out var type) &&
+                string.Equals(type.GetString(), "branch_summary", StringComparison.OrdinalIgnoreCase))
+            {
+                return root.Clone();
+            }
+        }
+
+        throw new InvalidOperationException("branch summary entry not found");
     }
 
     private static string ReadText(ChatMessage message)

@@ -111,8 +111,54 @@ public static class CodingAgentCompactionMessages
         Be concise. Focus on what's needed to understand the kept suffix.
         """;
 
+    public const string BranchSummaryPreamble = """
+        The user explored a different conversation branch before returning here.
+        Summary of that exploration:
+
+        """;
+
+    public const string BranchSummaryPrompt = """
+        Create a structured summary of this conversation branch for context when returning later.
+
+        Use this EXACT format:
+
+        ## Goal
+        [What was the user trying to accomplish in this branch?]
+
+        ## Constraints & Preferences
+        - [Any constraints, preferences, or requirements mentioned]
+        - [Or "(none)" if none were mentioned]
+
+        ## Progress
+        ### Done
+        - [x] [Completed tasks/changes]
+
+        ### In Progress
+        - [ ] [Work that was started but not finished]
+
+        ### Blocked
+        - [Issues preventing progress, if any]
+
+        ## Key Decisions
+        - **[Decision]**: [Brief rationale]
+
+        ## Next Steps
+        1. [What should happen next to continue this work]
+
+        Keep each section concise. Preserve exact file paths, function names, and error messages.
+        """;
+
     public static UserMessage CreateSummaryMessage(string summary, string? turnPrefixSummary = null) =>
         new(CreateSummaryText(summary, turnPrefixSummary));
+
+    public static UserMessage CreateBranchSummaryMessage(string summary, string? fromId = null) =>
+        new(CreateBranchSummaryText(summary, fromId));
+
+    public static string CreateBranchSummaryText(string summary, string? fromId = null)
+    {
+        var source = string.IsNullOrWhiteSpace(fromId) ? "root" : fromId.Trim();
+        return $"Branch summary from {source}:{Environment.NewLine}{Environment.NewLine}{summary.Trim()}";
+    }
 
     public static string CreateSummaryText(string summary, string? turnPrefixSummary = null)
     {

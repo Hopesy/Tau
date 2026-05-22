@@ -241,6 +241,72 @@ public class RuntimeCodingAgentRunnerTests
         Assert.DoesNotContain(sink.Events, e => e.Event == "run.end");
     }
 
+    [Fact]
+    public async Task RunAsync_IncludesContextFilesInGeneratedSystemPrompt()
+    {
+        string? capturedPrompt = null;
+        var runner = CreatePromptCapturingRunner(
+            context => capturedPrompt = context.SystemPrompt,
+            contextFiles:
+            [
+                new CodingAgentContextFile(
+                    Path.Combine(Path.GetTempPath(), "AGENTS.md"),
+                    "follow project rules",
+                    "project")
+            ]);
+
+        await foreach (var _ in runner.RunAsync("hello")) { }
+
+        Assert.NotNull(capturedPrompt);
+        Assert.Contains("# Project Context", capturedPrompt, StringComparison.Ordinal);
+        Assert.Contains("/AGENTS.md", capturedPrompt, StringComparison.Ordinal);
+        Assert.Contains("follow project rules", capturedPrompt, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RefreshSystemPromptResources_UpdatesGeneratedPromptContextFiles()
+    {
+        string? capturedPrompt = null;
+        var runner = CreatePromptCapturingRunner(context => capturedPrompt = context.SystemPrompt);
+
+        var refreshed = runner.RefreshSystemPromptResources(
+            [],
+            [new CodingAgentContextFile(Path.Combine(Path.GetTempPath(), "CLAUDE.md"), "new context", "project")]);
+
+        Assert.True(refreshed);
+        await foreach (var _ in runner.RunAsync("hello")) { }
+
+        Assert.NotNull(capturedPrompt);
+        Assert.Contains("/CLAUDE.md", capturedPrompt, StringComparison.Ordinal);
+        Assert.Contains("new context", capturedPrompt, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RefreshSystemPromptResources_WhenSystemPromptIsCustom_DoesNotOverwritePrompt()
+    {
+        string? capturedPrompt = null;
+        var runner = RuntimeCodingAgentRunner.Create(
+            "test-provider",
+            "test-model",
+            toolsOverride: [],
+            systemPromptOverride: "custom system prompt",
+            contextFiles:
+            [
+                new CodingAgentContextFile(Path.Combine(Path.GetTempPath(), "AGENTS.md"), "initial context", "project")
+            ],
+            providerRegistryOverride: CreatePromptCapturingRegistry(context => capturedPrompt = context.SystemPrompt),
+            modelCatalogOverride: CreatePromptCapturingModelCatalog());
+
+        var refreshed = runner.RefreshSystemPromptResources(
+            [],
+            [new CodingAgentContextFile(Path.Combine(Path.GetTempPath(), "CLAUDE.md"), "new context", "project")]);
+
+        Assert.False(refreshed);
+        await foreach (var _ in runner.RunAsync("hello")) { }
+
+        Assert.Equal("custom system prompt", capturedPrompt);
+    }
+
     private static RuntimeCodingAgentRunner CreateInstrumentedRunner(
         ITauLogSink sink,
         Func<AssistantMessageStream> streamFactory)
@@ -268,6 +334,39 @@ public class RuntimeCodingAgentRunnerTests
             new Tau.Ai.Registry.ModelCatalog(),
             logSink: sink);
     }
+
+    private static RuntimeCodingAgentRunner CreatePromptCapturingRunner(
+        Action<LlmContext> capture,
+        IReadOnlyList<CodingAgentContextFile>? contextFiles = null)
+    {
+        return RuntimeCodingAgentRunner.Create(
+            "test-provider",
+            "test-model",
+            toolsOverride: [],
+            contextFiles: contextFiles,
+            providerRegistryOverride: CreatePromptCapturingRegistry(capture),
+            modelCatalogOverride: CreatePromptCapturingModelCatalog());
+    }
+
+    private static ProviderRegistry CreatePromptCapturingRegistry(Action<LlmContext> capture)
+    {
+        var registry = new ProviderRegistry();
+        registry.Register("prompt-capture-test", () => new PromptCapturingProvider(capture), sourceId: "test");
+        return registry;
+    }
+
+    private static Tau.Ai.Registry.ModelCatalog CreatePromptCapturingModelCatalog()
+    {
+        var catalog = new Tau.Ai.Registry.ModelCatalog();
+        catalog.RegisterModel(new Model
+        {
+            Provider = "test-provider",
+            Id = "test-model",
+            Name = "Test Model",
+            Api = "prompt-capture-test"
+        });
+        return catalog;
+    }
 }
 
 file sealed class RecordingLogSink : ITauLogSink
@@ -283,6 +382,26 @@ file sealed class FactoryStreamProvider : IStreamProvider
     public string Api => "instrumented-test";
     public AssistantMessageStream Stream(Model model, LlmContext context, StreamOptions options) => _factory();
     public AssistantMessageStream StreamSimple(Model model, LlmContext context, SimpleStreamOptions options) => _factory();
+}
+
+file sealed class PromptCapturingProvider : IStreamProvider
+{
+    private readonly Action<LlmContext> _capture;
+    public PromptCapturingProvider(Action<LlmContext> capture) => _capture = capture;
+    public string Api => "prompt-capture-test";
+    public AssistantMessageStream Stream(Model model, LlmContext context, StreamOptions options) =>
+        CreateStream(context);
+
+    public AssistantMessageStream StreamSimple(Model model, LlmContext context, SimpleStreamOptions options) =>
+        CreateStream(context);
+
+    private AssistantMessageStream CreateStream(LlmContext context)
+    {
+        _capture(context);
+        var stream = new AssistantMessageStream();
+        stream.Push(new DoneEvent(new AssistantMessage([new TextContent("ok")])));
+        return stream;
+    }
 }
 
 file sealed class CompactingTestProvider : IStreamProvider

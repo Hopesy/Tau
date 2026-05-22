@@ -63,4 +63,73 @@ public sealed class OAuthCredentialStoreTests
             Directory.Delete(tempDir, recursive: true);
         }
     }
+
+    [Fact]
+    public void Remove_RemovesMatchingProviderAndPreservesOtherEntries()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), $"tau-auth-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+
+        try
+        {
+            var authPath = Path.Combine(tempDir, "auth.json");
+            File.WriteAllText(authPath, """
+                {
+                  "anthropic": {
+                    "type": "oauth",
+                    "refresh": "refresh-token",
+                    "access": "access-token",
+                    "expiresAt": "2030-01-01T00:00:00Z"
+                  },
+                  "openrouter": {
+                    "type": "api_key",
+                    "key": "or-key"
+                  }
+                }
+                """);
+            var store = new OAuthCredentialStore([authPath]);
+
+            var removed = store.Remove("ANTHROPIC");
+            var entries = store.LoadEntries();
+
+            Assert.True(removed);
+            Assert.False(entries.ContainsKey("anthropic"));
+            Assert.Equal("or-key", entries["openrouter"].ApiKey);
+        }
+        finally
+        {
+            Directory.Delete(tempDir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Remove_WhenProviderMissing_ReturnsFalseAndPreservesFile()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), $"tau-auth-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+
+        try
+        {
+            var authPath = Path.Combine(tempDir, "auth.json");
+            File.WriteAllText(authPath, """
+                {
+                  "openrouter": {
+                    "type": "api_key",
+                    "key": "or-key"
+                  }
+                }
+                """);
+            var before = File.ReadAllText(authPath);
+            var store = new OAuthCredentialStore([authPath]);
+
+            var removed = store.Remove("anthropic");
+
+            Assert.False(removed);
+            Assert.Equal(before, File.ReadAllText(authPath));
+        }
+        finally
+        {
+            Directory.Delete(tempDir, recursive: true);
+        }
+    }
 }

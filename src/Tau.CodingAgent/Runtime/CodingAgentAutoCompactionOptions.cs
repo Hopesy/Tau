@@ -8,6 +8,9 @@ public sealed record CodingAgentAutoCompactionOptions(int ThresholdTokens, strin
 
     public bool IsEnabled => ThresholdTokens > 0;
 
+    public CodingAgentAutoCompactionOptions WithEnabledOverride(bool? enabled) =>
+        enabled == false ? Disabled : this;
+
     public static CodingAgentAutoCompactionOptions FromEnvironment()
     {
         var thresholdValue = Environment.GetEnvironmentVariable("TAU_CODING_AGENT_AUTO_COMPACT_TOKENS");

@@ -8,7 +8,7 @@ public sealed class InteractiveInputEditor
     private readonly IInteractiveRenderer _renderer;
     private readonly InputHistory _history;
     private readonly InputBuffer _buffer;
-    private readonly IKeyBindingMap _bindings;
+    private IKeyBindingMap _bindings;
 
     public InteractiveInputEditor(
         IConsoleKeyReader reader,
@@ -26,6 +26,12 @@ public sealed class InteractiveInputEditor
 
     public InputBuffer Buffer => _buffer;
     public InputHistory History => _history;
+    public IKeyBindingMap KeyBindings => _bindings;
+
+    public void SetKeyBindings(IKeyBindingMap bindings)
+    {
+        _bindings = bindings;
+    }
 
     public async Task<InputResult> ReadLineAsync(
         string prompt,

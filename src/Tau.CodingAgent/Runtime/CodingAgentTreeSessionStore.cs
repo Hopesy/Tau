@@ -55,6 +55,8 @@ public sealed record CodingAgentTreeViewItem(
     int Depth = 0,
     string EntryType = "");
 
+public sealed record CodingAgentForkMessage(string EntryId, string Text);
+
 public sealed record CodingAgentCompactionRetentionOptions(
     int KeepRecentTokens = 20_000,
     int KeepRecentMessages = 4)
@@ -154,8 +156,13 @@ public sealed class CodingAgentTreeSessionController
         }
     }
 
-    public void StartNewFromRunner(ICodingAgentRunner runner)
+    public void StartNewFromRunner(ICodingAgentRunner runner, string? parentSession = null)
     {
+        if (!string.IsNullOrWhiteSpace(parentSession))
+        {
+            Store.RewriteHeader(parentSession.Trim());
+        }
+
         Store.StartNew(runner.Model.Provider, runner.Model.Id, runner.SessionName);
         _persistedMessageCount = 0;
         _persistedProvider = runner.Model.Provider;
@@ -192,6 +199,24 @@ public sealed class CodingAgentTreeSessionController
         runner.RestoreSession(snapshot.ToFlatSnapshot());
         MarkSnapshot(snapshot);
         return id;
+    }
+
+    public IReadOnlyList<ChatMessage> CollectBranchSummaryMessages(string entryId) =>
+        Store.CollectBranchSummaryMessages(entryId);
+
+    public CodingAgentTreeSessionSnapshot BranchWithSummary(
+        string entryId,
+        CodingAgentBranchSummaryResult result)
+    {
+        Store.BranchWithSummary(
+            entryId,
+            result.Summary,
+            result.ReadFiles,
+            result.ModifiedFiles,
+            result.FromHook);
+        var snapshot = Store.LoadCurrentBranchSnapshot();
+        MarkSnapshot(snapshot);
+        return snapshot;
     }
 
     public CodingAgentTreeSessionSnapshot Branch(string entryId)
@@ -248,6 +273,9 @@ public sealed class CodingAgentTreeSessionController
     public IReadOnlyList<CodingAgentTreeViewItem> EnumerateView(CodingAgentTreeFormatOptions options) =>
         Store.EnumerateView(options);
 
+    public IReadOnlyList<CodingAgentForkMessage> GetUserMessagesForForking() =>
+        Store.GetUserMessagesForForking();
+
     private void MarkSnapshot(CodingAgentTreeSessionSnapshot snapshot)
     {
         _persistedMessageCount = snapshot.Messages.Count;
@@ -269,6 +297,7 @@ public sealed class CodingAgentTreeSessionStore
     private const string SessionInfoType = "session_info";
     private const string LabelType = "label";
     private const string CompactionType = "compaction";
+    private const string BranchSummaryType = "branch_summary";
     private const string AutoRetryStartType = "auto_retry_start";
     private const string AutoRetryEndType = "auto_retry_end";
 
@@ -485,6 +514,39 @@ public sealed class CodingAgentTreeSessionStore
             FromHook = fromHook ? true : null,
             IsSplitTurn = string.IsNullOrWhiteSpace(turnPrefixSummary) ? null : true,
             TurnPrefixSummary = NormalizeName(turnPrefixSummary)
+        };
+        AppendEntry(entry);
+        return id;
+    }
+
+    public string AppendBranchSummary(
+        string? branchFromId,
+        string summary,
+        IReadOnlyList<string>? readFiles = null,
+        IReadOnlyList<string>? modifiedFiles = null,
+        bool fromHook = false)
+    {
+        if (string.IsNullOrWhiteSpace(summary))
+        {
+            throw new ArgumentException("Branch summary cannot be empty.", nameof(summary));
+        }
+
+        var state = ReadState();
+        var targetId = string.IsNullOrWhiteSpace(branchFromId)
+            ? null
+            : state.ResolveEntryId(branchFromId).Id;
+        var id = CreateEntryId(state.EntryIds);
+        var entry = new CodingAgentTreeSessionEntry
+        {
+            Type = BranchSummaryType,
+            Id = id,
+            ParentId = targetId,
+            Timestamp = DateTimeOffset.UtcNow,
+            FromId = targetId ?? "root",
+            Summary = summary.Trim(),
+            ReadFiles = NormalizeStringList(readFiles),
+            ModifiedFiles = NormalizeStringList(modifiedFiles),
+            FromHook = fromHook ? true : null
         };
         AppendEntry(entry);
         return id;
@@ -772,6 +834,43 @@ public sealed class CodingAgentTreeSessionStore
         return id;
     }
 
+    public void RewriteHeader(string? parentSession = null)
+    {
+        var state = ReadState();
+        var header = new CodingAgentTreeSessionHeader
+        {
+            Type = SessionType,
+            Version = state.Header.Version <= 0 ? CurrentVersion : state.Header.Version,
+            Id = state.Header.Id,
+            Timestamp = state.Header.Timestamp,
+            Cwd = string.IsNullOrWhiteSpace(state.Header.Cwd) ? _cwd : state.Header.Cwd,
+            ParentSession = NormalizeName(parentSession) ?? state.Header.ParentSession
+        };
+
+        var directory = System.IO.Path.GetDirectoryName(_path);
+        if (!string.IsNullOrEmpty(directory))
+        {
+            Directory.CreateDirectory(directory);
+        }
+
+        var tempPath = _path + ".tmp";
+        using (var writer = new StreamWriter(tempPath, false))
+        {
+            writer.WriteLine(JsonSerializer.Serialize(header, CodingAgentTreeSessionJsonContext.Default.CodingAgentTreeSessionHeader));
+            foreach (var entry in state.Entries)
+            {
+                writer.WriteLine(JsonSerializer.Serialize(entry, CodingAgentTreeSessionJsonContext.Default.CodingAgentTreeSessionEntry));
+            }
+        }
+
+        if (File.Exists(_path))
+        {
+            File.Delete(_path);
+        }
+
+        File.Move(tempPath, _path);
+    }
+
     public string Branch(string entryId)
     {
         var state = ReadState();
@@ -787,6 +886,26 @@ public sealed class CodingAgentTreeSessionStore
         };
         AppendEntry(entry);
         return id;
+    }
+
+    public string BranchWithSummary(
+        string entryId,
+        string summary,
+        IReadOnlyList<string>? readFiles = null,
+        IReadOnlyList<string>? modifiedFiles = null,
+        bool fromHook = false)
+    {
+        var state = ReadState();
+        var target = state.ResolveEntryId(entryId);
+        return AppendBranchSummary(target.Id, summary, readFiles, modifiedFiles, fromHook);
+    }
+
+    public IReadOnlyList<ChatMessage> CollectBranchSummaryMessages(string targetEntryId)
+    {
+        var state = ReadState();
+        var target = state.ResolveEntryId(targetEntryId);
+        var entries = CollectEntriesForBranchSummary(state, state.LeafId, target.Id);
+        return BuildBranchSummaryMessages(entries);
     }
 
     public string ExportCurrentBranch(string path)
@@ -911,6 +1030,29 @@ public sealed class CodingAgentTreeSessionStore
             .Select(static entry => entry.Id)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
         return BuildViewItems(state, branchIds, options);
+    }
+
+    public IReadOnlyList<CodingAgentForkMessage> GetUserMessagesForForking()
+    {
+        var state = ReadState();
+        var messages = new List<CodingAgentForkMessage>();
+        foreach (var entry in state.Entries)
+        {
+            if (entry.Type != MessageType ||
+                entry.Message is null ||
+                !string.Equals(entry.Message.Role, "user", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var text = ExtractUserMessageText(entry.Message);
+            if (!string.IsNullOrWhiteSpace(text))
+            {
+                messages.Add(new CodingAgentForkMessage(entry.Id, text));
+            }
+        }
+
+        return messages;
     }
 
     private List<CodingAgentTreeViewItem> BuildViewItems(
@@ -1113,6 +1255,12 @@ public sealed class CodingAgentTreeSessionStore
 
     private static void AppendSnapshotMessage(ICollection<ChatMessage> messages, CodingAgentTreeSessionEntry entry)
     {
+        if (entry.Type == BranchSummaryType && !string.IsNullOrWhiteSpace(entry.Summary))
+        {
+            messages.Add(CodingAgentCompactionMessages.CreateBranchSummaryMessage(entry.Summary, entry.FromId));
+            return;
+        }
+
         if (entry.Type != MessageType || entry.Message is null)
         {
             return;
@@ -1123,6 +1271,76 @@ public sealed class CodingAgentTreeSessionStore
         {
             messages.Add(message);
         }
+    }
+
+    private static IReadOnlyList<CodingAgentTreeSessionEntry> CollectEntriesForBranchSummary(
+        TreeState state,
+        string? oldLeafId,
+        string targetId)
+    {
+        if (string.IsNullOrWhiteSpace(oldLeafId) ||
+            oldLeafId.Equals(targetId, StringComparison.OrdinalIgnoreCase))
+        {
+            return [];
+        }
+
+        var oldPathIds = state.GetBranch(oldLeafId)
+            .Select(static entry => entry.Id)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var targetPath = state.GetBranch(targetId);
+        string? commonAncestorId = null;
+        for (var i = targetPath.Count - 1; i >= 0; i--)
+        {
+            if (oldPathIds.Contains(targetPath[i].Id))
+            {
+                commonAncestorId = targetPath[i].Id;
+                break;
+            }
+        }
+
+        var entries = new List<CodingAgentTreeSessionEntry>();
+        var currentId = oldLeafId;
+        while (!string.IsNullOrWhiteSpace(currentId) &&
+               !currentId.Equals(commonAncestorId, StringComparison.OrdinalIgnoreCase) &&
+               state.ById.TryGetValue(currentId, out var entry))
+        {
+            entries.Add(entry);
+            currentId = entry.ParentId;
+        }
+
+        entries.Reverse();
+        return entries;
+    }
+
+    private static IReadOnlyList<ChatMessage> BuildBranchSummaryMessages(
+        IReadOnlyList<CodingAgentTreeSessionEntry> entries)
+    {
+        var messages = new List<ChatMessage>();
+        foreach (var entry in entries)
+        {
+            switch (entry.Type)
+            {
+                case MessageType when entry.Message is not null &&
+                                      !string.Equals(entry.Message.Role, "toolResult", StringComparison.OrdinalIgnoreCase):
+                    var message = CodingAgentSessionStore.ToMessage(entry.Message);
+                    if (message is not null)
+                    {
+                        messages.Add(message);
+                    }
+
+                    break;
+
+                case CompactionType when !string.IsNullOrWhiteSpace(entry.Summary):
+                    messages.Add(CodingAgentCompactionMessages.CreateSummaryMessage(entry.Summary));
+                    break;
+
+                case BranchSummaryType when !string.IsNullOrWhiteSpace(entry.Summary):
+                    messages.Add(CodingAgentCompactionMessages.CreateBranchSummaryMessage(entry.Summary, entry.FromId));
+                    break;
+            }
+        }
+
+        return messages;
     }
 
     private void AppendEntry(CodingAgentTreeSessionEntry entry)
@@ -1210,6 +1428,22 @@ public sealed class CodingAgentTreeSessionStore
 
     private static string? NormalizeName(string? name) =>
         string.IsNullOrWhiteSpace(name) ? null : name.Trim();
+
+    private static List<string>? NormalizeStringList(IReadOnlyList<string>? values)
+    {
+        if (values is null || values.Count == 0)
+        {
+            return null;
+        }
+
+        var normalized = values
+            .Where(static value => !string.IsNullOrWhiteSpace(value))
+            .Select(static value => value.Trim())
+            .Distinct(StringComparer.Ordinal)
+            .Order(StringComparer.Ordinal)
+            .ToList();
+        return normalized.Count == 0 ? null : normalized;
+    }
 
     private static string ShortId(string? id) =>
         string.IsNullOrWhiteSpace(id) ? "root" : id.Length <= 8 ? id : id[..8];
@@ -1322,6 +1556,21 @@ public sealed class CodingAgentTreeSessionStore
         if (!string.IsNullOrWhiteSpace(entry.Summary))
         {
             parts.Add(entry.Summary);
+        }
+
+        if (!string.IsNullOrWhiteSpace(entry.FromId))
+        {
+            parts.Add(entry.FromId);
+        }
+
+        if (entry.ReadFiles is not null)
+        {
+            parts.AddRange(entry.ReadFiles);
+        }
+
+        if (entry.ModifiedFiles is not null)
+        {
+            parts.AddRange(entry.ModifiedFiles);
         }
 
         if (!string.IsNullOrWhiteSpace(entry.ErrorMessage))
@@ -1450,6 +1699,7 @@ public sealed class CodingAgentTreeSessionStore
             MessageType when entry.Message is not null => $"message {entry.Message.Role} {PreviewMessage(entry.Message)}",
             ModelChangeType => $"model {entry.Provider}/{entry.Model}",
             CompactionType => $"compaction {entry.TokensBefore.GetValueOrDefault()} tokens {PreviewText(entry.Summary)}",
+            BranchSummaryType => $"branch summary from {ShortId(entry.FromId)} {PreviewText(entry.Summary)}",
             AutoRetryStartType => $"auto-retry start {entry.Attempt.GetValueOrDefault()}/{entry.MaxAttempts.GetValueOrDefault()} {entry.DelayMs.GetValueOrDefault()}ms {PreviewText(entry.ErrorMessage)}",
             AutoRetryEndType => $"auto-retry end {(entry.Success == true ? "success" : "failed")} attempt {entry.Attempt.GetValueOrDefault()} {PreviewText(entry.FinalError)}",
             LabelType => $"label {ShortId(entry.TargetId)} {NormalizeName(entry.Label) ?? "clear"}",
@@ -1473,6 +1723,16 @@ public sealed class CodingAgentTreeSessionStore
         }
 
         return text.Length <= 72 ? text : text[..72] + "...";
+    }
+
+    private static string ExtractUserMessageText(CodingAgentSessionMessage message)
+    {
+        var text = string.Concat(
+                message.Content
+                    .Where(static content => content.Type == "text" && content.Text is not null)
+                    .Select(static content => content.Text))
+            .Trim();
+        return text;
     }
 
     private static string PreviewText(string? text)
@@ -1606,6 +1866,9 @@ internal sealed class CodingAgentTreeSessionEntry
     public string? TargetId { get; init; }
     public string? Label { get; init; }
     public string? Summary { get; init; }
+    public string? FromId { get; init; }
+    public List<string>? ReadFiles { get; init; }
+    public List<string>? ModifiedFiles { get; init; }
     public string? FirstKeptEntryId { get; init; }
     public int? TokensBefore { get; init; }
     public bool? FromHook { get; init; }
@@ -1637,6 +1900,9 @@ internal sealed class CodingAgentTreeSessionEntry
             TargetId = targetId ?? TargetId,
             Label = Label,
             Summary = Summary,
+            FromId = FromId,
+            ReadFiles = ReadFiles,
+            ModifiedFiles = ModifiedFiles,
             FirstKeptEntryId = firstKeptEntryId ?? FirstKeptEntryId,
             TokensBefore = TokensBefore,
             FromHook = FromHook,

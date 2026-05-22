@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Tau.Agent;
+using Tau.Agent.Runtime;
 using Tau.Ai;
 using Tau.Ai.Auth;
 using Tau.CodingAgent.Runtime;
@@ -408,6 +409,9 @@ public class RuntimeDelegationAgentRunnerTests
         public IReadOnlyList<ChatMessage> Messages => MutableMessages;
         public Model Model { get; }
         public string? SessionName { get; set; }
+        public ThinkingLevel? ThinkingLevel { get; set; }
+        public AgentQueueMode SteeringMode { get; set; } = AgentQueueMode.OneAtATime;
+        public AgentQueueMode FollowUpMode { get; set; } = AgentQueueMode.OneAtATime;
         public string? LastInput { get; private set; }
         public CodingAgentSessionSnapshot? RestoredSnapshot { get; private set; }
 
@@ -418,10 +422,22 @@ public class RuntimeDelegationAgentRunnerTests
             new(providerId ?? Model.Provider, false, "none", false, false, "test");
         public Tau.Ai.Auth.OAuth.IOAuthProvider? GetOAuthProvider(string providerId) => null;
         public void SaveOAuthCredentials(string providerId, Tau.Ai.Auth.OAuth.OAuthCredentials credentials) { }
+        public bool Logout(string providerId) => false;
+        public bool RefreshSkills(IReadOnlyList<CodingAgentSkill> skills) => false;
+        public bool RefreshSystemPromptResources(
+            IReadOnlyList<CodingAgentSkill> skills,
+            IReadOnlyList<CodingAgentContextFile> contextFiles) => false;
         public CodingAgentSessionStats GetSessionStats(string? sessionFile = null) =>
             new(Model.Provider, Model.Id, 0, 0, 0, 0, 0, 0, Model.ContextWindow, null, sessionFile);
         public Task<CodingAgentCompactionResult> CompactAsync(string? customInstructions = null, CancellationToken cancellationToken = default) =>
             throw new NotSupportedException();
+        public Task<CodingAgentBranchSummaryResult> SummarizeBranchAsync(
+            IReadOnlyList<ChatMessage> messages,
+            string? customInstructions = null,
+            CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+        public void Steer(string input) { }
+        public void FollowUp(string input) { }
         public void RestoreSession(CodingAgentSessionSnapshot snapshot)
         {
             RestoredSnapshot = snapshot;

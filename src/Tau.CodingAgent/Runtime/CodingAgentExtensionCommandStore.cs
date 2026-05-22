@@ -32,14 +32,24 @@ public sealed record CodingAgentExtensionCommandInvocation(
 
 public sealed record CodingAgentExtensionResources(
     IReadOnlyList<string> SkillPaths,
-    IReadOnlyList<string> PromptPaths);
+    IReadOnlyList<string> PromptPaths,
+    IReadOnlyList<string> ThemePaths)
+{
+    public CodingAgentExtensionResources(
+        IReadOnlyList<string> skillPaths,
+        IReadOnlyList<string> promptPaths)
+        : this(skillPaths, promptPaths, [])
+    {
+    }
+}
 
 public sealed record CodingAgentExtensionFileStatus(
     string FilePath,
     string Scope,
     int CommandCount,
     IReadOnlyList<string> SkillPaths,
-    IReadOnlyList<string> PromptPaths);
+    IReadOnlyList<string> PromptPaths,
+    IReadOnlyList<string> ThemePaths);
 
 public sealed record CodingAgentExtensionDiagnostic(
     string Severity,
@@ -91,12 +101,13 @@ public sealed class CodingAgentExtensionCommandStore
         var definitions = new List<CommandDefinition>();
         var skillPaths = new List<string>();
         var promptPaths = new List<string>();
+        var themePaths = new List<string>();
         var files = new List<CodingAgentExtensionFileStatus>();
         var diagnostics = new List<CodingAgentExtensionDiagnostic>();
         if (_includeDefaults)
         {
-            LoadSourceDirectory(_userExtensionsDirectory, "user", definitions, skillPaths, promptPaths, files, diagnostics);
-            LoadSourceDirectory(Path.Combine(_cwd, ".tau", "extensions"), "project", definitions, skillPaths, promptPaths, files, diagnostics);
+            LoadSourceDirectory(_userExtensionsDirectory, "user", definitions, skillPaths, promptPaths, themePaths, files, diagnostics);
+            LoadSourceDirectory(Path.Combine(_cwd, ".tau", "extensions"), "project", definitions, skillPaths, promptPaths, themePaths, files, diagnostics);
         }
 
         foreach (var path in _explicitPaths)
@@ -104,11 +115,11 @@ public sealed class CodingAgentExtensionCommandStore
             var resolved = ResolvePath(path, _cwd);
             if (Directory.Exists(resolved))
             {
-                LoadSourceDirectory(resolved, "path", definitions, skillPaths, promptPaths, files, diagnostics, reportMissing: true);
+                LoadSourceDirectory(resolved, "path", definitions, skillPaths, promptPaths, themePaths, files, diagnostics, reportMissing: true);
             }
             else if (File.Exists(resolved) && Path.GetExtension(resolved).Equals(".json", StringComparison.OrdinalIgnoreCase))
             {
-                LoadSourceFile(resolved, "path", definitions, skillPaths, promptPaths, files, diagnostics);
+                LoadSourceFile(resolved, "path", definitions, skillPaths, promptPaths, themePaths, files, diagnostics);
             }
             else if (File.Exists(resolved))
             {
@@ -130,7 +141,8 @@ public sealed class CodingAgentExtensionCommandStore
 
         var resources = new CodingAgentExtensionResources(
             skillPaths.Distinct(StringComparer.OrdinalIgnoreCase).ToArray(),
-            promptPaths.Distinct(StringComparer.OrdinalIgnoreCase).ToArray());
+            promptPaths.Distinct(StringComparer.OrdinalIgnoreCase).ToArray(),
+            themePaths.Distinct(StringComparer.OrdinalIgnoreCase).ToArray());
 
         return new CodingAgentExtensionStatus(
             ResolveInvocationNames(definitions),
@@ -194,6 +206,7 @@ public sealed class CodingAgentExtensionCommandStore
         ICollection<CommandDefinition> definitions,
         ICollection<string> skillPaths,
         ICollection<string> promptPaths,
+        ICollection<string> themePaths,
         ICollection<CodingAgentExtensionFileStatus> fileStatuses,
         ICollection<CodingAgentExtensionDiagnostic> diagnostics,
         bool reportMissing = false)
@@ -232,7 +245,7 @@ public sealed class CodingAgentExtensionCommandStore
 
         foreach (var file in jsonFiles)
         {
-            LoadSourceFile(file, scope, definitions, skillPaths, promptPaths, fileStatuses, diagnostics);
+            LoadSourceFile(file, scope, definitions, skillPaths, promptPaths, themePaths, fileStatuses, diagnostics);
         }
     }
 
@@ -242,6 +255,7 @@ public sealed class CodingAgentExtensionCommandStore
         ICollection<CommandDefinition> definitions,
         ICollection<string> skillPaths,
         ICollection<string> promptPaths,
+        ICollection<string> themePaths,
         ICollection<CodingAgentExtensionFileStatus> files,
         ICollection<CodingAgentExtensionDiagnostic> diagnostics)
     {
@@ -290,6 +304,7 @@ public sealed class CodingAgentExtensionCommandStore
             var commandCountBefore = definitions.Count;
             var fileSkillPaths = new List<string>();
             var filePromptPaths = new List<string>();
+            var fileThemePaths = new List<string>();
             var commands = new List<CommandDefinition>();
             if (document.RootElement.TryGetProperty("commands", out var commandArray)
                 && commandArray.ValueKind == JsonValueKind.Array)
@@ -317,6 +332,8 @@ public sealed class CodingAgentExtensionCommandStore
             AddPathArray(document.RootElement, "skill-paths", baseDirectory, fileSkillPaths);
             AddPathArray(document.RootElement, "promptPaths", baseDirectory, filePromptPaths);
             AddPathArray(document.RootElement, "prompt-paths", baseDirectory, filePromptPaths);
+            AddPathArray(document.RootElement, "themePaths", baseDirectory, fileThemePaths);
+            AddPathArray(document.RootElement, "theme-paths", baseDirectory, fileThemePaths);
             if (document.RootElement.TryGetProperty("resources", out var resources)
                 && resources.ValueKind == JsonValueKind.Object)
             {
@@ -324,6 +341,8 @@ public sealed class CodingAgentExtensionCommandStore
                 AddPathArray(resources, "skill-paths", baseDirectory, fileSkillPaths);
                 AddPathArray(resources, "promptPaths", baseDirectory, filePromptPaths);
                 AddPathArray(resources, "prompt-paths", baseDirectory, filePromptPaths);
+                AddPathArray(resources, "themePaths", baseDirectory, fileThemePaths);
+                AddPathArray(resources, "theme-paths", baseDirectory, fileThemePaths);
             }
 
             foreach (var command in commands)
@@ -341,12 +360,18 @@ public sealed class CodingAgentExtensionCommandStore
                 promptPaths.Add(path);
             }
 
+            foreach (var path in fileThemePaths)
+            {
+                themePaths.Add(path);
+            }
+
             files.Add(new CodingAgentExtensionFileStatus(
                 Path.GetFullPath(filePath),
                 scope,
                 definitions.Count - commandCountBefore,
                 fileSkillPaths.Distinct(StringComparer.OrdinalIgnoreCase).ToArray(),
-                filePromptPaths.Distinct(StringComparer.OrdinalIgnoreCase).ToArray()));
+                filePromptPaths.Distinct(StringComparer.OrdinalIgnoreCase).ToArray(),
+                fileThemePaths.Distinct(StringComparer.OrdinalIgnoreCase).ToArray()));
         }
     }
 

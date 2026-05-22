@@ -40,8 +40,9 @@ public sealed class CodingAgentTreeInteractiveNavigator
         string? searchPattern = null;
         var filterIndex = 0;
         var foldedEntryIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var showInspector = false;
 
-        Render(visibleItems, selected, writer, clearScreen, searchPattern, FilterCycle[filterIndex], foldedEntryIds);
+        Render(items, visibleItems, selected, writer, clearScreen, searchPattern, FilterCycle[filterIndex], foldedEntryIds, showInspector);
         frames++;
 
         while (true)
@@ -179,17 +180,27 @@ public sealed class CodingAgentTreeInteractiveNavigator
                             : (selected < visibleItems.Count - 1 ? selected + 1 : 0);
                     }
                     break;
+                case ConsoleKey.I:
+                    if ((key.Modifiers & ConsoleModifiers.Control) == 0)
+                    {
+                        showInspector = !showInspector;
+                    }
+                    else
+                    {
+                        continue;
+                    }
+                    break;
                 default:
                     continue;
             }
 
             if (visibleItems.Count == 0)
             {
-                Render(visibleItems, 0, writer, clearScreen, searchPattern, FilterCycle[filterIndex], foldedEntryIds);
+                Render(items, visibleItems, 0, writer, clearScreen, searchPattern, FilterCycle[filterIndex], foldedEntryIds, showInspector);
             }
             else
             {
-                Render(visibleItems, selected, writer, clearScreen, searchPattern, FilterCycle[filterIndex], foldedEntryIds);
+                Render(items, visibleItems, selected, writer, clearScreen, searchPattern, FilterCycle[filterIndex], foldedEntryIds, showInspector);
             }
             frames++;
         }
@@ -481,13 +492,15 @@ public sealed class CodingAgentTreeInteractiveNavigator
     }
 
     private static void Render(
+        IReadOnlyList<CodingAgentTreeViewItem> allItems,
         IReadOnlyList<CodingAgentTreeViewItem> items,
         int selected,
         TextWriter writer,
         Action? clearScreen,
         string? searchPattern,
         CodingAgentTreeFilterMode filterMode,
-        IReadOnlySet<string> foldedEntryIds)
+        IReadOnlySet<string> foldedEntryIds,
+        bool showInspector)
     {
         clearScreen?.Invoke();
 
@@ -499,7 +512,7 @@ public sealed class CodingAgentTreeInteractiveNavigator
             ? $", entry {items[selected].EntryId}, type {FormatEntryType(items[selected])}, depth {items[selected].Depth}{FormatSelectedFlags(items[selected])}"
             : string.Empty;
         var foldedLabel = foldedEntryIds.Count > 0 ? $", folded {foldedEntryIds.Count}" : string.Empty;
-        builder.AppendLine($"tree navigator: {items.Count} entries, {countLabel}{selectedMeta}, filter={filterLabel}{searchLabel}{foldedLabel} - j/k move, Left/Right page, Ctrl/Alt+Left/Right branch, f filter, / search, n/N next/prev, Space fold, Enter select, q quit");
+        builder.AppendLine($"tree navigator: {items.Count} entries, {countLabel}{selectedMeta}, filter={filterLabel}{searchLabel}{foldedLabel} - j/k move, Left/Right page, Ctrl/Alt+Left/Right branch, f filter, / search, n/N next/prev, Space fold, i inspect, Enter select, q quit");
 
         if (items.Count == 0)
         {
@@ -507,6 +520,11 @@ public sealed class CodingAgentTreeInteractiveNavigator
         }
         else
         {
+            if (showInspector)
+            {
+                AppendInspector(builder, allItems, items[selected], foldedEntryIds);
+            }
+
             for (var i = 0; i < items.Count; i++)
             {
                 var prefix = i == selected ? ">>" : "  ";
@@ -517,6 +535,37 @@ public sealed class CodingAgentTreeInteractiveNavigator
 
         writer.Write(builder.ToString());
         writer.Flush();
+    }
+
+    private static void AppendInspector(
+        StringBuilder builder,
+        IReadOnlyList<CodingAgentTreeViewItem> allItems,
+        CodingAgentTreeViewItem selected,
+        IReadOnlySet<string> foldedEntryIds)
+    {
+        var parent = string.IsNullOrWhiteSpace(selected.ParentEntryId) ? "none" : selected.ParentEntryId;
+        var childCount = allItems.Count(item =>
+            string.Equals(item.ParentEntryId, selected.EntryId, StringComparison.OrdinalIgnoreCase));
+        var foldState = foldedEntryIds.Contains(selected.EntryId)
+            ? "folded"
+            : childCount > 0 ? "expanded" : "none";
+        var pathState = selected.IsCurrentLeaf ? "leaf" : selected.IsOnBranch ? "branch" : "off-branch";
+
+        builder
+            .Append("  details: id ")
+            .Append(selected.EntryId)
+            .Append(", parent ")
+            .Append(parent)
+            .Append(", type ")
+            .Append(FormatEntryType(selected))
+            .Append(", depth ")
+            .Append(selected.Depth)
+            .Append(", children ")
+            .Append(childCount)
+            .Append(", fold ")
+            .Append(foldState)
+            .Append(", path ")
+            .AppendLine(pathState);
     }
 
     private static string FormatEntryType(CodingAgentTreeViewItem item) =>

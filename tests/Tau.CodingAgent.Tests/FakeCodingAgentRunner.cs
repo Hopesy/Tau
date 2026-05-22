@@ -1,4 +1,5 @@
 using Tau.Agent;
+using Tau.Agent.Runtime;
 using Tau.Ai;
 using Tau.Ai.Auth;
 using Tau.CodingAgent.Runtime;
@@ -42,12 +43,27 @@ public sealed class FakeCodingAgentRunner : ICodingAgentRunner
 
     public List<string> Inputs { get; } = [];
     public List<IReadOnlyList<ContentBlock>> ContentInputs { get; } = [];
+    public List<string> SteeringInputs { get; } = [];
+    public List<string> FollowUpInputs { get; } = [];
     public List<ChatMessage> MutableMessages { get; } = [];
     public IReadOnlyList<ChatMessage> Messages => MutableMessages;
     public Model Model { get; private set; }
     public string? SessionName { get; set; }
+    public ThinkingLevel? ThinkingLevel { get; set; }
+    public AgentQueueMode SteeringMode { get; set; } = AgentQueueMode.OneAtATime;
+    public AgentQueueMode FollowUpMode { get; set; } = AgentQueueMode.OneAtATime;
     public Func<string?, CancellationToken, Task<CodingAgentCompactionResult>>? CompactHandler { get; set; }
+    public Func<IReadOnlyList<ChatMessage>, string?, CancellationToken, Task<CodingAgentBranchSummaryResult>>? BranchSummaryHandler { get; set; }
+    public Action<string>? SteeringObserver { get; set; }
+    public Action<string>? FollowUpObserver { get; set; }
     public string? LastCompactInstructions { get; private set; }
+    public string? LastBranchSummaryInstructions { get; private set; }
+    public IReadOnlyList<ChatMessage>? LastBranchSummaryMessages { get; private set; }
+    public IReadOnlyList<CodingAgentSkill>? LastRefreshedSkills { get; private set; }
+    public IReadOnlyList<CodingAgentContextFile>? LastRefreshedContextFiles { get; private set; }
+    public bool RefreshSkillsResult { get; set; } = true;
+    public List<string> LoggedOutProviders { get; } = [];
+    public bool LogoutResult { get; set; } = true;
     public int ResetSessionCalls { get; private set; }
 
     public IReadOnlyList<string> GetProviders() => [.. _models.Keys.Order(StringComparer.OrdinalIgnoreCase)];
@@ -91,6 +107,26 @@ public sealed class FakeCodingAgentRunner : ICodingAgentRunner
     public Tau.Ai.Auth.OAuth.IOAuthProvider? OAuthProvider { get; set; }
     public (string ProviderId, Tau.Ai.Auth.OAuth.OAuthCredentials Credentials)? SavedOAuthCredentials { get; private set; }
 
+    public bool Logout(string providerId)
+    {
+        LoggedOutProviders.Add(providerId);
+        return LogoutResult;
+    }
+
+    public bool RefreshSkills(IReadOnlyList<CodingAgentSkill> skills)
+    {
+        return RefreshSystemPromptResources(skills, LastRefreshedContextFiles ?? []);
+    }
+
+    public bool RefreshSystemPromptResources(
+        IReadOnlyList<CodingAgentSkill> skills,
+        IReadOnlyList<CodingAgentContextFile> contextFiles)
+    {
+        LastRefreshedSkills = skills;
+        LastRefreshedContextFiles = contextFiles;
+        return RefreshSkillsResult;
+    }
+
     public CodingAgentSessionStats GetSessionStats(string? sessionFile = null)
     {
         return new CodingAgentSessionStats(
@@ -117,6 +153,21 @@ public sealed class FakeCodingAgentRunner : ICodingAgentRunner
         throw new InvalidOperationException("Compaction is not configured for this test runner.");
     }
 
+    public Task<CodingAgentBranchSummaryResult> SummarizeBranchAsync(
+        IReadOnlyList<ChatMessage> messages,
+        string? customInstructions = null,
+        CancellationToken cancellationToken = default)
+    {
+        LastBranchSummaryMessages = messages;
+        LastBranchSummaryInstructions = customInstructions;
+        if (BranchSummaryHandler is not null)
+        {
+            return BranchSummaryHandler(messages, customInstructions, cancellationToken);
+        }
+
+        throw new InvalidOperationException("Branch summarization is not configured for this test runner.");
+    }
+
     public void ResetSession()
     {
         ResetSessionCalls++;
@@ -130,6 +181,18 @@ public sealed class FakeCodingAgentRunner : ICodingAgentRunner
         MutableMessages.Clear();
         MutableMessages.AddRange(snapshot.Messages);
         SessionName = snapshot.Name;
+    }
+
+    public void Steer(string input)
+    {
+        SteeringInputs.Add(input);
+        SteeringObserver?.Invoke(input);
+    }
+
+    public void FollowUp(string input)
+    {
+        FollowUpInputs.Add(input);
+        FollowUpObserver?.Invoke(input);
     }
 
     public IAsyncEnumerable<AgentEvent> RunAsync(string input, CancellationToken cancellationToken = default)

@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Tau.Agent;
 using Tau.Ai;
+using Tau.Tui.Abstractions;
 using Tau.Tui.Runtime;
 
 namespace Tau.CodingAgent.Runtime;
@@ -19,6 +20,7 @@ public sealed class CodingAgentHost
     private readonly CodingAgentExtensionCommandStore? _extensionCommandStore;
     private readonly CodingAgentAutoCompactionOptions _autoCompaction;
     private readonly CodingAgentCommandRouter _commandRouter;
+    private readonly ICodingAgentTurnInputSource? _turnInputSource;
     private CodingAgentRetryOptions _retryOptions;
     private bool _shutdownRendered;
 
@@ -31,11 +33,18 @@ public sealed class CodingAgentHost
         CodingAgentTreeSessionController? treeSessionController = null,
         CodingAgentPromptTemplateStore? promptTemplateStore = null,
         CodingAgentSkillStore? skillStore = null,
+        CodingAgentContextFileStore? contextFileStore = null,
+        CodingAgentThemeStore? themeStore = null,
         CodingAgentExtensionCommandStore? extensionCommandStore = null,
+        CodingAgentChangelogStore? changelogStore = null,
         CodingAgentAutoCompactionOptions? autoCompaction = null,
         CodingAgentRetryOptions? retryOptions = null,
+        ICodingAgentTurnInputSource? turnInputSource = null,
         Func<int, IReadOnlyList<string>>? historySnapshotProvider = null,
-        Func<IReadOnlyList<CodingAgentTreeViewItem>, CancellationToken, Task<CodingAgentTreeInteractiveNavigator.Result>>? treeNavigator = null)
+        Func<IReadOnlyList<CodingAgentTreeViewItem>, CancellationToken, Task<CodingAgentTreeInteractiveNavigator.Result>>? treeNavigator = null,
+        IKeyBindingMap? keyBindings = null,
+        CodingAgentExtensionResourceState? extensionResourceState = null,
+        Func<IKeyBindingMap?>? reloadKeyBindings = null)
     {
         _ui = ui;
         _runner = runner;
@@ -46,6 +55,7 @@ public sealed class CodingAgentHost
         _extensionCommandStore = extensionCommandStore;
         _autoCompaction = autoCompaction ?? CodingAgentAutoCompactionOptions.Disabled;
         _retryOptions = retryOptions ?? CodingAgentRetryOptions.Disabled;
+        _turnInputSource = turnInputSource;
         _commandRouter = new CodingAgentCommandRouter(
             runner,
             settingsStore: settingsStore,
@@ -54,13 +64,19 @@ public sealed class CodingAgentHost
             treeSessionController: treeSessionController,
             promptTemplateStore: promptTemplateStore,
             skillStore: skillStore,
+            contextFileStore: contextFileStore,
+            themeStore: themeStore,
             extensionCommandStore: extensionCommandStore,
+            changelogStore: changelogStore,
             autoCompaction: _autoCompaction,
             retryOptions: _retryOptions,
             retryOptionsChanged: options => _retryOptions = options,
             historySnapshotProvider: historySnapshotProvider,
             clearScreenAction: () => _ui.ClearScreen(),
-            treeNavigator: treeNavigator);
+            treeNavigator: treeNavigator,
+            keyBindings: keyBindings,
+            extensionResourceState: extensionResourceState,
+            reloadKeyBindings: reloadKeyBindings);
     }
 
     public async Task<int> RunAsync(CancellationToken cancellationToken = default)
@@ -314,9 +330,15 @@ public sealed class CodingAgentHost
         CancellationToken cancellationToken)
     {
         var errorAlreadyRendered = false;
+        using var turnInputCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        Task? turnInputTask = null;
+
         try
         {
-            await foreach (var evt in _runner.RunAsync(input, cancellationToken).ConfigureAwait(false))
+            var events = _runner.RunAsync(input, cancellationToken);
+            turnInputTask = StartTurnInputListener(turnInputCts.Token);
+
+            await foreach (var evt in events.ConfigureAwait(false))
             {
                 if (evt is AgentEndEvent { ErrorMessage: not null } end)
                 {
@@ -338,6 +360,63 @@ public sealed class CodingAgentHost
         catch (Exception ex)
         {
             return CodingAgentTurnAttemptResult.Failed(ex.Message, errorAlreadyRendered: false);
+        }
+        finally
+        {
+            turnInputCts.Cancel();
+            if (turnInputTask is not null)
+            {
+                try
+                {
+                    await turnInputTask.ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    // Expected when the turn finishes before the input listener does.
+                }
+            }
+        }
+    }
+
+    private Task? StartTurnInputListener(CancellationToken cancellationToken)
+    {
+        if (_turnInputSource is null)
+        {
+            return null;
+        }
+
+        return Task.Run(() => ConsumeTurnInputsAsync(cancellationToken), CancellationToken.None);
+    }
+
+    private async Task ConsumeTurnInputsAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            await foreach (var turnInput in _turnInputSource!.ReadInputsAsync(cancellationToken).ConfigureAwait(false))
+            {
+                var text = turnInput.Text.Trim();
+                if (text.Length == 0)
+                {
+                    continue;
+                }
+
+                if (turnInput.Kind == CodingAgentTurnInputKind.FollowUp)
+                {
+                    _runner.FollowUp(text);
+                }
+                else
+                {
+                    _runner.Steer(text);
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Normal turn completion path.
+        }
+        catch (Exception ex)
+        {
+            _ui.WriteRuntimeError($"turn input listener failed: {ex.Message}");
         }
     }
 

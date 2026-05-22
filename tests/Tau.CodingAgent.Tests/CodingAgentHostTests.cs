@@ -40,9 +40,7 @@ public class CodingAgentHostTests
         await host.RunAsync();
 
         Assert.Empty(runner.Inputs);
-        Assert.Contains(
-            "status> commands: /help, /name, /copy, /files, /export, /share, /import, /new, /session, /tree, /label, /fork, /clone, /resume, /quit, /model, /provider, /models, /providers, /prompts, /skills, /extensions, /auth, /login, /retry, /history, /find, /clear, /compact",
-            terminal.FlattenedText());
+        Assert.Contains($"status> {CodingAgentCommandCatalog.HelpLine}", terminal.FlattenedText());
     }
 
     [Fact]
@@ -97,6 +95,54 @@ public class CodingAgentHostTests
             yield return new AgentEndEvent();
             await Task.CompletedTask;
         }
+    }
+
+    [Fact]
+    public async Task RunAsync_RunningTurnForwardsSteeringInputToRunner()
+    {
+        var terminal = new FakeTerminal();
+        terminal.QueueInput("start turn");
+        terminal.QueueInput("exit");
+
+        var steered = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var runner = new FakeCodingAgentRunner((_, _) => RunUntilInputAsync(steered.Task));
+        runner.SteeringObserver = input => steered.TrySetResult(input);
+
+        var host = new CodingAgentHost(
+            new InteractiveConsoleSession(terminal),
+            runner,
+            turnInputSource: new ScriptedTurnInputSource(
+                new CodingAgentTurnInput(CodingAgentTurnInputKind.Steering, "adjust the current answer")));
+
+        await host.RunAsync();
+
+        Assert.Equal(["start turn"], runner.Inputs);
+        Assert.Equal(["adjust the current answer"], runner.SteeringInputs);
+        Assert.Empty(runner.FollowUpInputs);
+    }
+
+    [Fact]
+    public async Task RunAsync_RunningTurnForwardsFollowUpInputToRunner()
+    {
+        var terminal = new FakeTerminal();
+        terminal.QueueInput("start turn");
+        terminal.QueueInput("exit");
+
+        var followedUp = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var runner = new FakeCodingAgentRunner((_, _) => RunUntilInputAsync(followedUp.Task));
+        runner.FollowUpObserver = input => followedUp.TrySetResult(input);
+
+        var host = new CodingAgentHost(
+            new InteractiveConsoleSession(terminal),
+            runner,
+            turnInputSource: new ScriptedTurnInputSource(
+                new CodingAgentTurnInput(CodingAgentTurnInputKind.FollowUp, "run another pass after this")));
+
+        await host.RunAsync();
+
+        Assert.Equal(["start turn"], runner.Inputs);
+        Assert.Empty(runner.SteeringInputs);
+        Assert.Equal(["run another pass after this"], runner.FollowUpInputs);
     }
 
     [Fact]
@@ -914,7 +960,7 @@ public class CodingAgentHostTests
             await host.RunAsync();
 
             Assert.Empty(runner.Inputs);
-            Assert.Contains("status> commands: /help, /name", terminal.FlattenedText());
+            Assert.Contains($"status> {CodingAgentCommandCatalog.HelpLine}", terminal.FlattenedText());
             Assert.DoesNotContain("extension help", terminal.FlattenedText());
         }
         finally
@@ -1013,6 +1059,57 @@ public class CodingAgentHostTests
 
         Assert.Empty(runner.Inputs);
         Assert.Contains("status> model: openai/gpt-5.4", terminal.FlattenedText());
+    }
+
+    [Fact]
+    public async Task RunAsync_SettingsCommand_RendersCurrentSettingsWithoutInvokingRunner()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-settings-host-{Guid.NewGuid():N}");
+        var settingsPath = Path.Combine(directory, "settings.json");
+        var terminal = new FakeTerminal();
+        terminal.QueueInput("/settings");
+        terminal.QueueInput("exit");
+
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>())
+        {
+            ThinkingLevel = ThinkingLevel.Medium
+        };
+        var settingsStore = new CodingAgentSettingsStore(settingsPath);
+        settingsStore.Save(new CodingAgentSettingsSnapshot(
+            "google",
+            "gemini-2.5-pro",
+            "labeled-only",
+            RetryMaxAttempts: 2,
+            RetryBaseDelayMilliseconds: 50,
+            DefaultThinkingLevel: "high",
+            EnabledModels: ["google/gemini-2.5-pro"]));
+        var host = new CodingAgentHost(
+            new InteractiveConsoleSession(terminal),
+            runner,
+            settingsStore: settingsStore);
+
+        try
+        {
+            await host.RunAsync();
+
+            Assert.Empty(runner.Inputs);
+            var output = terminal.FlattenedText();
+            Assert.Contains($"status> settings: {settingsPath}", output, StringComparison.Ordinal);
+            Assert.Contains("current model: openai/gpt-5.4", output, StringComparison.Ordinal);
+            Assert.Contains("current thinking: medium", output, StringComparison.Ordinal);
+            Assert.Contains("default model: google/gemini-2.5-pro", output, StringComparison.Ordinal);
+            Assert.Contains("tree filter: labeled-only", output, StringComparison.Ordinal);
+            Assert.Contains("retry: enabled 2 attempts, base 50ms", output, StringComparison.Ordinal);
+            Assert.Contains("default thinking: high", output, StringComparison.Ordinal);
+            Assert.Contains("scoped models: 1 enabled (google/gemini-2.5-pro)", output, StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
     }
 
     [Fact]
@@ -1264,6 +1361,68 @@ public class CodingAgentHostTests
     }
 
     [Fact]
+    public async Task RunAsync_LogoutCommand_RendersStatusAndDoesNotInvokeRunner()
+    {
+        var terminal = new FakeTerminal();
+        terminal.QueueInput("/logout anthropic");
+        terminal.QueueInput("exit");
+
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>())
+        {
+            AuthStatus = new("anthropic", true, "auth.json oauth", true, true, "OAuth credentials found in auth.json."),
+            LogoutResult = true
+        };
+        var host = new CodingAgentHost(new InteractiveConsoleSession(terminal), runner);
+
+        await host.RunAsync();
+
+        Assert.Empty(runner.Inputs);
+        Assert.Equal(["anthropic"], runner.LoggedOutProviders);
+        Assert.Contains(
+            "status> logout anthropic: auth.json credentials removed. Environment variables and models.json credentials are unchanged.",
+            terminal.FlattenedText());
+    }
+
+    [Fact]
+    public async Task RunAsync_ChangelogCommand_RendersReleaseNotesAndDoesNotInvokeRunner()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-changelog-host-" + Guid.NewGuid().ToString("N"));
+        var changelog = Path.Combine(directory, "feature-release-notes.md");
+        Directory.CreateDirectory(directory);
+        await File.WriteAllTextAsync(
+            changelog,
+            """
+            | 日期 | 功能域 | 用户价值 | 变更摘要 |
+            | --- | --- | --- | --- |
+            | 2026-05-21 | CodingAgent | 用户可以查看最近变更。 | 新增 /changelog baseline。 |
+            """);
+        var terminal = new FakeTerminal();
+        terminal.QueueInput("/changelog");
+        terminal.QueueInput("exit");
+
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var host = new CodingAgentHost(
+            new InteractiveConsoleSession(terminal),
+            runner,
+            changelogStore: new CodingAgentChangelogStore(changelog));
+
+        try
+        {
+            await host.RunAsync();
+
+            Assert.Empty(runner.Inputs);
+            var output = terminal.FlattenedText();
+            Assert.Contains($"status> changelog: 1/1 entries from {changelog}", output, StringComparison.Ordinal);
+            Assert.Contains("[1] 2026-05-21 CodingAgent", output, StringComparison.Ordinal);
+            Assert.Contains("用户价值: 用户可以查看最近变更。", output, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task RunAsync_CompactCommand_RendersStatusAndPersistsCompactedSession()
     {
         var path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"tau-coding-agent-compact-{Guid.NewGuid():N}.json");
@@ -1402,4 +1561,32 @@ public class CodingAgentHostTests
     private static string MessageText(AssistantMessage message) =>
         Assert.IsType<TextContent>(Assert.Single(message.Content)).Text;
 
+    private static async IAsyncEnumerable<AgentEvent> RunUntilInputAsync(Task<string> inputTask)
+    {
+        await inputTask.WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
+        yield return new AgentEndEvent();
+    }
+
+    private sealed class ScriptedTurnInputSource(params CodingAgentTurnInput[] inputs) : ICodingAgentTurnInputSource
+    {
+        public async IAsyncEnumerable<CodingAgentTurnInput> ReadInputsAsync(
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+        {
+            foreach (var input in inputs)
+            {
+                await Task.Yield();
+                cancellationToken.ThrowIfCancellationRequested();
+                yield return input;
+            }
+
+            try
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                // The host cancels the source once the active runner turn ends.
+            }
+        }
+    }
 }

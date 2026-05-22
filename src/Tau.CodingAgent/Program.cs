@@ -3,10 +3,113 @@ using Tau.CodingAgent.Runtime;
 using Tau.Tui.Abstractions;
 using Tau.Tui.Runtime;
 
+var printPrompt = TryExtractPrintPrompt(args);
+var rpcMode = HasRpcMode(args);
+var noContextFiles = HasNoContextFiles(args);
+var noThemes = HasNoThemes(args);
+var explicitThemePaths = GetThemePaths(args);
 var terminal = new SystemConsoleTerminal();
 var keyReader = new SystemConsoleKeyReader();
-var editor = CreateInteractiveEditorIfAttached(keyReader);
+var editor = printPrompt is null && !rpcMode ? CreateInteractiveEditorIfAttached(keyReader) : null;
 var ui = new InteractiveConsoleSession(terminal, editor);
+
+static bool HasRpcMode(string[] cliArgs)
+{
+    for (var i = 0; i < cliArgs.Length; i++)
+    {
+        var arg = cliArgs[i];
+        if (arg.Equals("--mode=rpc", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        if (arg.Equals("--mode", StringComparison.OrdinalIgnoreCase) &&
+            i + 1 < cliArgs.Length &&
+            cliArgs[i + 1].Equals("rpc", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static bool HasNoContextFiles(string[] cliArgs)
+{
+    foreach (var arg in cliArgs)
+    {
+        if (arg.Equals("--no-context-files", StringComparison.OrdinalIgnoreCase) ||
+            arg.Equals("-nc", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static bool HasNoThemes(string[] cliArgs)
+{
+    foreach (var arg in cliArgs)
+    {
+        if (arg.Equals("--no-themes", StringComparison.OrdinalIgnoreCase) ||
+            arg.Equals("-nt", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static IReadOnlyList<string> GetThemePaths(string[] cliArgs)
+{
+    var paths = new List<string>();
+    for (var i = 0; i < cliArgs.Length; i++)
+    {
+        var arg = cliArgs[i];
+        if (arg.Equals("--theme", StringComparison.OrdinalIgnoreCase))
+        {
+            if (i + 1 >= cliArgs.Length)
+            {
+                Console.Error.WriteLine("error: --theme requires a path argument");
+                Environment.Exit(1);
+            }
+
+            paths.Add(cliArgs[++i]);
+            continue;
+        }
+
+        if (arg.StartsWith("--theme=", StringComparison.OrdinalIgnoreCase))
+        {
+            paths.Add(arg["--theme=".Length..]);
+        }
+    }
+
+    return paths;
+}
+
+static string? TryExtractPrintPrompt(string[] cliArgs)
+{
+    for (var i = 0; i < cliArgs.Length; i++)
+    {
+        var arg = cliArgs[i];
+        if (arg is "--print" or "-p")
+        {
+            if (i + 1 >= cliArgs.Length)
+            {
+                Console.Error.WriteLine("error: --print requires a prompt argument");
+                Environment.Exit(1);
+            }
+            return cliArgs[i + 1];
+        }
+        if (arg.StartsWith("--print=", StringComparison.Ordinal))
+        {
+            return arg["--print=".Length..];
+        }
+    }
+    return null;
+}
 JsonlTauLogSink? logSink;
 try
 {
@@ -85,9 +188,14 @@ var sessionStore = CodingAgentTreeSessionStore.IsJsonlPath(sessionFile)
 var treeSessionController = CodingAgentTreeSessionController.OpenOrCreate();
 var settingsStore = new CodingAgentSettingsStore();
 var extensionCommandStore = new CodingAgentExtensionCommandStore();
-var extensionResources = extensionCommandStore.LoadResources();
-var promptTemplateStore = new CodingAgentPromptTemplateStore(explicitPaths: extensionResources.PromptPaths);
-var skillStore = new CodingAgentSkillStore(explicitPaths: extensionResources.SkillPaths);
+var extensionResourceState = new CodingAgentExtensionResourceState(extensionCommandStore.LoadResources());
+var promptTemplateStore = new CodingAgentPromptTemplateStore(additionalPathsProvider: () => extensionResourceState.PromptPaths);
+var skillStore = new CodingAgentSkillStore(additionalPathsProvider: () => extensionResourceState.SkillPaths);
+var contextFileStore = new CodingAgentContextFileStore(includeDefaults: !noContextFiles);
+var themeStore = new CodingAgentThemeStore(
+    explicitPaths: explicitThemePaths.Count == 0 ? null : explicitThemePaths,
+    additionalPathsProvider: () => extensionResourceState.ThemePaths,
+    includeDefaults: !noThemes);
 var flatSession = sessionStore?.Load() ?? new CodingAgentSessionSnapshot([], null, null, null);
 var treeSession = treeSessionController.LoadSnapshot();
 var session = CodingAgentTreeSessionStore.HasExplicitTreeSessionPath || treeSession.Messages.Count > 0
@@ -98,8 +206,57 @@ var providerId = Environment.GetEnvironmentVariable("TAU_PROVIDER") ?? session.P
 var modelId = Environment.GetEnvironmentVariable("TAU_MODEL")
               ?? (string.Equals(providerId, session.Provider, StringComparison.OrdinalIgnoreCase) ? session.Model : null)
               ?? (string.Equals(providerId, settings.DefaultProvider, StringComparison.OrdinalIgnoreCase) ? settings.DefaultModel : null);
-var runner = RuntimeCodingAgentRunner.Create(providerId, modelId, session.Messages, skills: skillStore.Load(), logSink: logSink);
+var runner = RuntimeCodingAgentRunner.Create(
+    providerId,
+    modelId,
+    session.Messages,
+    skills: skillStore.Load(),
+    contextFiles: contextFileStore.Load(),
+    logSink: logSink);
 runner.SessionName = session.Name;
+runner.SteeringMode = CodingAgentQueueModes.ToAgentQueueMode(settings.SteeringMode);
+runner.FollowUpMode = CodingAgentQueueModes.ToAgentQueueMode(settings.FollowUpMode);
+var autoCompaction = CodingAgentAutoCompactionOptions.FromEnvironment();
+if (!string.IsNullOrWhiteSpace(settings.DefaultThinkingLevel))
+{
+    runner.ThinkingLevel = settings.DefaultThinkingLevel.ToLowerInvariant() switch
+    {
+        "minimal" => Tau.Ai.ThinkingLevel.Minimal,
+        "low" => Tau.Ai.ThinkingLevel.Low,
+        "medium" or "med" => Tau.Ai.ThinkingLevel.Medium,
+        "high" => Tau.Ai.ThinkingLevel.High,
+        "xhigh" or "extrahigh" or "extra-high" => Tau.Ai.ThinkingLevel.ExtraHigh,
+        _ => null
+    };
+}
+using var cts = new CancellationTokenSource();
+
+Console.CancelKeyPress += (_, e) =>
+{
+    e.Cancel = true;
+    cts.Cancel();
+};
+
+if (printPrompt is not null)
+{
+    var printMode = new CodingAgentPrintMode(runner, Console.Out, Console.Error);
+    return await printMode.RunAsync(printPrompt, cts.Token).ConfigureAwait(false);
+}
+
+if (rpcMode)
+{
+    var rpcHost = new CodingAgentRpcHost(
+        runner,
+        Console.In,
+        Console.Out,
+        sessionStore,
+        settingsStore,
+        treeSessionController,
+        autoCompaction,
+        CodingAgentRetryOptions.FromSettingsOrEnvironment(settings));
+    return await rpcHost.RunAsync(cts.Token).ConfigureAwait(false);
+}
+
 var host = new CodingAgentHost(
     ui,
     runner,
@@ -108,17 +265,23 @@ var host = new CodingAgentHost(
     treeSessionController: treeSessionController,
     promptTemplateStore: promptTemplateStore,
     skillStore: skillStore,
+    contextFileStore: contextFileStore,
+    themeStore: themeStore,
     extensionCommandStore: extensionCommandStore,
-    autoCompaction: CodingAgentAutoCompactionOptions.FromEnvironment(),
+    autoCompaction: autoCompaction.WithEnabledOverride(settings.AutoCompactionEnabled),
     retryOptions: CodingAgentRetryOptions.FromSettingsOrEnvironment(settings),
+    turnInputSource: editor is null ? null : new SystemConsoleCodingAgentTurnInputSource(),
     historySnapshotProvider: editor is null ? null : limit => editor.History.Snapshot(limit),
-    treeNavigator: editor is null ? null : CreateTreeNavigator(keyReader));
-using var cts = new CancellationTokenSource();
-
-Console.CancelKeyPress += (_, e) =>
-{
-    e.Cancel = true;
-    cts.Cancel();
-};
+    treeNavigator: editor is null ? null : CreateTreeNavigator(keyReader),
+    keyBindings: editor?.KeyBindings,
+    extensionResourceState: extensionResourceState,
+    reloadKeyBindings: editor is null
+        ? null
+        : () =>
+        {
+            var bindings = KeyBindingFileStore.LoadOrDefault(ResolveKeyBindingsPath());
+            editor.SetKeyBindings(bindings);
+            return editor.KeyBindings;
+        });
 
 return await host.RunAsync(cts.Token).ConfigureAwait(false);

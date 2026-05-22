@@ -294,6 +294,42 @@ public sealed class ProviderAuthResolverTests
         }
     }
 
+    [Fact]
+    public void Logout_RemovesAuthFileCredentialForProvider()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), $"tau-auth-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+
+        try
+        {
+            var authPath = Path.Combine(tempDir, "auth.json");
+            File.WriteAllText(authPath, """
+                {
+                  "openrouter": {
+                    "type": "api_key",
+                    "key": "or-key"
+                  },
+                  "anthropic": {
+                    "type": "api_key",
+                    "key": "anthropic-key"
+                  }
+                }
+                """);
+            var credentialStore = new OAuthCredentialStore([authPath]);
+            var resolver = new ProviderAuthResolver(credentialStore: credentialStore);
+
+            var removed = resolver.Logout("openrouter");
+
+            Assert.True(removed);
+            Assert.Null(resolver.ResolveApiKey("openrouter"));
+            Assert.Equal("anthropic-key", resolver.ResolveApiKey("anthropic"));
+        }
+        finally
+        {
+            Directory.Delete(tempDir, recursive: true);
+        }
+    }
+
     private sealed class StubOAuthProvider : IOAuthProvider
     {
         public string Id => "custom-oauth";

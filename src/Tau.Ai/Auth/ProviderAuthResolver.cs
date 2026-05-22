@@ -171,4 +171,19 @@ public sealed class ProviderAuthResolver
 
     public void SaveOAuthCredentials(string providerId, OAuthCredentials credentials) =>
         _credentialStore.Save(providerId, credentials);
+
+    public bool Logout(string providerId)
+    {
+        var removed = _credentialStore.Remove(providerId);
+        _logSink.Log(new TauLogEvent(
+            "auth",
+            "logout",
+            DateTimeOffset.UtcNow,
+            new Dictionary<string, string?>
+            {
+                ["provider"] = providerId,
+                ["removed"] = removed ? "true" : "false"
+            }));
+        return removed;
+    }
 }

@@ -18,12 +18,14 @@ public sealed partial class CodingAgentPromptTemplateStore
     private readonly string _cwd;
     private readonly string _userPromptsDirectory;
     private readonly IReadOnlyList<string> _explicitPaths;
+    private readonly Func<IReadOnlyList<string>>? _additionalPathsProvider;
     private readonly bool _includeDefaults;
 
     public CodingAgentPromptTemplateStore(
         string? cwd = null,
         string? userPromptsDirectory = null,
         IReadOnlyList<string>? explicitPaths = null,
+        Func<IReadOnlyList<string>>? additionalPathsProvider = null,
         bool includeDefaults = true)
     {
         _cwd = string.IsNullOrWhiteSpace(cwd) ? Environment.CurrentDirectory : Path.GetFullPath(cwd);
@@ -31,6 +33,7 @@ public sealed partial class CodingAgentPromptTemplateStore
             ? GetDefaultUserPromptsDirectory()
             : Path.GetFullPath(userPromptsDirectory);
         _explicitPaths = explicitPaths ?? GetConfiguredPromptPaths();
+        _additionalPathsProvider = additionalPathsProvider;
         _includeDefaults = includeDefaults;
     }
 
@@ -43,7 +46,7 @@ public sealed partial class CodingAgentPromptTemplateStore
             templates.AddRange(LoadFromDirectory(Path.Combine(_cwd, ".tau", "prompts"), "project"));
         }
 
-        foreach (var path in _explicitPaths)
+        foreach (var path in GetExplicitPaths())
         {
             var resolved = ResolvePath(path, _cwd);
             if (Directory.Exists(resolved))
@@ -65,6 +68,24 @@ public sealed partial class CodingAgentPromptTemplateStore
             .Select(static group => group.First())
             .OrderBy(static template => template.Name, StringComparer.Ordinal)
             .ToArray();
+    }
+
+    private IEnumerable<string> GetExplicitPaths()
+    {
+        foreach (var path in _explicitPaths)
+        {
+            yield return path;
+        }
+
+        if (_additionalPathsProvider is null)
+        {
+            yield break;
+        }
+
+        foreach (var path in _additionalPathsProvider())
+        {
+            yield return path;
+        }
     }
 
     public bool TryExpand(string input, out string expanded, out CodingAgentPromptTemplate? template)

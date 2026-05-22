@@ -146,7 +146,8 @@ public class CodingAgentExtensionCommandStoreTests
               "response": "ok",
               "resources": {
                 "promptPaths": ["./prompts"],
-                "skillPaths": ["./skills"]
+                "skillPaths": ["./skills"],
+                "themePaths": ["./themes"]
               }
             }
             """);
@@ -159,6 +160,7 @@ public class CodingAgentExtensionCommandStoreTests
 
             Assert.Equal(Path.Combine(extensionDirectory, "prompts"), Assert.Single(resources.PromptPaths));
             Assert.Equal(Path.Combine(extensionDirectory, "skills"), Assert.Single(resources.SkillPaths));
+            Assert.Equal(Path.Combine(extensionDirectory, "themes"), Assert.Single(resources.ThemePaths));
         }
         finally
         {
@@ -193,7 +195,8 @@ public class CodingAgentExtensionCommandStoreTests
               ],
               "resources": {
                 "promptPaths": ["./prompts"],
-                "skillPaths": ["./skills"]
+                "skillPaths": ["./skills"],
+                "themePaths": ["./themes"]
               }
             }
             """);
@@ -214,8 +217,10 @@ public class CodingAgentExtensionCommandStoreTests
             Assert.Equal(2, file.CommandCount);
             Assert.Equal(Path.Combine(extensionDirectory, "prompts"), Assert.Single(file.PromptPaths));
             Assert.Equal(Path.Combine(extensionDirectory, "skills"), Assert.Single(file.SkillPaths));
+            Assert.Equal(Path.Combine(extensionDirectory, "themes"), Assert.Single(file.ThemePaths));
             Assert.Equal(file.PromptPaths, status.Resources.PromptPaths);
             Assert.Equal(file.SkillPaths, status.Resources.SkillPaths);
+            Assert.Equal(file.ThemePaths, status.Resources.ThemePaths);
 
             var diagnostic = Assert.Single(status.Diagnostics);
             Assert.Equal("error", diagnostic.Severity);

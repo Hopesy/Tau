@@ -17,25 +17,51 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner
     private readonly ModelCatalog _modelCatalog;
     private readonly ProviderAuthResolver _authResolver;
     private readonly ITauLogSink _logSink;
+    private readonly bool _refreshesGeneratedSystemPrompt;
     private AgentLoopConfig _config;
+    private IReadOnlyList<CodingAgentContextFile> _contextFiles;
 
     public RuntimeCodingAgentRunner(
         AgentRuntime runtime,
         AgentLoopConfig config,
         ModelCatalog modelCatalog,
         ProviderAuthResolver? authResolver = null,
-        ITauLogSink? logSink = null)
+        ITauLogSink? logSink = null,
+        bool refreshesGeneratedSystemPrompt = false,
+        IReadOnlyList<CodingAgentContextFile>? contextFiles = null)
     {
         _runtime = runtime;
         _config = config;
         _modelCatalog = modelCatalog;
         _authResolver = authResolver ?? new ProviderAuthResolver(logSink: logSink);
         _logSink = logSink ?? NullTauLogSink.Instance;
+        _refreshesGeneratedSystemPrompt = refreshesGeneratedSystemPrompt;
+        _contextFiles = contextFiles ?? [];
     }
 
     public IReadOnlyList<ChatMessage> Messages => _runtime.State.Messages;
     public Model Model => _config.Model;
     public string? SessionName { get; set; }
+    public AgentQueueMode SteeringMode
+    {
+        get => _runtime.SteeringMode;
+        set => _runtime.SteeringMode = value;
+    }
+
+    public AgentQueueMode FollowUpMode
+    {
+        get => _runtime.FollowUpMode;
+        set => _runtime.FollowUpMode = value;
+    }
+
+    public ThinkingLevel? ThinkingLevel
+    {
+        get => _config.StreamOptions?.Reasoning;
+        set => _config = _config with
+        {
+            StreamOptions = (_config.StreamOptions ?? new SimpleStreamOptions()) with { Reasoning = value }
+        };
+    }
 
     public IReadOnlyList<string> GetProviders() => _modelCatalog.GetProviders();
 
@@ -63,6 +89,28 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner
 
     public void SaveOAuthCredentials(string providerId, OAuthCredentials credentials) =>
         _authResolver.SaveOAuthCredentials(providerId, credentials);
+
+    public bool Logout(string providerId) =>
+        _authResolver.Logout(providerId);
+
+    public bool RefreshSkills(IReadOnlyList<CodingAgentSkill> skills)
+    {
+        return RefreshSystemPromptResources(skills, _contextFiles);
+    }
+
+    public bool RefreshSystemPromptResources(
+        IReadOnlyList<CodingAgentSkill> skills,
+        IReadOnlyList<CodingAgentContextFile> contextFiles)
+    {
+        if (!_refreshesGeneratedSystemPrompt)
+        {
+            return false;
+        }
+
+        _contextFiles = contextFiles;
+        _config = _config with { SystemPrompt = BuildSystemPrompt(_config.Tools, skills, _contextFiles) };
+        return true;
+    }
 
     public CodingAgentSessionStats GetSessionStats(string? sessionFile = null)
     {
@@ -128,6 +176,68 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner
         return new CodingAgentCompactionResult(summary, messagesBefore, Messages.Count, tokensBefore);
     }
 
+    public async Task<CodingAgentBranchSummaryResult> SummarizeBranchAsync(
+        IReadOnlyList<ChatMessage> messages,
+        string? customInstructions = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (messages.Count == 0)
+        {
+            throw new InvalidOperationException("No branch content to summarize");
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var tokensBefore = CodingAgentTokenEstimator.Estimate(messages);
+        var branchSummaryPrompt = BuildBranchSummaryPrompt(customInstructions, messages);
+        var summaryContext = new LlmContext(
+            CodingAgentCompactionMessages.SystemPrompt,
+            [new UserMessage(branchSummaryPrompt)],
+            Tools: null);
+        var summaryOptions = (_config.StreamOptions ?? new SimpleStreamOptions { MaxTokens = 16_384 }) with
+        {
+            MaxTokens = Math.Min(_config.StreamOptions?.MaxTokens ?? 16_384, 2_048),
+            CacheRetention = CacheRetention.None,
+            SessionId = null
+        };
+
+        var summaryMessage = await StreamFunctions
+            .CompleteSimpleAsync(_config.ProviderRegistry, _config.Model, summaryContext, summaryOptions)
+            .ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var summary = ExtractCompactionSummary(summaryMessage);
+        if (string.IsNullOrWhiteSpace(summary))
+        {
+            throw new InvalidOperationException("Branch summarization produced no text summary");
+        }
+
+        summary = CodingAgentCompactionMessages.BranchSummaryPreamble + summary.Trim();
+        var fileOperations = CodingAgentFileOperationTracker.Collect(messages);
+        var readFiles = fileOperations
+            .Where(static file => file.ReadCount > 0 && !file.WasModified)
+            .Select(static file => file.Path)
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+        var modifiedFiles = fileOperations
+            .Where(static file => file.WasModified)
+            .Select(static file => file.Path)
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+        var formattedFiles = CodingAgentFileOperationTracker.FormatForCompaction(messages);
+        if (!string.IsNullOrWhiteSpace(formattedFiles))
+        {
+            summary = $"{summary.Trim()}\n\n{formattedFiles}";
+        }
+
+        return new CodingAgentBranchSummaryResult(
+            summary,
+            messages.Count,
+            tokensBefore,
+            readFiles,
+            modifiedFiles);
+    }
+
     private static string BuildCompactionPrompt(string? customInstructions, IReadOnlyList<ChatMessage> messages)
     {
         var previousSummary = ExtractPreviousSummary(messages);
@@ -167,6 +277,101 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner
         return builder.ToString();
     }
 
+    private static string BuildBranchSummaryPrompt(string? customInstructions, IReadOnlyList<ChatMessage> messages)
+    {
+        var builder = new StringBuilder();
+        builder.AppendLine("<conversation>");
+        builder.Append(SerializeConversation(messages));
+        builder.AppendLine();
+        builder.AppendLine("</conversation>");
+        builder.AppendLine();
+        builder.Append(CodingAgentCompactionMessages.BranchSummaryPrompt);
+
+        var fileOperations = CodingAgentFileOperationTracker.FormatForCompaction(messages);
+        if (!string.IsNullOrWhiteSpace(fileOperations))
+        {
+            builder.AppendLine();
+            builder.AppendLine();
+            builder.AppendLine("File operations observed in this branch:");
+            builder.Append(fileOperations);
+        }
+
+        if (!string.IsNullOrWhiteSpace(customInstructions))
+        {
+            builder.AppendLine();
+            builder.AppendLine();
+            builder.AppendLine("Additional focus:");
+            builder.Append(customInstructions.Trim());
+        }
+
+        return builder.ToString();
+    }
+
+    private static string SerializeConversation(IReadOnlyList<ChatMessage> messages)
+    {
+        var builder = new StringBuilder();
+        foreach (var message in messages)
+        {
+            builder.Append("## ")
+                .Append(DescribeRole(message))
+                .AppendLine();
+            foreach (var content in GetMessageContent(message))
+            {
+                switch (content)
+                {
+                    case TextContent text:
+                        builder.AppendLine(text.Text.Trim());
+                        break;
+                    case ThinkingContent thinking:
+                        builder.AppendLine("<thinking>");
+                        builder.AppendLine(thinking.Thinking.Trim());
+                        builder.AppendLine("</thinking>");
+                        break;
+                    case ToolCallContent toolCall:
+                        builder.Append("Tool call ")
+                            .Append(toolCall.Name)
+                            .Append(" ")
+                            .Append(toolCall.Id)
+                            .Append(": ")
+                            .AppendLine(toolCall.Arguments);
+                        break;
+                    case ImageContent image:
+                        builder.Append("Image ")
+                            .Append(image.MimeType)
+                            .Append(" ")
+                            .Append(image.Data.Length)
+                            .AppendLine(" base64 chars");
+                        break;
+                    default:
+                        builder.AppendLine(content.Type);
+                        break;
+                }
+            }
+
+            builder.AppendLine();
+        }
+
+        return builder.ToString().TrimEnd();
+    }
+
+    private static IReadOnlyList<ContentBlock> GetMessageContent(ChatMessage message) =>
+        message switch
+        {
+            UserMessage user => user.Content,
+            AssistantMessage assistant => assistant.Content,
+            ToolResultMessage toolResult => toolResult.Content,
+            _ => []
+        };
+
+    private static string DescribeRole(ChatMessage message) =>
+        message switch
+        {
+            UserMessage => "user",
+            AssistantMessage => "assistant",
+            ToolResultMessage => "tool result",
+            _ => message.Role
+        };
+
     private static string? ExtractPreviousSummary(IReadOnlyList<ChatMessage> messages)
     {
         if (messages.Count == 0) return null;
@@ -188,6 +393,26 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner
     {
         _runtime.Reset();
         SessionName = null;
+    }
+
+    public void Steer(string input)
+    {
+        if (string.IsNullOrWhiteSpace(input))
+        {
+            return;
+        }
+
+        _runtime.Steer(new UserMessage(input));
+    }
+
+    public void FollowUp(string input)
+    {
+        if (string.IsNullOrWhiteSpace(input))
+        {
+            return;
+        }
+
+        _runtime.FollowUp(new UserMessage(input));
     }
 
     public void RestoreSession(CodingAgentSessionSnapshot snapshot)
@@ -309,12 +534,18 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner
         IReadOnlyList<IAgentTool>? toolsOverride = null,
         string? systemPromptOverride = null,
         IReadOnlyList<CodingAgentSkill>? skills = null,
-        ITauLogSink? logSink = null)
+        IReadOnlyList<CodingAgentContextFile>? contextFiles = null,
+        ITauLogSink? logSink = null,
+        ProviderRegistry? providerRegistryOverride = null,
+        ModelCatalog? modelCatalogOverride = null)
     {
-        var registry = new ProviderRegistry();
-        BuiltInProviders.RegisterAll(registry);
+        var registry = providerRegistryOverride ?? new ProviderRegistry();
+        if (providerRegistryOverride is null)
+        {
+            BuiltInProviders.RegisterAll(registry);
+        }
 
-        var modelCatalog = new ModelCatalog();
+        var modelCatalog = modelCatalogOverride ?? new ModelCatalog();
         var selection = modelCatalog.ResolveSelection(
             providerId,
             modelId,
@@ -328,7 +559,9 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner
             ProviderRegistry = registry,
             Tools = tools,
             LogSink = logSink ?? NullTauLogSink.Instance,
-            SystemPrompt = string.IsNullOrWhiteSpace(systemPromptOverride) ? BuildSystemPrompt(tools, skills ?? []) : systemPromptOverride,
+            SystemPrompt = string.IsNullOrWhiteSpace(systemPromptOverride)
+                ? BuildSystemPrompt(tools, skills ?? [], contextFiles ?? [])
+                : systemPromptOverride,
             StreamOptions = new SimpleStreamOptions { MaxTokens = 16_384 }
         };
 
@@ -341,7 +574,13 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner
             }
         }
 
-        return new RuntimeCodingAgentRunner(runtime, config, modelCatalog, logSink: logSink);
+        return new RuntimeCodingAgentRunner(
+            runtime,
+            config,
+            modelCatalog,
+            logSink: logSink,
+            refreshesGeneratedSystemPrompt: string.IsNullOrWhiteSpace(systemPromptOverride),
+            contextFiles: contextFiles ?? []);
     }
 
     public static string GetDefaultProviderId() => ModelCatalog.GetDefaultProviderId();
@@ -365,7 +604,10 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner
         ];
     }
 
-    private static string BuildSystemPrompt(IReadOnlyList<IAgentTool> tools, IReadOnlyList<CodingAgentSkill> skills)
+    private static string BuildSystemPrompt(
+        IReadOnlyList<IAgentTool> tools,
+        IReadOnlyList<CodingAgentSkill> skills,
+        IReadOnlyList<CodingAgentContextFile> contextFiles)
     {
         var cwd = Directory.GetCurrentDirectory().Replace('\\', '/');
         var date = DateTimeOffset.Now.ToString("yyyy-MM-dd");
@@ -388,7 +630,9 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner
             Current working directory: {cwd}
             Platform: {Environment.OSVersion}
             """;
-        return prompt + CodingAgentSkillStore.FormatForSystemPrompt(skills);
+        return prompt
+               + CodingAgentContextFileStore.FormatForSystemPrompt(contextFiles)
+               + CodingAgentSkillStore.FormatForSystemPrompt(skills);
     }
 
     private static string ExtractCompactionSummary(AssistantMessage message)

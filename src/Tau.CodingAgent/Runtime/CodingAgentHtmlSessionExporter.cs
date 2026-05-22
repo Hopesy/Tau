@@ -3074,6 +3074,7 @@ public static class CodingAgentHtmlSessionExporter
             "model_change" => "timeline-event model-change-event",
             "session_info" => "timeline-event session-info-event",
             "compaction" => "timeline-event compaction-event",
+            "branch_summary" => "timeline-event branch-summary-event",
             "auto_retry_start" or "auto_retry_end" => "timeline-event retry-event",
             "label" => "timeline-event label-event",
             _ => "timeline-event"
@@ -3123,6 +3124,23 @@ public static class CodingAgentHtmlSessionExporter
                         .AppendLine("</p>");
                 }
 
+                builder.AppendLine("</details>");
+                break;
+
+            case "branch_summary":
+                AppendEventHeader(builder, item.FromHook == true ? "extension branch summary" : "branch summary", item.Timestamp);
+                builder.Append("<details class=\"branch-summary-detail\" open><summary>")
+                    .Append(Html(FormatBranchSummary(item)))
+                    .AppendLine("</summary>");
+                if (!string.IsNullOrWhiteSpace(item.Summary))
+                {
+                    builder.Append("<pre>")
+                        .Append(Html(item.Summary))
+                        .AppendLine("</pre>");
+                }
+
+                AppendBranchSummaryFiles(builder, "Read files", item.ReadFiles);
+                AppendBranchSummaryFiles(builder, "Modified files", item.ModifiedFiles);
                 builder.AppendLine("</details>");
                 break;
 
@@ -3326,6 +3344,33 @@ public static class CodingAgentHtmlSessionExporter
             : $"Compacted session{reason}{split}";
     }
 
+    private static string FormatBranchSummary(SessionTimelineItem item) =>
+        $"Summary for branch switch from {ShortId(item.FromId ?? item.ParentId)}";
+
+    private static void AppendBranchSummaryFiles(
+        StringBuilder builder,
+        string title,
+        IReadOnlyList<string>? files)
+    {
+        if (files is null || files.Count == 0)
+        {
+            return;
+        }
+
+        builder.Append("<h4>")
+            .Append(Html(title))
+            .AppendLine("</h4>");
+        builder.AppendLine("<ul class=\"event-file-list\">");
+        foreach (var file in files)
+        {
+            builder.Append("<li>")
+                .Append(Html(file))
+                .AppendLine("</li>");
+        }
+
+        builder.AppendLine("</ul>");
+    }
+
     private static string FormatRetryTitle(SessionTimelineItem item) =>
         string.Equals(item.Type, "auto_retry_end", StringComparison.OrdinalIgnoreCase)
             ? "auto retry end"
@@ -3498,6 +3543,7 @@ public static class CodingAgentHtmlSessionExporter
                     case "model_change":
                     case "session_info":
                     case "compaction":
+                    case "branch_summary":
                     case "auto_retry_start":
                     case "auto_retry_end":
                     case "label":
@@ -3592,7 +3638,10 @@ public static class CodingAgentHtmlSessionExporter
         string? TargetId,
         string? Label,
         string? Summary,
+        string? FromId,
         string? FirstKeptEntryId,
+        IReadOnlyList<string>? ReadFiles,
+        IReadOnlyList<string>? ModifiedFiles,
         string? TurnPrefixSummary,
         bool? IsSplitTurn,
         int? TokensBefore,
@@ -3630,6 +3679,9 @@ public static class CodingAgentHtmlSessionExporter
                 null,
                 null,
                 null,
+                null,
+                null,
+                null,
                 null);
 
         public static SessionTimelineItem FromEntry(CodingAgentTreeSessionEntry entry, ChatMessage? message, string? resolvedLabel) =>
@@ -3646,7 +3698,10 @@ public static class CodingAgentHtmlSessionExporter
                 entry.TargetId,
                 entry.Label,
                 entry.Summary,
+                entry.FromId,
                 entry.FirstKeptEntryId,
+                entry.ReadFiles,
+                entry.ModifiedFiles,
                 entry.TurnPrefixSummary,
                 entry.IsSplitTurn,
                 entry.TokensBefore,
@@ -4012,6 +4067,10 @@ public static class CodingAgentHtmlSessionExporter
           border-left-color: #d0b26f;
         }
 
+        .branch-summary-event {
+          border-left-color: #7ccf98;
+        }
+
         .retry-event {
           border-left-color: #d495ff;
         }
@@ -4048,7 +4107,8 @@ public static class CodingAgentHtmlSessionExporter
           overflow-wrap: anywhere;
         }
 
-        .compaction-detail {
+        .compaction-detail,
+        .branch-summary-detail {
           margin-top: 8px;
           padding: 12px;
           border: 1px solid var(--line);
@@ -4056,8 +4116,15 @@ public static class CodingAgentHtmlSessionExporter
           background: #0c0f11;
         }
 
-        .compaction-detail pre {
+        .compaction-detail pre,
+        .branch-summary-detail pre {
           margin-top: 10px;
+        }
+
+        .event-file-list {
+          margin: 8px 0 0;
+          padding-left: 20px;
+          color: var(--muted);
         }
 
         pre {
@@ -4586,6 +4653,11 @@ public static class CodingAgentHtmlSessionExporter
           if (entry.type === 'compaction') {
             const tokens = entry.tokensBefore ? entry.tokensBefore.toLocaleString() + ' tokens' : 'session';
             return labelPrefix + 'compaction: ' + tokens;
+          }
+
+          if (entry.type === 'branch_summary') {
+            const source = entry.fromId || entry.parentId || 'root';
+            return labelPrefix + 'branch summary: ' + shortId(source);
           }
 
           if (entry.type === 'auto_retry_start') {

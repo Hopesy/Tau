@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Tau.Ai;
+using Tau.Tui.Abstractions;
 
 namespace Tau.CodingAgent.Runtime;
 
@@ -12,14 +13,20 @@ public sealed class CodingAgentCommandRouter
     private readonly CodingAgentTreeSessionController? _treeSessionController;
     private readonly CodingAgentPromptTemplateStore? _promptTemplateStore;
     private readonly CodingAgentSkillStore? _skillStore;
+    private readonly CodingAgentContextFileStore? _contextFileStore;
+    private readonly CodingAgentThemeStore? _themeStore;
     private readonly CodingAgentExtensionCommandStore? _extensionCommandStore;
+    private readonly CodingAgentChangelogStore _changelogStore;
     private readonly CodingAgentAutoCompactionOptions _autoCompaction;
     private readonly Action<CodingAgentRetryOptions>? _retryOptionsChanged;
     private readonly Func<int, IReadOnlyList<string>>? _historySnapshotProvider;
     private readonly Action? _clearScreenAction;
     private readonly Func<IReadOnlyList<CodingAgentTreeViewItem>, CancellationToken, Task<CodingAgentTreeInteractiveNavigator.Result>>? _treeNavigator;
+    private readonly CodingAgentExtensionResourceState? _extensionResourceState;
+    private readonly Func<IKeyBindingMap?>? _reloadKeyBindings;
     private readonly string? _sessionFile;
     private CodingAgentRetryOptions _retryOptions;
+    private IKeyBindingMap? _keyBindings;
 
     public CodingAgentCommandRouter(
         ICodingAgentRunner runner,
@@ -30,13 +37,19 @@ public sealed class CodingAgentCommandRouter
         CodingAgentTreeSessionController? treeSessionController = null,
         CodingAgentPromptTemplateStore? promptTemplateStore = null,
         CodingAgentSkillStore? skillStore = null,
+        CodingAgentContextFileStore? contextFileStore = null,
+        CodingAgentThemeStore? themeStore = null,
         CodingAgentExtensionCommandStore? extensionCommandStore = null,
+        CodingAgentChangelogStore? changelogStore = null,
         CodingAgentAutoCompactionOptions? autoCompaction = null,
         CodingAgentRetryOptions? retryOptions = null,
         Action<CodingAgentRetryOptions>? retryOptionsChanged = null,
         Func<int, IReadOnlyList<string>>? historySnapshotProvider = null,
         Action? clearScreenAction = null,
-        Func<IReadOnlyList<CodingAgentTreeViewItem>, CancellationToken, Task<CodingAgentTreeInteractiveNavigator.Result>>? treeNavigator = null)
+        Func<IReadOnlyList<CodingAgentTreeViewItem>, CancellationToken, Task<CodingAgentTreeInteractiveNavigator.Result>>? treeNavigator = null,
+        IKeyBindingMap? keyBindings = null,
+        CodingAgentExtensionResourceState? extensionResourceState = null,
+        Func<IKeyBindingMap?>? reloadKeyBindings = null)
     {
         _runner = runner;
         _settingsStore = settingsStore;
@@ -45,13 +58,19 @@ public sealed class CodingAgentCommandRouter
         _treeSessionController = treeSessionController;
         _promptTemplateStore = promptTemplateStore;
         _skillStore = skillStore;
+        _contextFileStore = contextFileStore;
+        _themeStore = themeStore;
         _extensionCommandStore = extensionCommandStore;
+        _changelogStore = changelogStore ?? new CodingAgentChangelogStore();
         _autoCompaction = autoCompaction ?? CodingAgentAutoCompactionOptions.Disabled;
         _retryOptions = retryOptions ?? CodingAgentRetryOptions.Disabled;
         _retryOptionsChanged = retryOptionsChanged;
         _historySnapshotProvider = historySnapshotProvider;
         _clearScreenAction = clearScreenAction;
         _treeNavigator = treeNavigator;
+        _keyBindings = keyBindings;
+        _extensionResourceState = extensionResourceState;
+        _reloadKeyBindings = reloadKeyBindings;
         _sessionFile = sessionFile;
     }
 
@@ -76,6 +95,10 @@ public sealed class CodingAgentCommandRouter
             return command switch
             {
                 "/help" => HandleHelpCommand(parts),
+                "/reload" => HandleReloadCommand(parts),
+                "/hotkeys" => HandleHotkeysCommand(parts),
+                "/settings" => HandleSettingsCommand(parts),
+                "/theme" => HandleThemeCommand(parts),
                 "/name" => HandleNameCommand(input, parts),
                 "/copy" => await HandleCopyCommandAsync(parts, cancellationToken).ConfigureAwait(false),
                 "/files" => HandleFilesCommand(parts),
@@ -87,19 +110,23 @@ public sealed class CodingAgentCommandRouter
                 "/session" => HandleSessionCommand(parts),
                 "/tree" => HandleTreeCommand(parts),
                 "/label" => HandleLabelCommand(input, parts),
-                "/fork" => HandleForkCommand(parts),
+                "/fork" => await HandleForkCommandAsync(input, parts, cancellationToken).ConfigureAwait(false),
                 "/clone" => HandleCloneCommand(parts),
                 "/resume" => HandleResumeCommand(input, parts),
                 "/model" => HandleModelCommand(parts),
                 "/provider" => HandleProviderCommand(parts),
                 "/models" => HandleModelsCommand(parts),
                 "/providers" => HandleProvidersCommand(parts),
+                "/scoped-models" => HandleScopedModelsCommand(parts),
                 "/prompts" => HandlePromptsCommand(parts),
                 "/skills" => HandleSkillsCommand(parts),
                 "/extensions" => HandleExtensionsCommand(parts),
                 "/auth" => HandleAuthCommand(parts),
                 "/login" => await HandleLoginCommandAsync(parts, cancellationToken).ConfigureAwait(false),
+                "/logout" => HandleLogoutCommand(parts),
+                "/changelog" => HandleChangelogCommand(parts),
                 "/retry" => HandleRetryCommand(parts),
+                "/thinking" => HandleThinkingCommand(parts),
                 "/history" => HandleHistoryCommand(parts),
                 "/find" => HandleFindCommand(input, parts),
                 "/clear" => HandleClearCommand(parts),
@@ -121,6 +148,243 @@ public sealed class CodingAgentCommandRouter
         }
 
         return CodingAgentCommandResult.Status(CodingAgentCommandCatalog.HelpLine);
+    }
+
+    private CodingAgentCommandResult HandleReloadCommand(IReadOnlyList<string> parts)
+    {
+        if (parts.Count != 1)
+        {
+            return CodingAgentCommandResult.Error(CodingAgentCommandCatalog.Usage("/reload"));
+        }
+
+        var lines = new List<string>();
+        var settings = _settingsStore?.Load();
+        if (settings is null)
+        {
+            lines.Add("settings: unavailable");
+        }
+        else
+        {
+            _retryOptions = CodingAgentRetryOptions.FromSettingsOrEnvironment(settings);
+            _retryOptionsChanged?.Invoke(_retryOptions);
+            _runner.ThinkingLevel = ParseThinkingLevelOrNull(settings.DefaultThinkingLevel);
+            _runner.SteeringMode = CodingAgentQueueModes.ToAgentQueueMode(settings.SteeringMode);
+            _runner.FollowUpMode = CodingAgentQueueModes.ToAgentQueueMode(settings.FollowUpMode);
+            lines.Add(
+                $"settings: loaded, retry {FormatRetryPolicy(_retryOptions)}, thinking {FormatThinkingLevel(_runner.ThinkingLevel)}, steering {CodingAgentQueueModes.FromAgentQueueMode(_runner.SteeringMode)}, follow-up {CodingAgentQueueModes.FromAgentQueueMode(_runner.FollowUpMode)}");
+        }
+
+        var extensionStatus = _extensionCommandStore?.LoadStatus();
+        if (extensionStatus is null)
+        {
+            lines.Add("extensions: unavailable");
+        }
+        else
+        {
+            _extensionResourceState?.Update(extensionStatus.Resources);
+            lines.Add(
+                $"extensions: {extensionStatus.Commands.Count} commands, {extensionStatus.Files.Count} files, {extensionStatus.Diagnostics.Count} issues");
+        }
+
+        var prompts = _promptTemplateStore?.Load();
+        lines.Add(prompts is null ? "prompts: unavailable" : $"prompts: {prompts.Count}");
+
+        var skills = _skillStore?.Load();
+        var contextFiles = _contextFileStore?.Load();
+        var promptRefreshed = skills is null && contextFiles is null
+            ? false
+            : _runner.RefreshSystemPromptResources(skills ?? [], contextFiles ?? []);
+        if (skills is null)
+        {
+            lines.Add("skills: unavailable");
+        }
+        else
+        {
+            lines.Add($"skills: {skills.Count}, runner prompt {(promptRefreshed ? "refreshed" : "unchanged")}");
+        }
+
+        lines.Add(contextFiles is null
+            ? "context files: unavailable"
+            : $"context files: {contextFiles.Count}, runner prompt {(promptRefreshed ? "refreshed" : "unchanged")}");
+
+        if (_reloadKeyBindings is null)
+        {
+            lines.Add("keybindings: unavailable");
+        }
+        else
+        {
+            _keyBindings = _reloadKeyBindings();
+            lines.Add(_keyBindings is null ? "keybindings: unavailable" : $"keybindings: {_keyBindings.Bindings.Count}");
+        }
+
+        var themeStatus = _themeStore?.LoadStatus();
+        lines.Add(themeStatus is null
+            ? "themes: unavailable"
+            : $"themes: {themeStatus.Themes.Count}, current {FormatCurrentTheme(settings?.Theme)}, issues {themeStatus.Diagnostics.Count}");
+        return CodingAgentCommandResult.Status($"reload complete:{Environment.NewLine}{string.Join(Environment.NewLine, lines)}");
+    }
+
+    private CodingAgentCommandResult HandleHotkeysCommand(IReadOnlyList<string> parts)
+    {
+        if (parts.Count != 1)
+        {
+            return CodingAgentCommandResult.Error(CodingAgentCommandCatalog.Usage("/hotkeys"));
+        }
+
+        if (_keyBindings is null)
+        {
+            return CodingAgentCommandResult.Error("Hotkeys are not available in this session.");
+        }
+
+        return CodingAgentCommandResult.Status(CodingAgentHotkeysFormatter.Format(_keyBindings));
+    }
+
+    private CodingAgentCommandResult HandleSettingsCommand(IReadOnlyList<string> parts)
+    {
+        if (parts.Count > 2 ||
+            (parts.Count == 2 &&
+             !IsCurrentKeyword(parts[1]) &&
+             !parts[1].Equals("path", StringComparison.OrdinalIgnoreCase)))
+        {
+            return CodingAgentCommandResult.Error(CodingAgentCommandCatalog.Usage("/settings"));
+        }
+
+        if (_settingsStore is null)
+        {
+            return CodingAgentCommandResult.Error("settings are not available in this session");
+        }
+
+        if (parts.Count == 2 && parts[1].Equals("path", StringComparison.OrdinalIgnoreCase))
+        {
+            return CodingAgentCommandResult.Status($"settings: {_settingsStore.Path}");
+        }
+
+        var settings = _settingsStore.Load();
+        return CodingAgentCommandResult.Status(FormatSettings(settings));
+    }
+
+    private string FormatSettings(CodingAgentSettingsSnapshot settings)
+    {
+        var lines = new List<string>
+        {
+            $"settings: {_settingsStore?.Path ?? "unavailable"}",
+            $"current model: {_runner.Model.Provider}/{_runner.Model.Id}",
+            $"current thinking: {FormatThinkingLevel(_runner.ThinkingLevel)}",
+            $"default model: {FormatSettingsDefaultModel(settings)}",
+            $"tree filter: {FormatTreeFilterSetting(settings.TreeFilterMode)}",
+            $"retry: {FormatRetryPolicy(CodingAgentRetryOptions.FromSettingsOrEnvironment(settings))}",
+            $"default thinking: {FormatSettingsThinkingLevel(settings.DefaultThinkingLevel)}",
+            $"steering mode: {CodingAgentQueueModes.NormalizeOrDefault(settings.SteeringMode)}",
+            $"follow-up mode: {CodingAgentQueueModes.NormalizeOrDefault(settings.FollowUpMode)}",
+            $"auto compaction: {FormatSettingsAutoCompaction(settings.AutoCompactionEnabled)}",
+            $"theme: {FormatThemeSetting(settings.Theme)}",
+            $"scoped models: {FormatSettingsScopedModels(settings.EnabledModels)}"
+        };
+        return string.Join(Environment.NewLine, lines);
+    }
+
+    private CodingAgentCommandResult HandleThemeCommand(IReadOnlyList<string> parts)
+    {
+        if (_settingsStore is null)
+        {
+            return CodingAgentCommandResult.Error("theme settings are not available in this session");
+        }
+
+        var settings = _settingsStore.Load();
+        if (parts.Count == 1 || (parts.Count == 2 && IsCurrentKeyword(parts[1])))
+        {
+            return CodingAgentCommandResult.Status(FormatThemeCurrent(settings.Theme));
+        }
+
+        if (parts.Count == 2 && parts[1].Equals("list", StringComparison.OrdinalIgnoreCase))
+        {
+            return FormatThemeList(settings.Theme);
+        }
+
+        if (parts.Count == 2 && parts[1].Equals("clear", StringComparison.OrdinalIgnoreCase))
+        {
+            _settingsStore.Save(settings with { Theme = null });
+            return CodingAgentCommandResult.Status($"theme: {CodingAgentThemeStore.DefaultThemeName}");
+        }
+
+        if (parts.Count == 3 && parts[1].Equals("set", StringComparison.OrdinalIgnoreCase))
+        {
+            if (_themeStore is null)
+            {
+                return CodingAgentCommandResult.Error("theme discovery is not available in this session");
+            }
+
+            var requested = parts[2].Trim();
+            if (string.IsNullOrWhiteSpace(requested))
+            {
+                return CodingAgentCommandResult.Error(CodingAgentCommandCatalog.Usage("/theme"));
+            }
+
+            var status = _themeStore.LoadStatus();
+            var theme = status.Themes.FirstOrDefault(candidate =>
+                candidate.Name.Equals(requested, StringComparison.OrdinalIgnoreCase));
+            if (theme is null)
+            {
+                return CodingAgentCommandResult.Error($"theme '{requested}' is not available");
+            }
+
+            _settingsStore.Save(settings with { Theme = theme.Name });
+            return CodingAgentCommandResult.Status($"theme: {theme.Name}");
+        }
+
+        return CodingAgentCommandResult.Error(CodingAgentCommandCatalog.Usage("/theme"));
+    }
+
+    private CodingAgentCommandResult FormatThemeList(string? currentTheme)
+    {
+        if (_themeStore is null)
+        {
+            return CodingAgentCommandResult.Error("theme discovery is not available in this session");
+        }
+
+        var status = _themeStore.LoadStatus();
+        var current = FormatCurrentTheme(currentTheme);
+        var lines = new List<string> { $"themes: {status.Themes.Count}, current {current}" };
+        foreach (var theme in status.Themes)
+        {
+            var marker = theme.Name.Equals(current, StringComparison.OrdinalIgnoreCase) ? "*" : "-";
+            var location = theme.FilePath is null ? theme.Scope : $"{theme.Scope} {theme.FilePath}";
+            lines.Add($"{marker} {theme.Name} ({location})");
+        }
+
+        if (status.Diagnostics.Count > 0)
+        {
+            lines.Add($"issues: {status.Diagnostics.Count}");
+            foreach (var diagnostic in status.Diagnostics.Take(8))
+            {
+                lines.Add($"{diagnostic.Severity} {diagnostic.Path} ({diagnostic.Scope}) - {diagnostic.Message}");
+            }
+
+            if (status.Diagnostics.Count > 8)
+            {
+                lines.Add($"... {status.Diagnostics.Count - 8} more issues");
+            }
+        }
+
+        return CodingAgentCommandResult.Status(string.Join(Environment.NewLine, lines));
+    }
+
+    private string FormatThemeCurrent(string? currentTheme)
+    {
+        var current = FormatCurrentTheme(currentTheme);
+        if (_themeStore is null)
+        {
+            return $"theme: {current}";
+        }
+
+        var theme = _themeStore.Find(current);
+        if (theme is null)
+        {
+            return $"theme: {current} (not found)";
+        }
+
+        var location = theme.FilePath is null ? theme.Scope : $"{theme.Scope} {theme.FilePath}";
+        return $"theme: {theme.Name} ({location})";
     }
 
     private CodingAgentCommandResult HandleNameCommand(string input, IReadOnlyList<string> parts)
@@ -421,9 +685,12 @@ public sealed class CodingAgentCommandRouter
         return CodingAgentCommandResult.Status($"label {entryId}: {FormatSessionName(normalized)}");
     }
 
-    private CodingAgentCommandResult HandleForkCommand(IReadOnlyList<string> parts)
+    private async Task<CodingAgentCommandResult> HandleForkCommandAsync(
+        string input,
+        IReadOnlyList<string> parts,
+        CancellationToken cancellationToken)
     {
-        if (parts.Count != 2)
+        if (parts.Count < 2 || (parts.Count >= 3 && !IsBranchSummaryOption(parts[2])))
         {
             return CodingAgentCommandResult.Error(CodingAgentCommandCatalog.Usage("/fork"));
         }
@@ -433,11 +700,40 @@ public sealed class CodingAgentCommandRouter
             return CodingAgentCommandResult.Error("tree sessions are not enabled");
         }
 
+        var entryId = parts[1];
+        var summarize = parts.Count >= 3;
         _treeSessionController.SyncFromRunner(_runner);
-        var snapshot = _treeSessionController.Branch(parts[1]);
+        CodingAgentTreeSessionSnapshot snapshot;
+        CodingAgentBranchSummaryResult? summary = null;
+        if (summarize)
+        {
+            var messages = _treeSessionController.CollectBranchSummaryMessages(entryId);
+            if (messages.Count > 0)
+            {
+                summary = await _runner
+                    .SummarizeBranchAsync(
+                        messages,
+                        ExtractBranchSummaryInstructions(parts),
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                snapshot = _treeSessionController.BranchWithSummary(entryId, summary);
+            }
+            else
+            {
+                snapshot = _treeSessionController.Branch(entryId);
+            }
+        }
+        else
+        {
+            snapshot = _treeSessionController.Branch(entryId);
+        }
+
         _runner.RestoreSession(snapshot.ToFlatSnapshot());
+        var summarySuffix = summary is null
+            ? summarize ? ", branch summary none" : string.Empty
+            : $", branch summary {summary.EntryCount} entries, tokens ~{summary.TokensBefore}";
         return CodingAgentCommandResult.Status(
-            $"forked session at {parts[1]}: leaf {FormatTreeId(snapshot.LeafId)}, messages {snapshot.Messages.Count}, model {_runner.Model.Provider}/{_runner.Model.Id}");
+            $"forked session at {entryId}: leaf {FormatTreeId(snapshot.LeafId)}, messages {snapshot.Messages.Count}, model {_runner.Model.Provider}/{_runner.Model.Id}{summarySuffix}");
     }
 
     private CodingAgentCommandResult HandleCloneCommand(IReadOnlyList<string> parts)
@@ -564,6 +860,243 @@ public sealed class CodingAgentCommandRouter
         return CodingAgentCommandResult.Status($"providers: {string.Join(", ", _runner.GetProviders())}");
     }
 
+    private CodingAgentCommandResult HandleScopedModelsCommand(IReadOnlyList<string> parts)
+    {
+        if (_settingsStore is null)
+        {
+            return CodingAgentCommandResult.Error("scoped model settings are not available in this session");
+        }
+
+        var settings = _settingsStore.Load();
+        var availableModels = GetAvailableModels();
+        if (availableModels.Count == 0)
+        {
+            return CodingAgentCommandResult.Error("scoped models: no models available");
+        }
+
+        if (parts.Count == 1 || (parts.Count == 2 && IsCurrentKeyword(parts[1])))
+        {
+            return CodingAgentCommandResult.Status(FormatScopedModels(settings.EnabledModels, availableModels));
+        }
+
+        var action = parts[1].ToLowerInvariant();
+        if (action is "clear" or "all")
+        {
+            if (parts.Count != 2)
+            {
+                return CodingAgentCommandResult.Error(CodingAgentCommandCatalog.Usage("/scoped-models"));
+            }
+
+            SaveScopedModels(settings, null);
+            return CodingAgentCommandResult.Status(FormatScopedModels(null, availableModels));
+        }
+
+        if (action is not ("set" or "add" or "remove") || parts.Count < 3)
+        {
+            return CodingAgentCommandResult.Error(CodingAgentCommandCatalog.Usage("/scoped-models"));
+        }
+
+        var resolved = ResolveScopedModelIds(parts.Skip(2), availableModels, out var error);
+        if (error is not null)
+        {
+            return CodingAgentCommandResult.Error(error);
+        }
+
+        var next = action switch
+        {
+            "set" => resolved,
+            "add" => AddScopedModelIds(settings.EnabledModels, resolved, availableModels),
+            "remove" => RemoveScopedModelIds(settings.EnabledModels, resolved, availableModels),
+            _ => resolved
+        };
+
+        if (next.Count == 0)
+        {
+            return CodingAgentCommandResult.Error("scoped model scope cannot be empty; use /scoped-models clear to enable all models");
+        }
+
+        var normalized = NormalizeScopedModelIds(next, availableModels);
+        var saved = normalized.Count == availableModels.Count ? null : normalized;
+        SaveScopedModels(settings, saved);
+        return CodingAgentCommandResult.Status(FormatScopedModels(saved, availableModels));
+    }
+
+    private IReadOnlyList<Model> GetAvailableModels()
+    {
+        var models = new List<Model>();
+        foreach (var provider in _runner.GetProviders())
+        {
+            models.AddRange(_runner.GetModels(provider));
+        }
+
+        return models;
+    }
+
+    private static IReadOnlyList<string> ResolveScopedModelIds(
+        IEnumerable<string> references,
+        IReadOnlyList<Model> availableModels,
+        out string? error)
+    {
+        error = null;
+        var ids = new List<string>();
+        foreach (var reference in references)
+        {
+            var trimmed = reference.Trim();
+            if (string.IsNullOrWhiteSpace(trimmed))
+            {
+                continue;
+            }
+
+            if (!TryResolveScopedModelId(trimmed, availableModels, out var id, out error))
+            {
+                return [];
+            }
+
+            if (!ids.Contains(id, StringComparer.OrdinalIgnoreCase))
+            {
+                ids.Add(id);
+            }
+        }
+
+        if (ids.Count == 0)
+        {
+            error = CodingAgentCommandCatalog.Usage("/scoped-models");
+        }
+
+        return ids;
+    }
+
+    private static bool TryResolveScopedModelId(
+        string reference,
+        IReadOnlyList<Model> availableModels,
+        out string id,
+        out string? error)
+    {
+        id = string.Empty;
+        error = null;
+        if (reference.Contains('/', StringComparison.Ordinal))
+        {
+            var parts = reference.Split('/', 2, StringSplitOptions.TrimEntries);
+            var match = availableModels.SingleOrDefault(model =>
+                model.Provider.Equals(parts[0], StringComparison.OrdinalIgnoreCase) &&
+                model.Id.Equals(parts[1], StringComparison.OrdinalIgnoreCase));
+            if (match is null)
+            {
+                error = $"model '{reference}' is not registered";
+                return false;
+            }
+
+            id = FormatScopedModelId(match);
+            return true;
+        }
+
+        var matches = availableModels
+            .Where(model => model.Id.Equals(reference, StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+        if (matches.Length == 0)
+        {
+            error = $"model '{reference}' is not registered";
+            return false;
+        }
+
+        if (matches.Length > 1)
+        {
+            error = $"model '{reference}' is ambiguous; use provider/model";
+            return false;
+        }
+
+        id = FormatScopedModelId(matches[0]);
+        return true;
+    }
+
+    private static IReadOnlyList<string> AddScopedModelIds(
+        IReadOnlyList<string>? current,
+        IReadOnlyList<string> additions,
+        IReadOnlyList<Model> availableModels)
+    {
+        if (current is null || current.Count == 0)
+        {
+            return availableModels.Select(FormatScopedModelId).ToArray();
+        }
+
+        var next = new List<string>(current);
+        foreach (var id in additions)
+        {
+            if (!next.Contains(id, StringComparer.OrdinalIgnoreCase))
+            {
+                next.Add(id);
+            }
+        }
+
+        return next;
+    }
+
+    private static IReadOnlyList<string> RemoveScopedModelIds(
+        IReadOnlyList<string>? current,
+        IReadOnlyList<string> removals,
+        IReadOnlyList<Model> availableModels)
+    {
+        var currentIds = current is null || current.Count == 0
+            ? availableModels.Select(FormatScopedModelId).ToArray()
+            : current;
+        return currentIds
+            .Where(id => !removals.Contains(id, StringComparer.OrdinalIgnoreCase))
+            .ToArray();
+    }
+
+    private static IReadOnlyList<string> NormalizeScopedModelIds(
+        IReadOnlyList<string> ids,
+        IReadOnlyList<Model> availableModels)
+    {
+        var availableIds = availableModels
+            .Select(FormatScopedModelId)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return ids
+            .Where(id => availableIds.Contains(id))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    private string FormatScopedModels(IReadOnlyList<string>? enabledModels, IReadOnlyList<Model> availableModels)
+    {
+        var allIds = availableModels.Select(FormatScopedModelId).ToArray();
+        var enabled = enabledModels is null || enabledModels.Count == 0
+            ? null
+            : enabledModels
+                .Where(id => allIds.Contains(id, StringComparer.OrdinalIgnoreCase))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+        var enabledSet = enabled is null
+            ? allIds.ToHashSet(StringComparer.OrdinalIgnoreCase)
+            : enabled.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var enabledCount = enabled?.Length ?? allIds.Length;
+        var header = enabled is null
+            ? $"scoped models: all enabled ({allIds.Length}/{allIds.Length})"
+            : $"scoped models: {enabledCount}/{allIds.Length} enabled";
+        var lines = new List<string>
+        {
+            header,
+            $"settings: {_settingsStore?.Path ?? "unavailable"}"
+        };
+
+        if (enabled is not null)
+        {
+            lines.Add($"order: {string.Join(", ", enabled)}");
+        }
+
+        lines.Add("models:");
+        foreach (var model in availableModels)
+        {
+            var id = FormatScopedModelId(model);
+            var state = enabledSet.Contains(id) ? "enabled" : "disabled";
+            lines.Add($"  {id} ({state})");
+        }
+
+        return string.Join(Environment.NewLine, lines);
+    }
+
+    private static string FormatScopedModelId(Model model) => $"{model.Provider}/{model.Id}";
+
     private CodingAgentCommandResult HandlePromptsCommand(IReadOnlyList<string> parts)
     {
         if (parts.Count != 1)
@@ -646,7 +1179,7 @@ public sealed class CodingAgentCommandRouter
         if (status.Files.Count > 0)
         {
             var files = status.Files.Select(file =>
-                $"{file.FilePath} ({file.Scope}, {file.CommandCount} commands, {file.PromptPaths.Count} prompts, {file.SkillPaths.Count} skills)");
+                $"{file.FilePath} ({file.Scope}, {file.CommandCount} commands, {file.PromptPaths.Count} prompts, {file.SkillPaths.Count} skills, {file.ThemePaths.Count} themes)");
             lines.Add($"extension files: {string.Join("; ", files)}");
         }
 
@@ -670,6 +1203,11 @@ public sealed class CodingAgentCommandRouter
         if (status.Resources.SkillPaths.Count > 0)
         {
             resources.Add($"skills {string.Join(", ", status.Resources.SkillPaths)}");
+        }
+
+        if (status.Resources.ThemePaths.Count > 0)
+        {
+            resources.Add($"themes {string.Join(", ", status.Resources.ThemePaths)}");
         }
 
         if (resources.Count > 0)
@@ -731,6 +1269,52 @@ public sealed class CodingAgentCommandRouter
         var credentials = await provider.LoginAsync(callbacks, cancellationToken).ConfigureAwait(false);
         _runner.SaveOAuthCredentials(status.Provider, credentials);
         return CodingAgentCommandResult.Status($"login {status.Provider}: authenticated successfully. Credentials saved to auth.json.");
+    }
+
+    private CodingAgentCommandResult HandleLogoutCommand(IReadOnlyList<string> parts)
+    {
+        if (parts.Count > 2)
+        {
+            return CodingAgentCommandResult.Error(CodingAgentCommandCatalog.Usage("/logout"));
+        }
+
+        var status = parts.Count == 2
+            ? _runner.GetAuthStatus(parts[1])
+            : _runner.GetAuthStatus();
+        var removed = _runner.Logout(status.Provider);
+        var unchanged = "Environment variables and models.json credentials are unchanged.";
+        return removed
+            ? CodingAgentCommandResult.Status($"logout {status.Provider}: auth.json credentials removed. {unchanged}")
+            : CodingAgentCommandResult.Status($"logout {status.Provider}: no auth.json credentials found. {unchanged}");
+    }
+
+    private CodingAgentCommandResult HandleChangelogCommand(IReadOnlyList<string> parts)
+    {
+        if (parts.Count > 2)
+        {
+            return CodingAgentCommandResult.Error(CodingAgentCommandCatalog.Usage("/changelog"));
+        }
+
+        var limit = 20;
+        if (parts.Count == 2)
+        {
+            if (parts[1].Equals("all", StringComparison.OrdinalIgnoreCase))
+            {
+                limit = int.MaxValue;
+            }
+            else if (!int.TryParse(
+                         parts[1],
+                         System.Globalization.NumberStyles.Integer,
+                         System.Globalization.CultureInfo.InvariantCulture,
+                         out limit)
+                     || limit <= 0)
+            {
+                return CodingAgentCommandResult.Error(CodingAgentCommandCatalog.Usage("/changelog"));
+            }
+        }
+
+        var snapshot = _changelogStore.Load();
+        return CodingAgentCommandResult.Status(CodingAgentChangelogStore.Format(snapshot, limit));
     }
 
     private CodingAgentCommandResult HandleFindCommand(string input, IReadOnlyList<string> parts)
@@ -944,6 +1528,110 @@ public sealed class CodingAgentCommandRouter
             configuredBaseDelayMilliseconds: baseDelayMilliseconds);
     }
 
+    private CodingAgentCommandResult HandleThinkingCommand(IReadOnlyList<string> parts)
+    {
+        if (parts.Count == 1 || (parts.Count == 2 && IsCurrentKeyword(parts[1])))
+        {
+            return CodingAgentCommandResult.Status($"thinking: {FormatThinkingLevel(_runner.ThinkingLevel)}");
+        }
+
+        if (parts.Count != 2)
+        {
+            return CodingAgentCommandResult.Error(CodingAgentCommandCatalog.Usage("/thinking"));
+        }
+
+        var arg = parts[1].ToLowerInvariant();
+
+        if (arg is "off" or "none")
+        {
+            _runner.ThinkingLevel = null;
+            SaveThinkingLevel(null);
+            return CodingAgentCommandResult.Status("thinking: off");
+        }
+
+        if (arg == "cycle")
+        {
+            _runner.ThinkingLevel = CycleThinkingLevel(_runner.ThinkingLevel);
+            SaveThinkingLevel(FormatThinkingLevelRaw(_runner.ThinkingLevel));
+            return CodingAgentCommandResult.Status($"thinking: {FormatThinkingLevel(_runner.ThinkingLevel)}");
+        }
+
+        if (!TryParseThinkingLevel(arg, out var level))
+        {
+            return CodingAgentCommandResult.Error(CodingAgentCommandCatalog.Usage("/thinking"));
+        }
+
+        _runner.ThinkingLevel = level;
+        SaveThinkingLevel(FormatThinkingLevelRaw(level));
+        return CodingAgentCommandResult.Status($"thinking: {FormatThinkingLevel(level)}");
+    }
+
+    private void SaveThinkingLevel(string? levelString)
+    {
+        if (_settingsStore is null) return;
+        var settings = _settingsStore.Load();
+        _settingsStore.Save(settings with { DefaultThinkingLevel = levelString });
+    }
+
+    private void SaveScopedModels(CodingAgentSettingsSnapshot current, IReadOnlyList<string>? enabledModels)
+    {
+        _settingsStore?.Save(current with { EnabledModels = enabledModels });
+    }
+
+    private static Ai.ThinkingLevel? ParseThinkingLevelOrNull(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value) ||
+            value.Equals("off", StringComparison.OrdinalIgnoreCase) ||
+            value.Equals("none", StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        return TryParseThinkingLevel(value.Trim().ToLowerInvariant(), out var level) ? level : null;
+    }
+
+    private static bool TryParseThinkingLevel(string value, out Ai.ThinkingLevel level)
+    {
+        level = default;
+        switch (value)
+        {
+            case "minimal": level = Ai.ThinkingLevel.Minimal; return true;
+            case "low": level = Ai.ThinkingLevel.Low; return true;
+            case "medium": case "med": level = Ai.ThinkingLevel.Medium; return true;
+            case "high": level = Ai.ThinkingLevel.High; return true;
+            case "xhigh": case "extrahigh": case "extra-high": level = Ai.ThinkingLevel.ExtraHigh; return true;
+            default: return false;
+        }
+    }
+
+    private static Ai.ThinkingLevel? CycleThinkingLevel(Ai.ThinkingLevel? current) => current switch
+    {
+        null => Ai.ThinkingLevel.Low,
+        Ai.ThinkingLevel.Minimal => Ai.ThinkingLevel.Low,
+        Ai.ThinkingLevel.Low => Ai.ThinkingLevel.Medium,
+        Ai.ThinkingLevel.Medium => Ai.ThinkingLevel.High,
+        Ai.ThinkingLevel.High => Ai.ThinkingLevel.ExtraHigh,
+        Ai.ThinkingLevel.ExtraHigh => null,
+        _ => Ai.ThinkingLevel.Low
+    };
+
+    private static string FormatThinkingLevel(Ai.ThinkingLevel? level) => level switch
+    {
+        null => "off",
+        Ai.ThinkingLevel.Minimal => "minimal",
+        Ai.ThinkingLevel.Low => "low",
+        Ai.ThinkingLevel.Medium => "medium",
+        Ai.ThinkingLevel.High => "high",
+        Ai.ThinkingLevel.ExtraHigh => "xhigh",
+        _ => "off"
+    };
+
+    private static string? FormatThinkingLevelRaw(Ai.ThinkingLevel? level) => level switch
+    {
+        null => null,
+        _ => FormatThinkingLevel(level)
+    };
+
     private async Task<CodingAgentCommandResult> HandleCompactCommandAsync(
         string input,
         IReadOnlyList<string> parts,
@@ -1017,8 +1705,52 @@ public sealed class CodingAgentCommandRouter
         value.Equals("disable", StringComparison.OrdinalIgnoreCase) ||
         value.Equals("disabled", StringComparison.OrdinalIgnoreCase);
 
+    private static bool IsBranchSummaryOption(string value) =>
+        value.Equals("--summarize", StringComparison.OrdinalIgnoreCase) ||
+        value.Equals("--summary", StringComparison.OrdinalIgnoreCase) ||
+        value.Equals("-s", StringComparison.OrdinalIgnoreCase);
+
+    private static string? ExtractBranchSummaryInstructions(IReadOnlyList<string> parts)
+    {
+        if (parts.Count <= 3)
+        {
+            return null;
+        }
+
+        var instructions = string.Join(' ', parts.Skip(3)).Trim();
+        return string.IsNullOrWhiteSpace(instructions) ? null : instructions;
+    }
+
     private static string FormatSessionName(string? name) =>
         string.IsNullOrWhiteSpace(name) ? "none" : name;
+
+    private static string FormatSettingsDefaultModel(CodingAgentSettingsSnapshot settings) =>
+        string.IsNullOrWhiteSpace(settings.DefaultProvider) || string.IsNullOrWhiteSpace(settings.DefaultModel)
+            ? "unset"
+            : $"{settings.DefaultProvider}/{settings.DefaultModel}";
+
+    private static string FormatTreeFilterSetting(string? treeFilterMode) =>
+        string.IsNullOrWhiteSpace(treeFilterMode) ? "default" : treeFilterMode;
+
+    private static string FormatSettingsThinkingLevel(string? defaultThinkingLevel) =>
+        string.IsNullOrWhiteSpace(defaultThinkingLevel) ? "off" : defaultThinkingLevel;
+
+    private static string FormatSettingsScopedModels(IReadOnlyList<string>? enabledModels) =>
+        enabledModels is null || enabledModels.Count == 0
+            ? "all enabled"
+            : $"{enabledModels.Count} enabled ({string.Join(", ", enabledModels)})";
+
+    private static string FormatSettingsAutoCompaction(bool? enabled) => enabled switch
+    {
+        true => "enabled",
+        false => "disabled",
+        null => "default"
+    };
+
+    private static string FormatThemeSetting(string? theme) => FormatCurrentTheme(theme);
+
+    private static string FormatCurrentTheme(string? theme) =>
+        string.IsNullOrWhiteSpace(theme) ? CodingAgentThemeStore.DefaultThemeName : theme;
 
     private static string FormatRetryPolicy(CodingAgentRetryOptions options) =>
         options.IsEnabled

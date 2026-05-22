@@ -29,5 +29,6 @@ public readonly record struct KeyBinding(ConsoleKey Key, ConsoleModifiers Modifi
 
 public interface IKeyBindingMap
 {
+    IReadOnlyDictionary<KeyBinding, EditorAction> Bindings { get; }
     EditorAction Resolve(ConsoleKeyInfo key);
 }

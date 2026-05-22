@@ -88,6 +88,68 @@ public sealed class OAuthCredentialStore
         WriteAuthFile(path, stream.ToArray());
     }
 
+    public bool Remove(string providerId)
+    {
+        if (string.IsNullOrWhiteSpace(providerId))
+        {
+            return false;
+        }
+
+        var path = _searchPaths.FirstOrDefault(File.Exists);
+        if (path is null)
+        {
+            return false;
+        }
+
+        Dictionary<string, JsonElement> existing = new(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            using var doc = JsonDocument.Parse(File.ReadAllText(path));
+            if (doc.RootElement.ValueKind != JsonValueKind.Object)
+            {
+                return false;
+            }
+
+            foreach (var prop in doc.RootElement.EnumerateObject())
+            {
+                existing[prop.Name] = prop.Value.Clone();
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+        {
+            return false;
+        }
+
+        var removed = false;
+        using var stream = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(stream, new JsonWriterOptions { Indented = true }))
+        {
+            writer.WriteStartObject();
+
+            foreach (var (key, value) in existing)
+            {
+                if (string.Equals(key, providerId, StringComparison.OrdinalIgnoreCase))
+                {
+                    removed = true;
+                    continue;
+                }
+
+                writer.WritePropertyName(key);
+                value.WriteTo(writer);
+            }
+
+            writer.WriteEndObject();
+        }
+
+        if (!removed)
+        {
+            return false;
+        }
+
+        WriteAuthFile(path, stream.ToArray());
+        return true;
+    }
+
     public IReadOnlyDictionary<string, StoredProviderAuth> LoadEntries()
     {
         var path = _searchPaths.FirstOrDefault(File.Exists);
