@@ -171,7 +171,9 @@ static string? ResolveKeyBindingsPath()
     return string.IsNullOrWhiteSpace(home) ? null : Path.Combine(home, ".tau", "coding-agent-keybindings.json");
 }
 
-static Func<IReadOnlyList<CodingAgentTreeViewItem>, CancellationToken, Task<CodingAgentTreeInteractiveNavigator.Result>> CreateTreeNavigator(IConsoleKeyReader keyReader)
+static Func<IReadOnlyList<CodingAgentTreeViewItem>, CancellationToken, Task<CodingAgentTreeInteractiveNavigator.Result>> CreateTreeNavigator(
+    IConsoleKeyReader keyReader,
+    CodingAgentSettingsStore settingsStore)
 {
     var navigator = new CodingAgentTreeInteractiveNavigator();
     return (items, cancellationToken) => navigator.NavigateAsync(
@@ -179,6 +181,17 @@ static Func<IReadOnlyList<CodingAgentTreeViewItem>, CancellationToken, Task<Codi
         keyReader,
         Console.Out,
         clearScreen: () => Console.Write("[2J[H"),
+        initialFoldedEntryIds: settingsStore.Load().TreeCollapsedEntryIds,
+        foldedEntryIdsChanged: foldedEntryIds =>
+        {
+            var normalized = foldedEntryIds
+                .Where(static id => !string.IsNullOrWhiteSpace(id))
+                .Select(static id => id.Trim())
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            var current = settingsStore.Load();
+            settingsStore.Save(current with { TreeCollapsedEntryIds = normalized.Length == 0 ? null : normalized });
+        },
         cancellationToken);
 }
 var sessionFile = Environment.GetEnvironmentVariable("TAU_CODING_AGENT_SESSION_FILE");
@@ -267,7 +280,7 @@ var host = new CodingAgentHost(
     retryOptions: CodingAgentRetryOptions.FromSettingsOrEnvironment(settings),
     turnInputSource: editor is null ? null : new SystemConsoleCodingAgentTurnInputSource(),
     historySnapshotProvider: editor is null ? null : limit => editor.History.Snapshot(limit),
-    treeNavigator: editor is null ? null : CreateTreeNavigator(keyReader),
+    treeNavigator: editor is null ? null : CreateTreeNavigator(keyReader, settingsStore),
     themeSelector: editor is null ? null : CodingAgentThemeSelector.CreateConsoleSelector(keyReader),
     settingsSelector: editor is null ? null : CodingAgentSettingsSelector.CreateConsoleSelector(keyReader),
     scopedModelsSelector: editor is null ? null : CodingAgentScopedModelsSelector.CreateConsoleSelector(keyReader),

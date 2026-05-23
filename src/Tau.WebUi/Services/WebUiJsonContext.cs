@@ -12,6 +12,8 @@ namespace Tau.WebUi.Services;
 [JsonSerializable(typeof(WebChatAttachmentDto[]))]
 [JsonSerializable(typeof(WebChatToolCallDto))]
 [JsonSerializable(typeof(WebChatToolCallDto[]))]
+[JsonSerializable(typeof(CodingAgentJsonlSessionPreviewDto))]
+[JsonSerializable(typeof(CodingAgentJsonlTimelineMessageDto))]
 [JsonSerializable(typeof(SendMessageRequest))]
 [JsonSerializable(typeof(WebChatStreamEventDto))]
 [JsonSerializable(typeof(WebUiAuthStatusDto))]
@@ -30,6 +32,15 @@ internal sealed partial class WebUiNdjsonContext : JsonSerializerContext
 [JsonSerializable(typeof(WebChatJsonlSessionHeader))]
 [JsonSerializable(typeof(WebChatJsonlMessageEntry))]
 internal sealed partial class WebUiJsonlContext : JsonSerializerContext
+{
+}
+
+[JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]
+[JsonSerializable(typeof(CodingAgentJsonlSessionHeader))]
+[JsonSerializable(typeof(CodingAgentJsonlSessionEntry))]
+[JsonSerializable(typeof(CodingAgentJsonlSessionMessage))]
+[JsonSerializable(typeof(CodingAgentJsonlSessionContent))]
+internal sealed partial class WebUiCodingAgentJsonlContext : JsonSerializerContext
 {
 }
 

@@ -152,6 +152,11 @@ public sealed class WebChatService
         return session.ToDto(persisted: true);
     }
 
+    public CodingAgentJsonlSessionPreviewDto PreviewCodingAgentJsonlSession(
+        string jsonl,
+        string? filePath = null) =>
+        CodingAgentJsonlSessionPreviewer.Parse(jsonl, filePath);
+
     public WebChatSessionDto? CloneSession(string id)
     {
         if (!_sessions.TryGetValue(id, out var existing))

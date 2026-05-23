@@ -1,5 +1,7 @@
 using System.Globalization;
 using Microsoft.Extensions.Logging;
+using Tau.Ai;
+using Tau.CodingAgent.Runtime;
 using Tau.Mom;
 
 namespace Tau.Agent.Tests;
@@ -318,6 +320,104 @@ public class FileDelegationProcessorTests
         Assert.Equal("hello from mom", captured.Prompt);
 
         Directory.Delete(root, recursive: true);
+    }
+
+    [Fact]
+    public async Task ProcessPendingAsync_WithJsonRequestModelOnly_UsesExplicitModelReference()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"tau-mom-{Guid.NewGuid():N}");
+        var inbox = Path.Combine(root, "inbox");
+        var outbox = Path.Combine(root, "outbox");
+        var archive = Path.Combine(root, "archive");
+        Directory.CreateDirectory(inbox);
+
+        var requestPath = Path.Combine(inbox, "delegation.json");
+        await File.WriteAllTextAsync(requestPath, """
+        {
+          "prompt": "use explicit model only",
+          "model": "google-gemini-cli/gemini-2.5-pro",
+          "workingDirectory": "."
+        }
+        """);
+
+        var options = new MomOptions
+        {
+            InboxPath = inbox,
+            OutboxPath = outbox,
+            ArchivePath = archive,
+            DefaultWorkingDirectory = root,
+            DefaultProvider = "openai",
+            DefaultModel = "gpt-5.4"
+        };
+
+        var runner = new FakeDelegationAgentRunner();
+        var processor = CreateProcessor(options, runner);
+
+        try
+        {
+            var processed = await processor.ProcessPendingAsync();
+
+            Assert.Equal(1, processed);
+            var captured = Assert.Single(runner.Requests);
+            Assert.Equal("google-gemini-cli", captured.Provider);
+            Assert.Equal("gemini-2.5-pro", captured.Model);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ProcessPendingAsync_WithTextRequest_CarriesProviderAndModelFromContext()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"tau-mom-{Guid.NewGuid():N}");
+        var inbox = Path.Combine(root, "inbox");
+        var outbox = Path.Combine(root, "outbox");
+        var archive = Path.Combine(root, "archive");
+        Directory.CreateDirectory(inbox);
+        Directory.CreateDirectory(root);
+        new CodingAgentSessionStore(Path.Combine(root, ChannelSessionStore.ContextFileName)).Save(
+            [],
+            new Model
+            {
+                Provider = "anthropic",
+                Id = "claude-opus-4-6",
+                Name = "Claude Opus 4.6",
+                Api = "anthropic"
+            },
+            "saved mom session");
+
+        var requestPath = Path.Combine(inbox, "delegation.txt");
+        await File.WriteAllTextAsync(requestPath, "follow up from mom");
+
+        var options = new MomOptions
+        {
+            InboxPath = inbox,
+            OutboxPath = outbox,
+            ArchivePath = archive,
+            DefaultWorkingDirectory = root,
+            DefaultProvider = "openai",
+            DefaultModel = "gpt-5.4"
+        };
+
+        var runner = new FakeDelegationAgentRunner();
+        var processor = CreateProcessor(options, runner);
+
+        try
+        {
+            var processed = await processor.ProcessPendingAsync();
+
+            Assert.Equal(1, processed);
+            var captured = Assert.Single(runner.Requests);
+            Assert.Equal("anthropic", captured.Provider);
+            Assert.Equal("claude-opus-4-6", captured.Model);
+            Assert.Equal("follow up from mom", captured.Prompt);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
     }
 
     private sealed class FakeDelegationAgentRunner : IDelegationAgentRunner

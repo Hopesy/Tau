@@ -217,6 +217,61 @@ public sealed class WebUiEndpointTests
             "Use application/x-ndjson");
     }
 
+    [Fact]
+    public async Task CodingAgentJsonlPreviewEndpoint_ReturnsHeaderAndMessageTimelineWithoutPersisting()
+    {
+        await using var fixture = await WebUiEndpointFixture.StartAsync(StreamOk);
+
+        var response = await fixture.Client.PostAsync(
+            "/api/sessions/import.coding-agent-jsonl/preview",
+            new StringContent(ValidCodingAgentJsonl(), Encoding.UTF8, "application/x-ndjson"));
+
+        response.EnsureSuccessStatusCode();
+        var preview = JsonSerializer.Deserialize(
+            await response.Content.ReadAsStringAsync(),
+            WebUiEndpointJsonContext.Default.CodingAgentJsonlSessionPreviewDto);
+        Assert.NotNull(preview);
+        Assert.Equal("coding-session-1", preview!.SessionId);
+        Assert.Equal(3, preview.Version);
+        Assert.Equal("C:\\Users\\zhouh\\Desktop\\Tau", preview.Cwd);
+        Assert.Equal("parent-session.jsonl", preview.ParentSession);
+        Assert.Equal(4, preview.EntryCount);
+        Assert.Equal(3, preview.MessageCount);
+        Assert.Equal("user", preview.Messages[0].Role);
+        Assert.Equal("hello coding agent", preview.Messages[0].TextPreview);
+        Assert.Equal("entry-model", preview.Messages[1].ParentEntryId);
+        Assert.True(preview.Messages[1].HasThinking);
+        Assert.Equal(1, preview.Messages[1].ToolCallCount);
+        Assert.Equal("tool-1", preview.Messages[2].ToolCallId);
+        Assert.True(preview.Messages[2].IsError);
+
+        var sessionsResponse = await fixture.Client.GetAsync("/api/sessions");
+        sessionsResponse.EnsureSuccessStatusCode();
+        var sessions = JsonSerializer.Deserialize(
+            await sessionsResponse.Content.ReadAsStringAsync(),
+            WebUiEndpointJsonContext.Default.WebChatSessionDtoArray);
+        Assert.Empty(sessions ?? []);
+    }
+
+    [Fact]
+    public async Task CodingAgentJsonlPreviewEndpoint_ReturnsProblemDetailsForMalformedJsonl()
+    {
+        await using var fixture = await WebUiEndpointFixture.StartAsync(StreamOk);
+        var jsonl = ValidCodingAgentHeader() + "{not-json}\n";
+
+        var response = await fixture.Client.PostAsync(
+            "/api/sessions/import.coding-agent-jsonl/preview",
+            new StringContent(jsonl, Encoding.UTF8, "application/x-ndjson"));
+
+        await AssertJsonlProblemAsync(
+            response,
+            HttpStatusCode.BadRequest,
+            "invalid_json",
+            2,
+            "line 2 is not valid JSON",
+            "Invalid CodingAgent JSONL preview");
+    }
+
     private static StringContent JsonBody<T>(T value, JsonTypeInfo<T> jsonTypeInfo) =>
         new(JsonSerializer.Serialize(value, jsonTypeInfo), Encoding.UTF8, "application/json");
 
@@ -225,12 +280,13 @@ public sealed class WebUiEndpointTests
         HttpStatusCode expectedStatus,
         string expectedCode,
         int? expectedLineNumber,
-        string expectedDetail)
+        string expectedDetail,
+        string expectedTitle = "Invalid WebUi JSONL import")
     {
         Assert.Equal(expectedStatus, response.StatusCode);
         Assert.Equal("application/problem+json", response.Content.Headers.ContentType?.MediaType);
         using var problem = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
-        Assert.Equal("Invalid WebUi JSONL import", problem.RootElement.GetProperty("title").GetString());
+        Assert.Equal(expectedTitle, problem.RootElement.GetProperty("title").GetString());
         Assert.Equal((int)expectedStatus, problem.RootElement.GetProperty("status").GetInt32());
         Assert.Equal(expectedCode, problem.RootElement.GetProperty("code").GetString());
         Assert.Contains(expectedDetail, problem.RootElement.GetProperty("detail").GetString(), StringComparison.Ordinal);
@@ -253,6 +309,16 @@ public sealed class WebUiEndpointTests
         yield return new MessageUpdateEvent(new TextDeltaEvent(0, "stream ok", partial));
         yield return new AgentEndEvent();
     }
+
+    private static string ValidCodingAgentJsonl() =>
+        ValidCodingAgentHeader() +
+        "{\"type\":\"message\",\"id\":\"entry-user\",\"parentId\":null,\"timestamp\":\"2026-05-23T02:01:00+00:00\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"hello coding agent\"}]}}\n" +
+        "{\"type\":\"model_change\",\"id\":\"entry-model\",\"parentId\":\"entry-user\",\"timestamp\":\"2026-05-23T02:01:30+00:00\",\"provider\":\"openai\",\"model\":\"gpt-5.4\"}\n" +
+        "{\"type\":\"message\",\"id\":\"entry-assistant\",\"parentId\":\"entry-model\",\"timestamp\":\"2026-05-23T02:02:00+00:00\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"plan\"},{\"type\":\"toolCall\",\"id\":\"tool-1\",\"name\":\"read\",\"arguments\":\"{}\"},{\"type\":\"text\",\"text\":\"done\"}]}}\n" +
+        "{\"type\":\"message\",\"id\":\"entry-tool\",\"parentId\":\"entry-assistant\",\"timestamp\":\"2026-05-23T02:03:00+00:00\",\"message\":{\"role\":\"toolResult\",\"toolCallId\":\"tool-1\",\"isError\":true,\"content\":[{\"type\":\"text\",\"text\":\"not found\"}]}}\n";
+
+    private static string ValidCodingAgentHeader() =>
+        "{\"type\":\"session\",\"version\":3,\"id\":\"coding-session-1\",\"timestamp\":\"2026-05-23T02:00:00+00:00\",\"cwd\":\"C:\\\\Users\\\\zhouh\\\\Desktop\\\\Tau\",\"parentSession\":\"parent-session.jsonl\"}\n";
 
     private sealed class WebUiEndpointFixture : IAsyncDisposable
     {
@@ -308,5 +374,7 @@ public sealed class WebUiEndpointTests
 [JsonSerializable(typeof(CreateSessionRequest))]
 [JsonSerializable(typeof(SendMessageRequest))]
 [JsonSerializable(typeof(WebChatSessionDto))]
+[JsonSerializable(typeof(WebChatSessionDto[]))]
+[JsonSerializable(typeof(CodingAgentJsonlSessionPreviewDto))]
 [JsonSourceGenerationOptions(JsonSerializerDefaults.Web)]
 internal sealed partial class WebUiEndpointJsonContext : JsonSerializerContext;

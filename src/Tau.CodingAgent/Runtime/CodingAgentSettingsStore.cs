@@ -16,7 +16,8 @@ public sealed record CodingAgentSettingsSnapshot(
     string? SteeringMode = null,
     string? FollowUpMode = null,
     bool? AutoCompactionEnabled = null,
-    string? Theme = null);
+    string? Theme = null,
+    IReadOnlyList<string>? TreeCollapsedEntryIds = null);
 
 public sealed class CodingAgentSettingsStore
 {
@@ -63,7 +64,8 @@ public sealed class CodingAgentSettingsStore
                     ?? CodingAgentQueueModes.NormalizeOrNull(document?.QueueMode),
                 CodingAgentQueueModes.NormalizeOrNull(document?.FollowUpMode),
                 document?.AutoCompactionEnabled,
-                NormalizeTheme(document?.Theme));
+                NormalizeTheme(document?.Theme),
+                NormalizeStringList(document?.TreeCollapsedEntryIds));
         }
         catch (JsonException)
         {
@@ -100,6 +102,7 @@ public sealed class CodingAgentSettingsStore
             FollowUpMode = CodingAgentQueueModes.NormalizeOrNull(snapshot.FollowUpMode),
             AutoCompactionEnabled = snapshot.AutoCompactionEnabled,
             Theme = NormalizeTheme(snapshot.Theme),
+            TreeCollapsedEntryIds = NormalizeStringList(snapshot.TreeCollapsedEntryIds),
             UpdatedAt = DateTimeOffset.UtcNow
         };
 
@@ -128,14 +131,19 @@ public sealed class CodingAgentSettingsStore
 
     private static string[]? NormalizeEnabledModels(IEnumerable<string>? enabledModels)
     {
-        if (enabledModels is null)
+        return NormalizeStringList(enabledModels);
+    }
+
+    private static string[]? NormalizeStringList(IEnumerable<string>? values)
+    {
+        if (values is null)
         {
             return null;
         }
 
-        var normalized = enabledModels
-            .Select(static model => model.Trim())
-            .Where(static model => !string.IsNullOrWhiteSpace(model))
+        var normalized = values
+            .Select(static value => value.Trim())
+            .Where(static value => !string.IsNullOrWhiteSpace(value))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
         return normalized.Length == 0 ? null : normalized;
@@ -159,6 +167,7 @@ internal sealed class CodingAgentSettingsDocument
     public string? QueueMode { get; init; }
     public bool? AutoCompactionEnabled { get; init; }
     public string? Theme { get; init; }
+    public string[]? TreeCollapsedEntryIds { get; init; }
     public DateTimeOffset UpdatedAt { get; init; }
 }
 

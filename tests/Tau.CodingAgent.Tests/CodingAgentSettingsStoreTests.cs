@@ -6,7 +6,7 @@ namespace Tau.CodingAgent.Tests;
 public class CodingAgentSettingsStoreTests
 {
     [Fact]
-    public void SaveAndLoad_RoundTripsDefaultModelTreeFilterModeRetryPolicyThinkingEnabledModelsQueueAndAutoCompaction()
+    public void SaveAndLoad_RoundTripsDefaultModelTreeFilterModeRetryPolicyThinkingEnabledModelsQueueAutoCompactionAndTreeFolds()
     {
         var path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"tau-coding-agent-settings-{Guid.NewGuid():N}.json");
         var store = new CodingAgentSettingsStore(path);
@@ -31,7 +31,8 @@ public class CodingAgentSettingsStoreTests
                 "all",
                 "one-at-a-time",
                 false,
-                "reload-theme"));
+                "reload-theme",
+                [" entry-a ", "entry-b", "ENTRY-A"]));
 
             var seeded = store.Load();
             Assert.Equal("openai", seeded.DefaultProvider);
@@ -45,6 +46,7 @@ public class CodingAgentSettingsStoreTests
             Assert.Equal("one-at-a-time", seeded.FollowUpMode);
             Assert.False(seeded.AutoCompactionEnabled);
             Assert.Equal("reload-theme", seeded.Theme);
+            Assert.Equal(["entry-a", "entry-b"], seeded.TreeCollapsedEntryIds);
 
             store.SaveDefaultModel(model);
 
@@ -61,6 +63,7 @@ public class CodingAgentSettingsStoreTests
             Assert.Equal("one-at-a-time", loaded.FollowUpMode);
             Assert.False(loaded.AutoCompactionEnabled);
             Assert.Equal("reload-theme", loaded.Theme);
+            Assert.Equal(["entry-a", "entry-b"], loaded.TreeCollapsedEntryIds);
         }
         finally
         {
@@ -93,6 +96,7 @@ public class CodingAgentSettingsStoreTests
             Assert.Null(loaded.FollowUpMode);
             Assert.Null(loaded.AutoCompactionEnabled);
             Assert.Null(loaded.Theme);
+            Assert.Null(loaded.TreeCollapsedEntryIds);
         }
         finally
         {

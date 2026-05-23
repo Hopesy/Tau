@@ -397,6 +397,98 @@ public class RuntimeDelegationAgentRunnerTests
         }
     }
 
+    [Fact]
+    public async Task ExecuteAsync_WithConsecutiveMessagesInSameWorkdir_CarriesSessionModelAndWritesBack()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"tau-mom-session-sync-{Guid.NewGuid():N}");
+        var workingDirectory = Path.Combine(root, "channel-a");
+        var contextPath = Path.Combine(workingDirectory, ChannelSessionStore.ContextFileName);
+        var factoryCalls = new List<(string Provider, string Model)>();
+        var createdRunners = new List<ScriptedRunner>();
+        var replies = new Queue<string>(["first answer", "second answer"]);
+        var delegationRunner = new RuntimeDelegationAgentRunner(
+            new MomOptions
+            {
+                DefaultProvider = "openai",
+                DefaultModel = "gpt-5.4"
+            },
+            (provider, model) =>
+            {
+                factoryCalls.Add((provider, model));
+                var reply = replies.Dequeue();
+                var runner = new ScriptedRunner(new Model
+                {
+                    Provider = provider,
+                    Id = model,
+                    Name = model,
+                    Api = "test"
+                })
+                {
+                    Events =
+                    [
+                        new MessageUpdateEvent(new TextDeltaEvent(0, reply, new AssistantMessage())),
+                        new MessageEndEvent(new AssistantMessage([new TextContent(reply)])
+                        {
+                            StopReason = StopReason.EndTurn
+                        }),
+                        new AgentEndEvent()
+                    ]
+                };
+                createdRunners.Add(runner);
+                return runner;
+            });
+
+        try
+        {
+            var first = await delegationRunner.ExecuteAsync(new DelegationRequest(
+                "first channel message",
+                Provider: "google",
+                Model: "gemini-2.5-pro",
+                WorkingDirectory: workingDirectory,
+                Title: "ops session"));
+            var second = await delegationRunner.ExecuteAsync(new DelegationRequest(
+                "second channel message",
+                WorkingDirectory: workingDirectory));
+
+            Assert.Equal("google-gemini-cli", first.Provider);
+            Assert.Equal("gemini-2.5-pro", first.Model);
+            Assert.Equal("google-gemini-cli", second.Provider);
+            Assert.Equal("gemini-2.5-pro", second.Model);
+            Assert.Equal(
+                new[]
+                {
+                    ("google-gemini-cli", "gemini-2.5-pro"),
+                    ("google-gemini-cli", "gemini-2.5-pro")
+                },
+                factoryCalls);
+
+            var firstRunner = createdRunners[0];
+            var secondRunner = createdRunners[1];
+            Assert.Null(firstRunner.RestoredSnapshot);
+            Assert.NotNull(secondRunner.RestoredSnapshot);
+            Assert.Equal(2, secondRunner.RestoredSnapshot!.Messages.Count);
+            Assert.Equal("ops session", secondRunner.RestoredSnapshot.Name);
+            Assert.Equal("ops session", secondRunner.SessionName);
+
+            var saved = new CodingAgentSessionStore(contextPath).Load();
+            Assert.Equal("google-gemini-cli", saved.Provider);
+            Assert.Equal("gemini-2.5-pro", saved.Model);
+            Assert.Equal("ops session", saved.Name);
+            Assert.Equal(4, saved.Messages.Count);
+            Assert.IsType<UserMessage>(saved.Messages[0]);
+            Assert.IsType<AssistantMessage>(saved.Messages[1]);
+            Assert.IsType<UserMessage>(saved.Messages[2]);
+            Assert.IsType<AssistantMessage>(saved.Messages[3]);
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
+    }
+
     private sealed class ScriptedRunner : ICodingAgentRunner
     {
         public ScriptedRunner(Model model)

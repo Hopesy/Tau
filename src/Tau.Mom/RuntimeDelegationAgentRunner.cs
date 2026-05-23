@@ -13,6 +13,7 @@ public sealed class RuntimeDelegationAgentRunner : IDelegationAgentRunner
     private readonly Func<string, string, string, Action<string, string?>, ICodingAgentRunner> _runnerFactory;
     private readonly MomOptions _options;
     private readonly ITauLogSink _logSink;
+    private readonly MomModelSelectionResolver _selectionResolver;
 
     public RuntimeDelegationAgentRunner()
         : this(new MomOptions())
@@ -54,6 +55,7 @@ public sealed class RuntimeDelegationAgentRunner : IDelegationAgentRunner
         _options = options;
         _runnerFactory = runnerFactory;
         _logSink = logSink ?? NullTauLogSink.Instance;
+        _selectionResolver = new MomModelSelectionResolver(options);
     }
 
     public async Task<DelegationExecution> ExecuteAsync(DelegationRequest request, CancellationToken cancellationToken = default)
@@ -67,13 +69,12 @@ public sealed class RuntimeDelegationAgentRunner : IDelegationAgentRunner
         var aggregatedUsage = new MutableUsage();
         var attachedFiles = new List<string>();
 
-        var provider = string.IsNullOrWhiteSpace(request.Provider) ? "openai" : request.Provider.Trim();
-        var model = string.IsNullOrWhiteSpace(request.Model)
-            ? RuntimeCodingAgentRunner.GetDefaultModelId(provider)
-            : request.Model.Trim();
         var workingDirectory = string.IsNullOrWhiteSpace(request.WorkingDirectory)
             ? Directory.GetCurrentDirectory()
             : Path.GetFullPath(request.WorkingDirectory);
+        var selection = _selectionResolver.Resolve(request.Provider, request.Model, workingDirectory);
+        var provider = selection.Provider;
+        var model = selection.ModelId;
 
         _logSink.Log(new TauLogEvent(
             "mom",

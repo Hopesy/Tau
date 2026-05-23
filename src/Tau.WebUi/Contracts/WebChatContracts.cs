@@ -68,6 +68,31 @@ public sealed record WebChatSessionDto(
     bool Persisted,
     IReadOnlyList<WebChatMessageDto> Messages);
 
+public sealed record CodingAgentJsonlSessionPreviewDto(
+    string SessionId,
+    int Version,
+    DateTimeOffset Timestamp,
+    string Cwd,
+    string? ParentSession,
+    string? FilePath,
+    int EntryCount,
+    int MessageCount,
+    IReadOnlyList<CodingAgentJsonlTimelineMessageDto> Messages);
+
+public sealed record CodingAgentJsonlTimelineMessageDto(
+    string EntryId,
+    string? ParentEntryId,
+    DateTimeOffset Timestamp,
+    string Role,
+    string TextPreview,
+    int TextLength,
+    int ContentPartCount,
+    bool HasThinking,
+    int ToolCallCount,
+    int ImageCount,
+    string? ToolCallId = null,
+    bool? IsError = null);
+
 public sealed record WebUiModelOptionDto(
     string Id,
     string Name,

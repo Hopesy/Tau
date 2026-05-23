@@ -8,9 +8,10 @@ public sealed class JsonlTauLogSink : ITauLogSink, IDisposable
 {
     private readonly object _gate = new();
     private readonly StreamWriter _writer;
+    private readonly TauSecretRedactor _redactor;
     private bool _disposed;
 
-    public JsonlTauLogSink(string path)
+    public JsonlTauLogSink(string path, TauSecretRedactor? redactor = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
         var directory = System.IO.Path.GetDirectoryName(path);
@@ -21,6 +22,7 @@ public sealed class JsonlTauLogSink : ITauLogSink, IDisposable
 
         var stream = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.Read);
         _writer = new StreamWriter(stream) { AutoFlush = true };
+        _redactor = redactor ?? TauSecretRedactor.ForEnvironmentVariable(TauSecretRedactor.TauLogEnvironmentVariable);
         Path = path;
     }
 
@@ -33,7 +35,7 @@ public sealed class JsonlTauLogSink : ITauLogSink, IDisposable
             return;
         }
 
-        var line = SerializeEvent(evt);
+        var line = SerializeEvent(evt, _redactor);
 
         lock (_gate)
         {
@@ -74,13 +76,14 @@ public sealed class JsonlTauLogSink : ITauLogSink, IDisposable
         return new JsonlTauLogSink(defaultPath);
     }
 
-    internal static string SerializeEvent(TauLogEvent evt)
+    internal static string SerializeEvent(TauLogEvent evt, TauSecretRedactor? redactor = null)
     {
+        redactor ??= TauSecretRedactor.ForEnvironmentVariable(TauSecretRedactor.TauLogEnvironmentVariable);
         var builder = new StringBuilder();
         builder.Append('{');
-        builder.Append("\"ts\":\"").Append(EscapeString(evt.Timestamp.ToString("O"))).Append("\",");
-        builder.Append("\"category\":\"").Append(EscapeString(evt.Category)).Append("\",");
-        builder.Append("\"event\":\"").Append(EscapeString(evt.Event)).Append("\",");
+        builder.Append("\"ts\":\"").Append(EscapeString(Redact(redactor, evt.Timestamp.ToString("O")))).Append("\",");
+        builder.Append("\"category\":\"").Append(EscapeString(Redact(redactor, evt.Category))).Append("\",");
+        builder.Append("\"event\":\"").Append(EscapeString(Redact(redactor, evt.Event))).Append("\",");
         builder.Append("\"fields\":{");
 
         var first = true;
@@ -95,13 +98,15 @@ public sealed class JsonlTauLogSink : ITauLogSink, IDisposable
             }
             else
             {
-                builder.Append('"').Append(EscapeString(pair.Value)).Append('"');
+                builder.Append('"').Append(EscapeString(Redact(redactor, pair.Value))).Append('"');
             }
         }
 
         builder.Append("}}");
         return builder.ToString();
     }
+
+    private static string Redact(TauSecretRedactor redactor, string? value) => redactor.Redact(value);
 
     private static string EscapeString(string value)
     {

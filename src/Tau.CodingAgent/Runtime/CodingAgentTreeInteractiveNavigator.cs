@@ -23,6 +23,8 @@ public sealed class CodingAgentTreeInteractiveNavigator
         IConsoleKeyReader reader,
         TextWriter writer,
         Action? clearScreen = null,
+        IEnumerable<string>? initialFoldedEntryIds = null,
+        Action<IReadOnlySet<string>>? foldedEntryIdsChanged = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(items);
@@ -39,8 +41,12 @@ public sealed class CodingAgentTreeInteractiveNavigator
         var frames = 0;
         string? searchPattern = null;
         var filterIndex = 0;
-        var foldedEntryIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var foldedEntryIds = new HashSet<string>(
+            initialFoldedEntryIds?.Where(static id => !string.IsNullOrWhiteSpace(id)).Select(static id => id.Trim()) ?? [],
+            StringComparer.OrdinalIgnoreCase);
         var showInspector = false;
+        visibleItems = ApplyFilter(items, FilterCycle[filterIndex], searchPattern, foldedEntryIds);
+        selected = FindIndexById(visibleItems, items[^1].EntryId);
 
         Render(items, visibleItems, selected, writer, clearScreen, searchPattern, FilterCycle[filterIndex], foldedEntryIds, showInspector);
         frames++;
@@ -77,6 +83,7 @@ public sealed class CodingAgentTreeInteractiveNavigator
                         if (currentEntryId is not null && IsSegmentFoldable(currentEntryId, navigation) && !foldedEntryIds.Contains(currentEntryId))
                         {
                             foldedEntryIds.Add(currentEntryId);
+                            NotifyFoldedEntryIdsChanged(foldedEntryIds, foldedEntryIdsChanged);
                             visibleItems = ApplyFilter(items, FilterCycle[filterIndex], searchPattern, foldedEntryIds);
                             selected = FindIndexById(visibleItems, currentEntryId);
                         }
@@ -97,6 +104,7 @@ public sealed class CodingAgentTreeInteractiveNavigator
                         var navigation = BuildVisibleNavigation(items, visibleItems);
                         if (currentEntryId is not null && foldedEntryIds.Remove(currentEntryId))
                         {
+                            NotifyFoldedEntryIdsChanged(foldedEntryIds, foldedEntryIdsChanged);
                             visibleItems = ApplyFilter(items, FilterCycle[filterIndex], searchPattern, foldedEntryIds);
                             selected = FindIndexById(visibleItems, currentEntryId);
                         }
@@ -129,7 +137,7 @@ public sealed class CodingAgentTreeInteractiveNavigator
                     {
                         var currentId = visibleItems.Count > 0 ? visibleItems[selected].EntryId : null;
                         searchPattern = null;
-                        foldedEntryIds.Clear();
+                        ClearFoldedEntryIds(foldedEntryIds, foldedEntryIdsChanged);
                         visibleItems = ApplyFilter(items, FilterCycle[filterIndex], null, foldedEntryIds);
                         selected = FindIndexById(visibleItems, currentId);
                     }
@@ -144,7 +152,7 @@ public sealed class CodingAgentTreeInteractiveNavigator
                     {
                         var currentEntryId = visibleItems.Count > 0 ? visibleItems[selected].EntryId : null;
                         filterIndex = (filterIndex + 1) % FilterCycle.Length;
-                        foldedEntryIds.Clear();
+                        ClearFoldedEntryIds(foldedEntryIds, foldedEntryIdsChanged);
                         visibleItems = ApplyFilter(items, FilterCycle[filterIndex], searchPattern, foldedEntryIds);
                         selected = FindIndexById(visibleItems, currentEntryId);
                     }
@@ -158,7 +166,7 @@ public sealed class CodingAgentTreeInteractiveNavigator
                     searchPattern = await ReadSearchPatternAsync(reader, writer, cancellationToken).ConfigureAwait(false);
                     if (searchPattern is not null)
                     {
-                        foldedEntryIds.Clear();
+                        ClearFoldedEntryIds(foldedEntryIds, foldedEntryIdsChanged);
                         visibleItems = ApplyFilter(items, FilterCycle[filterIndex], searchPattern, foldedEntryIds);
                         selected = visibleItems.Count > 0 ? visibleItems.Count - 1 : 0;
                     }
@@ -167,7 +175,10 @@ public sealed class CodingAgentTreeInteractiveNavigator
                     if (visibleItems.Count > 0)
                     {
                         var currentEntryId = visibleItems[selected].EntryId;
-                        ToggleFold(items, currentEntryId, foldedEntryIds);
+                        if (ToggleFold(items, currentEntryId, foldedEntryIds))
+                        {
+                            NotifyFoldedEntryIdsChanged(foldedEntryIds, foldedEntryIdsChanged);
+                        }
                         visibleItems = ApplyFilter(items, FilterCycle[filterIndex], searchPattern, foldedEntryIds);
                         selected = FindIndexById(visibleItems, currentEntryId);
                     }
@@ -419,20 +430,42 @@ public sealed class CodingAgentTreeInteractiveNavigator
     private static IReadOnlyList<string> GetVisibleChildren(VisibleNavigation navigation, string? parentId) =>
         navigation.VisibleChildrenById.TryGetValue(parentId ?? string.Empty, out var children) ? children : [];
 
-    private static void ToggleFold(
+    private static bool ToggleFold(
         IReadOnlyList<CodingAgentTreeViewItem> items,
         string entryId,
         ISet<string> foldedEntryIds)
     {
         if (!HasDescendants(items, entryId))
         {
-            return;
+            return false;
         }
 
         if (!foldedEntryIds.Remove(entryId))
         {
             foldedEntryIds.Add(entryId);
         }
+
+        return true;
+    }
+
+    private static void ClearFoldedEntryIds(
+        ISet<string> foldedEntryIds,
+        Action<IReadOnlySet<string>>? foldedEntryIdsChanged)
+    {
+        if (foldedEntryIds.Count == 0)
+        {
+            return;
+        }
+
+        foldedEntryIds.Clear();
+        NotifyFoldedEntryIdsChanged(foldedEntryIds, foldedEntryIdsChanged);
+    }
+
+    private static void NotifyFoldedEntryIdsChanged(
+        IEnumerable<string> foldedEntryIds,
+        Action<IReadOnlySet<string>>? foldedEntryIdsChanged)
+    {
+        foldedEntryIdsChanged?.Invoke(new HashSet<string>(foldedEntryIds, StringComparer.OrdinalIgnoreCase));
     }
 
     private static bool HasDescendants(IReadOnlyList<CodingAgentTreeViewItem> items, string entryId) =>

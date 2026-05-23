@@ -1,7 +1,5 @@
 using System.Globalization;
 using System.Text.Json;
-using Tau.Ai.Registry;
-using Tau.CodingAgent.Runtime;
 
 namespace Tau.Mom;
 
@@ -11,7 +9,7 @@ public sealed class FileDelegationProcessor
     private readonly IDelegationAgentRunner _runner;
     private readonly ChannelStatusStore _statusStore;
     private readonly ILogger<FileDelegationProcessor> _logger;
-    private readonly ModelCatalog _catalog = new();
+    private readonly MomModelSelectionResolver _selectionResolver;
 
     public FileDelegationProcessor(
         MomOptions options,
@@ -23,6 +21,7 @@ public sealed class FileDelegationProcessor
         _runner = runner;
         _statusStore = statusStore;
         _logger = logger;
+        _selectionResolver = new MomModelSelectionResolver(options);
     }
 
     public async Task<int> ProcessPendingAsync(CancellationToken cancellationToken = default)
@@ -133,8 +132,8 @@ public sealed class FileDelegationProcessor
                 throw new InvalidOperationException($"Delegation request '{file}' is invalid.");
             }
 
-            var resolvedSelection = ResolveSelection(request.Provider, request.Model);
             var workingDirectory = ResolveWorkingDirectory(request.WorkingDirectory);
+            var resolvedSelection = _selectionResolver.Resolve(request.Provider, request.Model, workingDirectory);
             var channelMessage = MomChannelMessage.FromDelegationRequest(
                 request with
                 {
@@ -163,8 +162,8 @@ public sealed class FileDelegationProcessor
             throw new InvalidOperationException($"Delegation request '{file}' is empty.");
         }
 
-        var defaultSelection = ResolveSelection(null, null);
         var defaultWorkingDirectory = ResolveWorkingDirectory(null);
+        var defaultSelection = _selectionResolver.Resolve(null, null, defaultWorkingDirectory);
         return new MomChannelMessage(
                 "local",
                 prompt,
@@ -174,36 +173,6 @@ public sealed class FileDelegationProcessor
                 Model: defaultSelection.ModelId,
                 Title: Path.GetFileNameWithoutExtension(file))
             .ToDelegationRequest(defaultWorkingDirectory);
-    }
-
-    private ResolvedModelSelection ResolveSelection(string? provider, string? model)
-    {
-        var defaultProvider = string.IsNullOrWhiteSpace(_options.DefaultProvider)
-            ? RuntimeCodingAgentRunner.GetDefaultProviderId()
-            : _options.DefaultProvider.Trim();
-        var defaultModel = string.IsNullOrWhiteSpace(_options.DefaultModel)
-            ? null
-            : _options.DefaultModel.Trim();
-
-        if (string.IsNullOrWhiteSpace(provider) && !string.IsNullOrWhiteSpace(defaultModel))
-        {
-            return _catalog.ResolveSelection(defaultProvider, defaultModel, defaultProvider);
-        }
-
-        if (string.IsNullOrWhiteSpace(provider) && string.IsNullOrWhiteSpace(model))
-        {
-            return _catalog.ResolveSelection(defaultProvider, null, defaultProvider);
-        }
-
-        if (!string.IsNullOrWhiteSpace(provider) && provider.Trim().Equals("google", StringComparison.OrdinalIgnoreCase))
-        {
-            var normalizedModel = string.IsNullOrWhiteSpace(model)
-                ? ModelCatalog.GetDefaultModelId("google-gemini-cli")
-                : model.Trim();
-            return _catalog.ResolveSelection("google-gemini-cli", normalizedModel, defaultProvider);
-        }
-
-        return _catalog.ResolveSelection(provider, model, defaultProvider);
     }
 
     private string ResolveWorkingDirectory(string? workingDirectory)

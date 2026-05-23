@@ -11,6 +11,7 @@ public static class WebUiApplication
 {
     private const string JsonlContentType = "application/x-ndjson; charset=utf-8";
     private const string JsonlImportProblemTitle = "Invalid WebUi JSONL import";
+    private const string CodingAgentJsonlPreviewProblemTitle = "Invalid CodingAgent JSONL preview";
     private static readonly char[] PortableInvalidFileNameChars = ['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
 
     public static IEndpointRouteBuilder MapWebUiEndpoints(this IEndpointRouteBuilder app)
@@ -131,6 +132,7 @@ public static class WebUiApplication
             if (!IsSupportedJsonlImportContentType(request.ContentType))
             {
                 return JsonlProblem(
+                    JsonlImportProblemTitle,
                     "unsupported_content_type",
                     $"Unsupported JSONL import content type '{request.ContentType}'. Use application/x-ndjson.",
                     StatusCodes.Status415UnsupportedMediaType);
@@ -145,11 +147,38 @@ public static class WebUiApplication
             }
             catch (WebChatJsonlImportException ex)
             {
-                return JsonlProblem(ex.Code, ex.Message, StatusCodes.Status400BadRequest, ex.LineNumber);
+                return JsonlProblem(JsonlImportProblemTitle, ex.Code, ex.Message, StatusCodes.Status400BadRequest, ex.LineNumber);
             }
             catch (Exception ex)
             {
                 return Results.BadRequest(ex.Message);
+            }
+        });
+        app.MapPost("/api/sessions/import.coding-agent-jsonl/preview", async Task<IResult> (HttpRequest request, WebChatService chat, CancellationToken cancellationToken) =>
+        {
+            if (!IsSupportedJsonlImportContentType(request.ContentType))
+            {
+                return JsonlProblem(
+                    CodingAgentJsonlPreviewProblemTitle,
+                    "unsupported_content_type",
+                    $"Unsupported CodingAgent JSONL preview content type '{request.ContentType}'. Use application/x-ndjson.",
+                    StatusCodes.Status415UnsupportedMediaType);
+            }
+
+            try
+            {
+                using var reader = new StreamReader(request.Body, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+                var jsonl = await reader.ReadToEndAsync(cancellationToken).ConfigureAwait(false);
+                return Results.Ok(chat.PreviewCodingAgentJsonlSession(jsonl));
+            }
+            catch (CodingAgentJsonlPreviewException ex)
+            {
+                return JsonlProblem(
+                    CodingAgentJsonlPreviewProblemTitle,
+                    ex.Code,
+                    ex.Message,
+                    StatusCodes.Status400BadRequest,
+                    ex.LineNumber);
             }
         });
         app.MapDelete("/api/sessions/{id}", (string id, WebChatService chat) =>
@@ -223,7 +252,7 @@ public static class WebUiApplication
     private static bool HasMessageInput(SendMessageRequest request) =>
         !string.IsNullOrWhiteSpace(request.Text) || request.Attachments is { Count: > 0 };
 
-    private static IResult JsonlProblem(string code, string detail, int statusCode, int? lineNumber = null)
+    private static IResult JsonlProblem(string title, string code, string detail, int statusCode, int? lineNumber = null)
     {
         var extensions = new Dictionary<string, object?>
         {
@@ -237,7 +266,7 @@ public static class WebUiApplication
         return Results.Problem(
             detail: detail,
             statusCode: statusCode,
-            title: JsonlImportProblemTitle,
+            title: title,
             extensions: extensions);
     }
 

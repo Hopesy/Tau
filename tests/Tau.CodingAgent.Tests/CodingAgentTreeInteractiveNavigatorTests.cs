@@ -285,6 +285,51 @@ public class CodingAgentTreeInteractiveNavigatorTests
     }
 
     [Fact]
+    public async Task NavigateAsync_InitialFoldedEntryIdsHideDescendants()
+    {
+        var items = MakeNestedItems();
+        var reader = new FakeKeyReader();
+        reader.EnqueueKey(ConsoleKey.Enter);
+
+        var writer = new StringWriter();
+        var navigator = new CodingAgentTreeInteractiveNavigator();
+        var result = await navigator.NavigateAsync(
+            items,
+            reader,
+            writer,
+            initialFoldedEntryIds: ["root"]);
+
+        Assert.Equal("root", result.SelectedEntryId);
+        var rendered = writer.ToString();
+        Assert.Contains("folded 1", rendered, StringComparison.Ordinal);
+        Assert.Contains("root <- _ session name none [folded]", rendered, StringComparison.Ordinal);
+        Assert.DoesNotContain("grandchild", rendered, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task NavigateAsync_FoldChangesInvokeCallback()
+    {
+        var items = MakeNestedItems();
+        var reader = new FakeKeyReader();
+        var changes = new List<IReadOnlySet<string>>();
+        reader.EnqueueRaw(new ConsoleKeyInfo('g', ConsoleKey.G, shift: false, alt: false, control: false));
+        reader.EnqueueRaw(new ConsoleKeyInfo(' ', ConsoleKey.Spacebar, shift: false, alt: false, control: false));
+        reader.EnqueueRaw(new ConsoleKeyInfo(' ', ConsoleKey.Spacebar, shift: false, alt: false, control: false));
+        reader.EnqueueKey(ConsoleKey.Enter);
+
+        var navigator = new CodingAgentTreeInteractiveNavigator();
+        await navigator.NavigateAsync(
+            items,
+            reader,
+            new StringWriter(),
+            foldedEntryIdsChanged: folded => changes.Add(folded));
+
+        Assert.Equal(2, changes.Count);
+        Assert.Contains("root", changes[0]);
+        Assert.Empty(changes[1]);
+    }
+
+    [Fact]
     public async Task NavigateAsync_SpaceExpandsFoldedEntry()
     {
         var items = MakeNestedItems();

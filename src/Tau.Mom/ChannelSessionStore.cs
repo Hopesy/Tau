@@ -17,6 +17,16 @@ public sealed class ChannelSessionStore
 
     public string Path => _path;
 
+    public ChannelSessionMetadata LoadMetadata()
+    {
+        var snapshot = new CodingAgentSessionStore(_path).Load();
+        return new ChannelSessionMetadata(
+            NormalizeOptional(snapshot.Provider),
+            NormalizeOptional(snapshot.Model),
+            NormalizeOptional(snapshot.Name),
+            snapshot.Messages.Count);
+    }
+
     public CodingAgentSessionSnapshot Load(string provider, string model, string? sessionName)
     {
         var store = new CodingAgentSessionStore(_path);
@@ -37,4 +47,20 @@ public sealed class ChannelSessionStore
             _logger?.LogWarning(ex, "Failed to save mom channel context {Path}.", _path);
         }
     }
+
+    private static string? NormalizeOptional(string? value)
+    {
+        return string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+    }
+}
+
+public readonly record struct ChannelSessionMetadata(
+    string? Provider,
+    string? Model,
+    string? SessionName,
+    int MessageCount)
+{
+    public bool HasModelSelection =>
+        !string.IsNullOrWhiteSpace(Provider) ||
+        !string.IsNullOrWhiteSpace(Model);
 }

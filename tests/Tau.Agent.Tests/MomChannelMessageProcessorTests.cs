@@ -1,5 +1,7 @@
 using System.Globalization;
 using Microsoft.Extensions.Logging;
+using Tau.Ai;
+using Tau.CodingAgent.Runtime;
 using Tau.Mom;
 
 namespace Tau.Agent.Tests;
@@ -173,6 +175,65 @@ public sealed class MomChannelMessageProcessorTests
         }
     }
 
+    [Fact]
+    public async Task ProcessAsync_WithConsecutiveChannelMessages_CarriesSessionModelAndWritesBack()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"tau-mom-channel-session-{Guid.NewGuid():N}");
+        var runner = new PersistingSessionDelegationAgentRunner();
+        var responder = new RecordingResponder();
+        var processor = CreateProcessor(CreateOptions(root), runner);
+        var workingDirectory = Path.Combine(root, "CSESSION");
+        var contextPath = Path.Combine(workingDirectory, ChannelSessionStore.ContextFileName);
+
+        try
+        {
+            var firstProcessed = await processor.ProcessAsync(
+                new MomChannelMessage(
+                    "CSESSION",
+                    "first incident update",
+                    "1778351400.123456",
+                    "U123",
+                    Provider: "google",
+                    Model: "gemini-2.5-pro",
+                    Title: "incident room"),
+                responder);
+            var secondProcessed = await processor.ProcessAsync(
+                new MomChannelMessage(
+                    "CSESSION",
+                    "second incident update",
+                    "1778351460.123456",
+                    "U456"),
+                responder);
+
+            Assert.True(firstProcessed);
+            Assert.True(secondProcessed);
+            Assert.Equal(2, runner.Requests.Count);
+            Assert.Equal("google-gemini-cli", runner.Requests[0].Provider);
+            Assert.Equal("gemini-2.5-pro", runner.Requests[0].Model);
+            Assert.Equal("incident room", runner.Requests[0].Title);
+            Assert.Equal("google-gemini-cli", runner.Requests[1].Provider);
+            Assert.Equal("gemini-2.5-pro", runner.Requests[1].Model);
+            Assert.Null(runner.Requests[1].Title);
+            Assert.Equal(new[] { 0, 2 }, runner.RestoredMessageCounts);
+
+            var saved = new CodingAgentSessionStore(contextPath).Load();
+            Assert.Equal("google-gemini-cli", saved.Provider);
+            Assert.Equal("gemini-2.5-pro", saved.Model);
+            Assert.Equal("incident room", saved.Name);
+            Assert.Equal(4, saved.Messages.Count);
+            Assert.Equal(2, responder.Responses.Count);
+            Assert.Equal("response-1", responder.Responses[0].Text);
+            Assert.Equal("response-2", responder.Responses[1].Text);
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
+    }
+
     private static MomOptions CreateOptions(string root)
     {
         return new MomOptions
@@ -224,6 +285,52 @@ public sealed class MomChannelMessageProcessorTests
             Requests.Add(request);
             return Task.FromResult(new DelegationExecution(
                 "stub-response",
+                [],
+                Error: null,
+                request.Provider ?? "unknown",
+                request.Model ?? "unknown",
+                request.WorkingDirectory ?? Directory.GetCurrentDirectory(),
+                request.Metadata,
+                StopReason: "end_turn",
+                Usage: new DelegationUsage(InputTokens: 10, OutputTokens: 5)));
+        }
+    }
+
+    private sealed class PersistingSessionDelegationAgentRunner : IDelegationAgentRunner
+    {
+        public List<DelegationRequest> Requests { get; } = [];
+        public List<int> RestoredMessageCounts { get; } = [];
+
+        public Task<DelegationExecution> ExecuteAsync(DelegationRequest request, CancellationToken cancellationToken = default)
+        {
+            Requests.Add(request);
+            var contextPath = Path.Combine(request.WorkingDirectory!, ChannelSessionStore.ContextFileName);
+            var store = new CodingAgentSessionStore(contextPath);
+            var snapshot = store.Load();
+            RestoredMessageCounts.Add(snapshot.Messages.Count);
+
+            var response = $"response-{Requests.Count}";
+            var messages = snapshot.Messages
+                .Concat<ChatMessage>(
+                [
+                    new UserMessage(request.Prompt),
+                    new AssistantMessage([new TextContent(response)])
+                ])
+                .ToArray();
+            var model = new Model
+            {
+                Provider = request.Provider!,
+                Id = request.Model!,
+                Name = request.Model!,
+                Api = "test"
+            };
+            store.Save(
+                messages,
+                model,
+                string.IsNullOrWhiteSpace(request.Title) ? snapshot.Name : request.Title);
+
+            return Task.FromResult(new DelegationExecution(
+                response,
                 [],
                 Error: null,
                 request.Provider ?? "unknown",

@@ -1,6 +1,3 @@
-using Tau.Ai.Registry;
-using Tau.CodingAgent.Runtime;
-
 namespace Tau.Mom;
 
 public sealed class MomChannelMessageProcessor
@@ -11,7 +8,7 @@ public sealed class MomChannelMessageProcessor
     private readonly SlackAttachmentDownloader? _attachmentDownloader;
     private readonly MomChannelRunRegistry _runRegistry;
     private readonly ILogger<MomChannelMessageProcessor> _logger;
-    private readonly ModelCatalog _catalog = new();
+    private readonly MomModelSelectionResolver _selectionResolver;
 
     public MomChannelMessageProcessor(
         MomOptions options,
@@ -27,6 +24,7 @@ public sealed class MomChannelMessageProcessor
         _attachmentDownloader = attachmentDownloader;
         _runRegistry = runRegistry ?? new MomChannelRunRegistry();
         _logger = logger;
+        _selectionResolver = new MomModelSelectionResolver(options);
     }
 
     public async Task<bool> ProcessAsync(
@@ -59,7 +57,7 @@ public sealed class MomChannelMessageProcessor
                 .ConfigureAwait(false);
         }
 
-        var selection = ResolveSelection(message.Provider, message.Model);
+        var selection = _selectionResolver.Resolve(message.Provider, message.Model, workingDirectory);
         var request = (message with
             {
                 Provider = selection.Provider,
@@ -194,36 +192,6 @@ public sealed class MomChannelMessageProcessor
         }
 
         await responder.RespondAsync(message, "_Nothing running_", cancellationToken).ConfigureAwait(false);
-    }
-
-    private ResolvedModelSelection ResolveSelection(string? provider, string? model)
-    {
-        var defaultProvider = string.IsNullOrWhiteSpace(_options.DefaultProvider)
-            ? RuntimeCodingAgentRunner.GetDefaultProviderId()
-            : _options.DefaultProvider.Trim();
-        var defaultModel = string.IsNullOrWhiteSpace(_options.DefaultModel)
-            ? null
-            : _options.DefaultModel.Trim();
-
-        if (string.IsNullOrWhiteSpace(provider) && !string.IsNullOrWhiteSpace(defaultModel))
-        {
-            return _catalog.ResolveSelection(defaultProvider, defaultModel, defaultProvider);
-        }
-
-        if (string.IsNullOrWhiteSpace(provider) && string.IsNullOrWhiteSpace(model))
-        {
-            return _catalog.ResolveSelection(defaultProvider, null, defaultProvider);
-        }
-
-        if (!string.IsNullOrWhiteSpace(provider) && provider.Trim().Equals("google", StringComparison.OrdinalIgnoreCase))
-        {
-            var normalizedModel = string.IsNullOrWhiteSpace(model)
-                ? ModelCatalog.GetDefaultModelId("google-gemini-cli")
-                : model.Trim();
-            return _catalog.ResolveSelection("google-gemini-cli", normalizedModel, defaultProvider);
-        }
-
-        return _catalog.ResolveSelection(provider, model, defaultProvider);
     }
 
     private string ResolveChannelWorkingDirectory(string channelId)

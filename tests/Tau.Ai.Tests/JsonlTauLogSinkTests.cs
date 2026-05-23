@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Tau.Ai;
 using Tau.Ai.Observability;
 
 namespace Tau.Ai.Tests;
@@ -97,20 +98,74 @@ public class JsonlTauLogSinkTests
     }
 
     [Fact]
+    public void JsonlTauLogSink_RedactsSecretsByDefault()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"tau-log-redacted-{Guid.NewGuid():N}.jsonl");
+        using var environment = EnvironmentVariableScope.Acquire();
+        environment.Set(TauSecretRedactor.TauLogEnvironmentVariable, null);
+        try
+        {
+            using (var sink = new JsonlTauLogSink(path))
+            {
+                sink.Log(new TauLogEvent("agent", "run.error", DateTimeOffset.UtcNow, new Dictionary<string, string?>
+                {
+                    ["message"] = "Authorization: Bearer abcdef1234567890abcdef1234567890",
+                    ["token"] = "ghp_AAAA1111BBBB2222CCCC3333DDDD4444EEEE"
+                }));
+            }
+
+            var line = File.ReadAllText(path);
+            Assert.DoesNotContain("Bearer abcdef1234567890abcdef1234567890", line, StringComparison.Ordinal);
+            Assert.DoesNotContain("ghp_AAAA1111BBBB2222CCCC3333DDDD4444EEEE", line, StringComparison.Ordinal);
+            using var doc = JsonDocument.Parse(line);
+            Assert.Equal(TauSecretRedactor.Placeholder, doc.RootElement.GetProperty("fields").GetProperty("token").GetString());
+            Assert.Equal($"Authorization: {TauSecretRedactor.Placeholder}", doc.RootElement.GetProperty("fields").GetProperty("message").GetString());
+        }
+        finally
+        {
+            if (File.Exists(path)) File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void JsonlTauLogSink_AllowsExplicitRuntimeLogRedactionOptOut()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"tau-log-unredacted-{Guid.NewGuid():N}.jsonl");
+        using var environment = EnvironmentVariableScope.Acquire();
+        environment.Set(TauSecretRedactor.TauLogEnvironmentVariable, "0");
+        try
+        {
+            using (var sink = new JsonlTauLogSink(path))
+            {
+                sink.Log(new TauLogEvent("agent", "run.error", DateTimeOffset.UtcNow, new Dictionary<string, string?>
+                {
+                    ["token"] = "sk-EXAMPLE_BASE_KEY_99999999"
+                }));
+            }
+
+            var line = File.ReadAllText(path);
+            Assert.Contains("sk-EXAMPLE_BASE_KEY_99999999", line, StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (File.Exists(path)) File.Delete(path);
+        }
+    }
+
+    [Fact]
     public void JsonlTauLogSink_FromEnvironment_UsesExplicitPathWhenSet()
     {
         var path = Path.Combine(Path.GetTempPath(), $"tau-log-env-{Guid.NewGuid():N}.jsonl");
-        var previous = Environment.GetEnvironmentVariable("TAU_LOG_FILE");
+        using var environment = EnvironmentVariableScope.Acquire();
+        environment.Set("TAU_LOG_FILE", path);
         try
         {
-            Environment.SetEnvironmentVariable("TAU_LOG_FILE", path);
             using var sink = JsonlTauLogSink.FromEnvironment();
             Assert.NotNull(sink);
             Assert.Equal(path, sink!.Path);
         }
         finally
         {
-            Environment.SetEnvironmentVariable("TAU_LOG_FILE", previous);
             if (File.Exists(path)) File.Delete(path);
         }
     }
@@ -118,18 +173,10 @@ public class JsonlTauLogSinkTests
     [Fact]
     public void JsonlTauLogSink_FromEnvironment_ReturnsNullWhenDisabled()
     {
-        var previousDisabled = Environment.GetEnvironmentVariable("TAU_LOG_DISABLED");
-        var previousPath = Environment.GetEnvironmentVariable("TAU_LOG_FILE");
-        try
-        {
-            Environment.SetEnvironmentVariable("TAU_LOG_FILE", null);
-            Environment.SetEnvironmentVariable("TAU_LOG_DISABLED", "1");
-            Assert.Null(JsonlTauLogSink.FromEnvironment());
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable("TAU_LOG_DISABLED", previousDisabled);
-            Environment.SetEnvironmentVariable("TAU_LOG_FILE", previousPath);
-        }
+        using var environment = EnvironmentVariableScope.Acquire();
+        environment.Set("TAU_LOG_FILE", null);
+        environment.Set("TAU_LOG_DISABLED", "1");
+
+        Assert.Null(JsonlTauLogSink.FromEnvironment());
     }
 }
