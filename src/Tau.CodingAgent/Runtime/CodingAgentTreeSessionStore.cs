@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.Json.Serialization.Metadata;
 using Tau.Ai;
 
 namespace Tau.CodingAgent.Runtime;
@@ -313,11 +314,14 @@ public sealed class CodingAgentTreeSessionStore
 
     private readonly string _path;
     private readonly string _cwd;
+    private readonly TauSecretRedactor _secretRedactor;
 
-    public CodingAgentTreeSessionStore(string? path = null, string? cwd = null)
+    public CodingAgentTreeSessionStore(string? path = null, string? cwd = null, TauSecretRedactor? secretRedactor = null)
     {
         _path = string.IsNullOrWhiteSpace(path) ? GetDefaultPath() : System.IO.Path.GetFullPath(path);
         _cwd = string.IsNullOrWhiteSpace(cwd) ? Environment.CurrentDirectory : cwd;
+        _secretRedactor = secretRedactor ??
+            TauSecretRedactor.ForEnvironmentVariable(TauSecretRedactor.CodingAgentEnvironmentVariable);
         EnsureSessionFile();
     }
 
@@ -890,10 +894,10 @@ public sealed class CodingAgentTreeSessionStore
         var tempPath = _path + ".tmp";
         using (var writer = new StreamWriter(tempPath, false))
         {
-            writer.WriteLine(JsonSerializer.Serialize(header, CodingAgentTreeSessionJsonContext.Default.CodingAgentTreeSessionHeader));
+            writer.WriteLine(SerializeJsonlLine(header, CodingAgentTreeSessionJsonContext.Default.CodingAgentTreeSessionHeader));
             foreach (var entry in state.Entries)
             {
-                writer.WriteLine(JsonSerializer.Serialize(entry, CodingAgentTreeSessionJsonContext.Default.CodingAgentTreeSessionEntry));
+                writer.WriteLine(SerializeJsonlLine(entry, CodingAgentTreeSessionJsonContext.Default.CodingAgentTreeSessionEntry));
             }
         }
 
@@ -996,7 +1000,7 @@ public sealed class CodingAgentTreeSessionStore
         var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var idMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         string? parentId = null;
-        writer.WriteLine(JsonSerializer.Serialize(header, CodingAgentTreeSessionJsonContext.Default.CodingAgentTreeSessionHeader));
+        writer.WriteLine(SerializeJsonlLine(header, CodingAgentTreeSessionJsonContext.Default.CodingAgentTreeSessionHeader));
         foreach (var original in branch)
         {
             var id = CreateEntryId(ids);
@@ -1008,7 +1012,7 @@ public sealed class CodingAgentTreeSessionStore
                 ? remappedFirstKept
                 : original.FirstKeptEntryId;
             var entry = original.Clone(id, parentId, targetId, firstKeptEntryId);
-            writer.WriteLine(JsonSerializer.Serialize(entry, CodingAgentTreeSessionJsonContext.Default.CodingAgentTreeSessionEntry));
+            writer.WriteLine(SerializeJsonlLine(entry, CodingAgentTreeSessionJsonContext.Default.CodingAgentTreeSessionEntry));
             ids.Add(id);
             idMap[original.Id] = id;
             parentId = id;
@@ -1321,7 +1325,7 @@ public sealed class CodingAgentTreeSessionStore
             Timestamp = DateTimeOffset.UtcNow,
             Cwd = _cwd
         };
-        File.WriteAllText(_path, JsonSerializer.Serialize(header, CodingAgentTreeSessionJsonContext.Default.CodingAgentTreeSessionHeader) + "\n");
+        File.WriteAllText(_path, SerializeJsonlLine(header, CodingAgentTreeSessionJsonContext.Default.CodingAgentTreeSessionHeader) + "\n");
     }
 
     private TreeState ReadState()
@@ -1556,8 +1560,13 @@ public sealed class CodingAgentTreeSessionStore
 
     private void AppendEntry(CodingAgentTreeSessionEntry entry)
     {
-        var json = JsonSerializer.Serialize(entry, CodingAgentTreeSessionJsonContext.Default.CodingAgentTreeSessionEntry);
-        File.AppendAllText(_path, json + "\n");
+        File.AppendAllText(_path, SerializeJsonlLine(entry, CodingAgentTreeSessionJsonContext.Default.CodingAgentTreeSessionEntry) + "\n");
+    }
+
+    private string SerializeJsonlLine<T>(T value, JsonTypeInfo<T> jsonTypeInfo)
+    {
+        var json = JsonSerializer.Serialize(value, jsonTypeInfo);
+        return JsonlSecretRedactor.RedactLine(json, _secretRedactor);
     }
 
     private static bool IsValidSessionFile(string path)

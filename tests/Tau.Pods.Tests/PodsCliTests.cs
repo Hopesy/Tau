@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Tau.Pods.Cli;
 using Tau.Pods.Models;
 using Tau.Pods.Services;
@@ -404,6 +405,64 @@ public class PodsCliTests
             Assert.Contains("modelPath=/mnt/models/models--org--model", output, StringComparison.Ordinal);
             Assert.Contains("servedModel=org-model", output, StringComparison.Ordinal);
             Assert.DoesNotContain("Config not found", stderr.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            Console.SetOut(previousOut);
+            Console.SetError(previousError);
+            tempDir.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task VllmPlan_WithJsonOption_PrintsMachineReadablePlan()
+    {
+        var tempDir = Directory.CreateTempSubdirectory("tau-pods-cli-vllm-plan-json-");
+        var configPath = Path.Combine(tempDir.FullName, "custom-pods.json");
+        var stdout = new StringWriter();
+        var stderr = new StringWriter();
+        var previousOut = Console.Out;
+        var previousError = Console.Error;
+
+        try
+        {
+            Console.SetOut(stdout);
+            Console.SetError(stderr);
+            new PodsConfigStore().Save(configPath, ConfigWithSshPod());
+
+            var exitCode = await PodsCli.RunAsync(["vllm", "plan", "--json", configPath, "ssh-pod", "org/model", "served model"]);
+
+            Assert.Equal(0, exitCode);
+            Assert.DoesNotContain("[metadata-json]", stdout.ToString(), StringComparison.Ordinal);
+            Assert.DoesNotContain("Config not found", stderr.ToString(), StringComparison.Ordinal);
+
+            using var document = JsonDocument.Parse(stdout.ToString());
+            var root = document.RootElement;
+            Assert.Equal("ssh-pod", root.GetProperty("pod").GetString());
+            Assert.Equal("served-model", root.GetProperty("deployment").GetString());
+            Assert.Equal("org/model", root.GetProperty("model").GetString());
+            Assert.Equal("/mnt/models/models--org--model", root.GetProperty("modelPath").GetString());
+            Assert.Equal(8000, root.GetProperty("port").GetInt32());
+            Assert.Equal("served-model", root.GetProperty("servedModel").GetString());
+            Assert.Equal("tau-pod-served-model.service", root.GetProperty("unit").GetString());
+            var serveCommand = root.GetProperty("serveCommand").GetString()!;
+            var systemdUnit = root.GetProperty("systemdUnit").GetString()!;
+            var remoteCommand = root.GetProperty("remoteCommand").GetString()!;
+            Assert.Contains("vllm serve '/mnt/models/models--org--model'", serveCommand, StringComparison.Ordinal);
+            Assert.Contains("ExecStart=/usr/bin/env bash -lc", systemdUnit, StringComparison.Ordinal);
+            Assert.Contains("cat > ~/.tau_pods/served-model.service <<'EOF'", remoteCommand, StringComparison.Ordinal);
+            Assert.DoesNotContain("ssh ", remoteCommand, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("systemctl start", remoteCommand, StringComparison.OrdinalIgnoreCase);
+
+            var metadata = root.GetProperty("metadata");
+            Assert.Equal("planned-vllm", metadata.GetProperty("status").GetString());
+            Assert.Equal("served-model", metadata.GetProperty("name").GetString());
+            Assert.Equal("/mnt/models/models--org--model", metadata.GetProperty("modelPath").GetString());
+            Assert.Equal(8000, metadata.GetProperty("port").GetInt32());
+            Assert.Equal("tau-pod-served-model.service", metadata.GetProperty("unit").GetString());
+
+            using var metadataJson = JsonDocument.Parse(root.GetProperty("metadataJson").GetString()!);
+            Assert.Equal(metadata.GetProperty("ts").GetString(), metadataJson.RootElement.GetProperty("ts").GetString());
         }
         finally
         {

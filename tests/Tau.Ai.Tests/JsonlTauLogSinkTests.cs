@@ -128,6 +128,47 @@ public class JsonlTauLogSinkTests
     }
 
     [Fact]
+    public void JsonlTauLogSink_RedactsJsonStringValuesWithoutChangingFieldKeys()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"tau-log-value-redacted-{Guid.NewGuid():N}.jsonl");
+        using var environment = EnvironmentVariableScope.Acquire();
+        environment.Set(TauSecretRedactor.TauLogEnvironmentVariable, null);
+        var secretKey = "sk-KEYNAME_SHOULD_STAY_VISIBLE_123456";
+        var secretValue = "ghp_AAAA1111BBBB2222CCCC3333DDDD4444EEEE";
+        try
+        {
+            using (var sink = new JsonlTauLogSink(path))
+            {
+                sink.Log(new TauLogEvent(
+                    "Authorization: Bearer abcdef1234567890abcdef1234567890",
+                    "xoxb-1234567890-098765-ABCDEFabcdefGH",
+                    DateTimeOffset.Parse("2026-05-23T01:02:03Z"),
+                    new Dictionary<string, string?>
+                    {
+                        [secretKey] = secretValue,
+                        ["nullField"] = null
+                    }));
+            }
+
+            var line = File.ReadAllText(path);
+            Assert.Contains(secretKey, line, StringComparison.Ordinal);
+            Assert.DoesNotContain(secretValue, line, StringComparison.Ordinal);
+            Assert.DoesNotContain("Bearer abcdef1234567890abcdef1234567890", line, StringComparison.Ordinal);
+            Assert.DoesNotContain("xoxb-1234567890-098765-ABCDEFabcdefGH", line, StringComparison.Ordinal);
+
+            using var doc = JsonDocument.Parse(line);
+            Assert.Equal($"Authorization: {TauSecretRedactor.Placeholder}", doc.RootElement.GetProperty("category").GetString());
+            Assert.Equal(TauSecretRedactor.Placeholder, doc.RootElement.GetProperty("event").GetString());
+            Assert.Equal(TauSecretRedactor.Placeholder, doc.RootElement.GetProperty("fields").GetProperty(secretKey).GetString());
+            Assert.Equal(JsonValueKind.Null, doc.RootElement.GetProperty("fields").GetProperty("nullField").ValueKind);
+        }
+        finally
+        {
+            if (File.Exists(path)) File.Delete(path);
+        }
+    }
+
+    [Fact]
     public void JsonlTauLogSink_AllowsExplicitRuntimeLogRedactionOptOut()
     {
         var path = Path.Combine(Path.GetTempPath(), $"tau-log-unredacted-{Guid.NewGuid():N}.jsonl");

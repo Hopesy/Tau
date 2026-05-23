@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Text;
+using System.Text.Json;
 using Tau.Ai.Observability;
 using Tau.Pods.Models;
 using Tau.Pods.Services;
@@ -404,7 +406,7 @@ public static class PodsCli
     {
         if (args.Length < 2)
         {
-            Console.Error.WriteLine("Usage: vllm <plan> [path] <pod-id> <model-id> [deployment-name]");
+            Console.Error.WriteLine("Usage: vllm <plan> [--json] [path] <pod-id> <model-id> [deployment-name]");
             return 1;
         }
 
@@ -422,7 +424,8 @@ public static class PodsCli
         PodsConfigValidator validator,
         PodVllmCommandPlanner planner)
     {
-        if (!TryParseModelCommand(args, minValueCount: 1, "Usage: vllm plan [path] <pod-id> <model-id> [deployment-name]", out var parsed))
+        var jsonOutput = TryConsumeFlag(args, "--json", startIndex: 2, out var positionalArgs);
+        if (!TryParseModelCommand(positionalArgs, minValueCount: 1, "Usage: vllm plan [--json] [path] <pod-id> <model-id> [deployment-name]", out var parsed))
         {
             return 1;
         }
@@ -434,6 +437,18 @@ public static class PodsCli
         var deploymentName = parsed.Values.Count > 1 ? parsed.Values[1] : null;
         var plan = planner.PlanServe(pod, new PodVllmServeOptions(modelId, deploymentName));
 
+        if (jsonOutput)
+        {
+            PrintVllmPlanJson(pod, plan);
+            return 0;
+        }
+
+        PrintVllmPlanText(pod, plan);
+        return 0;
+    }
+
+    private static void PrintVllmPlanText(PodDefinition pod, PodVllmServePlan plan)
+    {
         Console.WriteLine($"pod={pod.Id}");
         Console.WriteLine($"deployment={plan.DeploymentName}");
         Console.WriteLine($"model={plan.ModelId}");
@@ -449,7 +464,34 @@ public static class PodsCli
         Console.WriteLine(plan.MetadataJson);
         Console.WriteLine("[remote-command]");
         Console.WriteLine(plan.RemoteCommand);
-        return 0;
+    }
+
+    private static void PrintVllmPlanJson(PodDefinition pod, PodVllmServePlan plan)
+    {
+        using var output = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(output, new JsonWriterOptions { Indented = true }))
+        {
+            writer.WriteStartObject();
+            writer.WriteString("pod", pod.Id);
+            writer.WriteString("deployment", plan.DeploymentName);
+            writer.WriteString("model", plan.ModelId);
+            writer.WriteString("modelPath", plan.ModelPath);
+            writer.WriteNumber("port", plan.Port);
+            writer.WriteString("servedModel", plan.ServedModelName);
+            writer.WriteString("unit", plan.UnitName);
+            writer.WriteString("serveCommand", plan.ServeCommand);
+            writer.WriteString("systemdUnit", plan.SystemdUnit);
+            writer.WritePropertyName("metadata");
+            using (var metadata = JsonDocument.Parse(plan.MetadataJson))
+            {
+                metadata.RootElement.WriteTo(writer);
+            }
+            writer.WriteString("metadataJson", plan.MetadataJson);
+            writer.WriteString("remoteCommand", plan.RemoteCommand);
+            writer.WriteEndObject();
+        }
+
+        Console.WriteLine(Encoding.UTF8.GetString(output.ToArray()));
     }
 
     private static async Task<int> ModelListAsync(
@@ -599,11 +641,30 @@ public static class PodsCli
     private static int UnknownVllmSubcommand(string subcommand)
     {
         Console.Error.WriteLine($"Unknown vllm subcommand: {subcommand}");
-        Console.Error.WriteLine("Usage: vllm <plan> [path] <pod-id> <model-id> [deployment-name]");
+        Console.Error.WriteLine("Usage: vllm <plan> [--json] [path] <pod-id> <model-id> [deployment-name]");
         return 1;
     }
 
     private static bool IsHelp(string arg) => arg is "help" or "--help" or "-h";
+
+    private static bool TryConsumeFlag(string[] args, string flag, int startIndex, out string[] positionalArgs)
+    {
+        var found = false;
+        var values = new List<string>(args.Length);
+        for (var i = 0; i < args.Length; i++)
+        {
+            if (i >= startIndex && args[i].Equals(flag, StringComparison.OrdinalIgnoreCase))
+            {
+                found = true;
+                continue;
+            }
+
+            values.Add(args[i]);
+        }
+
+        positionalArgs = values.ToArray();
+        return found;
+    }
 
     private static bool TryParseTargetCommand(
         string[] args,
@@ -695,7 +756,7 @@ public static class PodsCli
         Console.WriteLine("  model pull [path] <id> <model> Pull a Hugging Face model on an ssh pod");
         Console.WriteLine("  model remove [path] <id> <model> Remove a cached model from an ssh pod");
         Console.WriteLine("  model status [path] <id> <model> Check whether a model is cached");
-        Console.WriteLine("  vllm plan [path] <id> <model> [name] Print a plan-only vLLM serve command");
+        Console.WriteLine("  vllm plan [--json] [path] <id> <model> [name] Print a plan-only vLLM serve command");
     }
 
     private sealed record TargetCommandArguments(string ConfigPath, string PodId, IReadOnlyList<string> Values);

@@ -4,6 +4,9 @@
 
 | 日期 | 功能域 | 用户价值 | 变更摘要 |
 | --- | --- | --- | --- |
+| 2026-05-23 | Ai | runtime event JSONL 日志的脱敏规则和其它 JSONL writer 共享同一实现，field key / number / bool / null 不会被误改。 | `JsonlTauLogSink` 改为先生成完整 JSONL 行，再调用 `JsonlSecretRedactor.RedactLine`；category、event 和 field value 作为 string value 脱敏，object key 保留，`TAU_LOG_REDACT_SECRETS=0` 继续作为 opt-out。 |
+| 2026-05-23 | CodingAgent | JSONL tree session 默认不会把常见 token pattern 原文持久化到本地 session 文件。 | `CodingAgentTreeSessionStore` 写 `session` header、entries、branch export 和 append entry 时统一通过 `JsonlSecretRedactor`；默认按 `TAU_CODING_AGENT_REDACT_SECRETS` 脱敏 string value，`0/false` 可关闭，读取恢复按已写入内容工作。 |
+| 2026-05-23 | Pods | `vllm plan` 可以输出机器可读 JSON，外部脚本不必解析文本段落。 | 新增 `vllm plan --json [path] <pod-id> <model-id> [deployment-name]`；JSON 包含 pod/deployment/model/modelPath/port/servedModel/unit/serveCommand/systemdUnit/metadata/metadataJson/remoteCommand，仍然只生成 plan，不执行 SSH、不调用 `systemctl`。 |
 | 2026-05-23 | Ai | 其它模块可以复用同一套 JSONL 行级脱敏逻辑，不再各自维护 JSON string value redaction。 | 新增 `JsonlSecretRedactor`，解析 JSON 行后递归只处理 string value，保留 object key 和 number/bool/null；invalid JSON fallback 到整行 pattern redaction，disabled redactor 原样返回。当前是 foundation，不自动覆盖所有 JSONL 文件。 |
 | 2026-05-23 | CodingAgent | `/tree --interactive` 的折叠状态现在会写入当前 JSONL session，换 session 时不再只依赖全局 settings。 | 新增 append-only `tree_state` metadata entry 与 `CodingAgentTreeFoldState`，interactive navigator 返回 folded snapshot 后由 router 追加到 tree session；启动 navigator 时优先恢复当前 session 的 collapsed ids，settings `treeCollapsedEntryIds` 只作为兼容 fallback。当前仍不是完整上游 TreeSelector、多选或 TUI metadata inspector。 |
 | 2026-05-23 | Tui | 消息区、状态栏和 scrollback 有了可组合的固定高度 viewport，后续主屏接线可以复用同一状态容器。 | 新增 `TuiTranscriptViewport`，组合 `TuiMessageArea`、`TuiStatusBar` 和 `TuiScrollbackBuffer`，固定最后一行为 status，支持 append/set/clear、line/page scroll、resize rewrap、bottom-follow 和窄宽截断；当前不写 Console，也未接 terminal host。 |
