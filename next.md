@@ -103,7 +103,7 @@
 - [x] richer rendering / thinking / tool timeline 展示（fenced code blocks、inline code、links、headings/lists/blockquotes、strong/emphasis、tables、task lists、thinking details、tool call cards with status/input/output）
 - [x] auth/settings UX（`/api/auth/{provider}` 状态查询 + 前端 provider/model 切换时刷新 auth 状态；真实 login flow 仍在 Tau.Ai OAuth backlog）
 - [x] 附件体系（`WebChatAttachmentDto` + 前端 file picker/preview/remove + 发送时 base64 content + text extraction）
-- [x] session lifecycle（session delete / export JSON download / export.html / export.md / export.jsonl 线性 transcript / clone / search by title / import file upload / title rename / last-opened session restore baseline / clear messages 端点）
+- [x] session lifecycle（session delete / export JSON download / export.html / export.md / export.jsonl 线性 transcript / import.jsonl 线性 transcript roundtrip / clone / search by title / import file upload / title rename / last-opened session restore baseline / clear messages 端点）
 - [x] 更高层的 WebUi 行为测试（已补 `WebChatService` fake-runner 流式消息、附件 prompt 和持久化行为测试、Minimal API endpoint 的 NDJSON streaming/session 持久化/export/import/delete/rename/restore/错误状态回归，以及 `tests/Tau.WebUi.Tests` 用 Microsoft.Playwright 真实 headless Chromium 跑 create session/streaming send/rename 的 browser-级 flow 测试）
 
 ### Tau.Mom
@@ -134,9 +134,9 @@
 - [x] Slack per-channel queue seam（`MomChannelQueueDispatcher` 固定同频道顺序处理、不同频道独立推进、pending queue limit 和 stop bypass）
 - [x] Slack true cancellable stop seam（`MomChannelRunRegistry` 跟踪当前 in-process channel run，stop bypass queue 后取消 linked runner token，写 `cancelled` status 并回复 `_Stopped_`）
 - [x] Agent Skills prompt inventory parity（workspace/channel `skills/**/SKILL.md` -> XML `<available_skills>`，sandbox path mapping，channel override，`disable-model-invocation`）
-- [x] Mom sandbox/tool delegation seam（`MomSandboxConfig` / `IMomSandboxExecutor` / `MomToolSet`，默认 host sandbox，配置层支持 `docker:<container>`，Docker validate/exec 路径已可通过注入 `IMomSandboxProcessRunner` 本地验证，runner 默认工具切到 `bash/read/write/edit/attach`，attach 产物进入 execution attachments）
+- [x] Mom sandbox/tool delegation seam（`MomSandboxConfig` / `IMomSandboxExecutor` / `MomToolSet`，默认 host sandbox，配置层支持 `docker:<container>`，新增 `--validate-sandbox` 显式 sandbox validation 入口，Docker validate/exec 路径已可通过注入 `IMomSandboxProcessRunner` 本地验证，runner 默认工具切到 `bash/read/write/edit/attach`，attach 产物进入 execution attachments）
 - [ ] real Slack smoke
-- [~] workspace / sandbox / tool delegation（已补 workspace memory context、本地 attachment staging、scratch 目录、SYSTEM.md、Agent Skills prompt inventory、host sandbox executor、docker path/command construction seam、Docker validate/exec 可测试 seam 和 `bash/read/write/edit/attach` tools；仍缺真实 Docker sandbox smoke）
+- [~] workspace / sandbox / tool delegation（已补 workspace memory context、本地 attachment staging、scratch 目录、SYSTEM.md、Agent Skills prompt inventory、host sandbox executor、docker path/command construction seam、`--validate-sandbox` 显式 validation 入口、Docker validate/exec 可测试 seam 和 `bash/read/write/edit/attach` tools；仍缺真实 Docker sandbox smoke）
 - [~] message / runtime flow（已补最小 `log.jsonl` channel history 注入、本地 request/result 写回、`context.json` runtime messages、`last_prompt.jsonl` prompt debug snapshot、`status.json` runtime 状态、本地 busy-state guard、Slack-compatible envelope、Slack event mapper、Slack Socket Mode transport seam、Slack startup backfill seam、channel processor busy/stop/typing/thread response seam、true cancellable stop seam、Slack Web API responder seam、Slack private file download seam 与 per-channel queue seam，仍缺真实 Slack session sync / 多消息 runtime flow）
 - [ ] 更高层 delegation flow 与端到端测试
 
@@ -146,7 +146,7 @@
 - [x] probe（HTTP endpoint / TCP ssh target）
 - [x] exec（SSH pod remote command execution）
 - [x] deploy / stop / restart / health / logs / deployments（`PodLifecycleService` + CLI commands，SSH-based deploy/stop/restart/logs/deployments 和 HTTP/SSH health check；logs 通过 journalctl 拉 `tau-pod-<name>` unit，回退 `~/.tau_pods/<name>.log`，可配置 tail；deployments 通过 SSH 列出并解析 `~/.tau_pods/*.json` metadata，输出 name/model/status/ts）
-- [~] 真正的 CLI 运维命令体系（已补 `health/deploy/stop/restart/logs/deployments`、可省略 path 的 target-command 参数解析、SSH lifecycle metadata 命令转义、SSH exec `ArgumentList` argv hardening 和 CLI 参数回归测试；仍缺更完整模型生命周期、更完整远端 transport hardening 和真实运维 smoke）
+- [~] 真正的 CLI 运维命令体系（已补 `health/deploy/stop/restart/logs/deployments`、可省略 path 的 target-command 参数解析、SSH lifecycle metadata 命令转义、SSH exec `ArgumentList` argv hardening、本地 ssh 启动失败/runner 异常/cancellation 结构化返回和 CLI 参数回归测试；仍缺更完整模型生命周期、更完整远端 transport hardening 和真实运维 smoke）
 
 ## P2：工程化
 

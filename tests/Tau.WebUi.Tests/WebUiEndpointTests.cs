@@ -97,6 +97,75 @@ public sealed class WebUiEndpointTests
         Assert.Equal(HttpStatusCode.NotFound, missing.StatusCode);
     }
 
+    [Fact]
+    public async Task ImportJsonlEndpoint_ImportsExportedLinearTranscript()
+    {
+        await using var fixture = await WebUiEndpointFixture.StartAsync(StreamOk);
+        var created = await fixture.Client.PostAsync(
+            "/api/sessions",
+            JsonBody(
+                new CreateSessionRequest("Endpoint JSONL Import", "openai", "gpt-5.4"),
+                WebUiEndpointJsonContext.Default.CreateSessionRequest));
+        created.EnsureSuccessStatusCode();
+        var session = JsonSerializer.Deserialize(
+            await created.Content.ReadAsStringAsync(),
+            WebUiEndpointJsonContext.Default.WebChatSessionDto);
+        Assert.NotNull(session);
+
+        var sent = await fixture.Client.PostAsync(
+            $"/api/sessions/{session!.Id}/messages",
+            JsonBody(
+                new SendMessageRequest("roundtrip me"),
+                WebUiEndpointJsonContext.Default.SendMessageRequest));
+        sent.EnsureSuccessStatusCode();
+        var exported = await fixture.Client.GetAsync($"/api/sessions/{session.Id}/export.jsonl");
+        exported.EnsureSuccessStatusCode();
+        var jsonl = await exported.Content.ReadAsStringAsync();
+
+        var importedResponse = await fixture.Client.PostAsync(
+            "/api/sessions/import.jsonl",
+            new StringContent(jsonl, Encoding.UTF8, "application/x-ndjson"));
+        importedResponse.EnsureSuccessStatusCode();
+        var imported = JsonSerializer.Deserialize(
+            await importedResponse.Content.ReadAsStringAsync(),
+            WebUiEndpointJsonContext.Default.WebChatSessionDto);
+
+        Assert.NotNull(imported);
+        Assert.NotEqual(session.Id, imported!.Id);
+        Assert.Equal("Endpoint JSONL Import", imported.Title);
+        Assert.Equal("openai", imported.Provider);
+        Assert.Equal("gpt-5.4", imported.Model);
+        Assert.True(imported.Persisted);
+        Assert.Equal(2, imported.Messages.Count);
+        Assert.Equal("user", imported.Messages[0].Role);
+        Assert.Equal("roundtrip me", imported.Messages[0].Text);
+        Assert.Equal("assistant", imported.Messages[1].Role);
+        Assert.Equal("stream ok", imported.Messages[1].Text);
+
+        var fetched = await fixture.Client.GetAsync($"/api/sessions/{imported.Id}");
+        fetched.EnsureSuccessStatusCode();
+        var fetchedSession = JsonSerializer.Deserialize(
+            await fetched.Content.ReadAsStringAsync(),
+            WebUiEndpointJsonContext.Default.WebChatSessionDto);
+        Assert.Equal(imported.Id, fetchedSession?.Id);
+        Assert.Equal("roundtrip me", fetchedSession?.Messages[0].Text);
+    }
+
+    [Theory]
+    [InlineData("{not-json}\n", "not valid JSON")]
+    [InlineData("{\"type\":\"message\",\"id\":\"message-000001\",\"parentId\":null,\"timestamp\":\"2026-05-23T01:03:00+00:00\",\"role\":\"user\",\"text\":\"hello\"}\n", "First JSONL line must be a session header")]
+    public async Task ImportJsonlEndpoint_ReturnsBadRequestForMalformedJsonl(string jsonl, string expectedMessage)
+    {
+        await using var fixture = await WebUiEndpointFixture.StartAsync(StreamOk);
+
+        var response = await fixture.Client.PostAsync(
+            "/api/sessions/import.jsonl",
+            new StringContent(jsonl, Encoding.UTF8, "application/x-ndjson"));
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Contains(expectedMessage, await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+    }
+
     private static StringContent JsonBody<T>(T value, JsonTypeInfo<T> jsonTypeInfo) =>
         new(JsonSerializer.Serialize(value, jsonTypeInfo), Encoding.UTF8, "application/json");
 

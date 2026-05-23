@@ -1,7 +1,8 @@
 using Microsoft.Extensions.Options;
 using Tau.Mom;
 
-var builder = Host.CreateApplicationBuilder(args);
+var commandLine = MomCommandLine.Parse(args);
+var builder = Host.CreateApplicationBuilder(commandLine.HostArgs);
 builder.Services.Configure<MomOptions>(builder.Configuration.GetSection("Mom"));
 builder.Services.AddSingleton(sp =>
 {
@@ -45,8 +46,7 @@ builder.Services.AddSingleton<SlackBackfillService>();
 builder.Services.AddSingleton<SlackWebApiResponder>();
 builder.Services.AddSingleton<SlackSocketModeTransport>();
 
-var runOnce = args.Any(arg => string.Equals(arg, "--once", StringComparison.OrdinalIgnoreCase));
-if (!runOnce)
+if (!commandLine.RunOnce && !commandLine.ValidateSandbox)
 {
     builder.Services.AddHostedService<Worker>();
     builder.Services.AddHostedService<SlackSocketModeWorker>();
@@ -54,7 +54,23 @@ if (!runOnce)
 
 var host = builder.Build();
 
-if (runOnce)
+if (commandLine.ValidateSandbox)
+{
+    var options = host.Services.GetRequiredService<MomOptions>();
+    var logger = host.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Tau.Mom.ValidateSandbox");
+    var result = await MomSandboxValidator.ValidateAsync(options).ConfigureAwait(false);
+    if (result.Succeeded)
+    {
+        logger.LogInformation("{Message}", result.Message);
+        return;
+    }
+
+    logger.LogError("{Message}", result.Message);
+    Environment.ExitCode = 1;
+    return;
+}
+
+if (commandLine.RunOnce)
 {
     var eventProcessor = host.Services.GetRequiredService<MomEventProcessor>();
     var processor = host.Services.GetRequiredService<FileDelegationProcessor>();

@@ -8,6 +8,28 @@ namespace Tau.Agent.Tests;
 public sealed class MomSandboxAndToolsTests
 {
     [Fact]
+    public void CommandLine_ParseStripsMomSwitchesAndPreservesHostArgs()
+    {
+        var parsed = MomCommandLine.Parse([
+            "--once",
+            "--Mom:Sandbox",
+            "docker:mom-sandbox",
+            "--validate-sandbox",
+            "--urls",
+            "http://127.0.0.1:5005"
+        ]);
+
+        Assert.True(parsed.RunOnce);
+        Assert.True(parsed.ValidateSandbox);
+        Assert.Equal([
+            "--Mom:Sandbox",
+            "docker:mom-sandbox",
+            "--urls",
+            "http://127.0.0.1:5005"
+        ], parsed.HostArgs);
+    }
+
+    [Fact]
     public void Parse_MapsHostAndDockerWorkspacePaths()
     {
         var root = Path.Combine(Path.GetTempPath(), $"tau-mom-sandbox-{Guid.NewGuid():N}");
@@ -27,6 +49,54 @@ public sealed class MomSandboxAndToolsTests
 
         Assert.Throws<ArgumentException>(() => MomSandboxConfig.Parse("docker:"));
         Assert.Throws<ArgumentException>(() => MomSandboxConfig.Parse("vm"));
+    }
+
+    [Fact]
+    public async Task SandboxValidator_HostSucceedsWithoutProcessChecks()
+    {
+        var runner = new RecordingMomProcessRunner();
+
+        var result = await MomSandboxValidator.ValidateAsync(new MomOptions { Sandbox = "host" }, runner);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal("host", result.Sandbox);
+        Assert.Contains("No Docker checks", result.Message, StringComparison.Ordinal);
+        Assert.Empty(runner.Invocations);
+    }
+
+    [Fact]
+    public async Task SandboxValidator_DockerUsesValidationRunner()
+    {
+        var runner = new RecordingMomProcessRunner(
+            new MomSandboxExecResult("Docker version 27.0.0", string.Empty, 0),
+            new MomSandboxExecResult("true\n", string.Empty, 0));
+
+        var result = await MomSandboxValidator.ValidateAsync(new MomOptions { Sandbox = "docker:mom-sandbox" }, runner);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal("docker:mom-sandbox", result.Sandbox);
+        Assert.Contains("container is running", result.Message, StringComparison.Ordinal);
+        Assert.Collection(
+            runner.Invocations,
+            version => Assert.Equal(["--version"], version.Arguments),
+            inspect => Assert.Equal(["inspect", "-f", "{{.State.Running}}", "mom-sandbox"], inspect.Arguments));
+    }
+
+    [Fact]
+    public async Task SandboxValidator_ReturnsFailureForInvalidOrUnavailableDocker()
+    {
+        var invalid = await MomSandboxValidator.ValidateAsync(new MomOptions { Sandbox = "docker:" });
+
+        Assert.False(invalid.Succeeded);
+        Assert.Equal("docker:", invalid.Sandbox);
+        Assert.Contains("requires a container name", invalid.Message, StringComparison.Ordinal);
+
+        var runner = new RecordingMomProcessRunner(new MomSandboxExecResult(string.Empty, "missing", -1));
+        var missingDocker = await MomSandboxValidator.ValidateAsync(new MomOptions { Sandbox = "docker:mom-sandbox" }, runner);
+
+        Assert.False(missingDocker.Succeeded);
+        Assert.Equal("docker:mom-sandbox", missingDocker.Sandbox);
+        Assert.Contains("not installed or not in PATH", missingDocker.Message, StringComparison.Ordinal);
     }
 
     [Fact]

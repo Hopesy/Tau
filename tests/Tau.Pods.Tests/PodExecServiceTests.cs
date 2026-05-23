@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using Tau.Pods.Models;
 using Tau.Pods.Services;
 
@@ -74,6 +75,85 @@ public class PodExecServiceTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_WithSshPod_ReturnsFailureOnNonZeroExit()
+    {
+        var service = new PodExecService((_, _) =>
+            Task.FromResult(new PodExecService.ProcessExecutionResult(255, string.Empty, "permission denied\n")));
+
+        var result = await service.ExecuteAsync(SshPod(), "whoami");
+
+        Assert.False(result.Success);
+        Assert.Equal("ssh", result.Transport);
+        Assert.Equal(255, result.ExitCode);
+        Assert.Equal("permission denied\n", result.StdErr);
+        Assert.Contains("ssh exec failed (255)", result.Summary, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_WithSshPod_ReturnsStructuredFailureWhenProcessStartThrows()
+    {
+        var service = new PodExecService((_, _) =>
+            throw new Win32Exception(2, "ssh executable not found"));
+
+        var result = await service.ExecuteAsync(SshPod(), "uptime");
+
+        Assert.False(result.Success);
+        Assert.Equal(-1, result.ExitCode);
+        Assert.Equal("ssh process start failed", result.Summary);
+        Assert.Contains("Win32Exception", result.StdErr, StringComparison.Ordinal);
+        Assert.Contains("ssh executable not found", result.StdErr, StringComparison.Ordinal);
+        Assert.DoesNotContain("uptime", result.StdErr, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_WithSshPod_ReturnsStructuredFailureWhenProcessRunnerThrows()
+    {
+        var service = new PodExecService((_, _) =>
+            throw new IOException("pipe closed unexpectedly"));
+
+        var result = await service.ExecuteAsync(SshPod(), "uptime");
+
+        Assert.False(result.Success);
+        Assert.Equal(-1, result.ExitCode);
+        Assert.Equal("ssh process runner failed", result.Summary);
+        Assert.Contains("IOException", result.StdErr, StringComparison.Ordinal);
+        Assert.Contains("pipe closed unexpectedly", result.StdErr, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_WithSshPod_ReturnsStructuredFailureWhenRunnerReportsStartFailure()
+    {
+        var service = new PodExecService((_, _) =>
+            Task.FromResult(PodExecService.ProcessExecutionResult.StartFailed("ssh process start failed: Win32Exception: not found")));
+
+        var result = await service.ExecuteAsync(SshPod(), "uptime");
+
+        Assert.False(result.Success);
+        Assert.Equal(-1, result.ExitCode);
+        Assert.Equal("ssh process start failed", result.Summary);
+        Assert.Contains("Win32Exception", result.StdErr, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_WithSshPod_ReturnsStructuredFailureWhenCancelled()
+    {
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+        var service = new PodExecService((_, token) =>
+        {
+            token.ThrowIfCancellationRequested();
+            return Task.FromResult(new PodExecService.ProcessExecutionResult(0, "ok\n", string.Empty));
+        });
+
+        var result = await service.ExecuteAsync(SshPod(), "uptime", cts.Token);
+
+        Assert.False(result.Success);
+        Assert.Equal(-1, result.ExitCode);
+        Assert.Equal("ssh exec cancelled", result.Summary);
+        Assert.Contains("cancelled", result.StdErr, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task ExecuteAsync_WithSshPod_PassesComplexCommandAsSingleRemoteArgument()
     {
         const string command = "printf \"%s\" \"hello world\"; echo done";
@@ -102,4 +182,14 @@ public class PodExecServiceTests
         Assert.Equal(command, result.Command);
         Assert.Equal("pods.example.internal:22", result.Target);
     }
+
+    private static PodDefinition SshPod() => new()
+    {
+        Id = "ssh-pod",
+        Provider = "ssh",
+        Model = "deepseek-r1",
+        Region = "lab",
+        SshHost = "pods.example.internal",
+        SshPort = 2222
+    };
 }

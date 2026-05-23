@@ -11,6 +11,12 @@ public class PodLifecycleServiceTests
             Task.FromResult(new PodExecService.ProcessExecutionResult(exitCode, stdout, stderr)));
     }
 
+    private static PodExecService CreateStartFailureExecService()
+    {
+        return new PodExecService((_, _) =>
+            Task.FromResult(PodExecService.ProcessExecutionResult.StartFailed("ssh process start failed: Win32Exception: not found")));
+    }
+
     private static string RemoteCommand(System.Diagnostics.ProcessStartInfo psi)
     {
         Assert.Equal(8, psi.ArgumentList.Count);
@@ -69,6 +75,19 @@ public class PodLifecycleServiceTests
     }
 
     [Fact]
+    public async Task HealthAsync_SshPod_SurfacesExecStartFailure()
+    {
+        var service = new PodLifecycleService(CreateStartFailureExecService());
+        var pod = new PodDefinition { Id = "test", SshHost = "host.example.com", SshPort = 22 };
+
+        var result = await service.HealthAsync(pod);
+
+        Assert.False(result.Healthy);
+        Assert.Equal("ssh", result.Transport);
+        Assert.Contains("ssh process start failed", result.Summary, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task HealthAsync_NoPodTransport_ReturnsNotConfigured()
     {
         var exec = CreateFakeExecService();
@@ -93,6 +112,19 @@ public class PodLifecycleServiceTests
         Assert.True(result.Success);
         Assert.Equal("llama70b", result.DeploymentName);
         Assert.Contains("Deployed", result.Summary);
+    }
+
+    [Fact]
+    public async Task DeployAsync_SshPod_SurfacesExecStartFailure()
+    {
+        var service = new PodLifecycleService(CreateStartFailureExecService());
+        var pod = new PodDefinition { Id = "gpu-1", SshHost = "host.example.com" };
+
+        var result = await service.DeployAsync(pod, "meta/llama-3.1-70b", "llama70b");
+
+        Assert.False(result.Success);
+        Assert.Equal("llama70b", result.DeploymentName);
+        Assert.Contains("Deploy failed: ssh process start failed", result.Summary, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -122,6 +154,18 @@ public class PodLifecycleServiceTests
     }
 
     [Fact]
+    public async Task StopAsync_SshPod_SurfacesExecStartFailure()
+    {
+        var service = new PodLifecycleService(CreateStartFailureExecService());
+        var pod = new PodDefinition { Id = "gpu-1", SshHost = "host.example.com" };
+
+        var result = await service.StopAsync(pod, "llama70b");
+
+        Assert.False(result.Success);
+        Assert.Contains("Stop failed: ssh process start failed", result.Summary, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task RestartAsync_SshPod_ReturnsSuccessWhenDeploymentExists()
     {
         var exec = CreateFakeExecService(0, "restarted llama70b\n");
@@ -145,6 +189,18 @@ public class PodLifecycleServiceTests
 
         Assert.False(result.Success);
         Assert.Contains("not found", result.Summary);
+    }
+
+    [Fact]
+    public async Task RestartAsync_SshPod_SurfacesExecStartFailure()
+    {
+        var service = new PodLifecycleService(CreateStartFailureExecService());
+        var pod = new PodDefinition { Id = "gpu-1", SshHost = "host.example.com" };
+
+        var result = await service.RestartAsync(pod, "llama70b");
+
+        Assert.False(result.Success);
+        Assert.Contains("Restart failed: ssh process start failed", result.Summary, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -213,6 +269,18 @@ public class PodLifecycleServiceTests
 
         Assert.False(result.Success);
         Assert.Contains("Logs failed", result.Summary);
+    }
+
+    [Fact]
+    public async Task LogsAsync_SurfacesExecStartFailure()
+    {
+        var service = new PodLifecycleService(CreateStartFailureExecService());
+        var pod = new PodDefinition { Id = "gpu-1", SshHost = "host.example.com" };
+
+        var result = await service.LogsAsync(pod, "deployment");
+
+        Assert.False(result.Success);
+        Assert.Contains("Logs failed: ssh process start failed", result.Summary, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -302,5 +370,18 @@ public class PodLifecycleServiceTests
         Assert.False(result.Success);
         Assert.Empty(result.Deployments);
         Assert.Contains("Deployments failed", result.Summary);
+    }
+
+    [Fact]
+    public async Task ListDeploymentsAsync_SurfacesExecStartFailure()
+    {
+        var service = new PodLifecycleService(CreateStartFailureExecService());
+        var pod = new PodDefinition { Id = "gpu-1", SshHost = "host.example.com" };
+
+        var result = await service.ListDeploymentsAsync(pod);
+
+        Assert.False(result.Success);
+        Assert.Empty(result.Deployments);
+        Assert.Contains("Deployments failed: ssh process start failed", result.Summary, StringComparison.OrdinalIgnoreCase);
     }
 }

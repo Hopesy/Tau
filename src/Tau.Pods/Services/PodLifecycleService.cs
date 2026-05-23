@@ -79,10 +79,11 @@ public sealed class PodLifecycleService
         var command = $"test -f ~/.tau_pods/{deployName}.json && echo {ShellSingleQuote($"restarted {deployName}")} || echo 'not found'";
         var result = await _execService.ExecuteAsync(pod, command, cancellationToken).ConfigureAwait(false);
         var success = result.Success && result.StdOut.Contains("restarted");
+        var failureSummary = result.Success ? "deployment not found" : result.Summary;
         return new PodStopResult(
             pod.Id,
             success,
-            success ? $"Restarted '{deployName}' on {pod.Id}." : $"Restart failed: deployment not found or SSH error.");
+            success ? $"Restarted '{deployName}' on {pod.Id}." : $"Restart failed: {failureSummary}.");
     }
 
     public async Task<PodLogsResult> LogsAsync(

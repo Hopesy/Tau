@@ -122,6 +122,20 @@ public static class WebUiApplication
                 return Results.BadRequest(ex.Message);
             }
         });
+        app.MapPost("/api/sessions/import.jsonl", async Task<IResult> (HttpRequest request, WebChatService chat, CancellationToken cancellationToken) =>
+        {
+            try
+            {
+                using var reader = new StreamReader(request.Body, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+                var jsonl = await reader.ReadToEndAsync(cancellationToken).ConfigureAwait(false);
+                var session = WebChatJsonlImporter.Parse(jsonl);
+                return Results.Ok(chat.ImportSession(session));
+            }
+            catch (Exception ex)
+            {
+                return Results.BadRequest(ex.Message);
+            }
+        });
         app.MapDelete("/api/sessions/{id}", (string id, WebChatService chat) =>
         {
             return chat.DeleteSession(id) ? Results.NoContent() : Results.NotFound();
