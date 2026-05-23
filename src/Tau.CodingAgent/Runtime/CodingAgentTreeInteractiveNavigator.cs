@@ -16,7 +16,11 @@ public sealed class CodingAgentTreeInteractiveNavigator
         CodingAgentTreeFilterMode.All
     ];
 
-    public sealed record Result(string? SelectedEntryId, int LastIndex, int Frames);
+    public sealed record Result(
+        string? SelectedEntryId,
+        int LastIndex,
+        int Frames,
+        IReadOnlySet<string>? FoldedEntryIds = null);
 
     public async Task<Result> NavigateAsync(
         IReadOnlyList<CodingAgentTreeViewItem> items,
@@ -127,11 +131,11 @@ public sealed class CodingAgentTreeInteractiveNavigator
                 case ConsoleKey.Enter:
                     writer.WriteLine();
                     return visibleItems.Count == 0
-                        ? new Result(null, selected, frames)
-                        : new Result(visibleItems[selected].EntryId, selected, frames);
+                        ? new Result(null, selected, frames, SnapshotFoldedEntryIds(foldedEntryIds))
+                        : new Result(visibleItems[selected].EntryId, selected, frames, SnapshotFoldedEntryIds(foldedEntryIds));
                 case ConsoleKey.Q:
                     writer.WriteLine();
-                    return new Result(null, selected, frames);
+                    return new Result(null, selected, frames, SnapshotFoldedEntryIds(foldedEntryIds));
                 case ConsoleKey.Escape:
                     if (searchPattern is not null)
                     {
@@ -144,7 +148,7 @@ public sealed class CodingAgentTreeInteractiveNavigator
                     else
                     {
                         writer.WriteLine();
-                        return new Result(null, selected, frames);
+                        return new Result(null, selected, frames, SnapshotFoldedEntryIds(foldedEntryIds));
                     }
                     break;
                 case ConsoleKey.F:
@@ -467,6 +471,9 @@ public sealed class CodingAgentTreeInteractiveNavigator
     {
         foldedEntryIdsChanged?.Invoke(new HashSet<string>(foldedEntryIds, StringComparer.OrdinalIgnoreCase));
     }
+
+    private static IReadOnlySet<string> SnapshotFoldedEntryIds(IEnumerable<string> foldedEntryIds) =>
+        new HashSet<string>(foldedEntryIds, StringComparer.OrdinalIgnoreCase);
 
     private static bool HasDescendants(IReadOnlyList<CodingAgentTreeViewItem> items, string entryId) =>
         items.Any(item => string.Equals(item.ParentEntryId, entryId, StringComparison.OrdinalIgnoreCase));

@@ -9,15 +9,19 @@ public static class PodsCli
 {
     private const string DefaultConfigPath = "tau.pods.json";
 
-    public static async Task<int> RunAsync(string[] args)
+    public static async Task<int> RunAsync(
+        string[] args,
+        PodExecService? execService = null,
+        PodVllmCommandPlanner? vllmPlanner = null)
     {
         var store = new PodsConfigStore();
         var validator = new PodsConfigValidator();
         using var logSink = CreateLogSink();
         var probeService = new PodProbeService(logSink: logSink);
-        var execService = new PodExecService();
+        execService ??= new PodExecService();
         var lifecycleService = new PodLifecycleService(execService);
         var modelService = new PodModelService(execService);
+        vllmPlanner ??= new PodVllmCommandPlanner();
 
         if (args.Length == 0 || IsHelp(args[0]))
         {
@@ -43,6 +47,7 @@ public static class PodsCli
             "logs" => await LogsAsync(args, path, store, validator, lifecycleService).ConfigureAwait(false),
             "deployments" => await DeploymentsAsync(args, path, store, validator, lifecycleService).ConfigureAwait(false),
             "model" => await ModelAsync(args, store, validator, modelService).ConfigureAwait(false),
+            "vllm" => Vllm(args, store, validator, vllmPlanner),
             _ => Unknown(command)
         };
     }
@@ -391,6 +396,62 @@ public static class PodsCli
         };
     }
 
+    private static int Vllm(
+        string[] args,
+        PodsConfigStore store,
+        PodsConfigValidator validator,
+        PodVllmCommandPlanner planner)
+    {
+        if (args.Length < 2)
+        {
+            Console.Error.WriteLine("Usage: vllm <plan> [path] <pod-id> <model-id> [deployment-name]");
+            return 1;
+        }
+
+        var subcommand = args[1].ToLowerInvariant();
+        return subcommand switch
+        {
+            "plan" => VllmPlan(args, store, validator, planner),
+            _ => UnknownVllmSubcommand(subcommand)
+        };
+    }
+
+    private static int VllmPlan(
+        string[] args,
+        PodsConfigStore store,
+        PodsConfigValidator validator,
+        PodVllmCommandPlanner planner)
+    {
+        if (!TryParseModelCommand(args, minValueCount: 1, "Usage: vllm plan [path] <pod-id> <model-id> [deployment-name]", out var parsed))
+        {
+            return 1;
+        }
+
+        var pod = LoadPodOrReport(parsed.ConfigPath, parsed.PodId, store, validator, out var exitCode);
+        if (pod is null) return exitCode;
+
+        var modelId = parsed.Values[0];
+        var deploymentName = parsed.Values.Count > 1 ? parsed.Values[1] : null;
+        var plan = planner.PlanServe(pod, new PodVllmServeOptions(modelId, deploymentName));
+
+        Console.WriteLine($"pod={pod.Id}");
+        Console.WriteLine($"deployment={plan.DeploymentName}");
+        Console.WriteLine($"model={plan.ModelId}");
+        Console.WriteLine($"modelPath={plan.ModelPath}");
+        Console.WriteLine($"port={plan.Port}");
+        Console.WriteLine($"servedModel={plan.ServedModelName}");
+        Console.WriteLine($"unit={plan.UnitName}");
+        Console.WriteLine("[serve-command]");
+        Console.WriteLine(plan.ServeCommand);
+        Console.WriteLine("[systemd-unit]");
+        Console.WriteLine(plan.SystemdUnit);
+        Console.WriteLine("[metadata-json]");
+        Console.WriteLine(plan.MetadataJson);
+        Console.WriteLine("[remote-command]");
+        Console.WriteLine(plan.RemoteCommand);
+        return 0;
+    }
+
     private static async Task<int> ModelListAsync(
         string[] args,
         PodsConfigStore store,
@@ -535,6 +596,13 @@ public static class PodsCli
         return 1;
     }
 
+    private static int UnknownVllmSubcommand(string subcommand)
+    {
+        Console.Error.WriteLine($"Unknown vllm subcommand: {subcommand}");
+        Console.Error.WriteLine("Usage: vllm <plan> [path] <pod-id> <model-id> [deployment-name]");
+        return 1;
+    }
+
     private static bool IsHelp(string arg) => arg is "help" or "--help" or "-h";
 
     private static bool TryParseTargetCommand(
@@ -627,6 +695,7 @@ public static class PodsCli
         Console.WriteLine("  model pull [path] <id> <model> Pull a Hugging Face model on an ssh pod");
         Console.WriteLine("  model remove [path] <id> <model> Remove a cached model from an ssh pod");
         Console.WriteLine("  model status [path] <id> <model> Check whether a model is cached");
+        Console.WriteLine("  vllm plan [path] <id> <model> [name] Print a plan-only vLLM serve command");
     }
 
     private sealed record TargetCommandArguments(string ConfigPath, string PodId, IReadOnlyList<string> Values);

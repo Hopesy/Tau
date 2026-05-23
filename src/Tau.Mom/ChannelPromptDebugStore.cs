@@ -38,7 +38,7 @@ internal static class ChannelPromptDebugStore
                 CountImageAttachments(workingDirectoryFullPath, request.Attachments));
 
             var json = JsonSerializer.Serialize(document, MomJsonContext.Default.ChannelPromptDebugContext);
-            File.WriteAllText(Path.Combine(workingDirectoryFullPath, PromptFileName), json);
+            File.WriteAllText(Path.Combine(workingDirectoryFullPath, PromptFileName), MomSecretRedaction.RedactJson(json));
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
         {

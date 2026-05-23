@@ -254,6 +254,126 @@ public sealed class WebUiEndpointTests
     }
 
     [Fact]
+    public async Task CodingAgentJsonlImportEndpoint_ImportsPreviewTimelineAndPersistsSession()
+    {
+        await using var fixture = await WebUiEndpointFixture.StartAsync(StreamOk);
+
+        var response = await fixture.Client.PostAsync(
+            "/api/sessions/import.coding-agent-jsonl",
+            new StringContent(ValidCodingAgentJsonl(), Encoding.UTF8, "application/x-ndjson"));
+
+        response.EnsureSuccessStatusCode();
+        var imported = JsonSerializer.Deserialize(
+            await response.Content.ReadAsStringAsync(),
+            WebUiEndpointJsonContext.Default.WebChatSessionDto);
+        Assert.NotNull(imported);
+        Assert.NotEqual("coding-session-1", imported!.Id);
+        Assert.Equal("Imported CodingAgent session coding-session-1", imported.Title);
+        Assert.True(imported.Persisted);
+        Assert.Equal(3, imported.Messages.Count);
+        Assert.Equal("user", imported.Messages[0].Role);
+        Assert.Equal("hello coding agent", imported.Messages[0].Text);
+        Assert.Equal("assistant", imported.Messages[1].Role);
+        Assert.Contains("done", imported.Messages[1].Text, StringComparison.Ordinal);
+        Assert.Contains("[thinking content present]", imported.Messages[1].Text, StringComparison.Ordinal);
+        Assert.Contains("[tool call: 1]", imported.Messages[1].Text, StringComparison.Ordinal);
+        Assert.Equal("assistant", imported.Messages[2].Role);
+        Assert.Contains("not found", imported.Messages[2].Text, StringComparison.Ordinal);
+        Assert.Contains("[tool result: tool-1; status=error]", imported.Messages[2].Text, StringComparison.Ordinal);
+
+        var fetched = await fixture.Client.GetAsync($"/api/sessions/{imported.Id}");
+        fetched.EnsureSuccessStatusCode();
+        var fetchedSession = JsonSerializer.Deserialize(
+            await fetched.Content.ReadAsStringAsync(),
+            WebUiEndpointJsonContext.Default.WebChatSessionDto);
+        Assert.Equal(imported.Id, fetchedSession?.Id);
+        Assert.Equal(3, fetchedSession?.Messages.Count);
+    }
+
+    [Fact]
+    public async Task CodingAgentJsonlImportEndpoint_ReturnsProblemDetailsForMalformedJsonl()
+    {
+        await using var fixture = await WebUiEndpointFixture.StartAsync(StreamOk);
+        var jsonl = ValidCodingAgentHeader() + "{not-json}\n";
+
+        var response = await fixture.Client.PostAsync(
+            "/api/sessions/import.coding-agent-jsonl",
+            new StringContent(jsonl, Encoding.UTF8, "application/x-ndjson"));
+
+        await AssertJsonlProblemAsync(
+            response,
+            HttpStatusCode.BadRequest,
+            "invalid_json",
+            2,
+            "line 2 is not valid JSON",
+            "Invalid CodingAgent JSONL import");
+    }
+
+    [Fact]
+    public async Task CodingAgentJsonlImportEndpoint_GivesToolMessagesConservativeText()
+    {
+        await using var fixture = await WebUiEndpointFixture.StartAsync(StreamOk);
+
+        var response = await fixture.Client.PostAsync(
+            "/api/sessions/import.coding-agent-jsonl",
+            new StringContent(CodingAgentJsonlWithToolOnlyMessages(), Encoding.UTF8, "application/x-ndjson"));
+
+        response.EnsureSuccessStatusCode();
+        var imported = JsonSerializer.Deserialize(
+            await response.Content.ReadAsStringAsync(),
+            WebUiEndpointJsonContext.Default.WebChatSessionDto);
+        Assert.NotNull(imported);
+        Assert.Equal(2, imported!.Messages.Count);
+        Assert.Equal("assistant", imported.Messages[0].Role);
+        Assert.False(string.IsNullOrWhiteSpace(imported.Messages[0].Text));
+        Assert.Contains("[tool call: 1]", imported.Messages[0].Text, StringComparison.Ordinal);
+        Assert.Equal("assistant", imported.Messages[1].Role);
+        Assert.False(string.IsNullOrWhiteSpace(imported.Messages[1].Text));
+        Assert.Contains("[tool result: tool-2; status=ok]", imported.Messages[1].Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CodingAgentJsonlImportEndpoint_DoesNotMutateExistingSession()
+    {
+        await using var fixture = await WebUiEndpointFixture.StartAsync(StreamOk);
+        var created = await fixture.Client.PostAsync(
+            "/api/sessions",
+            JsonBody(
+                new CreateSessionRequest("Existing session", "openai", "gpt-5.4"),
+                WebUiEndpointJsonContext.Default.CreateSessionRequest));
+        created.EnsureSuccessStatusCode();
+        var existing = JsonSerializer.Deserialize(
+            await created.Content.ReadAsStringAsync(),
+            WebUiEndpointJsonContext.Default.WebChatSessionDto);
+        Assert.NotNull(existing);
+
+        var importedResponse = await fixture.Client.PostAsync(
+            "/api/sessions/import.coding-agent-jsonl",
+            new StringContent(ValidCodingAgentJsonl(), Encoding.UTF8, "application/x-ndjson"));
+        importedResponse.EnsureSuccessStatusCode();
+
+        var fetchedExisting = await fixture.Client.GetAsync($"/api/sessions/{existing!.Id}");
+        fetchedExisting.EnsureSuccessStatusCode();
+        var afterImport = JsonSerializer.Deserialize(
+            await fetchedExisting.Content.ReadAsStringAsync(),
+            WebUiEndpointJsonContext.Default.WebChatSessionDto);
+        Assert.NotNull(afterImport);
+        Assert.Equal(existing.Id, afterImport!.Id);
+        Assert.Equal(existing.Title, afterImport.Title);
+        Assert.Equal(existing.Provider, afterImport.Provider);
+        Assert.Equal(existing.Model, afterImport.Model);
+        Assert.Equal(existing.UpdatedAt, afterImport.UpdatedAt);
+        Assert.Empty(afterImport.Messages);
+
+        var sessionsResponse = await fixture.Client.GetAsync("/api/sessions");
+        sessionsResponse.EnsureSuccessStatusCode();
+        var sessions = JsonSerializer.Deserialize(
+            await sessionsResponse.Content.ReadAsStringAsync(),
+            WebUiEndpointJsonContext.Default.WebChatSessionDtoArray);
+        Assert.Equal(2, sessions?.Length);
+    }
+
+    [Fact]
     public async Task CodingAgentJsonlPreviewEndpoint_ReturnsProblemDetailsForMalformedJsonl()
     {
         await using var fixture = await WebUiEndpointFixture.StartAsync(StreamOk);
@@ -316,6 +436,11 @@ public sealed class WebUiEndpointTests
         "{\"type\":\"model_change\",\"id\":\"entry-model\",\"parentId\":\"entry-user\",\"timestamp\":\"2026-05-23T02:01:30+00:00\",\"provider\":\"openai\",\"model\":\"gpt-5.4\"}\n" +
         "{\"type\":\"message\",\"id\":\"entry-assistant\",\"parentId\":\"entry-model\",\"timestamp\":\"2026-05-23T02:02:00+00:00\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"plan\"},{\"type\":\"toolCall\",\"id\":\"tool-1\",\"name\":\"read\",\"arguments\":\"{}\"},{\"type\":\"text\",\"text\":\"done\"}]}}\n" +
         "{\"type\":\"message\",\"id\":\"entry-tool\",\"parentId\":\"entry-assistant\",\"timestamp\":\"2026-05-23T02:03:00+00:00\",\"message\":{\"role\":\"toolResult\",\"toolCallId\":\"tool-1\",\"isError\":true,\"content\":[{\"type\":\"text\",\"text\":\"not found\"}]}}\n";
+
+    private static string CodingAgentJsonlWithToolOnlyMessages() =>
+        ValidCodingAgentHeader() +
+        "{\"type\":\"message\",\"id\":\"entry-tool-call-only\",\"parentId\":null,\"timestamp\":\"2026-05-23T02:02:00+00:00\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"toolCall\",\"id\":\"tool-2\",\"name\":\"read\",\"arguments\":\"{}\"}]}}\n" +
+        "{\"type\":\"message\",\"id\":\"entry-tool-result-empty\",\"parentId\":\"entry-tool-call-only\",\"timestamp\":\"2026-05-23T02:03:00+00:00\",\"message\":{\"role\":\"toolResult\",\"toolCallId\":\"tool-2\",\"isError\":false,\"content\":[]}}\n";
 
     private static string ValidCodingAgentHeader() =>
         "{\"type\":\"session\",\"version\":3,\"id\":\"coding-session-1\",\"timestamp\":\"2026-05-23T02:00:00+00:00\",\"cwd\":\"C:\\\\Users\\\\zhouh\\\\Desktop\\\\Tau\",\"parentSession\":\"parent-session.jsonl\"}\n";

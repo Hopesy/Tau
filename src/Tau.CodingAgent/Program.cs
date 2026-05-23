@@ -173,7 +173,8 @@ static string? ResolveKeyBindingsPath()
 
 static Func<IReadOnlyList<CodingAgentTreeViewItem>, CancellationToken, Task<CodingAgentTreeInteractiveNavigator.Result>> CreateTreeNavigator(
     IConsoleKeyReader keyReader,
-    CodingAgentSettingsStore settingsStore)
+    CodingAgentSettingsStore settingsStore,
+    CodingAgentTreeSessionController treeSessionController)
 {
     var navigator = new CodingAgentTreeInteractiveNavigator();
     return (items, cancellationToken) => navigator.NavigateAsync(
@@ -181,7 +182,7 @@ static Func<IReadOnlyList<CodingAgentTreeViewItem>, CancellationToken, Task<Codi
         keyReader,
         Console.Out,
         clearScreen: () => Console.Write("[2J[H"),
-        initialFoldedEntryIds: settingsStore.Load().TreeCollapsedEntryIds,
+        initialFoldedEntryIds: treeSessionController.LoadTreeFoldState()?.CollapsedEntryIds ?? settingsStore.Load().TreeCollapsedEntryIds,
         foldedEntryIdsChanged: foldedEntryIds =>
         {
             var normalized = foldedEntryIds
@@ -280,7 +281,7 @@ var host = new CodingAgentHost(
     retryOptions: CodingAgentRetryOptions.FromSettingsOrEnvironment(settings),
     turnInputSource: editor is null ? null : new SystemConsoleCodingAgentTurnInputSource(),
     historySnapshotProvider: editor is null ? null : limit => editor.History.Snapshot(limit),
-    treeNavigator: editor is null ? null : CreateTreeNavigator(keyReader, settingsStore),
+    treeNavigator: editor is null ? null : CreateTreeNavigator(keyReader, settingsStore, treeSessionController),
     themeSelector: editor is null ? null : CodingAgentThemeSelector.CreateConsoleSelector(keyReader),
     settingsSelector: editor is null ? null : CodingAgentSettingsSelector.CreateConsoleSelector(keyReader),
     scopedModelsSelector: editor is null ? null : CodingAgentScopedModelsSelector.CreateConsoleSelector(keyReader),

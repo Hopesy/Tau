@@ -57,6 +57,8 @@ public sealed record CodingAgentTreeViewItem(
 
 public sealed record CodingAgentForkMessage(string EntryId, string Text);
 
+public sealed record CodingAgentTreeFoldState(IReadOnlyList<string> CollapsedEntryIds);
+
 public sealed record CodingAgentCompactionRetentionOptions(
     int KeepRecentTokens = 20_000,
     int KeepRecentMessages = 4)
@@ -262,9 +264,14 @@ public sealed class CodingAgentTreeSessionController
     public string AppendAutoRetryEnd(bool success, int attempt, string? finalError = null) =>
         Store.AppendAutoRetryEnd(success, attempt, finalError);
 
+    public string AppendTreeFoldState(IReadOnlySet<string> collapsedEntryIds) =>
+        Store.AppendTreeFoldState(collapsedEntryIds);
+
     public string? GetLabel(string entryId) => Store.GetLabel(entryId);
 
     public CodingAgentTreeSessionSummary GetSummary() => Store.GetSummary();
+
+    public CodingAgentTreeFoldState? LoadTreeFoldState() => Store.LoadTreeFoldState();
 
     public string FormatTree(int maxEntries = 24) => Store.FormatTree(maxEntries);
 
@@ -302,6 +309,7 @@ public sealed class CodingAgentTreeSessionStore
     private const string BranchSummaryType = "branch_summary";
     private const string AutoRetryStartType = "auto_retry_start";
     private const string AutoRetryEndType = "auto_retry_end";
+    private const string TreeStateType = "tree_state";
 
     private readonly string _path;
     private readonly string _cwd;
@@ -589,6 +597,30 @@ public sealed class CodingAgentTreeSessionStore
         };
         AppendEntry(entry);
         return id;
+    }
+
+    public string AppendTreeFoldState(IReadOnlySet<string> collapsedEntryIds)
+    {
+        ArgumentNullException.ThrowIfNull(collapsedEntryIds);
+
+        var state = ReadState();
+        var id = CreateEntryId(state.EntryIds);
+        var entry = new CodingAgentTreeSessionEntry
+        {
+            Type = TreeStateType,
+            Id = id,
+            ParentId = state.LeafId,
+            Timestamp = DateTimeOffset.UtcNow,
+            CollapsedEntryIds = NormalizeStringList([.. collapsedEntryIds])
+        };
+        AppendEntry(entry);
+        return id;
+    }
+
+    public CodingAgentTreeFoldState? LoadTreeFoldState()
+    {
+        var state = ReadState();
+        return state.TreeFoldState;
     }
 
     public string? FindCompactionFirstKeptEntryId(int retainRecentTokenCount, int retainRecentMessageCount)
@@ -1204,6 +1236,10 @@ public sealed class CodingAgentTreeSessionStore
                 lines.Add($"attempt: {entry.Attempt.GetValueOrDefault()}");
                 AppendIfPresent(lines, "final error", PreviewText(entry.FinalError));
                 break;
+
+            case TreeStateType:
+                AppendList(lines, "collapsed entries", entry.CollapsedEntryIds);
+                break;
         }
     }
 
@@ -1644,7 +1680,7 @@ public sealed class CodingAgentTreeSessionStore
                    string.Equals(entry.Message?.Role, "user", StringComparison.OrdinalIgnoreCase);
         }
 
-        var isSettingsEntry = entry.Type is LabelType or ModelChangeType or SessionInfoType;
+        var isSettingsEntry = entry.Type is LabelType or ModelChangeType or SessionInfoType or TreeStateType;
         if (isSettingsEntry)
         {
             return false;
@@ -1778,6 +1814,11 @@ public sealed class CodingAgentTreeSessionStore
             parts.Add(entry.Success.Value ? "success" : "failed");
         }
 
+        if (entry.CollapsedEntryIds is not null)
+        {
+            parts.AddRange(entry.CollapsedEntryIds);
+        }
+
         if (entry.Message is { } message)
         {
             parts.Add(message.Role);
@@ -1877,6 +1918,7 @@ public sealed class CodingAgentTreeSessionStore
             BranchSummaryType => $"branch summary from {ShortId(entry.FromId)} {PreviewText(entry.Summary)}",
             AutoRetryStartType => $"auto-retry start {entry.Attempt.GetValueOrDefault()}/{entry.MaxAttempts.GetValueOrDefault()} {entry.DelayMs.GetValueOrDefault()}ms {PreviewText(entry.ErrorMessage)}",
             AutoRetryEndType => $"auto-retry end {(entry.Success == true ? "success" : "failed")} attempt {entry.Attempt.GetValueOrDefault()} {PreviewText(entry.FinalError)}",
+            TreeStateType => $"tree state collapsed {entry.CollapsedEntryIds?.Count ?? 0}",
             LabelType => $"label {ShortId(entry.TargetId)} {NormalizeName(entry.Label) ?? "clear"}",
             SessionInfoType when string.Equals(entry.Action, "branch", StringComparison.OrdinalIgnoreCase) => "branch",
             SessionInfoType when entry.Action is not null => $"{entry.Action} name {NormalizeName(entry.Name) ?? "none"}",
@@ -1933,6 +1975,7 @@ public sealed class CodingAgentTreeSessionStore
             var labels = BuildLabelsById(entries);
             LabelsById = labels.Labels;
             LabelTimestampsById = labels.LabelTimestamps;
+            TreeFoldState = BuildTreeFoldState(entries);
             BranchPointCount = entries
                 .Where(static entry => entry.ParentId is not null)
                 .GroupBy(static entry => entry.ParentId, StringComparer.OrdinalIgnoreCase)
@@ -1946,6 +1989,7 @@ public sealed class CodingAgentTreeSessionStore
         public string? LeafId { get; }
         public IReadOnlyDictionary<string, string> LabelsById { get; }
         public IReadOnlyDictionary<string, string> LabelTimestampsById { get; }
+        public CodingAgentTreeFoldState? TreeFoldState { get; }
         public int BranchPointCount { get; }
 
         public CodingAgentTreeSessionEntry ResolveEntryId(string idOrPrefix)
@@ -2014,6 +2058,22 @@ public sealed class CodingAgentTreeSessionStore
 
             return (labels, timestamps);
         }
+
+        private static CodingAgentTreeFoldState? BuildTreeFoldState(IReadOnlyList<CodingAgentTreeSessionEntry> entries)
+        {
+            CodingAgentTreeFoldState? latest = null;
+            foreach (var entry in entries)
+            {
+                if (entry.Type != TreeStateType)
+                {
+                    continue;
+                }
+
+                latest = new CodingAgentTreeFoldState(NormalizeStringList(entry.CollapsedEntryIds) ?? []);
+            }
+
+            return latest;
+        }
     }
 }
 
@@ -2055,6 +2115,7 @@ internal sealed class CodingAgentTreeSessionEntry
     public string? ErrorMessage { get; init; }
     public bool? Success { get; init; }
     public string? FinalError { get; init; }
+    public List<string>? CollapsedEntryIds { get; init; }
 
     public CodingAgentTreeSessionEntry Clone(
         string id,
@@ -2088,7 +2149,8 @@ internal sealed class CodingAgentTreeSessionEntry
             DelayMs = DelayMs,
             ErrorMessage = ErrorMessage,
             Success = Success,
-            FinalError = FinalError
+            FinalError = FinalError,
+            CollapsedEntryIds = CollapsedEntryIds
         };
 }
 

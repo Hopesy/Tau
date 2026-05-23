@@ -157,6 +157,31 @@ public sealed class WebChatService
         string? filePath = null) =>
         CodingAgentJsonlSessionPreviewer.Parse(jsonl, filePath);
 
+    public WebChatSessionDto ImportCodingAgentJsonlSession(
+        string jsonl,
+        string? filePath = null)
+    {
+        var preview = PreviewCodingAgentJsonlSession(jsonl, filePath);
+        var timestamp = preview.Timestamp == default ? DateTimeOffset.UtcNow : preview.Timestamp;
+        var messages = preview.Messages
+            .Select(CreateImportedCodingAgentMessage)
+            .ToArray();
+        var updatedAt = messages.Length == 0
+            ? timestamp
+            : messages.Max(static message => message.Timestamp);
+        var session = new WebChatSessionDto(
+            preview.SessionId,
+            $"Imported CodingAgent session {preview.SessionId}",
+            _defaultProvider,
+            _defaultModel,
+            timestamp,
+            updatedAt,
+            Persisted: false,
+            messages);
+
+        return ImportSession(session);
+    }
+
     public WebChatSessionDto? CloneSession(string id)
     {
         if (!_sessions.TryGetValue(id, out var existing))
@@ -248,6 +273,55 @@ public sealed class WebChatService
 
             yield return streamEvent;
         }
+    }
+
+    private static WebChatMessageDto CreateImportedCodingAgentMessage(CodingAgentJsonlTimelineMessageDto message)
+    {
+        return new WebChatMessageDto(
+            NormalizeCodingAgentRole(message.Role),
+            BuildCodingAgentImportText(message),
+            message.Timestamp);
+    }
+
+    private static string NormalizeCodingAgentRole(string role) =>
+        string.Equals(role, "user", StringComparison.OrdinalIgnoreCase) ? "user" : "assistant";
+
+    private static string BuildCodingAgentImportText(CodingAgentJsonlTimelineMessageDto message)
+    {
+        var parts = new List<string>();
+        if (!string.IsNullOrWhiteSpace(message.TextPreview))
+        {
+            parts.Add(message.TextPreview.Trim());
+        }
+
+        if (message.HasThinking)
+        {
+            parts.Add("[thinking content present]");
+        }
+
+        if (message.ToolCallCount > 0)
+        {
+            parts.Add($"[tool call: {message.ToolCallCount}]");
+        }
+
+        if (message.ImageCount > 0)
+        {
+            parts.Add($"[image content: {message.ImageCount}]");
+        }
+
+        if (string.Equals(message.Role, "toolResult", StringComparison.OrdinalIgnoreCase))
+        {
+            var id = string.IsNullOrWhiteSpace(message.ToolCallId) ? "unknown" : message.ToolCallId.Trim();
+            var result = message.IsError is null ? "unknown" : message.IsError.Value ? "error" : "ok";
+            parts.Add($"[tool result: {id}; status={result}]");
+        }
+
+        if (parts.Count == 0)
+        {
+            parts.Add($"[coding agent {message.Role} message: {message.EntryId}]");
+        }
+
+        return string.Join("\n\n", parts);
     }
 
     private void Persist()

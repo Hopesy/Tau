@@ -10,6 +10,8 @@ namespace Tau.Agent.Tests;
 
 public class RuntimeDelegationAgentRunnerTests
 {
+    private const string MomRedactEnvironmentVariable = "TAU_MOM_REDACT_SECRETS";
+
     [Fact]
     public async Task ExecuteAsync_AggregatesUsage_StopReason_ToolEventsWithDuration()
     {
@@ -395,6 +397,122 @@ public class RuntimeDelegationAgentRunnerTests
         {
             Directory.Delete(root, recursive: true);
         }
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_RedactsSecretsInPromptDebugAndChannelHistoryByDefault()
+    {
+        using var environment = EnvironmentVariableScope.Acquire();
+        environment.Set(MomRedactEnvironmentVariable, null);
+
+        var model = new Model { Provider = "openai", Id = "gpt-5.4", Name = "GPT-5.4", Api = "openai-responses" };
+        var fake = new ScriptedRunner(model)
+        {
+            Events = [new AgentEndEvent()]
+        };
+
+        var root = Path.Combine(Path.GetTempPath(), $"tau-mom-prompt-redact-{Guid.NewGuid():N}");
+        var workingDirectory = Path.Combine(root, "channel-a");
+        Directory.CreateDirectory(workingDirectory);
+        var historySlackToken = "xoxb-1234567890abcdef";
+        var promptOpenAiKey = "sk-1234567890abcdefghijklmnop";
+        var metadataBearerToken = "Bearer abcdefghijklmnopqrstuvwx";
+        var restoredJwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghijklmnopqrstuvwxyz";
+        await File.WriteAllTextAsync(Path.Combine(workingDirectory, "log.jsonl"), $$"""
+        {"date":"2026-05-05T01:00:00Z","ts":"1","user":"U1","userName":"Alice","text":"history keeps safe words {{historySlackToken}}","isBot":false}
+        """);
+        new CodingAgentSessionStore(Path.Combine(workingDirectory, ChannelSessionStore.ContextFileName)).Save(
+            [new UserMessage($"restored safe words {restoredJwt}")],
+            model,
+            "saved channel session");
+
+        var delegationRunner = new RuntimeDelegationAgentRunner((_, _) => fake);
+
+        string? debugJson = null;
+        try
+        {
+            await delegationRunner.ExecuteAsync(new DelegationRequest(
+                $"current prompt safe words {promptOpenAiKey}",
+                Provider: "openai",
+                Model: "gpt-5.4",
+                WorkingDirectory: workingDirectory,
+                Metadata: new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["authorization"] = metadataBearerToken
+                }));
+            debugJson = await File.ReadAllTextAsync(Path.Combine(workingDirectory, "last_prompt.jsonl"));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+
+        Assert.NotNull(fake.LastInput);
+        Assert.Contains("history keeps safe words", fake.LastInput, StringComparison.Ordinal);
+        Assert.Contains(TauSecretRedactor.Placeholder, fake.LastInput, StringComparison.Ordinal);
+        Assert.DoesNotContain(historySlackToken, fake.LastInput, StringComparison.Ordinal);
+
+        Assert.NotNull(debugJson);
+        Assert.Contains(TauSecretRedactor.Placeholder, debugJson!, StringComparison.Ordinal);
+        Assert.DoesNotContain(promptOpenAiKey, debugJson!, StringComparison.Ordinal);
+        Assert.DoesNotContain(metadataBearerToken, debugJson!, StringComparison.Ordinal);
+        Assert.DoesNotContain(restoredJwt, debugJson!, StringComparison.Ordinal);
+        Assert.Contains("current prompt safe words", debugJson!, StringComparison.Ordinal);
+        Assert.Contains("restored safe words", debugJson!, StringComparison.Ordinal);
+
+        using var debugDocument = JsonDocument.Parse(debugJson!);
+        var debugRoot = debugDocument.RootElement;
+        Assert.Equal($"current prompt safe words {TauSecretRedactor.Placeholder}", debugRoot.GetProperty("newUserMessage").GetString());
+        Assert.Contains(
+            $"authorization: {TauSecretRedactor.Placeholder}",
+            debugRoot.GetProperty("delegationContext").GetString(),
+            StringComparison.Ordinal);
+        var restoredMessage = Assert.Single(debugRoot.GetProperty("messages").EnumerateArray().ToArray());
+        var restoredContent = Assert.Single(restoredMessage.GetProperty("content").EnumerateArray().ToArray());
+        Assert.Equal($"restored safe words {TauSecretRedactor.Placeholder}", restoredContent.GetProperty("text").GetString());
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_WhenMomRedactionDisabled_PreservesPromptDebugSecrets()
+    {
+        using var environment = EnvironmentVariableScope.Acquire();
+        environment.Set(MomRedactEnvironmentVariable, "0");
+
+        var model = new Model { Provider = "openai", Id = "gpt-5.4", Name = "GPT-5.4", Api = "openai-responses" };
+        var fake = new ScriptedRunner(model)
+        {
+            Events = [new AgentEndEvent()]
+        };
+
+        var root = Path.Combine(Path.GetTempPath(), $"tau-mom-prompt-redact-off-{Guid.NewGuid():N}");
+        var workingDirectory = Path.Combine(root, "channel-a");
+        Directory.CreateDirectory(workingDirectory);
+        var openAiKey = "sk-abcdefghijklmnopqrstuvwx1234";
+        var bearerToken = "Bearer abcdefghijklmnopqrstuvwx";
+        var delegationRunner = new RuntimeDelegationAgentRunner((_, _) => fake);
+
+        string? debugJson = null;
+        try
+        {
+            await delegationRunner.ExecuteAsync(new DelegationRequest(
+                $"raw current prompt {openAiKey}",
+                Provider: "openai",
+                Model: "gpt-5.4",
+                WorkingDirectory: workingDirectory,
+                Metadata: new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["authorization"] = bearerToken
+                }));
+            debugJson = await File.ReadAllTextAsync(Path.Combine(workingDirectory, "last_prompt.jsonl"));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+
+        Assert.NotNull(debugJson);
+        Assert.Contains(openAiKey, debugJson!, StringComparison.Ordinal);
+        Assert.Contains(bearerToken, debugJson!, StringComparison.Ordinal);
     }
 
     [Fact]

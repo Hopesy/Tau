@@ -8,6 +8,8 @@ namespace Tau.Agent.Tests;
 
 public class FileDelegationProcessorTests
 {
+    private const string MomRedactEnvironmentVariable = "TAU_MOM_REDACT_SECRETS";
+
     [Fact]
     public async Task ProcessPendingAsync_WithJsonRequest_WritesStructuredOutboxAndArchivesInput()
     {
@@ -119,6 +121,105 @@ public class FileDelegationProcessorTests
         Assert.EndsWith("delegation.json", archived, StringComparison.OrdinalIgnoreCase);
 
         Directory.Delete(root, recursive: true);
+    }
+
+    [Fact]
+    public async Task ProcessPendingAsync_RedactsSecretsInChannelLogByDefault()
+    {
+        using var environment = EnvironmentVariableScope.Acquire();
+        environment.Set(MomRedactEnvironmentVariable, null);
+
+        var root = Path.Combine(Path.GetTempPath(), $"tau-mom-redact-{Guid.NewGuid():N}");
+        var inbox = Path.Combine(root, "inbox");
+        var outbox = Path.Combine(root, "outbox");
+        var archive = Path.Combine(root, "archive");
+        Directory.CreateDirectory(inbox);
+
+        var openAiKey = "sk-1234567890abcdefghijklmnop";
+        var bearerToken = "Bearer abcdefghijklmnopqrstuvwx";
+        var slackToken = "xoxb-1234567890abcdef";
+        var requestPath = Path.Combine(inbox, "delegation.txt");
+        await File.WriteAllTextAsync(requestPath, $"keep visible request text {openAiKey} Authorization: {bearerToken}");
+
+        var options = new MomOptions
+        {
+            InboxPath = inbox,
+            OutboxPath = outbox,
+            ArchivePath = archive,
+            DefaultWorkingDirectory = root,
+            DefaultProvider = "openai",
+            DefaultModel = "gpt-5.4"
+        };
+
+        var processor = CreateProcessor(options, new FakeDelegationAgentRunner
+        {
+            Response = $"keep visible response text {slackToken}"
+        });
+
+        try
+        {
+            var processed = await processor.ProcessPendingAsync();
+
+            Assert.Equal(1, processed);
+            var logText = await File.ReadAllTextAsync(Path.Combine(root, "log.jsonl"));
+            Assert.Contains(TauSecretRedactor.Placeholder, logText, StringComparison.Ordinal);
+            Assert.DoesNotContain(openAiKey, logText, StringComparison.Ordinal);
+            Assert.DoesNotContain(bearerToken, logText, StringComparison.Ordinal);
+            Assert.DoesNotContain(slackToken, logText, StringComparison.Ordinal);
+            Assert.Contains("keep visible request text", logText, StringComparison.Ordinal);
+            Assert.Contains("keep visible response text", logText, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ProcessPendingAsync_WhenMomRedactionDisabled_PreservesChannelLogSecrets()
+    {
+        using var environment = EnvironmentVariableScope.Acquire();
+        environment.Set(MomRedactEnvironmentVariable, "0");
+
+        var root = Path.Combine(Path.GetTempPath(), $"tau-mom-redact-off-{Guid.NewGuid():N}");
+        var inbox = Path.Combine(root, "inbox");
+        var outbox = Path.Combine(root, "outbox");
+        var archive = Path.Combine(root, "archive");
+        Directory.CreateDirectory(inbox);
+
+        var openAiKey = "sk-abcdefghijklmnopqrstuvwx1234";
+        var slackToken = "xoxb-abcdef1234567890";
+        var requestPath = Path.Combine(inbox, "delegation.txt");
+        await File.WriteAllTextAsync(requestPath, $"debug raw {openAiKey}");
+
+        var options = new MomOptions
+        {
+            InboxPath = inbox,
+            OutboxPath = outbox,
+            ArchivePath = archive,
+            DefaultWorkingDirectory = root,
+            DefaultProvider = "openai",
+            DefaultModel = "gpt-5.4"
+        };
+
+        var processor = CreateProcessor(options, new FakeDelegationAgentRunner
+        {
+            Response = $"raw response {slackToken}"
+        });
+
+        try
+        {
+            var processed = await processor.ProcessPendingAsync();
+
+            Assert.Equal(1, processed);
+            var logText = await File.ReadAllTextAsync(Path.Combine(root, "log.jsonl"));
+            Assert.Contains(openAiKey, logText, StringComparison.Ordinal);
+            Assert.Contains(slackToken, logText, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
     }
 
     [Fact]
@@ -424,12 +525,13 @@ public class FileDelegationProcessorTests
     {
         public List<DelegationRequest> Requests { get; } = [];
         public string? Error { get; init; }
+        public string Response { get; init; } = "stub-response";
 
         public Task<DelegationExecution> ExecuteAsync(DelegationRequest request, CancellationToken cancellationToken = default)
         {
             Requests.Add(request);
             return Task.FromResult(new DelegationExecution(
-                Error is null ? "stub-response" : string.Empty,
+                Error is null ? Response : string.Empty,
                 [
                     new DelegationToolEvent("start", "ls", "tool-1"),
                     new DelegationToolEvent("end", "ls", "tool-1", IsError: false, DurationMs: 42)

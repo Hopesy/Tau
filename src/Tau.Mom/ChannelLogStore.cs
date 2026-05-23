@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
+using Tau.Ai;
 
 namespace Tau.Mom;
 
@@ -177,12 +178,13 @@ internal static class ChannelLogStore
         }
 
         var excludeTs = GetCurrentMessageTimestamp(metadata);
+        var redactor = MomSecretRedaction.CreateRedactor();
         var messages = new List<ChannelLogMessage>();
         try
         {
             foreach (var line in File.ReadLines(logPath))
             {
-                var message = TryParseChannelLogMessage(line, excludeTs);
+                var message = TryParseChannelLogMessage(line, excludeTs, redactor);
                 if (message is not null)
                 {
                     messages.Add(message);
@@ -221,7 +223,8 @@ internal static class ChannelLogStore
 
     private static void AppendJsonLine(StringBuilder builder, ChannelLogEntry entry)
     {
-        builder.Append(JsonSerializer.Serialize(entry, MomCompactJsonContext.Default.ChannelLogEntry));
+        var json = JsonSerializer.Serialize(entry, MomCompactJsonContext.Default.ChannelLogEntry);
+        builder.Append(MomSecretRedaction.RedactJson(json));
         builder.AppendLine();
     }
 
@@ -408,7 +411,7 @@ internal static class ChannelLogStore
         };
     }
 
-    private static ChannelLogMessage? TryParseChannelLogMessage(string line, string? excludeTs)
+    private static ChannelLogMessage? TryParseChannelLogMessage(string line, string? excludeTs, TauSecretRedactor redactor)
     {
         if (string.IsNullOrWhiteSpace(line))
         {
@@ -441,6 +444,7 @@ internal static class ChannelLogStore
                 return null;
             }
 
+            text = MomSecretRedaction.RedactText(text, redactor);
             var user = TryGetString(root, "userName");
             if (string.IsNullOrWhiteSpace(user))
             {

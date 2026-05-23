@@ -12,6 +12,7 @@ public static class WebUiApplication
     private const string JsonlContentType = "application/x-ndjson; charset=utf-8";
     private const string JsonlImportProblemTitle = "Invalid WebUi JSONL import";
     private const string CodingAgentJsonlPreviewProblemTitle = "Invalid CodingAgent JSONL preview";
+    private const string CodingAgentJsonlImportProblemTitle = "Invalid CodingAgent JSONL import";
     private static readonly char[] PortableInvalidFileNameChars = ['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
 
     public static IEndpointRouteBuilder MapWebUiEndpoints(this IEndpointRouteBuilder app)
@@ -175,6 +176,33 @@ public static class WebUiApplication
             {
                 return JsonlProblem(
                     CodingAgentJsonlPreviewProblemTitle,
+                    ex.Code,
+                    ex.Message,
+                    StatusCodes.Status400BadRequest,
+                    ex.LineNumber);
+            }
+        });
+        app.MapPost("/api/sessions/import.coding-agent-jsonl", async Task<IResult> (HttpRequest request, WebChatService chat, CancellationToken cancellationToken) =>
+        {
+            if (!IsSupportedJsonlImportContentType(request.ContentType))
+            {
+                return JsonlProblem(
+                    CodingAgentJsonlImportProblemTitle,
+                    "unsupported_content_type",
+                    $"Unsupported CodingAgent JSONL import content type '{request.ContentType}'. Use application/x-ndjson.",
+                    StatusCodes.Status415UnsupportedMediaType);
+            }
+
+            try
+            {
+                using var reader = new StreamReader(request.Body, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+                var jsonl = await reader.ReadToEndAsync(cancellationToken).ConfigureAwait(false);
+                return Results.Ok(chat.ImportCodingAgentJsonlSession(jsonl));
+            }
+            catch (CodingAgentJsonlPreviewException ex)
+            {
+                return JsonlProblem(
+                    CodingAgentJsonlImportProblemTitle,
                     ex.Code,
                     ex.Message,
                     StatusCodes.Status400BadRequest,

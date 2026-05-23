@@ -849,6 +849,11 @@ public sealed class CodingAgentCommandRouter
             }
 
             var result = _treeNavigator(items, CancellationToken.None).GetAwaiter().GetResult();
+            if (result.FoldedEntryIds is not null)
+            {
+                _treeSessionController.AppendTreeFoldState(result.FoldedEntryIds);
+            }
+
             return result.SelectedEntryId is null
                 ? CodingAgentCommandResult.Status("tree navigator cancelled")
                 : CodingAgentCommandResult.Status($"selected entry {result.SelectedEntryId}");
