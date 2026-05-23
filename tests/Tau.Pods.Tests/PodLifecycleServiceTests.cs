@@ -11,6 +11,12 @@ public class PodLifecycleServiceTests
             Task.FromResult(new PodExecService.ProcessExecutionResult(exitCode, stdout, stderr)));
     }
 
+    private static string RemoteCommand(System.Diagnostics.ProcessStartInfo psi)
+    {
+        Assert.Equal(8, psi.ArgumentList.Count);
+        return psi.ArgumentList[7];
+    }
+
     [Fact]
     public async Task DeployAsync_NormalizesDeploymentNameAndShellQuotesMetadata()
     {
@@ -28,10 +34,11 @@ public class PodLifecycleServiceTests
         Assert.True(result.Success);
         Assert.Equal("name-with-spaces--rm", result.DeploymentName);
         Assert.NotNull(captured);
-        Assert.Contains("printf %s", captured!.Arguments, StringComparison.Ordinal);
-        Assert.Contains("~/.tau_pods/name-with-spaces--rm.json", captured!.Arguments, StringComparison.Ordinal);
-        Assert.DoesNotContain("model/'quoted", captured.Arguments, StringComparison.Ordinal);
-        Assert.DoesNotContain("~/.tau_pods/name with spaces; rm.json", captured.Arguments, StringComparison.Ordinal);
+        var command = RemoteCommand(captured!);
+        Assert.Contains("printf %s", command, StringComparison.Ordinal);
+        Assert.Contains("~/.tau_pods/name-with-spaces--rm.json", command, StringComparison.Ordinal);
+        Assert.DoesNotContain("model/'quoted", command, StringComparison.Ordinal);
+        Assert.DoesNotContain("~/.tau_pods/name with spaces; rm.json", command, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -159,8 +166,9 @@ public class PodLifecycleServiceTests
         Assert.NotNull(result.Output);
         Assert.Contains("line2", result.Output);
         Assert.NotNull(captured);
-        Assert.Contains("journalctl -u 'tau-pod-llama-70b' -n 50", captured!.Arguments, StringComparison.Ordinal);
-        Assert.Contains("~/.tau_pods/llama-70b.log", captured.Arguments, StringComparison.Ordinal);
+        var command = RemoteCommand(captured!);
+        Assert.Contains("journalctl -u 'tau-pod-llama-70b' -n 50", command, StringComparison.Ordinal);
+        Assert.Contains("~/.tau_pods/llama-70b.log", command, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -178,7 +186,7 @@ public class PodLifecycleServiceTests
         await service.LogsAsync(pod, "deployment");
 
         Assert.NotNull(captured);
-        Assert.Contains(" -n 100 ", captured!.Arguments, StringComparison.Ordinal);
+        Assert.Contains(" -n 100 ", RemoteCommand(captured!), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -246,7 +254,7 @@ public class PodLifecycleServiceTests
         Assert.Equal("qwen7", result.Deployments[1].Name);
         Assert.Contains("Found 2", result.Summary);
         Assert.NotNull(captured);
-        Assert.Contains("~/.tau_pods/*.json", captured!.Arguments, StringComparison.Ordinal);
+        Assert.Contains("~/.tau_pods/*.json", RemoteCommand(captured!), StringComparison.Ordinal);
     }
 
     [Fact]

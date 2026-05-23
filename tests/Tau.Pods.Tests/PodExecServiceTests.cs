@@ -8,7 +8,12 @@ public class PodExecServiceTests
     [Fact]
     public async Task ExecuteAsync_WithEndpointPod_ReturnsUnsupported()
     {
-        var service = new PodExecService((_, _) => throw new InvalidOperationException("should not start process"));
+        var processStarted = false;
+        var service = new PodExecService((_, _) =>
+        {
+            processStarted = true;
+            return Task.FromResult(new PodExecService.ProcessExecutionResult(0, string.Empty, string.Empty));
+        });
         var pod = new PodDefinition
         {
             Id = "http-pod",
@@ -23,17 +28,62 @@ public class PodExecServiceTests
         Assert.False(result.Success);
         Assert.Equal("http", result.Transport);
         Assert.Contains("do not support remote exec yet", result.Summary, StringComparison.OrdinalIgnoreCase);
+        Assert.False(processStarted);
     }
 
     [Fact]
-    public async Task ExecuteAsync_WithSshPod_UsesInjectedProcessResult()
+    public async Task ExecuteAsync_WithSshPod_UsesArgumentListInOrder()
     {
         var service = new PodExecService((psi, _) =>
         {
             Assert.Equal("ssh", psi.FileName, ignoreCase: true);
-            Assert.Contains("pods.example.internal", psi.Arguments, StringComparison.Ordinal);
-            Assert.Contains("echo hello", psi.Arguments, StringComparison.Ordinal);
+            Assert.Equal(string.Empty, psi.Arguments);
+            Assert.Equal(
+                new[]
+                {
+                    "-p",
+                    "2222",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ConnectTimeout=5",
+                    "pods.example.internal",
+                    "echo hello"
+                },
+                psi.ArgumentList);
             return Task.FromResult(new PodExecService.ProcessExecutionResult(0, "hello\n", string.Empty));
+        });
+
+        var pod = new PodDefinition
+        {
+            Id = "ssh-pod",
+            Provider = "ssh",
+            Model = "deepseek-r1",
+            Region = "lab",
+            SshHost = "pods.example.internal",
+            SshPort = 2222
+        };
+
+        var result = await service.ExecuteAsync(pod, "echo hello");
+
+        Assert.True(result.Success);
+        Assert.Equal("ssh", result.Transport);
+        Assert.Equal(0, result.ExitCode);
+        Assert.Equal("hello\n", result.StdOut);
+        Assert.Contains("ssh exec ok", result.Summary, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_WithSshPod_PassesComplexCommandAsSingleRemoteArgument()
+    {
+        const string command = "printf \"%s\" \"hello world\"; echo done";
+        var service = new PodExecService((psi, _) =>
+        {
+            Assert.Equal(8, psi.ArgumentList.Count);
+            Assert.Equal(command, psi.ArgumentList[7]);
+            Assert.Contains("\"hello world\"", psi.ArgumentList[7], StringComparison.Ordinal);
+            Assert.Contains("; echo done", psi.ArgumentList[7], StringComparison.Ordinal);
+            return Task.FromResult(new PodExecService.ProcessExecutionResult(0, "done\n", string.Empty));
         });
 
         var pod = new PodDefinition
@@ -46,12 +96,10 @@ public class PodExecServiceTests
             SshPort = 22
         };
 
-        var result = await service.ExecuteAsync(pod, "echo hello");
+        var result = await service.ExecuteAsync(pod, command);
 
         Assert.True(result.Success);
-        Assert.Equal("ssh", result.Transport);
-        Assert.Equal(0, result.ExitCode);
-        Assert.Equal("hello\n", result.StdOut);
-        Assert.Contains("ssh exec ok", result.Summary, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(command, result.Command);
+        Assert.Equal("pods.example.internal:22", result.Target);
     }
 }

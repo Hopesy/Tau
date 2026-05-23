@@ -71,6 +71,20 @@ public static class WebUiApplication
                 "text/html; charset=utf-8",
                 $"{SafeFileName(session.Title)}.tau-webui-session.html");
         });
+        app.MapGet("/api/sessions/{id}/export.jsonl", (string id, WebChatService chat) =>
+        {
+            var session = chat.GetSession(id);
+            if (session is null)
+            {
+                return Results.NotFound();
+            }
+
+            var jsonl = WebChatJsonlExporter.Render(session);
+            return Results.File(
+                Encoding.UTF8.GetBytes(jsonl),
+                "application/x-ndjson; charset=utf-8",
+                $"{SafeFileName(session.Title)}.tau-webui-session.jsonl");
+        });
         app.MapGet("/api/sessions/{id}/export.md", (string id, WebChatService chat) =>
         {
             var session = chat.GetSession(id);

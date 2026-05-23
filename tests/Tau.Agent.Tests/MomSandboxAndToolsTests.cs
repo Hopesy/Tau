@@ -30,6 +30,94 @@ public sealed class MomSandboxAndToolsTests
     }
 
     [Fact]
+    public async Task ValidateAsync_DockerChecksVersionAndRunningContainer()
+    {
+        var runner = new RecordingMomProcessRunner(
+            new MomSandboxExecResult("Docker version 27.0.0", string.Empty, 0),
+            new MomSandboxExecResult("true\n", string.Empty, 0));
+
+        await MomSandboxExecutorFactory.ValidateAsync(MomSandboxConfig.Parse("docker:mom-sandbox"), runner);
+
+        Assert.Collection(
+            runner.Invocations,
+            version =>
+            {
+                Assert.Equal("docker", version.FileName);
+                Assert.Equal(["--version"], version.Arguments);
+                Assert.Null(version.WorkingDirectory);
+                Assert.Null(version.TimeoutSeconds);
+            },
+            inspect =>
+            {
+                Assert.Equal("docker", inspect.FileName);
+                Assert.Equal(["inspect", "-f", "{{.State.Running}}", "mom-sandbox"], inspect.Arguments);
+                Assert.Null(inspect.WorkingDirectory);
+                Assert.Null(inspect.TimeoutSeconds);
+            });
+    }
+
+    [Fact]
+    public async Task ValidateAsync_DockerRejectsStoppedContainer()
+    {
+        var runner = new RecordingMomProcessRunner(
+            new MomSandboxExecResult("Docker version 27.0.0", string.Empty, 0),
+            new MomSandboxExecResult("false\n", string.Empty, 0));
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => MomSandboxExecutorFactory.ValidateAsync(MomSandboxConfig.Parse("docker:mom-sandbox"), runner));
+
+        Assert.Contains("is not running", error.Message, StringComparison.Ordinal);
+        Assert.Equal(2, runner.Invocations.Count);
+    }
+
+    [Fact]
+    public async Task ValidateAsync_DockerRejectsMissingContainer()
+    {
+        var runner = new RecordingMomProcessRunner(
+            new MomSandboxExecResult("Docker version 27.0.0", string.Empty, 0),
+            new MomSandboxExecResult(string.Empty, "No such object", 1));
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => MomSandboxExecutorFactory.ValidateAsync(MomSandboxConfig.Parse("docker:mom-sandbox"), runner));
+
+        Assert.Contains("does not exist", error.Message, StringComparison.Ordinal);
+        Assert.Equal(2, runner.Invocations.Count);
+    }
+
+    [Fact]
+    public async Task ValidateAsync_DockerRejectsMissingDocker()
+    {
+        var runner = new RecordingMomProcessRunner(
+            new MomSandboxExecResult(string.Empty, "Failed to start process: docker", -1));
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => MomSandboxExecutorFactory.ValidateAsync(MomSandboxConfig.Parse("docker:mom-sandbox"), runner));
+
+        Assert.Contains("not installed or not in PATH", error.Message, StringComparison.Ordinal);
+        var invocation = Assert.Single(runner.Invocations);
+        Assert.Equal("docker", invocation.FileName);
+        Assert.Equal(["--version"], invocation.Arguments);
+    }
+
+    [Fact]
+    public async Task DockerExecutor_ExecAsync_ConstructsDockerExecCommand()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"tau-mom-docker-{Guid.NewGuid():N}");
+        var runner = new RecordingMomProcessRunner(new MomSandboxExecResult("ok\n", string.Empty, 0));
+        var executor = new DockerMomSandboxExecutor(MomSandboxConfig.Parse("docker:mom-sandbox"), root, runner);
+
+        var result = await executor.ExecAsync("printf hi", new MomSandboxExecOptions(12));
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Equal("ok\n", result.Stdout);
+        var invocation = Assert.Single(runner.Invocations);
+        Assert.Equal("docker", invocation.FileName);
+        Assert.Equal(["exec", "-w", "/workspace", "mom-sandbox", "sh", "-c", "printf hi"], invocation.Arguments);
+        Assert.Null(invocation.WorkingDirectory);
+        Assert.Equal(12, invocation.TimeoutSeconds);
+    }
+
+    [Fact]
     public async Task HostExecutor_ExecutesInWorkingDirectory()
     {
         var root = Path.Combine(Path.GetTempPath(), $"tau-mom-host-{Guid.NewGuid():N}");
@@ -147,4 +235,38 @@ public sealed class MomSandboxAndToolsTests
     {
         return string.Join("\n", result.Content.OfType<TextContent>().Select(static text => text.Text));
     }
+
+    private sealed class RecordingMomProcessRunner : IMomSandboxProcessRunner
+    {
+        private readonly Queue<MomSandboxExecResult> _results;
+
+        public RecordingMomProcessRunner(params MomSandboxExecResult[] results)
+        {
+            _results = new Queue<MomSandboxExecResult>(results);
+        }
+
+        public List<ProcessInvocation> Invocations { get; } = [];
+
+        public Task<MomSandboxExecResult> RunAsync(
+            string fileName,
+            IReadOnlyList<string> arguments,
+            string? workingDirectory,
+            int? timeoutSeconds,
+            CancellationToken cancellationToken)
+        {
+            Invocations.Add(new ProcessInvocation(fileName, arguments.ToArray(), workingDirectory, timeoutSeconds));
+            if (_results.Count == 0)
+            {
+                throw new InvalidOperationException("No recorded process result is available.");
+            }
+
+            return Task.FromResult(_results.Dequeue());
+        }
+    }
+
+    private sealed record ProcessInvocation(
+        string FileName,
+        string[] Arguments,
+        string? WorkingDirectory,
+        int? TimeoutSeconds);
 }

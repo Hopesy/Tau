@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 using Tau.Pods.Models;
 
 namespace Tau.Pods.Services;
@@ -41,12 +42,19 @@ public sealed class PodExecService
             var psi = new ProcessStartInfo
             {
                 FileName = "ssh",
-                Arguments = $"-p {port} -o BatchMode=yes -o ConnectTimeout=5 {host} \"{command.Replace("\"", "\\\"")}\"",
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 UseShellExecute = false,
                 CreateNoWindow = true
             };
+            psi.ArgumentList.Add("-p");
+            psi.ArgumentList.Add(port.ToString(CultureInfo.InvariantCulture));
+            psi.ArgumentList.Add("-o");
+            psi.ArgumentList.Add("BatchMode=yes");
+            psi.ArgumentList.Add("-o");
+            psi.ArgumentList.Add("ConnectTimeout=5");
+            psi.ArgumentList.Add(host);
+            psi.ArgumentList.Add(command);
 
             var execution = await _executeProcessAsync(psi, cancellationToken).ConfigureAwait(false);
             watch.Stop();

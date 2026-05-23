@@ -26,4 +26,11 @@ internal sealed partial class WebUiNdjsonContext : JsonSerializerContext
 {
 }
 
+[JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]
+[JsonSerializable(typeof(WebChatJsonlSessionHeader))]
+[JsonSerializable(typeof(WebChatJsonlMessageEntry))]
+internal sealed partial class WebUiJsonlContext : JsonSerializerContext
+{
+}
+
 internal sealed record WebChatStoreDocument(IReadOnlyList<WebChatSessionDto> Sessions);

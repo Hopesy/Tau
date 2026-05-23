@@ -168,14 +168,13 @@ tests/
 - session 本地持久化到 `output/webui-sessions.json`
 - 每个 session 可独立配置 provider / model / title
 - `PUT /api/sessions/{id}` 支持会话设置更新和 title rename
-- session delete/export/import 已接入，前端会记住 last-opened session 并在 reload 时恢复仍存在的会话
+- session delete/export/import 已接入，前端会记住 last-opened session 并在 reload 时恢复仍存在的会话；`GET /api/sessions/{id}/export.jsonl` 会把当前 WebChat DTO 导出为 WebUi-local 线性 JSONL transcript，首行 `type=session` header，后续 `type=message` entries 使用稳定 `message-000001` id 和线性 `parentId`
 - `WebUiApplication.MapWebUiEndpoints()` 让生产入口和 endpoint tests 共用同一套 Minimal API route table
 - `WebUiRunnerFactory` 通过显式 provider/model/history 驱动 runtime
 
 当前短板：
 
-- 还缺 browser 级端到端 WebUi flow 测试
-- 当前 WebUi session 仍是 WebChatStore DTO，不是 CodingAgent JSONL session/tree 语义
+- 当前 WebUi session 仍是 WebChatStore DTO；虽已有 WebUi-local 线性 JSONL transcript export，但还不是 CodingAgent JSONL branch/session-tree 语义
 - 还没有 auth login 的完整交互管理层
 - richer rendering 仍未达到完整上游 renderer/template parity
 
@@ -199,7 +198,7 @@ tests/
 - `RuntimeDelegationAgentRunner` 在 `<delegation_context>` 之前还会注入 `<mom_runtime_context>`，把本地 Mom 的 workspace/channel layout、events 文件格式、attachment manifest、memory/log/status 路径和 `[SILENT]` 事件约定写成运行时前缀；这是本地 worker 的语义，不代表 Slack adapter 已接通
 - `ChannelWorkspaceLayout` 统一定义并创建本地 workspace/channel 路径：workspace `MEMORY.md` / `SYSTEM.md` / `skills/` / `events/`，channel `MEMORY.md` / `log.jsonl` / `context.json` / `status.json` / `last_prompt.jsonl` / `attachments/` / `scratch/` / `skills/`；这样后续 Slack adapter、sandbox 和 tool delegation 不再各自拼路径字符串
 - `SYSTEM.md` 的非空内容会以 `system_configuration_log` 注入 `<delegation_context>`；workspace/channel `skills/**/SKILL.md` 会被解析为上游 Agent Skills 风格的 `<available_skills>`，并按 sandbox 映射 skill file path。Mom skills 不是额外 tool 注册；agent 读取 `SKILL.md` 后通过 `bash/read/write/edit` 使用脚本
-- `MomOptions.Sandbox` 支持 `host` 和 `docker:<container>` 配置；当前已实现 host executor、docker command/path translation seam、workspace path authority 和 `bash/read/write/edit/attach` 五个上游同名 Mom tools，默认 runner 会使用 Mom tool set 而不是通用 CodingAgent 工具名。真实 Docker container smoke 仍是后续切片
+- `MomOptions.Sandbox` 支持 `host` 和 `docker:<container>` 配置；当前已实现 host executor、docker command/path translation seam、Docker validate/exec 可注入 `IMomSandboxProcessRunner` seam、workspace path authority 和 `bash/read/write/edit/attach` 五个上游同名 Mom tools，默认 runner 会使用 Mom tool set 而不是通用 CodingAgent 工具名。真实 Docker container smoke 仍是后续切片
 - `ChannelPromptDebugStore` 会在每次调用 runner 前写 `workingDirectory/last_prompt.jsonl`，记录 mom runtime context、delegation context、实际 runner input、恢复的 session messages、当前 user prompt、attachment count 和 image attachment count；这是对齐上游 mom `last_prompt.jsonl` 的本地可观测 seam，不代表图片附件已经以多模态内容传入 runner
 - `workingDirectory/MEMORY.md` 与其父目录的 `MEMORY.md` 会以 current/parent workspace memory 注入同一段上下文
 - `workingDirectory/log.jsonl` 会记录本地 file delegation 的用户请求与 bot 结果；最近非 bot 文本消息会以 channel history 注入同一段上下文，malformed 行、空文本和当前消息 `ts` 会被跳过
@@ -252,11 +251,12 @@ tests/
 - `deploy / stop / restart` 当前基于 SSH pod 的 `~/.tau_pods/<deployment>.json` metadata 管理
 - target command 支持默认 `tau.pods.json` 或显式 config path
 - deployment name 会先规范化再作为远端 metadata 文件名，metadata 内容会 shell quote 后再交给 SSH
+- SSH exec 进程参数使用 `ProcessStartInfo.ArgumentList` 构造，`-p`、`-o`、host 和 remote command 均作为独立 argv 传给系统 `ssh`，避免本地命令行拼接和 quoting 漂移
 
 当前短板：
 
 - 还没有真实模型进程编排、镜像/服务管理和 rollout 状态机
-- 没有完整远端 transport hardening 和真实运维 smoke
+- 还缺更完整远端 transport hardening 和真实运维 smoke
 
 ## 核心类型映射
 
@@ -329,9 +329,9 @@ dotnet run --project src/Tau.Pods/Tau.Pods.csproj --no-build -- probe tau.pods.j
 - `Tau.CodingAgent` `/changelog` 默认从当前工作目录向上查找 `docs/releases/feature-release-notes.md`；`TAU_CODING_AGENT_CHANGELOG_FILE` 可指定替代 release notes 文件，便于打包或测试场景固定来源
 - `TAU_CODING_AGENT_AUTO_COMPACT_TOKENS` 设置为正整数时，会在普通消息进入 runner 前估算当前 session + 待发送输入的 token 数，超过阈值时先调用 compaction；settings/RPC `autoCompactionEnabled=false` 会禁止生产入口自动触发，`true` 只恢复 boolean 开关，不会凭空生成 threshold；`TAU_CODING_AGENT_AUTO_COMPACT_INSTRUCTIONS` 会作为自动摘要的附加指令；`TAU_CODING_AGENT_COMPACT_KEEP_RECENT_TOKENS` 可调整 compaction 后保留 recent messages 的 token budget，默认 20000；`TAU_CODING_AGENT_COMPACT_KEEP_RECENT_MESSAGES` 可调整 token budget 未命中时回落保留的最近 message 数，默认 4；普通 runner exception、取消或错误型 `AgentEndEvent` 会回滚到回合前 snapshot；生产入口优先从 settings 读取 retry 配置，未配置时从 `TAU_CODING_AGENT_AUTO_RETRY_ATTEMPTS` 和 `TAU_CODING_AGENT_AUTO_RETRY_BASE_DELAY_MS` 读取，env 未设置时按 3 次 retry、2000ms exponential base delay 运行；生产入口也会从同一 settings 文件读取 `defaultThinkingLevel` 和 queue mode 并恢复到 runner；`/retry` 可在当前进程里立即改写 retry 策略，`/thinking` 可在当前进程里立即改写 reasoning level，并在 JSONL tree / HTML transcript 中保留 retry start/end audit entries；`/session` 会把同一估算器的当前 token、模型 context window、auto threshold budget 和 retry policy 展示出来
 - `Tau.WebUi` 的 `/api/status`、`/api/catalog`、`POST /api/sessions` 已可返回真实 JSON
-- `Tau.WebUi` 的 session 已可持久化到 `output/webui-sessions.json`
+- `Tau.WebUi` 的 session 已可持久化到 `output/webui-sessions.json`，并支持 JSON / HTML / Markdown / WebUi-local JSONL transcript 导出
 - `Tau.Mom --once` 已可真实处理结构化请求并写出带 `provider/model/workingDirectory/title/metadata/attachments` 的 outbox；file request、due `events/*.json` 与 Slack event JSON 会先映射为 `MomChannelMessage`，再生成统一 `DelegationRequest`；本地存在的 attachment 会 staging 到 `workingDirectory/attachments/` 并保留 original/local 元数据；runner 执行前会创建 `scratch/`、workspace/channel `skills/`、`attachments/` 和 `events/`，输入会合并 request context、workspace memory、`SYSTEM.md`、Agent Skills prompt inventory 与最近 channel history，并通过 `context.json` 恢复/保存同一 workdir 的 runtime messages；调用 runner 前会写 `workingDirectory/last_prompt.jsonl` 作为 prompt/debug 快照；默认 runner 工具集已切到 Mom 的 `bash/read/write/edit/attach`，host sandbox 可本地执行，docker sandbox 当前固定配置和路径/命令构造 seam；处理完成后会把本地请求/结果追加到 `workingDirectory/log.jsonl`，并把当前或最近一次运行状态写到 `workingDirectory/status.json`；同一 workdir 内已有新鲜 `running` 状态时会保留 inbox 请求并跳过处理
 - `Tau.Pods probe` 已可对本地 HTTP endpoint 返回真实健康结果
-- `Tau.Pods exec` 已可对 SSH pod 通过系统 `ssh` 客户端执行远程命令
+- `Tau.Pods exec` 已可对 SSH pod 通过系统 `ssh` 客户端执行远程命令，且本地进程 argv 通过 `ArgumentList` 构造
 - `Tau.slnx` 当前已可 build；如果本机 `bash` 入口不可用，可按 `scripts/verify-dotnet.sh` 中的项目顺序直接执行等价 `dotnet build/test` 命令
 - `scripts/verify-dotnet.ps1` 当前提供 Windows PowerShell 等价验证入口，覆盖与 `verify-dotnet.sh` 相同的 restore/build/test 项目顺序，并支持可选 `-RunSmoke` 执行 `WebUi` 和 `Mom --once` 的最小运行态 smoke

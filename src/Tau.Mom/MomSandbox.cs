@@ -44,6 +44,16 @@ public sealed record MomSandboxExecResult(
     int ExitCode,
     bool TimedOut = false);
 
+public interface IMomSandboxProcessRunner
+{
+    Task<MomSandboxExecResult> RunAsync(
+        string fileName,
+        IReadOnlyList<string> arguments,
+        string? workingDirectory,
+        int? timeoutSeconds,
+        CancellationToken cancellationToken);
+}
+
 public interface IMomSandboxExecutor
 {
     MomSandboxConfig Config { get; }
@@ -62,31 +72,46 @@ public interface IMomSandboxExecutor
 
 public static class MomSandboxExecutorFactory
 {
-    public static IMomSandboxExecutor Create(MomOptions options, string hostWorkingDirectory)
+    public static IMomSandboxExecutor Create(
+        MomOptions options,
+        string hostWorkingDirectory,
+        IMomSandboxProcessRunner? processRunner = null)
     {
         ArgumentNullException.ThrowIfNull(options);
-        return Create(MomSandboxConfig.Parse(options.Sandbox), hostWorkingDirectory);
+        return Create(MomSandboxConfig.Parse(options.Sandbox), hostWorkingDirectory, processRunner);
     }
 
-    public static IMomSandboxExecutor Create(MomSandboxConfig config, string hostWorkingDirectory)
+    public static IMomSandboxExecutor Create(
+        MomSandboxConfig config,
+        string hostWorkingDirectory,
+        IMomSandboxProcessRunner? processRunner = null)
     {
         var fullWorkingDirectory = Path.GetFullPath(hostWorkingDirectory);
         return config.Kind switch
         {
-            MomSandboxKind.Host => new HostMomSandboxExecutor(config, fullWorkingDirectory),
-            MomSandboxKind.Docker => new DockerMomSandboxExecutor(config, fullWorkingDirectory),
+            MomSandboxKind.Host => new HostMomSandboxExecutor(config, fullWorkingDirectory, processRunner),
+            MomSandboxKind.Docker => new DockerMomSandboxExecutor(config, fullWorkingDirectory, processRunner),
             _ => throw new ArgumentOutOfRangeException(nameof(config), config.Kind, "Unknown Mom sandbox kind.")
         };
     }
 
-    public static async Task ValidateAsync(MomSandboxConfig config, CancellationToken cancellationToken = default)
+    public static Task ValidateAsync(MomSandboxConfig config, CancellationToken cancellationToken = default)
+    {
+        return ValidateAsync(config, null, cancellationToken);
+    }
+
+    public static async Task ValidateAsync(
+        MomSandboxConfig config,
+        IMomSandboxProcessRunner? processRunner,
+        CancellationToken cancellationToken = default)
     {
         if (config.Kind == MomSandboxKind.Host)
         {
             return;
         }
 
-        var dockerVersion = await ProcessRunner.RunAsync(
+        var runner = processRunner ?? ProcessRunner.Instance;
+        var dockerVersion = await runner.RunAsync(
                 "docker",
                 ["--version"],
                 null,
@@ -98,7 +123,7 @@ public static class MomSandboxExecutorFactory
             throw new InvalidOperationException("Docker is not installed or not in PATH.");
         }
 
-        var inspect = await ProcessRunner.RunAsync(
+        var inspect = await runner.RunAsync(
                 "docker",
                 ["inspect", "-f", "{{.State.Running}}", config.Container!],
                 null,
@@ -119,11 +144,17 @@ public static class MomSandboxExecutorFactory
 
 public sealed class HostMomSandboxExecutor : IMomSandboxExecutor
 {
-    public HostMomSandboxExecutor(MomSandboxConfig config, string hostWorkingDirectory)
+    private readonly IMomSandboxProcessRunner _processRunner;
+
+    public HostMomSandboxExecutor(
+        MomSandboxConfig config,
+        string hostWorkingDirectory,
+        IMomSandboxProcessRunner? processRunner = null)
     {
         Config = config;
         HostWorkingDirectory = Path.GetFullPath(hostWorkingDirectory);
         WorkspacePath = HostWorkingDirectory;
+        _processRunner = processRunner ?? ProcessRunner.Instance;
     }
 
     public MomSandboxConfig Config { get; }
@@ -155,7 +186,7 @@ public sealed class HostMomSandboxExecutor : IMomSandboxExecutor
         CancellationToken cancellationToken = default)
     {
         var isWindows = OperatingSystem.IsWindows();
-        return ProcessRunner.RunAsync(
+        return _processRunner.RunAsync(
             isWindows ? "cmd.exe" : "sh",
             isWindows ? ["/c", command] : ["-c", command],
             HostWorkingDirectory,
@@ -174,7 +205,12 @@ public sealed class HostMomSandboxExecutor : IMomSandboxExecutor
 
 public sealed class DockerMomSandboxExecutor : IMomSandboxExecutor
 {
-    public DockerMomSandboxExecutor(MomSandboxConfig config, string hostWorkingDirectory)
+    private readonly IMomSandboxProcessRunner _processRunner;
+
+    public DockerMomSandboxExecutor(
+        MomSandboxConfig config,
+        string hostWorkingDirectory,
+        IMomSandboxProcessRunner? processRunner = null)
     {
         if (config.Kind != MomSandboxKind.Docker || string.IsNullOrWhiteSpace(config.Container))
         {
@@ -184,6 +220,7 @@ public sealed class DockerMomSandboxExecutor : IMomSandboxExecutor
         Config = config;
         HostWorkingDirectory = Path.GetFullPath(hostWorkingDirectory);
         WorkspacePath = "/workspace";
+        _processRunner = processRunner ?? ProcessRunner.Instance;
     }
 
     public MomSandboxConfig Config { get; }
@@ -239,7 +276,7 @@ public sealed class DockerMomSandboxExecutor : IMomSandboxExecutor
         MomSandboxExecOptions? options = null,
         CancellationToken cancellationToken = default)
     {
-        return ProcessRunner.RunAsync(
+        return _processRunner.RunAsync(
             "docker",
             ["exec", "-w", WorkspacePath, Config.Container!, "sh", "-c", command],
             null,
@@ -248,9 +285,15 @@ public sealed class DockerMomSandboxExecutor : IMomSandboxExecutor
     }
 }
 
-internal static class ProcessRunner
+internal sealed class ProcessRunner : IMomSandboxProcessRunner
 {
-    public static async Task<MomSandboxExecResult> RunAsync(
+    public static ProcessRunner Instance { get; } = new();
+
+    private ProcessRunner()
+    {
+    }
+
+    public async Task<MomSandboxExecResult> RunAsync(
         string fileName,
         IReadOnlyList<string> arguments,
         string? workingDirectory,
@@ -276,7 +319,16 @@ internal static class ProcessRunner
             psi.WorkingDirectory = workingDirectory;
         }
 
-        using var process = Process.Start(psi);
+        Process? process;
+        try
+        {
+            process = Process.Start(psi);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception or FileNotFoundException or DirectoryNotFoundException or UnauthorizedAccessException)
+        {
+            return new MomSandboxExecResult(string.Empty, $"Failed to start process: {fileName}. {ex.Message}", -1);
+        }
+
         if (process is null)
         {
             return new MomSandboxExecResult(string.Empty, $"Failed to start process: {fileName}", -1);
