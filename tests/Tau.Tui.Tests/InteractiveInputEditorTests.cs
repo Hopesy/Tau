@@ -104,6 +104,56 @@ public sealed class InteractiveInputEditorTests
     }
 
     [Fact]
+    public async Task ReadLineAsync_ModelCycleActionReturnsActionAndPreservesDraft()
+    {
+        var reader = new FakeKeyReader();
+        foreach (var ch in "draft")
+        {
+            reader.Enqueue(ch);
+        }
+
+        reader.EnqueueRaw(new ConsoleKeyInfo('\x10', ConsoleKey.P, shift: false, alt: false, control: true));
+
+        var renderer = new FakeRenderer();
+        var history = new InputHistory();
+        var editor = new InteractiveInputEditor(reader, renderer, history: history);
+
+        var result = await editor.ReadLineAsync("> ");
+
+        Assert.Equal(InputResultKind.Action, result.Kind);
+        Assert.Equal(EditorAction.CycleModelForward, result.Action);
+        Assert.Null(result.Text);
+        Assert.Equal("draft", editor.Buffer.Draft);
+        Assert.Equal(0, history.Count);
+        Assert.Equal(1, renderer.CommitCalls);
+    }
+
+    [Fact]
+    public async Task ReadLineAsync_ModelSelectActionReturnsActionAndPreservesDraft()
+    {
+        var reader = new FakeKeyReader();
+        foreach (var ch in "draft")
+        {
+            reader.Enqueue(ch);
+        }
+
+        reader.EnqueueRaw(new ConsoleKeyInfo('\x0C', ConsoleKey.L, shift: false, alt: false, control: true));
+
+        var renderer = new FakeRenderer();
+        var history = new InputHistory();
+        var editor = new InteractiveInputEditor(reader, renderer, history: history);
+
+        var result = await editor.ReadLineAsync("> ");
+
+        Assert.Equal(InputResultKind.Action, result.Kind);
+        Assert.Equal(EditorAction.SelectModel, result.Action);
+        Assert.Null(result.Text);
+        Assert.Equal("draft", editor.Buffer.Draft);
+        Assert.Equal(0, history.Count);
+        Assert.Equal(1, renderer.CommitCalls);
+    }
+
+    [Fact]
     public async Task ReadLineAsync_UpArrowRecallsHistory()
     {
         var history = new InputHistory();

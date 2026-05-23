@@ -2,6 +2,7 @@ using Tau.Agent;
 using Tau.Agent.Runtime;
 using Tau.Ai;
 using Tau.Ai.Auth;
+using Tau.Ai.Auth.OAuth;
 using Tau.CodingAgent.Runtime;
 
 namespace Tau.CodingAgent.Tests;
@@ -19,7 +20,8 @@ public sealed class FakeCodingAgentRunner : ICodingAgentRunner
                 Id = "gpt-5.4",
                 Name = "GPT-5.4",
                 Api = "openai-responses",
-                ContextWindow = 128_000
+                ContextWindow = 128_000,
+                Reasoning = true
             }
         ],
         ["google"] =
@@ -30,7 +32,8 @@ public sealed class FakeCodingAgentRunner : ICodingAgentRunner
                 Id = "gemini-2.5-pro",
                 Name = "Gemini 2.5 Pro",
                 Api = "google-gemini",
-                ContextWindow = 1_048_576
+                ContextWindow = 1_048_576,
+                Reasoning = true
             }
         ]
     };
@@ -71,6 +74,28 @@ public sealed class FakeCodingAgentRunner : ICodingAgentRunner
     public IReadOnlyList<Model> GetModels(string provider) =>
         _models.TryGetValue(provider, out var models) ? models : [];
 
+    public void SetModelReasoning(string provider, string modelId, bool reasoning)
+    {
+        if (!_models.TryGetValue(provider, out var models))
+        {
+            throw new KeyNotFoundException($"Provider '{provider}' is not registered.");
+        }
+
+        var index = models.FindIndex(model => model.Id.Equals(modelId, StringComparison.OrdinalIgnoreCase));
+        if (index < 0)
+        {
+            throw new KeyNotFoundException($"Model '{provider}/{modelId}' is not registered.");
+        }
+
+        var updated = models[index] with { Reasoning = reasoning };
+        models[index] = updated;
+        if (Model.Provider.Equals(provider, StringComparison.OrdinalIgnoreCase) &&
+            Model.Id.Equals(modelId, StringComparison.OrdinalIgnoreCase))
+        {
+            Model = updated;
+        }
+    }
+
     public Model SelectModel(string? providerId, string? modelId)
     {
         var provider = string.IsNullOrWhiteSpace(providerId) ? Model.Provider : providerId;
@@ -93,19 +118,42 @@ public sealed class FakeCodingAgentRunner : ICodingAgentRunner
     }
 
     public ProviderAuthStatus AuthStatus { get; set; } = new("openai", false, "none", false, false, "No credentials found.");
+    public Dictionary<string, ProviderAuthStatus> AuthStatuses { get; } = new(StringComparer.OrdinalIgnoreCase);
 
-    public ProviderAuthStatus GetAuthStatus(string? providerId = null) =>
-        AuthStatus with { Provider = string.IsNullOrWhiteSpace(providerId) ? Model.Provider : providerId };
+    public void ConfigureAuth(params string[] providers)
+    {
+        foreach (var provider in providers)
+        {
+            AuthStatuses[provider] = new ProviderAuthStatus(
+                provider,
+                true,
+                "environment",
+                false,
+                false,
+                "Credentials are available.");
+        }
+    }
 
-    public Tau.Ai.Auth.OAuth.IOAuthProvider? GetOAuthProvider(string providerId) => OAuthProvider;
+    public ProviderAuthStatus GetAuthStatus(string? providerId = null)
+    {
+        var provider = string.IsNullOrWhiteSpace(providerId) ? Model.Provider : providerId;
+        return AuthStatuses.TryGetValue(provider, out var status)
+            ? status with { Provider = provider }
+            : AuthStatus with { Provider = provider };
+    }
 
-    public void SaveOAuthCredentials(string providerId, Tau.Ai.Auth.OAuth.OAuthCredentials credentials)
+    public IOAuthProvider? GetOAuthProvider(string providerId) =>
+        OAuthProvider is not null && OAuthProvider.Id.Equals(providerId, StringComparison.OrdinalIgnoreCase)
+            ? OAuthProvider
+            : null;
+
+    public void SaveOAuthCredentials(string providerId, OAuthCredentials credentials)
     {
         SavedOAuthCredentials = (providerId, credentials);
     }
 
-    public Tau.Ai.Auth.OAuth.IOAuthProvider? OAuthProvider { get; set; }
-    public (string ProviderId, Tau.Ai.Auth.OAuth.OAuthCredentials Credentials)? SavedOAuthCredentials { get; private set; }
+    public IOAuthProvider? OAuthProvider { get; set; }
+    public (string ProviderId, OAuthCredentials Credentials)? SavedOAuthCredentials { get; private set; }
 
     public bool Logout(string providerId)
     {

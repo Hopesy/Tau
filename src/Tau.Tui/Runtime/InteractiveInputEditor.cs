@@ -91,6 +91,15 @@ public sealed class InteractiveInputEditor
                     _renderer.Render(new string(chars.ToArray()), cursor);
                     continue;
                 }
+                case EditorAction.CycleModelForward:
+                case EditorAction.CycleModelBackward:
+                case EditorAction.SelectModel:
+                {
+                    var draft = new string(chars.ToArray());
+                    _renderer.Commit();
+                    _buffer.SetDraft(draft);
+                    return InputResult.ForAction(action);
+                }
                 case EditorAction.KillToLineEnd:
                     if (cursor < chars.Count)
                     {
@@ -336,16 +345,18 @@ public sealed class InteractiveInputEditor
     }
 }
 
-public sealed record InputResult(InputResultKind Kind, string? Text)
+public sealed record InputResult(InputResultKind Kind, string? Text, EditorAction Action = EditorAction.None)
 {
     public static InputResult Submitted(string text) => new(InputResultKind.Submitted, text);
     public static InputResult Cancelled { get; } = new(InputResultKind.Cancelled, null);
+    public static InputResult ForAction(EditorAction action) => new(InputResultKind.Action, null, action);
 }
 
 public enum InputResultKind
 {
     Submitted,
-    Cancelled
+    Cancelled,
+    Action
 }
 
 public sealed class InputHistory

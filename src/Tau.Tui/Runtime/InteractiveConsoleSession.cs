@@ -31,23 +31,28 @@ public sealed class InteractiveConsoleSession
 
     public async Task<string?> ReadInputAsync(CancellationToken cancellationToken = default)
     {
+        var result = await ReadInputResultAsync(cancellationToken).ConfigureAwait(false);
+        return result.Kind == InputResultKind.Submitted ? result.Text : null;
+    }
+
+    public async Task<InputResult> ReadInputResultAsync(CancellationToken cancellationToken = default)
+    {
         if (_editor is not null)
         {
             EnsureStreamingLineClosed();
             var result = await _editor.ReadLineAsync("> ", ConsoleColor.Green, cancellationToken).ConfigureAwait(false);
-            if (result.Kind == InputResultKind.Cancelled)
+            if (result.Kind != InputResultKind.Submitted)
             {
-                // Match the Console.ReadLine semantic: returning null means EOF / abort.
-                return null;
+                return result;
             }
 
             InputBuffer.SetDraft(result.Text);
-            return InputBuffer.Commit();
+            return InputResult.Submitted(InputBuffer.Commit());
         }
 
         var input = await _terminal.PromptAsync("> ", ConsoleColor.Green, cancellationToken).ConfigureAwait(false);
         InputBuffer.SetDraft(input);
-        return InputBuffer.Commit();
+        return InputResult.Submitted(InputBuffer.Commit());
     }
 
     public void WriteUserMessage(string message)

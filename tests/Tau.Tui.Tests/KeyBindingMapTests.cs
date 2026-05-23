@@ -27,6 +27,24 @@ public class KeyBindingMapTests
     }
 
     [Fact]
+    public void Default_MapsModelCycleKeys()
+    {
+        var forward = new ConsoleKeyInfo('\x10', ConsoleKey.P, shift: false, alt: false, control: true);
+        Assert.Equal(EditorAction.CycleModelForward, KeyBindingMap.Default.Resolve(forward));
+
+        var backward = new ConsoleKeyInfo('\x10', ConsoleKey.P, shift: true, alt: false, control: true);
+        Assert.Equal(EditorAction.CycleModelBackward, KeyBindingMap.Default.Resolve(backward));
+    }
+
+    [Fact]
+    public void Default_MapsModelSelectKey()
+    {
+        var select = new ConsoleKeyInfo('\x0C', ConsoleKey.L, shift: false, alt: false, control: true);
+
+        Assert.Equal(EditorAction.SelectModel, KeyBindingMap.Default.Resolve(select));
+    }
+
+    [Fact]
     public void Default_ReturnsNoneForUnboundKey()
     {
         var info = new ConsoleKeyInfo('a', ConsoleKey.A, shift: false, alt: false, control: false);

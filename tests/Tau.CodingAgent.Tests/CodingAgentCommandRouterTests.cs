@@ -144,6 +144,40 @@ public class CodingAgentCommandRouterTests
     }
 
     [Fact]
+    public async Task TryHandleAsync_ScopedModelsCommand_PersistsPerEntryThinkingLevels()
+    {
+        var settingsPath = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-scoped-models-thinking-{Guid.NewGuid():N}.json");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var settingsStore = new CodingAgentSettingsStore(settingsPath);
+        var router = new CodingAgentCommandRouter(runner, settingsStore);
+
+        try
+        {
+            var set = await router.TryHandleAsync("/scoped-models set google/gemini-2.5-pro:high");
+            var afterSet = settingsStore.Load();
+            var add = await router.TryHandleAsync("/scoped-models add openai/gpt-5.4:off");
+            var afterAdd = settingsStore.Load();
+
+            Assert.False(set.IsError);
+            Assert.Contains("order: google/gemini-2.5-pro:high", set.Message, StringComparison.Ordinal);
+            Assert.Contains("google/gemini-2.5-pro (enabled, thinking high)", set.Message, StringComparison.Ordinal);
+            Assert.Equal(["google/gemini-2.5-pro:high"], afterSet.EnabledModels);
+
+            Assert.False(add.IsError);
+            Assert.Contains("order: google/gemini-2.5-pro:high, openai/gpt-5.4:off", add.Message, StringComparison.Ordinal);
+            Assert.Contains("openai/gpt-5.4 (enabled, thinking off)", add.Message, StringComparison.Ordinal);
+            Assert.Equal(["google/gemini-2.5-pro:high", "openai/gpt-5.4:off"], afterAdd.EnabledModels);
+        }
+        finally
+        {
+            if (File.Exists(settingsPath))
+            {
+                File.Delete(settingsPath);
+            }
+        }
+    }
+
+    [Fact]
     public async Task TryHandleAsync_ScopedModelsCommand_ReturnsUsageOrModelErrors()
     {
         var settingsPath = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-scoped-models-invalid-{Guid.NewGuid():N}.json");
@@ -164,13 +198,125 @@ public class CodingAgentCommandRouterTests
                 {
                     Assert.True(result.Handled);
                     Assert.True(result.IsError);
-                    Assert.Equal("usage: /scoped-models [set|add|remove|clear|all] [provider/model ...]", result.Message);
+                    Assert.Equal("usage: /scoped-models [current|select|set|add|remove|clear|all] [provider/model ...]", result.Message);
                 });
 
             Assert.True(missingModel.Handled);
             Assert.True(missingModel.IsError);
             Assert.Equal("model 'openai/nope' is not registered", missingModel.Message);
             Assert.Empty(runner.Inputs);
+        }
+        finally
+        {
+            if (File.Exists(settingsPath))
+            {
+                File.Delete(settingsPath);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_ScopedModelsCommand_UsesInjectedSelectorAndPersistsSelection()
+    {
+        var settingsPath = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-scoped-models-selector-{Guid.NewGuid():N}.json");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var settingsStore = new CodingAgentSettingsStore(settingsPath);
+        var selectorStates = new List<CodingAgentScopedModelsSelectorState>();
+        var router = new CodingAgentCommandRouter(
+            runner,
+            settingsStore,
+            scopedModelsSelector: (state, _) =>
+            {
+                selectorStates.Add(state);
+                return Task.FromResult(CodingAgentScopedModelsSelection.Saved(["google/gemini-2.5-pro"]));
+            });
+
+        try
+        {
+            var result = await router.TryHandleAsync("/scoped-models");
+            var saved = settingsStore.Load();
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Contains("scoped models: 1/2 enabled", result.Message, StringComparison.Ordinal);
+            Assert.Equal(["google/gemini-2.5-pro"], saved.EnabledModels);
+            var state = Assert.Single(selectorStates);
+            Assert.Equal(settingsPath, state.SettingsPath);
+            Assert.Equal("openai/gpt-5.4", $"{state.CurrentModel.Provider}/{state.CurrentModel.Id}");
+            Assert.Equal(["google/gemini-2.5-pro", "openai/gpt-5.4"], state.AvailableModels.Select(model => $"{model.Provider}/{model.Id}").ToArray());
+            Assert.Empty(runner.Inputs);
+        }
+        finally
+        {
+            if (File.Exists(settingsPath))
+            {
+                File.Delete(settingsPath);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_ScopedModelsCommand_SelectorPreservesExistingThinkingLevels()
+    {
+        var settingsPath = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-scoped-models-selector-thinking-{Guid.NewGuid():N}.json");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var settingsStore = new CodingAgentSettingsStore(settingsPath);
+        settingsStore.Save(new CodingAgentSettingsSnapshot(
+            null,
+            null,
+            EnabledModels: ["google/gemini-2.5-pro:high"]));
+        var router = new CodingAgentCommandRouter(
+            runner,
+            settingsStore,
+            scopedModelsSelector: (_, _) => Task.FromResult(CodingAgentScopedModelsSelection.Saved(
+                ["google/gemini-2.5-pro", "openai/gpt-5.4"])));
+
+        try
+        {
+            var result = await router.TryHandleAsync("/scoped-models select");
+            var saved = settingsStore.Load();
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Contains("order: google/gemini-2.5-pro:high, openai/gpt-5.4", result.Message, StringComparison.Ordinal);
+            Assert.Equal(["google/gemini-2.5-pro:high", "openai/gpt-5.4"], saved.EnabledModels);
+        }
+        finally
+        {
+            if (File.Exists(settingsPath))
+            {
+                File.Delete(settingsPath);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_ScopedModelsCommand_SelectCancelAndUnavailableDoNotChangeSettings()
+    {
+        var settingsPath = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-scoped-models-selector-cancel-{Guid.NewGuid():N}.json");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var settingsStore = new CodingAgentSettingsStore(settingsPath);
+        settingsStore.Save(new CodingAgentSettingsSnapshot(null, null, EnabledModels: ["google/gemini-2.5-pro"]));
+        var cancelRouter = new CodingAgentCommandRouter(
+            runner,
+            settingsStore,
+            scopedModelsSelector: (_, _) => Task.FromResult(CodingAgentScopedModelsSelection.Cancelled));
+        var unavailableRouter = new CodingAgentCommandRouter(runner, settingsStore);
+
+        try
+        {
+            var cancel = await cancelRouter.TryHandleAsync("/scoped-models select");
+            var unavailable = await unavailableRouter.TryHandleAsync("/scoped-models select");
+
+            Assert.True(cancel.Handled);
+            Assert.False(cancel.IsError);
+            Assert.Equal("scoped model selection cancelled", cancel.Message);
+            Assert.Equal(["google/gemini-2.5-pro"], settingsStore.Load().EnabledModels);
+
+            Assert.True(unavailable.Handled);
+            Assert.True(unavailable.IsError);
+            Assert.Equal("scoped model selector is not available in this session", unavailable.Message);
+            Assert.Equal(["google/gemini-2.5-pro"], settingsStore.Load().EnabledModels);
         }
         finally
         {
@@ -246,6 +392,7 @@ public class CodingAgentCommandRouterTests
         {
             var path = await router.TryHandleAsync("/settings path");
             var current = await router.TryHandleAsync("/settings current");
+            var selectorUnavailable = await router.TryHandleAsync("/settings select");
             var unavailable = await unavailableRouter.TryHandleAsync("/settings");
             var invalid = await router.TryHandleAsync("/settings edit");
 
@@ -264,13 +411,185 @@ public class CodingAgentCommandRouterTests
             Assert.Contains("theme: dark", current.Message, StringComparison.Ordinal);
             Assert.Contains("scoped models: all enabled", current.Message, StringComparison.Ordinal);
 
+            Assert.True(selectorUnavailable.Handled);
+            Assert.True(selectorUnavailable.IsError);
+            Assert.Equal("settings selector is not available in this session", selectorUnavailable.Message);
+
             Assert.True(unavailable.Handled);
             Assert.True(unavailable.IsError);
             Assert.Equal("settings are not available in this session", unavailable.Message);
 
             Assert.True(invalid.Handled);
             Assert.True(invalid.IsError);
-            Assert.Equal("usage: /settings [current|path]", invalid.Message);
+            Assert.Equal("usage: /settings [current|path|select]", invalid.Message);
+            Assert.Empty(runner.Inputs);
+        }
+        finally
+        {
+            if (File.Exists(settingsPath))
+            {
+                File.Delete(settingsPath);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_SettingsCommand_SelectsAndPersistsSettingsWithInjectedSelector()
+    {
+        var settingsPath = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-settings-select-{Guid.NewGuid():N}.json");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>())
+        {
+            ThinkingLevel = ThinkingLevel.Low
+        };
+        var settingsStore = new CodingAgentSettingsStore(settingsPath);
+        var selections = new Queue<string?>(
+        [
+            CodingAgentSettingsSelector.SteeringModeAction,
+            CodingAgentSettingsSelector.FollowUpModeAction,
+            CodingAgentSettingsSelector.TreeFilterModeAction,
+            CodingAgentSettingsSelector.ThinkingLevelAction,
+            CodingAgentSettingsSelector.AutoCompactionAction,
+            null
+        ]);
+        var selectorStates = new List<CodingAgentSettingsSelectorState>();
+        bool? autoCompactionChanged = null;
+        var router = new CodingAgentCommandRouter(
+            runner,
+            settingsStore,
+            autoCompaction: new CodingAgentAutoCompactionOptions(1000),
+            autoCompactionChanged: enabled => autoCompactionChanged = enabled,
+            settingsSelector: (state, _) =>
+            {
+                selectorStates.Add(state);
+                return Task.FromResult(selections.Dequeue());
+            });
+
+        try
+        {
+            settingsStore.Save(new CodingAgentSettingsSnapshot(
+                "openai",
+                "gpt-5.4",
+                RetryMaxAttempts: 4,
+                RetryBaseDelayMilliseconds: 125,
+                DefaultThinkingLevel: "low",
+                SteeringMode: "one-at-a-time",
+                FollowUpMode: "one-at-a-time"));
+
+            var steering = await router.TryHandleAsync("/settings select");
+            var followUp = await router.TryHandleAsync("/settings select");
+            var tree = await router.TryHandleAsync("/settings select");
+            var thinking = await router.TryHandleAsync("/settings select");
+            var autoCompaction = await router.TryHandleAsync("/settings select");
+            var cancel = await router.TryHandleAsync("/settings select");
+            var saved = settingsStore.Load();
+
+            Assert.All(
+                [steering, followUp, tree, thinking, autoCompaction, cancel],
+                result =>
+                {
+                    Assert.True(result.Handled);
+                    Assert.False(result.IsError);
+                });
+            Assert.Equal("steering mode: all", steering.Message);
+            Assert.Equal("follow-up mode: all", followUp.Message);
+            Assert.Equal("tree filter: no-tools", tree.Message);
+            Assert.Equal("thinking: medium", thinking.Message);
+            Assert.Equal("auto compaction: disabled", autoCompaction.Message);
+            Assert.Equal("settings selection cancelled", cancel.Message);
+
+            Assert.Equal(AgentQueueMode.All, runner.SteeringMode);
+            Assert.Equal(AgentQueueMode.All, runner.FollowUpMode);
+            Assert.Equal(ThinkingLevel.Medium, runner.ThinkingLevel);
+            Assert.Equal("all", saved.SteeringMode);
+            Assert.Equal("all", saved.FollowUpMode);
+            Assert.Equal("no-tools", saved.TreeFilterMode);
+            Assert.Equal("medium", saved.DefaultThinkingLevel);
+            Assert.False(saved.AutoCompactionEnabled);
+            Assert.False(autoCompactionChanged);
+            Assert.Equal("openai", saved.DefaultProvider);
+            Assert.Equal("gpt-5.4", saved.DefaultModel);
+            Assert.Equal(4, saved.RetryMaxAttempts);
+            Assert.Equal(125, saved.RetryBaseDelayMilliseconds);
+
+            Assert.Equal(6, selectorStates.Count);
+            Assert.Equal(settingsPath, selectorStates[0].SettingsPath);
+            Assert.True(selectorStates[0].AutoCompactionEnabled);
+            Assert.Equal("dark", selectorStates[0].CurrentTheme);
+            Assert.Empty(runner.Inputs);
+        }
+        finally
+        {
+            if (File.Exists(settingsPath))
+            {
+                File.Delete(settingsPath);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_SettingsCommand_ThemeSelectionUsesThemeSelector()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-settings-theme-select-" + Guid.NewGuid().ToString("N"));
+        var projectThemes = Path.Combine(directory, ".tau", "themes");
+        Directory.CreateDirectory(projectThemes);
+        var themeFile = Path.Combine(projectThemes, "solarized.json");
+        await File.WriteAllTextAsync(themeFile, CodingAgentThemeStoreTests.CreateThemeJson("solarized"));
+        var settingsPath = Path.Combine(directory, "settings.json");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var settingsStore = new CodingAgentSettingsStore(settingsPath);
+        var themeStore = new CodingAgentThemeStore(
+            cwd: directory,
+            userThemesDirectory: Path.Combine(directory, "missing-user-themes"),
+            explicitPaths: []);
+        var router = new CodingAgentCommandRouter(
+            runner,
+            settingsStore,
+            themeStore: themeStore,
+            settingsSelector: (_, _) => Task.FromResult<string?>(CodingAgentSettingsSelector.ThemeAction),
+            themeSelector: (_, _, _) => Task.FromResult<string?>("SOLARIZED"));
+
+        try
+        {
+            var result = await router.TryHandleAsync("/settings select");
+            var saved = settingsStore.Load();
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Equal("theme: solarized", result.Message);
+            Assert.Equal("solarized", saved.Theme);
+            Assert.Empty(runner.Inputs);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_SettingsCommand_ScopedModelsSelectionUsesScopedModelsSelector()
+    {
+        var settingsPath = Path.Combine(Path.GetTempPath(), $"tau-settings-scoped-models-select-{Guid.NewGuid():N}.json");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var settingsStore = new CodingAgentSettingsStore(settingsPath);
+        var router = new CodingAgentCommandRouter(
+            runner,
+            settingsStore,
+            settingsSelector: (_, _) => Task.FromResult<string?>(CodingAgentSettingsSelector.ScopedModelsAction),
+            scopedModelsSelector: (_, _) => Task.FromResult(
+                CodingAgentScopedModelsSelection.Saved(["google/gemini-2.5-pro"])));
+
+        try
+        {
+            var result = await router.TryHandleAsync("/settings select");
+            var saved = settingsStore.Load();
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Contains("scoped models: 1/2 enabled", result.Message, StringComparison.Ordinal);
+            Assert.Equal(["google/gemini-2.5-pro"], saved.EnabledModels);
             Assert.Empty(runner.Inputs);
         }
         finally
@@ -353,6 +672,114 @@ public class CodingAgentCommandRouterTests
     }
 
     [Fact]
+    public async Task TryHandleAsync_ThemeCommand_SelectsPersistedThemeWithInjectedSelector()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-theme-select-router-" + Guid.NewGuid().ToString("N"));
+        var projectThemes = Path.Combine(directory, ".tau", "themes");
+        Directory.CreateDirectory(projectThemes);
+        var themeFile = Path.Combine(projectThemes, "solarized.json");
+        await File.WriteAllTextAsync(themeFile, CodingAgentThemeStoreTests.CreateThemeJson("solarized"));
+        var settingsPath = Path.Combine(directory, "settings.json");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var settingsStore = new CodingAgentSettingsStore(settingsPath);
+        var themeStore = new CodingAgentThemeStore(
+            cwd: directory,
+            userThemesDirectory: Path.Combine(directory, "missing-user-themes"),
+            explicitPaths: []);
+        CodingAgentThemeStatus? selectorStatus = null;
+        string? selectorCurrentTheme = null;
+        var router = new CodingAgentCommandRouter(
+            runner,
+            settingsStore,
+            themeStore: themeStore,
+            themeSelector: (status, currentTheme, _) =>
+            {
+                selectorStatus = status;
+                selectorCurrentTheme = currentTheme;
+                return Task.FromResult<string?>("SOLARIZED");
+            });
+
+        try
+        {
+            settingsStore.Save(new CodingAgentSettingsSnapshot(
+                "openai",
+                "gpt-5.4",
+                "no-tools",
+                RetryMaxAttempts: 4,
+                RetryBaseDelayMilliseconds: 125,
+                DefaultThinkingLevel: "high",
+                EnabledModels: ["google/gemini-2.5-pro"]));
+
+            var result = await router.TryHandleAsync("/theme select");
+            var afterSelect = settingsStore.Load();
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Equal("theme: solarized", result.Message);
+            Assert.Equal("solarized", afterSelect.Theme);
+            Assert.Equal("openai", afterSelect.DefaultProvider);
+            Assert.Equal("gpt-5.4", afterSelect.DefaultModel);
+            Assert.Equal("no-tools", afterSelect.TreeFilterMode);
+            Assert.Equal(4, afterSelect.RetryMaxAttempts);
+            Assert.Equal(125, afterSelect.RetryBaseDelayMilliseconds);
+            Assert.Equal("high", afterSelect.DefaultThinkingLevel);
+            Assert.Equal(["google/gemini-2.5-pro"], afterSelect.EnabledModels);
+            Assert.NotNull(selectorStatus);
+            Assert.Contains(selectorStatus.Themes, theme => theme.Name == "solarized");
+            Assert.Equal("dark", selectorCurrentTheme);
+            Assert.Empty(runner.Inputs);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_ThemeCommand_SelectCancelDoesNotChangeSettings()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-theme-select-cancel-" + Guid.NewGuid().ToString("N"));
+        var settingsPath = Path.Combine(directory, "settings.json");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var settingsStore = new CodingAgentSettingsStore(settingsPath);
+        var themeStore = new CodingAgentThemeStore(
+            cwd: directory,
+            userThemesDirectory: Path.Combine(directory, "missing-user-themes"),
+            explicitPaths: []);
+        var router = new CodingAgentCommandRouter(
+            runner,
+            settingsStore,
+            themeStore: themeStore,
+            themeSelector: (_, _, _) => Task.FromResult<string?>(null));
+
+        try
+        {
+            settingsStore.Save(new CodingAgentSettingsSnapshot(
+                "openai",
+                "gpt-5.4",
+                Theme: "light"));
+
+            var result = await router.TryHandleAsync("/theme select");
+            var afterCancel = settingsStore.Load();
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Equal("theme selection cancelled", result.Message);
+            Assert.Equal("light", afterCancel.Theme);
+            Assert.Equal("openai", afterCancel.DefaultProvider);
+            Assert.Equal("gpt-5.4", afterCancel.DefaultModel);
+            Assert.Empty(runner.Inputs);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
     public async Task TryHandleAsync_ThemeCommand_ReturnsUsageAvailabilityAndMissingThemeErrors()
     {
         var settingsPath = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-theme-errors-{Guid.NewGuid():N}.json");
@@ -372,6 +799,7 @@ public class CodingAgentCommandRouterTests
             var unavailableSettings = await unavailableRouter.TryHandleAsync("/theme");
             var unavailableDiscovery = await noThemeStoreRouter.TryHandleAsync("/theme list");
             var missingTheme = await router.TryHandleAsync("/theme set missing");
+            var unavailableSelector = await router.TryHandleAsync("/theme select");
             var invalid = await router.TryHandleAsync("/theme set");
             var extra = await router.TryHandleAsync("/theme clear dark");
 
@@ -387,13 +815,17 @@ public class CodingAgentCommandRouterTests
             Assert.True(missingTheme.IsError);
             Assert.Equal("theme 'missing' is not available", missingTheme.Message);
 
+            Assert.True(unavailableSelector.Handled);
+            Assert.True(unavailableSelector.IsError);
+            Assert.Equal("theme selector is not available in this session", unavailableSelector.Message);
+
             Assert.All(
                 [invalid, extra],
                 result =>
                 {
                     Assert.True(result.Handled);
                     Assert.True(result.IsError);
-                    Assert.Equal("usage: /theme [current|list|set|clear] [name]", result.Message);
+                    Assert.Equal("usage: /theme [current|list|select|set|clear] [name]", result.Message);
                 });
             Assert.Empty(runner.Inputs);
         }
@@ -600,6 +1032,275 @@ public class CodingAgentCommandRouterTests
     }
 
     [Fact]
+    public async Task TryHandleAsync_AuthSelect_UsesSelectorAndReturnsSelectedProviderStatus()
+    {
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>())
+        {
+            AuthStatus = new("openai", false, "none", false, true, "No credentials found.")
+        };
+        var selectorStates = new List<CodingAgentAuthSelectorState>();
+        var router = new CodingAgentCommandRouter(
+            runner,
+            authSelector: (state, _) =>
+            {
+                selectorStates.Add(state);
+                return Task.FromResult<string?>("google");
+            });
+
+        var result = await router.TryHandleAsync("/auth select");
+
+        Assert.True(result.Handled);
+        Assert.False(result.IsError);
+        Assert.Equal("auth google: missing via none. No credentials found.", result.Message);
+        var state = Assert.Single(selectorStates);
+        Assert.Equal("openai", state.CurrentProvider);
+        Assert.Equal(["google", "openai"], state.Providers.Select(status => status.Provider).Order(StringComparer.OrdinalIgnoreCase));
+        Assert.Empty(runner.Inputs);
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_AuthSelect_CancelAndUnavailableDoNotInvokeRunner()
+    {
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var cancelRouter = new CodingAgentCommandRouter(
+            runner,
+            authSelector: (_, _) => Task.FromResult<string?>(null));
+        var unavailableRouter = new CodingAgentCommandRouter(runner);
+
+        var cancelled = await cancelRouter.TryHandleAsync("/auth select");
+        var unavailable = await unavailableRouter.TryHandleAsync("/auth select");
+
+        Assert.True(cancelled.Handled);
+        Assert.False(cancelled.IsError);
+        Assert.Equal("auth selection cancelled", cancelled.Message);
+        Assert.True(unavailable.Handled);
+        Assert.True(unavailable.IsError);
+        Assert.Equal("auth selector is not available in this session", unavailable.Message);
+        Assert.Empty(runner.Inputs);
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_AuthCurrentAndExplicitProvider_ReturnStatuses()
+    {
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>())
+        {
+            AuthStatus = new("openai", true, "environment", false, false, "Credentials are available.")
+        };
+        var router = new CodingAgentCommandRouter(runner);
+
+        var current = await router.TryHandleAsync("/auth current");
+        var explicitProvider = await router.TryHandleAsync("/auth anthropic");
+
+        Assert.True(current.Handled);
+        Assert.False(current.IsError);
+        Assert.Equal("auth openai: configured via environment. Credentials are available.", current.Message);
+        Assert.True(explicitProvider.Handled);
+        Assert.False(explicitProvider.IsError);
+        Assert.Equal("auth anthropic: configured via environment. Credentials are available.", explicitProvider.Message);
+        Assert.Empty(runner.Inputs);
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_LoginBareCommandWithSelector_UsesSelectedOAuthProvider()
+    {
+        var oauthProvider = new FakeOAuthProvider { Id = "google", Name = "Google" };
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>())
+        {
+            AuthStatus = new("openai", false, "none", false, true, "No credentials found."),
+            OAuthProvider = oauthProvider
+        };
+        var selectorStates = new List<CodingAgentAuthSelectorState>();
+        var router = new CodingAgentCommandRouter(
+            runner,
+            authSelector: (state, _) =>
+            {
+                selectorStates.Add(state);
+                return Task.FromResult<string?>("google");
+            });
+
+        var result = await router.TryHandleAsync("/login");
+
+        Assert.True(result.Handled);
+        Assert.False(result.IsError);
+        Assert.Equal("login google: authenticated successfully. Credentials saved to auth.json.", result.Message);
+        Assert.Equal(1, oauthProvider.LoginCalls);
+        Assert.NotNull(oauthProvider.LastCallbacks);
+        var saved = runner.SavedOAuthCredentials;
+        Assert.True(saved.HasValue);
+        Assert.Equal("google", saved.Value.ProviderId);
+        var state = Assert.Single(selectorStates);
+        var provider = Assert.Single(state.Providers);
+        Assert.Equal("google", provider.Provider);
+        Assert.Empty(runner.Inputs);
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_LoginSelector_CancelAndUnavailableDoNotStartOAuth()
+    {
+        var oauthProvider = new FakeOAuthProvider { Id = "google", Name = "Google" };
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>())
+        {
+            AuthStatus = new("openai", false, "none", false, true, "No credentials found."),
+            OAuthProvider = oauthProvider
+        };
+        var cancelRouter = new CodingAgentCommandRouter(
+            runner,
+            authSelector: (_, _) => Task.FromResult<string?>(null));
+        var unavailableRouter = new CodingAgentCommandRouter(runner);
+
+        var cancelled = await cancelRouter.TryHandleAsync("/login");
+        var unavailable = await unavailableRouter.TryHandleAsync("/login select");
+
+        Assert.True(cancelled.Handled);
+        Assert.False(cancelled.IsError);
+        Assert.Equal("login selection cancelled", cancelled.Message);
+        Assert.True(unavailable.Handled);
+        Assert.True(unavailable.IsError);
+        Assert.Equal("login selector is not available in this session", unavailable.Message);
+        Assert.Equal(0, oauthProvider.LoginCalls);
+        Assert.Null(runner.SavedOAuthCredentials);
+        Assert.Empty(runner.Inputs);
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_LoginBareCommandWithoutSelector_PreservesCurrentProviderLogin()
+    {
+        var oauthProvider = new FakeOAuthProvider { Id = "openai" };
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>())
+        {
+            AuthStatus = new("openai", false, "none", false, true, "No credentials found."),
+            OAuthProvider = oauthProvider
+        };
+        var router = new CodingAgentCommandRouter(runner);
+
+        var result = await router.TryHandleAsync("/login");
+
+        Assert.True(result.Handled);
+        Assert.False(result.IsError);
+        Assert.Equal("login openai: authenticated successfully. Credentials saved to auth.json.", result.Message);
+        Assert.Equal(1, oauthProvider.LoginCalls);
+        var saved = runner.SavedOAuthCredentials;
+        Assert.True(saved.HasValue);
+        Assert.Equal("openai", saved.Value.ProviderId);
+        Assert.Empty(runner.Inputs);
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_LoginExplicitProvider_DoesNotUseSelector()
+    {
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>())
+        {
+            AuthStatus = new("openai", true, "auth.json api_key", false, false, "API key entry found in auth.json.")
+        };
+        var selectorCalls = 0;
+        var router = new CodingAgentCommandRouter(
+            runner,
+            authSelector: (_, _) =>
+            {
+                selectorCalls++;
+                return Task.FromResult<string?>("google");
+            });
+
+        var result = await router.TryHandleAsync("/login anthropic");
+
+        Assert.True(result.Handled);
+        Assert.False(result.IsError);
+        Assert.Equal("auth anthropic: already configured via auth.json api_key.", result.Message);
+        Assert.Equal(0, selectorCalls);
+        Assert.Empty(runner.Inputs);
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_LogoutBareCommandWithSelector_UsesSelectedOAuthProvider()
+    {
+        var oauthProvider = new FakeOAuthProvider { Id = "google", Name = "Google" };
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>())
+        {
+            AuthStatus = new("openai", false, "none", false, false, "No credentials found."),
+            OAuthProvider = oauthProvider,
+            LogoutResult = true
+        };
+        runner.AuthStatuses["google"] = new("google", true, "auth.json oauth", true, true, "OAuth credentials found in auth.json.");
+        var selectorStates = new List<CodingAgentAuthSelectorState>();
+        var router = new CodingAgentCommandRouter(
+            runner,
+            authSelector: (state, _) =>
+            {
+                selectorStates.Add(state);
+                return Task.FromResult<string?>("google");
+            });
+
+        var result = await router.TryHandleAsync("/logout");
+
+        Assert.True(result.Handled);
+        Assert.False(result.IsError);
+        Assert.Equal(
+            "logout google: auth.json credentials removed. Environment variables and models.json credentials are unchanged.",
+            result.Message);
+        Assert.Equal(["google"], runner.LoggedOutProviders);
+        var state = Assert.Single(selectorStates);
+        var provider = Assert.Single(state.Providers);
+        Assert.Equal("google", provider.Provider);
+        Assert.True(provider.UsesOAuth);
+        Assert.Empty(runner.Inputs);
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_LogoutSelector_CancelUnavailableAndNoOAuthDoNotRemoveCredentials()
+    {
+        var oauthProvider = new FakeOAuthProvider { Id = "google", Name = "Google" };
+        var cancelRunner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>())
+        {
+            OAuthProvider = oauthProvider,
+            LogoutResult = true
+        };
+        cancelRunner.AuthStatuses["google"] = new("google", true, "auth.json oauth", true, true, "OAuth credentials found in auth.json.");
+        var cancelRouter = new CodingAgentCommandRouter(
+            cancelRunner,
+            authSelector: (_, _) => Task.FromResult<string?>(null));
+        var unavailableRunner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>())
+        {
+            OAuthProvider = oauthProvider
+        };
+        unavailableRunner.AuthStatuses["google"] = new("google", true, "auth.json oauth", true, true, "OAuth credentials found in auth.json.");
+        var unavailableRouter = new CodingAgentCommandRouter(unavailableRunner);
+        var noOAuthRunner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>())
+        {
+            AuthStatus = new("openai", true, "auth.json api_key", false, false, "API key entry found in auth.json."),
+            OAuthProvider = oauthProvider
+        };
+        var selectorCalls = 0;
+        var noOAuthRouter = new CodingAgentCommandRouter(
+            noOAuthRunner,
+            authSelector: (_, _) =>
+            {
+                selectorCalls++;
+                return Task.FromResult<string?>("google");
+            });
+
+        var cancelled = await cancelRouter.TryHandleAsync("/logout");
+        var unavailable = await unavailableRouter.TryHandleAsync("/logout select");
+        var noOAuth = await noOAuthRouter.TryHandleAsync("/logout select");
+
+        Assert.True(cancelled.Handled);
+        Assert.False(cancelled.IsError);
+        Assert.Equal("logout selection cancelled", cancelled.Message);
+        Assert.Empty(cancelRunner.LoggedOutProviders);
+        Assert.True(unavailable.Handled);
+        Assert.True(unavailable.IsError);
+        Assert.Equal("logout selector is not available in this session", unavailable.Message);
+        Assert.Empty(unavailableRunner.LoggedOutProviders);
+        Assert.True(noOAuth.Handled);
+        Assert.False(noOAuth.IsError);
+        Assert.Equal("No OAuth providers logged in. Use /login first.", noOAuth.Message);
+        Assert.Equal(0, selectorCalls);
+        Assert.Empty(noOAuthRunner.LoggedOutProviders);
+        Assert.Empty(cancelRunner.Inputs);
+        Assert.Empty(unavailableRunner.Inputs);
+        Assert.Empty(noOAuthRunner.Inputs);
+    }
+
+    [Fact]
     public async Task TryHandleAsync_LogoutCommand_RemovesDefaultProviderAuthJsonCredentials()
     {
         var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>())
@@ -628,7 +1329,14 @@ public class CodingAgentCommandRouterTests
             AuthStatus = new("openai", false, "none", false, false, "No credentials found."),
             LogoutResult = false
         };
-        var router = new CodingAgentCommandRouter(runner);
+        var selectorCalls = 0;
+        var router = new CodingAgentCommandRouter(
+            runner,
+            authSelector: (_, _) =>
+            {
+                selectorCalls++;
+                return Task.FromResult<string?>("google");
+            });
 
         var result = await router.TryHandleAsync("/logout anthropic");
 
@@ -638,6 +1346,7 @@ public class CodingAgentCommandRouterTests
             "logout anthropic: no auth.json credentials found. Environment variables and models.json credentials are unchanged.",
             result.Message);
         Assert.Equal(["anthropic"], runner.LoggedOutProviders);
+        Assert.Equal(0, selectorCalls);
         Assert.Empty(runner.Inputs);
     }
 
@@ -651,7 +1360,7 @@ public class CodingAgentCommandRouterTests
 
         Assert.True(result.Handled);
         Assert.True(result.IsError);
-        Assert.Equal("usage: /logout [provider]", result.Message);
+        Assert.Equal("usage: /logout [select|provider]", result.Message);
         Assert.Empty(runner.LoggedOutProviders);
         Assert.Empty(runner.Inputs);
     }
@@ -2744,6 +3453,82 @@ public class CodingAgentCommandRouterTests
     }
 
     [Fact]
+    public async Task TryHandleAsync_ThinkingCommand_ClampsToCurrentModelCapabilities()
+    {
+        var settingsPath = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-thinking-clamp-{Guid.NewGuid():N}.json");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.SelectModel("google", "gemini-2.5-pro");
+        var settingsStore = new CodingAgentSettingsStore(settingsPath);
+        var router = new CodingAgentCommandRouter(runner, settingsStore);
+
+        try
+        {
+            var xhigh = await router.TryHandleAsync("/thinking xhigh");
+
+            Assert.True(xhigh.Handled);
+            Assert.False(xhigh.IsError);
+            Assert.Equal("thinking: high", xhigh.Message);
+            Assert.Equal(ThinkingLevel.High, runner.ThinkingLevel);
+            Assert.Equal("high", settingsStore.Load().DefaultThinkingLevel);
+
+            runner.SetModelReasoning("google", "gemini-2.5-pro", false);
+            var nonReasoning = await router.TryHandleAsync("/thinking high");
+
+            Assert.True(nonReasoning.Handled);
+            Assert.False(nonReasoning.IsError);
+            Assert.Equal("thinking: off", nonReasoning.Message);
+            Assert.Null(runner.ThinkingLevel);
+            Assert.Null(settingsStore.Load().DefaultThinkingLevel);
+            Assert.Empty(runner.Inputs);
+        }
+        finally
+        {
+            if (File.Exists(settingsPath))
+            {
+                File.Delete(settingsPath);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_ThinkingCommand_CycleSkipsXhighWhenUnsupported()
+    {
+        var settingsPath = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-thinking-cycle-clamp-{Guid.NewGuid():N}.json");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>())
+        {
+            ThinkingLevel = ThinkingLevel.Medium
+        };
+        runner.SelectModel("google", "gemini-2.5-pro");
+        var settingsStore = new CodingAgentSettingsStore(settingsPath);
+        var router = new CodingAgentCommandRouter(runner, settingsStore);
+
+        try
+        {
+            var high = await router.TryHandleAsync("/thinking cycle");
+
+            Assert.False(high.IsError);
+            Assert.Equal("thinking: high", high.Message);
+            Assert.Equal(ThinkingLevel.High, runner.ThinkingLevel);
+            Assert.Equal("high", settingsStore.Load().DefaultThinkingLevel);
+
+            var off = await router.TryHandleAsync("/thinking cycle");
+
+            Assert.False(off.IsError);
+            Assert.Equal("thinking: off", off.Message);
+            Assert.Null(runner.ThinkingLevel);
+            Assert.Null(settingsStore.Load().DefaultThinkingLevel);
+            Assert.Empty(runner.Inputs);
+        }
+        finally
+        {
+            if (File.Exists(settingsPath))
+            {
+                File.Delete(settingsPath);
+            }
+        }
+    }
+
+    [Fact]
     public async Task TryHandleAsync_ThinkingCommand_OffClearsRuntimeAndSettings()
     {
         var settingsPath = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-thinking-off-{Guid.NewGuid():N}.json");
@@ -2776,6 +3561,182 @@ public class CodingAgentCommandRouterTests
     }
 
     [Fact]
+    public async Task TryHandleAsync_ThinkingCommand_SelectUsesSelectorAndPersistsSettings()
+    {
+        var settingsPath = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-thinking-select-{Guid.NewGuid():N}.json");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>())
+        {
+            ThinkingLevel = ThinkingLevel.Low
+        };
+        var settingsStore = new CodingAgentSettingsStore(settingsPath);
+        settingsStore.Save(new CodingAgentSettingsSnapshot("openai", "gpt-5.4", "no-tools", DefaultThinkingLevel: "low"));
+        var selectorStates = new List<CodingAgentThinkingSelectorState>();
+        var router = new CodingAgentCommandRouter(
+            runner,
+            settingsStore,
+            thinkingSelector: (state, _) =>
+            {
+                selectorStates.Add(state);
+                return Task.FromResult<string?>("high");
+            });
+
+        try
+        {
+            var result = await router.TryHandleAsync("/thinking select");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Equal("thinking: high", result.Message);
+            Assert.Equal(ThinkingLevel.High, runner.ThinkingLevel);
+            Assert.Single(selectorStates);
+            Assert.Equal(ThinkingLevel.Low, selectorStates[0].CurrentLevel);
+            Assert.Equal(CodingAgentThinkingSelector.DefaultLevels, selectorStates[0].AvailableLevels);
+
+            var settings = settingsStore.Load();
+            Assert.Equal("openai", settings.DefaultProvider);
+            Assert.Equal("gpt-5.4", settings.DefaultModel);
+            Assert.Equal("no-tools", settings.TreeFilterMode);
+            Assert.Equal("high", settings.DefaultThinkingLevel);
+            Assert.Empty(runner.Inputs);
+        }
+        finally
+        {
+            if (File.Exists(settingsPath))
+            {
+                File.Delete(settingsPath);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_ThinkingCommand_SelectUsesModelAvailableLevelsAndClampsSelection()
+    {
+        var settingsPath = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-thinking-select-clamp-{Guid.NewGuid():N}.json");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.SelectModel("google", "gemini-2.5-pro");
+        var settingsStore = new CodingAgentSettingsStore(settingsPath);
+        settingsStore.Save(new CodingAgentSettingsSnapshot("google", "gemini-2.5-pro"));
+        var selectorStates = new List<CodingAgentThinkingSelectorState>();
+        var router = new CodingAgentCommandRouter(
+            runner,
+            settingsStore,
+            thinkingSelector: (state, _) =>
+            {
+                selectorStates.Add(state);
+                return Task.FromResult<string?>("xhigh");
+            });
+
+        try
+        {
+            var result = await router.TryHandleAsync("/thinking select");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Equal("thinking: high", result.Message);
+            Assert.Equal(ThinkingLevel.High, runner.ThinkingLevel);
+            Assert.Single(selectorStates);
+            Assert.Equal(["off", "minimal", "low", "medium", "high"], selectorStates[0].AvailableLevels);
+            Assert.Equal("high", settingsStore.Load().DefaultThinkingLevel);
+            Assert.Empty(runner.Inputs);
+        }
+        finally
+        {
+            if (File.Exists(settingsPath))
+            {
+                File.Delete(settingsPath);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_ThinkingCommand_SelectOffClearsRuntimeAndSettings()
+    {
+        var settingsPath = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-thinking-select-off-{Guid.NewGuid():N}.json");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>())
+        {
+            ThinkingLevel = ThinkingLevel.ExtraHigh
+        };
+        var settingsStore = new CodingAgentSettingsStore(settingsPath);
+        settingsStore.Save(new CodingAgentSettingsSnapshot(null, null, DefaultThinkingLevel: "xhigh"));
+        var router = new CodingAgentCommandRouter(
+            runner,
+            settingsStore,
+            thinkingSelector: (_, _) => Task.FromResult<string?>("off"));
+
+        try
+        {
+            var result = await router.TryHandleAsync("/thinking select");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Equal("thinking: off", result.Message);
+            Assert.Null(runner.ThinkingLevel);
+            Assert.Null(settingsStore.Load().DefaultThinkingLevel);
+            Assert.Empty(runner.Inputs);
+        }
+        finally
+        {
+            if (File.Exists(settingsPath))
+            {
+                File.Delete(settingsPath);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_ThinkingCommand_SelectUnavailableCancelAndInvalidDoNotChangeSettings()
+    {
+        var settingsPath = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-thinking-select-errors-{Guid.NewGuid():N}.json");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>())
+        {
+            ThinkingLevel = ThinkingLevel.Low
+        };
+        var settingsStore = new CodingAgentSettingsStore(settingsPath);
+        settingsStore.Save(new CodingAgentSettingsSnapshot(null, null, DefaultThinkingLevel: "low"));
+
+        try
+        {
+            var unavailableRouter = new CodingAgentCommandRouter(runner, settingsStore);
+            var unavailable = await unavailableRouter.TryHandleAsync("/thinking select");
+
+            var cancelRouter = new CodingAgentCommandRouter(
+                runner,
+                settingsStore,
+                thinkingSelector: (_, _) => Task.FromResult<string?>(null));
+            var cancelled = await cancelRouter.TryHandleAsync("/thinking select");
+
+            var invalidRouter = new CodingAgentCommandRouter(
+                runner,
+                settingsStore,
+                thinkingSelector: (_, _) => Task.FromResult<string?>("turbo"));
+            var invalid = await invalidRouter.TryHandleAsync("/thinking select");
+
+            Assert.True(unavailable.Handled);
+            Assert.True(unavailable.IsError);
+            Assert.Equal("thinking selector is not available in this session", unavailable.Message);
+
+            Assert.True(cancelled.Handled);
+            Assert.False(cancelled.IsError);
+            Assert.Equal("thinking selection cancelled", cancelled.Message);
+
+            Assert.True(invalid.Handled);
+            Assert.True(invalid.IsError);
+            Assert.Equal("thinking selector returned unsupported level 'turbo'", invalid.Message);
+
+            Assert.Equal(ThinkingLevel.Low, runner.ThinkingLevel);
+            Assert.Equal("low", settingsStore.Load().DefaultThinkingLevel);
+            Assert.Empty(runner.Inputs);
+        }
+        finally
+        {
+            if (File.Exists(settingsPath))
+            {
+                File.Delete(settingsPath);
+            }
+        }
+    }
+
+    [Fact]
     public async Task TryHandleAsync_ThinkingCommand_InvalidArgumentsReturnUsage()
     {
         var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
@@ -2790,7 +3751,7 @@ public class CodingAgentCommandRouterTests
             {
                 Assert.True(result.Handled);
                 Assert.True(result.IsError);
-                Assert.Equal("usage: /thinking [current|cycle|off|minimal|low|medium|high|xhigh]", result.Message);
+                Assert.Equal("usage: /thinking [current|select|cycle|off|minimal|low|medium|high|xhigh]", result.Message);
             });
         Assert.Empty(runner.Inputs);
     }
@@ -3034,6 +3995,7 @@ public class CodingAgentCommandRouterTests
     {
         var settingsPath = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-router-{Guid.NewGuid():N}.json");
         var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.ConfigureAuth("google");
         var settingsStore = new CodingAgentSettingsStore(settingsPath);
         var router = new CodingAgentCommandRouter(runner, settingsStore);
 
@@ -3049,6 +4011,570 @@ public class CodingAgentCommandRouterTests
             var settings = settingsStore.Load();
             Assert.Equal("google", settings.DefaultProvider);
             Assert.Equal("gemini-2.5-pro", settings.DefaultModel);
+        }
+        finally
+        {
+            if (File.Exists(settingsPath))
+            {
+                File.Delete(settingsPath);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_ModelSelectCommand_UsesSelectorAndPersistsDefaultModel()
+    {
+        var settingsPath = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-router-model-select-{Guid.NewGuid():N}.json");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.ConfigureAuth("openai", "google");
+        var settingsStore = new CodingAgentSettingsStore(settingsPath);
+        CodingAgentModelSelectorState? capturedState = null;
+        var router = new CodingAgentCommandRouter(
+            runner,
+            settingsStore,
+            modelSelector: (state, _) =>
+            {
+                capturedState = state;
+                return Task.FromResult<string?>("google/gemini-2.5-pro");
+            });
+
+        try
+        {
+            var result = await router.TryHandleAsync("/model select gemini");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Equal("model: google/gemini-2.5-pro", result.Message);
+            Assert.Equal("gemini", capturedState?.InitialFilter);
+            Assert.Equal(2, capturedState?.AvailableModels.Count);
+            Assert.Null(capturedState?.ScopedModels);
+            Assert.Equal("google", runner.Model.Provider);
+            Assert.Equal("gemini-2.5-pro", runner.Model.Id);
+
+            var settings = settingsStore.Load();
+            Assert.Equal("google", settings.DefaultProvider);
+            Assert.Equal("gemini-2.5-pro", settings.DefaultModel);
+            Assert.Empty(runner.Inputs);
+        }
+        finally
+        {
+            if (File.Exists(settingsPath))
+            {
+                File.Delete(settingsPath);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_ModelSelectCommand_FiltersModelsWithoutConfiguredAuth()
+    {
+        var settingsPath = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-router-model-auth-{Guid.NewGuid():N}.json");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.ConfigureAuth("openai");
+        var settingsStore = new CodingAgentSettingsStore(settingsPath);
+        settingsStore.Save(new CodingAgentSettingsSnapshot(
+            null,
+            null,
+            EnabledModels: ["openai/gpt-5.4", "google/gemini-2.5-pro"]));
+        CodingAgentModelSelectorState? capturedState = null;
+        var router = new CodingAgentCommandRouter(
+            runner,
+            settingsStore,
+            modelSelector: (state, _) =>
+            {
+                capturedState = state;
+                return Task.FromResult<string?>("openai/gpt-5.4");
+            });
+
+        try
+        {
+            var result = await router.TryHandleAsync("/model select");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Equal("model: openai/gpt-5.4", result.Message);
+            Assert.NotNull(capturedState);
+            var state = capturedState!;
+            Assert.Equal(["openai/gpt-5.4"], state.AvailableModels.Select(model => $"{model.Provider}/{model.Id}").ToArray());
+            Assert.NotNull(state.ScopedModels);
+            Assert.Equal(["openai/gpt-5.4"], state.ScopedModels.Select(model => $"{model.Provider}/{model.Id}").ToArray());
+            Assert.Equal("openai", runner.Model.Provider);
+            Assert.Equal("gpt-5.4", runner.Model.Id);
+
+            var settings = settingsStore.Load();
+            Assert.Equal("openai", settings.DefaultProvider);
+            Assert.Equal("gpt-5.4", settings.DefaultModel);
+            Assert.Equal(["openai/gpt-5.4", "google/gemini-2.5-pro"], settings.EnabledModels);
+        }
+        finally
+        {
+            if (File.Exists(settingsPath))
+            {
+                File.Delete(settingsPath);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_ModelSelectCommand_RejectsSelectorModelWithoutConfiguredAuth()
+    {
+        var settingsPath = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-router-model-auth-{Guid.NewGuid():N}.json");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.ConfigureAuth("openai");
+        var settingsStore = new CodingAgentSettingsStore(settingsPath);
+        var router = new CodingAgentCommandRouter(
+            runner,
+            settingsStore,
+            modelSelector: (_, _) => Task.FromResult<string?>("google/gemini-2.5-pro"));
+
+        try
+        {
+            var result = await router.TryHandleAsync("/model select");
+
+            Assert.True(result.Handled);
+            Assert.True(result.IsError);
+            Assert.Equal("model 'google/gemini-2.5-pro' does not have configured auth", result.Message);
+            Assert.Equal("openai", runner.Model.Provider);
+            Assert.Equal("gpt-5.4", runner.Model.Id);
+            Assert.Null(settingsStore.Load().DefaultProvider);
+        }
+        finally
+        {
+            if (File.Exists(settingsPath))
+            {
+                File.Delete(settingsPath);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_BareModelCommand_UsesSelectorWhenAvailable()
+    {
+        var settingsPath = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-router-model-select-{Guid.NewGuid():N}.json");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.ConfigureAuth("openai", "google");
+        var settingsStore = new CodingAgentSettingsStore(settingsPath);
+        var router = new CodingAgentCommandRouter(
+            runner,
+            settingsStore,
+            modelSelector: (_, _) => Task.FromResult<string?>("google/gemini-2.5-pro"));
+
+        try
+        {
+            var result = await router.TryHandleAsync("/model");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Equal("model: google/gemini-2.5-pro", result.Message);
+            Assert.Equal("google", runner.Model.Provider);
+            Assert.Equal("gemini-2.5-pro", runner.Model.Id);
+        }
+        finally
+        {
+            if (File.Exists(settingsPath))
+            {
+                File.Delete(settingsPath);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_BareModelCommand_WithoutSelectorShowsCurrentModel()
+    {
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var router = new CodingAgentCommandRouter(runner);
+
+        var result = await router.TryHandleAsync("/model");
+
+        Assert.True(result.Handled);
+        Assert.False(result.IsError);
+        Assert.Equal("model: openai/gpt-5.4", result.Message);
+        Assert.Equal("openai", runner.Model.Provider);
+        Assert.Equal("gpt-5.4", runner.Model.Id);
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_ModelSelectCommand_WithoutSelectorReturnsError()
+    {
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var router = new CodingAgentCommandRouter(runner);
+
+        var result = await router.TryHandleAsync("/model select");
+
+        Assert.True(result.Handled);
+        Assert.True(result.IsError);
+        Assert.Equal("model selector is not available in this session", result.Message);
+        Assert.Equal("openai", runner.Model.Provider);
+        Assert.Empty(runner.Inputs);
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_ModelSelectCommand_CancelDoesNotChangeModel()
+    {
+        var settingsPath = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-router-model-select-{Guid.NewGuid():N}.json");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.ConfigureAuth("openai");
+        var settingsStore = new CodingAgentSettingsStore(settingsPath);
+        var router = new CodingAgentCommandRouter(
+            runner,
+            settingsStore,
+            modelSelector: (_, _) => Task.FromResult<string?>(null));
+
+        try
+        {
+            var result = await router.TryHandleAsync("/model select");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Equal("model selection cancelled", result.Message);
+            Assert.Equal("openai", runner.Model.Provider);
+            Assert.Null(settingsStore.Load().DefaultProvider);
+            Assert.Empty(runner.Inputs);
+        }
+        finally
+        {
+            if (File.Exists(settingsPath))
+            {
+                File.Delete(settingsPath);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_ModelCommand_RejectsModelWithoutConfiguredAuth()
+    {
+        var settingsPath = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-router-model-auth-{Guid.NewGuid():N}.json");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.ConfigureAuth("openai");
+        var settingsStore = new CodingAgentSettingsStore(settingsPath);
+        var router = new CodingAgentCommandRouter(runner, settingsStore);
+
+        try
+        {
+            var result = await router.TryHandleAsync("/model google gemini-2.5-pro");
+
+            Assert.True(result.Handled);
+            Assert.True(result.IsError);
+            Assert.Equal("model 'google/gemini-2.5-pro' does not have configured auth", result.Message);
+            Assert.Equal("openai", runner.Model.Provider);
+            Assert.Equal("gpt-5.4", runner.Model.Id);
+            Assert.Null(settingsStore.Load().DefaultProvider);
+        }
+        finally
+        {
+            if (File.Exists(settingsPath))
+            {
+                File.Delete(settingsPath);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_ProviderCommand_RejectsProviderWithoutConfiguredAuth()
+    {
+        var settingsPath = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-router-provider-auth-{Guid.NewGuid():N}.json");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.ConfigureAuth("openai");
+        var settingsStore = new CodingAgentSettingsStore(settingsPath);
+        var router = new CodingAgentCommandRouter(runner, settingsStore);
+
+        try
+        {
+            var result = await router.TryHandleAsync("/provider google");
+
+            Assert.True(result.Handled);
+            Assert.True(result.IsError);
+            Assert.Equal("provider 'google' does not have configured auth", result.Message);
+            Assert.Equal("openai", runner.Model.Provider);
+            Assert.Equal("gpt-5.4", runner.Model.Id);
+            Assert.Null(settingsStore.Load().DefaultProvider);
+        }
+        finally
+        {
+            if (File.Exists(settingsPath))
+            {
+                File.Delete(settingsPath);
+            }
+        }
+    }
+
+    [Fact]
+    public void CycleModel_UsesScopedModelsAndPersistsDefaultModel()
+    {
+        var settingsPath = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-router-cycle-{Guid.NewGuid():N}.json");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.ConfigureAuth("openai", "google");
+        var settingsStore = new CodingAgentSettingsStore(settingsPath);
+        settingsStore.Save(new CodingAgentSettingsSnapshot(
+            "openai",
+            "gpt-5.4",
+            EnabledModels: ["openai/gpt-5.4", "google/gemini-2.5-pro"]));
+        var router = new CodingAgentCommandRouter(runner, settingsStore);
+
+        try
+        {
+            var result = router.CycleModel();
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Equal("model: google/gemini-2.5-pro (scoped)", result.Message);
+            Assert.Equal("google", runner.Model.Provider);
+            Assert.Equal("gemini-2.5-pro", runner.Model.Id);
+
+            var settings = settingsStore.Load();
+            Assert.Equal("google", settings.DefaultProvider);
+            Assert.Equal("gemini-2.5-pro", settings.DefaultModel);
+            Assert.Equal(["openai/gpt-5.4", "google/gemini-2.5-pro"], settings.EnabledModels);
+        }
+        finally
+        {
+            if (File.Exists(settingsPath))
+            {
+                File.Delete(settingsPath);
+            }
+        }
+    }
+
+    [Fact]
+    public void CycleModel_AppliesScopedModelThinkingLevelOverride()
+    {
+        var settingsPath = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-router-cycle-thinking-{Guid.NewGuid():N}.json");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>())
+        {
+            ThinkingLevel = ThinkingLevel.Low
+        };
+        runner.ConfigureAuth("openai", "google");
+        var settingsStore = new CodingAgentSettingsStore(settingsPath);
+        settingsStore.Save(new CodingAgentSettingsSnapshot(
+            "openai",
+            "gpt-5.4",
+            DefaultThinkingLevel: "low",
+            EnabledModels: ["openai/gpt-5.4", "google/gemini-2.5-pro:high"]));
+        var router = new CodingAgentCommandRouter(runner, settingsStore);
+
+        try
+        {
+            var result = router.CycleModel();
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Equal("model: google/gemini-2.5-pro (scoped, thinking: high)", result.Message);
+            Assert.Equal("google", runner.Model.Provider);
+            Assert.Equal("gemini-2.5-pro", runner.Model.Id);
+            Assert.Equal(ThinkingLevel.High, runner.ThinkingLevel);
+
+            var settings = settingsStore.Load();
+            Assert.Equal("google", settings.DefaultProvider);
+            Assert.Equal("gemini-2.5-pro", settings.DefaultModel);
+            Assert.Equal("high", settings.DefaultThinkingLevel);
+            Assert.Equal(["openai/gpt-5.4", "google/gemini-2.5-pro:high"], settings.EnabledModels);
+        }
+        finally
+        {
+            if (File.Exists(settingsPath))
+            {
+                File.Delete(settingsPath);
+            }
+        }
+    }
+
+    [Fact]
+    public void CycleModel_ClampsScopedThinkingOverrideToTargetModel()
+    {
+        var settingsPath = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-router-cycle-thinking-clamp-{Guid.NewGuid():N}.json");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>())
+        {
+            ThinkingLevel = ThinkingLevel.Low
+        };
+        runner.ConfigureAuth("openai", "google");
+        var settingsStore = new CodingAgentSettingsStore(settingsPath);
+        settingsStore.Save(new CodingAgentSettingsSnapshot(
+            "openai",
+            "gpt-5.4",
+            DefaultThinkingLevel: "low",
+            EnabledModels: ["openai/gpt-5.4", "google/gemini-2.5-pro:xhigh"]));
+        var router = new CodingAgentCommandRouter(runner, settingsStore);
+
+        try
+        {
+            var result = router.CycleModel();
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Equal("model: google/gemini-2.5-pro (scoped, thinking: high)", result.Message);
+            Assert.Equal("google", runner.Model.Provider);
+            Assert.Equal("gemini-2.5-pro", runner.Model.Id);
+            Assert.Equal(ThinkingLevel.High, runner.ThinkingLevel);
+
+            var settings = settingsStore.Load();
+            Assert.Equal("google", settings.DefaultProvider);
+            Assert.Equal("gemini-2.5-pro", settings.DefaultModel);
+            Assert.Equal("high", settings.DefaultThinkingLevel);
+            Assert.Equal(["openai/gpt-5.4", "google/gemini-2.5-pro:xhigh"], settings.EnabledModels);
+        }
+        finally
+        {
+            if (File.Exists(settingsPath))
+            {
+                File.Delete(settingsPath);
+            }
+        }
+    }
+
+    [Fact]
+    public void CycleModel_ClampsCurrentThinkingWhenTargetModelDoesNotReason()
+    {
+        var settingsPath = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-router-cycle-thinking-off-{Guid.NewGuid():N}.json");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>())
+        {
+            ThinkingLevel = ThinkingLevel.High
+        };
+        runner.SetModelReasoning("google", "gemini-2.5-pro", false);
+        runner.ConfigureAuth("openai", "google");
+        var settingsStore = new CodingAgentSettingsStore(settingsPath);
+        settingsStore.Save(new CodingAgentSettingsSnapshot(
+            "openai",
+            "gpt-5.4",
+            DefaultThinkingLevel: "high",
+            EnabledModels: ["openai/gpt-5.4", "google/gemini-2.5-pro"]));
+        var router = new CodingAgentCommandRouter(runner, settingsStore);
+
+        try
+        {
+            var result = router.CycleModel();
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Equal("model: google/gemini-2.5-pro (scoped)", result.Message);
+            Assert.Equal("google", runner.Model.Provider);
+            Assert.Equal("gemini-2.5-pro", runner.Model.Id);
+            Assert.Null(runner.ThinkingLevel);
+
+            var settings = settingsStore.Load();
+            Assert.Equal("google", settings.DefaultProvider);
+            Assert.Equal("gemini-2.5-pro", settings.DefaultModel);
+            Assert.Null(settings.DefaultThinkingLevel);
+            Assert.Equal(["openai/gpt-5.4", "google/gemini-2.5-pro"], settings.EnabledModels);
+        }
+        finally
+        {
+            if (File.Exists(settingsPath))
+            {
+                File.Delete(settingsPath);
+            }
+        }
+    }
+
+    [Fact]
+    public void CycleModel_SkipsScopedModelsWithoutConfiguredAuth()
+    {
+        var settingsPath = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-router-cycle-auth-{Guid.NewGuid():N}.json");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.ConfigureAuth("openai");
+        var settingsStore = new CodingAgentSettingsStore(settingsPath);
+        settingsStore.Save(new CodingAgentSettingsSnapshot(
+            null,
+            null,
+            EnabledModels: ["openai/gpt-5.4", "google/gemini-2.5-pro"]));
+        var router = new CodingAgentCommandRouter(runner, settingsStore);
+
+        try
+        {
+            var result = router.CycleModel();
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Equal("Only one model in scope", result.Message);
+            Assert.Equal("openai", runner.Model.Provider);
+            Assert.Equal("gpt-5.4", runner.Model.Id);
+
+            var settings = settingsStore.Load();
+            Assert.Null(settings.DefaultProvider);
+            Assert.Equal(["openai/gpt-5.4", "google/gemini-2.5-pro"], settings.EnabledModels);
+        }
+        finally
+        {
+            if (File.Exists(settingsPath))
+            {
+                File.Delete(settingsPath);
+            }
+        }
+    }
+
+    [Fact]
+    public void CycleModel_ReturnsErrorWhenNoModelHasConfiguredAuth()
+    {
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var router = new CodingAgentCommandRouter(runner);
+
+        var result = router.CycleModel();
+
+        Assert.True(result.Handled);
+        Assert.True(result.IsError);
+        Assert.Equal("No models with configured auth are available. Use /login or configure provider credentials.", result.Message);
+        Assert.Equal("openai", runner.Model.Provider);
+        Assert.Equal("gpt-5.4", runner.Model.Id);
+    }
+
+    [Fact]
+    public void CycleModel_BackwardWrapsAcrossAllAvailableModels()
+    {
+        var settingsPath = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-router-cycle-{Guid.NewGuid():N}.json");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.ConfigureAuth("openai", "google");
+        runner.SelectModel("google", "gemini-2.5-pro");
+        var settingsStore = new CodingAgentSettingsStore(settingsPath);
+        var router = new CodingAgentCommandRouter(runner, settingsStore);
+
+        try
+        {
+            var result = router.CycleModel("backward");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Equal("model: openai/gpt-5.4", result.Message);
+            Assert.Equal("openai", runner.Model.Provider);
+            Assert.Equal("gpt-5.4", runner.Model.Id);
+
+            var settings = settingsStore.Load();
+            Assert.Equal("openai", settings.DefaultProvider);
+            Assert.Equal("gpt-5.4", settings.DefaultModel);
+        }
+        finally
+        {
+            if (File.Exists(settingsPath))
+            {
+                File.Delete(settingsPath);
+            }
+        }
+    }
+
+    [Fact]
+    public void CycleModel_ReturnsScopedStatusWhenOnlyOneCandidateIsAvailable()
+    {
+        var settingsPath = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-router-cycle-{Guid.NewGuid():N}.json");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.ConfigureAuth("openai");
+        var settingsStore = new CodingAgentSettingsStore(settingsPath);
+        settingsStore.Save(new CodingAgentSettingsSnapshot(
+            "openai",
+            "gpt-5.4",
+            EnabledModels: ["openai/gpt-5.4"]));
+        var router = new CodingAgentCommandRouter(runner, settingsStore);
+
+        try
+        {
+            var result = router.CycleModel();
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Equal("Only one model in scope", result.Message);
+            Assert.Equal("openai", runner.Model.Provider);
+            Assert.Equal("gpt-5.4", runner.Model.Id);
+
+            var settings = settingsStore.Load();
+            Assert.Equal("openai", settings.DefaultProvider);
+            Assert.Equal("gpt-5.4", settings.DefaultModel);
         }
         finally
         {

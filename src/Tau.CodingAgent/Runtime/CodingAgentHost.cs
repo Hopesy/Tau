@@ -18,7 +18,8 @@ public sealed class CodingAgentHost
     private readonly CodingAgentPromptTemplateStore? _promptTemplateStore;
     private readonly CodingAgentSkillStore? _skillStore;
     private readonly CodingAgentExtensionCommandStore? _extensionCommandStore;
-    private readonly CodingAgentAutoCompactionOptions _autoCompaction;
+    private readonly CodingAgentAutoCompactionOptions _autoCompactionBase;
+    private CodingAgentAutoCompactionOptions _autoCompaction;
     private readonly CodingAgentCommandRouter _commandRouter;
     private readonly ICodingAgentTurnInputSource? _turnInputSource;
     private CodingAgentRetryOptions _retryOptions;
@@ -38,10 +39,17 @@ public sealed class CodingAgentHost
         CodingAgentExtensionCommandStore? extensionCommandStore = null,
         CodingAgentChangelogStore? changelogStore = null,
         CodingAgentAutoCompactionOptions? autoCompaction = null,
+        bool? autoCompactionEnabled = null,
         CodingAgentRetryOptions? retryOptions = null,
         ICodingAgentTurnInputSource? turnInputSource = null,
         Func<int, IReadOnlyList<string>>? historySnapshotProvider = null,
         Func<IReadOnlyList<CodingAgentTreeViewItem>, CancellationToken, Task<CodingAgentTreeInteractiveNavigator.Result>>? treeNavigator = null,
+        Func<CodingAgentThemeStatus, string?, CancellationToken, Task<string?>>? themeSelector = null,
+        Func<CodingAgentSettingsSelectorState, CancellationToken, Task<string?>>? settingsSelector = null,
+        Func<CodingAgentScopedModelsSelectorState, CancellationToken, Task<CodingAgentScopedModelsSelection>>? scopedModelsSelector = null,
+        Func<CodingAgentAuthSelectorState, CancellationToken, Task<string?>>? authSelector = null,
+        Func<CodingAgentThinkingSelectorState, CancellationToken, Task<string?>>? thinkingSelector = null,
+        Func<CodingAgentModelSelectorState, CancellationToken, Task<string?>>? modelSelector = null,
         IKeyBindingMap? keyBindings = null,
         CodingAgentExtensionResourceState? extensionResourceState = null,
         Func<IKeyBindingMap?>? reloadKeyBindings = null)
@@ -53,7 +61,8 @@ public sealed class CodingAgentHost
         _promptTemplateStore = promptTemplateStore;
         _skillStore = skillStore;
         _extensionCommandStore = extensionCommandStore;
-        _autoCompaction = autoCompaction ?? CodingAgentAutoCompactionOptions.Disabled;
+        _autoCompactionBase = autoCompaction ?? CodingAgentAutoCompactionOptions.Disabled;
+        _autoCompaction = _autoCompactionBase.WithEnabledOverride(autoCompactionEnabled);
         _retryOptions = retryOptions ?? CodingAgentRetryOptions.Disabled;
         _turnInputSource = turnInputSource;
         _commandRouter = new CodingAgentCommandRouter(
@@ -68,12 +77,19 @@ public sealed class CodingAgentHost
             themeStore: themeStore,
             extensionCommandStore: extensionCommandStore,
             changelogStore: changelogStore,
-            autoCompaction: _autoCompaction,
+            autoCompaction: _autoCompactionBase,
             retryOptions: _retryOptions,
             retryOptionsChanged: options => _retryOptions = options,
+            autoCompactionChanged: enabled => _autoCompaction = _autoCompactionBase.WithEnabledOverride(enabled),
             historySnapshotProvider: historySnapshotProvider,
             clearScreenAction: () => _ui.ClearScreen(),
             treeNavigator: treeNavigator,
+            themeSelector: themeSelector,
+            settingsSelector: settingsSelector,
+            scopedModelsSelector: scopedModelsSelector,
+            authSelector: authSelector,
+            thinkingSelector: thinkingSelector,
+            modelSelector: modelSelector,
             keyBindings: keyBindings,
             extensionResourceState: extensionResourceState,
             reloadKeyBindings: reloadKeyBindings);
@@ -85,7 +101,18 @@ public sealed class CodingAgentHost
 
         while (!cancellationToken.IsCancellationRequested)
         {
-            var input = await _ui.ReadInputAsync(cancellationToken).ConfigureAwait(false);
+            var inputResult = await _ui.ReadInputResultAsync(cancellationToken).ConfigureAwait(false);
+            if (inputResult.Kind == InputResultKind.Action)
+            {
+                if (await TryHandleEditorActionAsync(inputResult.Action, cancellationToken).ConfigureAwait(false))
+                {
+                    PersistSession();
+                }
+
+                continue;
+            }
+
+            var input = inputResult.Text;
             if (input is null || input.Equals("exit", StringComparison.OrdinalIgnoreCase))
             {
                 break;
@@ -140,6 +167,27 @@ public sealed class CodingAgentHost
         }
 
         return 0;
+    }
+
+    private async Task<bool> TryHandleEditorActionAsync(
+        EditorAction action,
+        CancellationToken cancellationToken)
+    {
+        var result = action switch
+        {
+            EditorAction.CycleModelForward => _commandRouter.CycleModel("forward"),
+            EditorAction.CycleModelBackward => _commandRouter.CycleModel("backward"),
+            EditorAction.SelectModel => await _commandRouter.SelectModelAsync(cancellationToken: cancellationToken).ConfigureAwait(false),
+            _ => CodingAgentCommandResult.NotCommand
+        };
+
+        if (!result.Handled)
+        {
+            return false;
+        }
+
+        RenderCommandResult(result);
+        return true;
     }
 
     private async Task<bool> TryHandleCommandAsync(string input, CancellationToken cancellationToken)

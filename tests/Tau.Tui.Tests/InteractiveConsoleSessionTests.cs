@@ -71,6 +71,42 @@ public class InteractiveConsoleSessionTests
     }
 
     [Fact]
+    public async Task ReadInputResultAsync_ReturnsEditorAction()
+    {
+        var terminal = new FakeTerminal();
+        var keyReader = new ScriptedKeyReader();
+        keyReader.EnqueueRaw(new ConsoleKeyInfo('\x10', ConsoleKey.P, shift: false, alt: false, control: true));
+        var renderer = new CapturingRenderer();
+        var editor = new InteractiveInputEditor(keyReader, renderer);
+        var session = new InteractiveConsoleSession(terminal, editor);
+
+        var result = await session.ReadInputResultAsync();
+
+        Assert.Equal(InputResultKind.Action, result.Kind);
+        Assert.Equal(EditorAction.CycleModelForward, result.Action);
+        Assert.Empty(terminal.Writes);
+        Assert.Single(renderer.Prompts);
+    }
+
+    [Fact]
+    public async Task ReadInputResultAsync_ReturnsModelSelectEditorAction()
+    {
+        var terminal = new FakeTerminal();
+        var keyReader = new ScriptedKeyReader();
+        keyReader.EnqueueRaw(new ConsoleKeyInfo('\x0C', ConsoleKey.L, shift: false, alt: false, control: true));
+        var renderer = new CapturingRenderer();
+        var editor = new InteractiveInputEditor(keyReader, renderer);
+        var session = new InteractiveConsoleSession(terminal, editor);
+
+        var result = await session.ReadInputResultAsync();
+
+        Assert.Equal(InputResultKind.Action, result.Kind);
+        Assert.Equal(EditorAction.SelectModel, result.Action);
+        Assert.Empty(terminal.Writes);
+        Assert.Single(renderer.Prompts);
+    }
+
+    [Fact]
     public void ShowWelcome_WritesTitleHintAndBlankLine()
     {
         var terminal = new FakeTerminal();

@@ -171,9 +171,7 @@ public sealed class CodingAgentRpcHost
                 case "get_available_models":
                     await WriteSuccessAsync(id, "get_available_models", new
                     {
-                        models = _runner.GetProviders()
-                            .SelectMany(provider => _runner.GetModels(provider))
-                            .ToArray()
+                        models = GetAuthConfiguredModels().ToArray()
                     }, cancellationToken).ConfigureAwait(false);
                     break;
                 case "set_thinking_level":
@@ -365,8 +363,9 @@ public sealed class CodingAgentRpcHost
 
         var provider = GetRequiredString(command, "provider");
         var modelId = GetRequiredString(command, "modelId");
-        var model = _runner.SelectModel(provider, modelId);
+        var model = SelectConfiguredModel(provider, modelId);
         _settingsStore?.SaveDefaultModel(model);
+        ClampCurrentThinkingLevel();
         _treeSessionController?.SyncFromRunner(_runner);
         PersistSession();
         await WriteSuccessAsync(id, "set_model", model, cancellationToken).ConfigureAwait(false);
@@ -413,7 +412,7 @@ public sealed class CodingAgentRpcHost
         if (!string.IsNullOrWhiteSpace(updated.DefaultProvider) &&
             !string.IsNullOrWhiteSpace(updated.DefaultModel))
         {
-            selectedModel = _runner.SelectModel(updated.DefaultProvider, updated.DefaultModel);
+            selectedModel = SelectConfiguredModel(updated.DefaultProvider, updated.DefaultModel);
             updated = updated with
             {
                 DefaultProvider = selectedModel.Provider,
@@ -421,21 +420,23 @@ public sealed class CodingAgentRpcHost
             };
         }
 
+        var effectiveThinking = CodingAgentThinkingLevels.ClampForModel(
+            _runner.Model,
+            ParseThinkingLevelOrNull(updated.DefaultThinkingLevel));
+        updated = updated with { DefaultThinkingLevel = FormatThinkingLevelRaw(effectiveThinking) };
         _settingsStore.Save(updated);
+
+        _runner.ThinkingLevel = effectiveThinking;
+        _runner.SteeringMode = CodingAgentQueueModes.ToAgentQueueMode(updated.SteeringMode);
+        _runner.FollowUpMode = CodingAgentQueueModes.ToAgentQueueMode(updated.FollowUpMode);
+        SetRetryOptions(CodingAgentRetryOptions.FromSettingsOrEnvironment(updated));
+        _autoCompactionEnabled = updated.AutoCompactionEnabled;
 
         if (selectedModel is not null)
         {
             _treeSessionController?.SyncFromRunner(_runner);
             PersistSession();
         }
-
-        _runner.ThinkingLevel = string.IsNullOrWhiteSpace(updated.DefaultThinkingLevel)
-            ? null
-            : ParseThinkingLevelOrNull(updated.DefaultThinkingLevel);
-        _runner.SteeringMode = CodingAgentQueueModes.ToAgentQueueMode(updated.SteeringMode);
-        _runner.FollowUpMode = CodingAgentQueueModes.ToAgentQueueMode(updated.FollowUpMode);
-        SetRetryOptions(CodingAgentRetryOptions.FromSettingsOrEnvironment(updated));
-        _autoCompactionEnabled = updated.AutoCompactionEnabled;
 
         await WriteSuccessAsync(id, "update_settings", CreateSettingsData(updated), cancellationToken)
             .ConfigureAwait(false);
@@ -451,17 +452,29 @@ public sealed class CodingAgentRpcHost
         }
 
         var candidates = GetModelCycleCandidates(out var isScoped);
-        if (candidates.Count <= 1)
+        if (candidates.Count == 0)
+        {
+            await WriteErrorAsync(
+                    id,
+                    "cycle_model",
+                    "No models with configured auth are available. Use login or configure provider credentials.",
+                    cancellationToken)
+                .ConfigureAwait(false);
+            return;
+        }
+
+        if (candidates.Count == 1)
         {
             await WriteExplicitDataSuccessAsync(id, "cycle_model", null, cancellationToken).ConfigureAwait(false);
             return;
         }
 
-        var currentIndex = candidates.FindIndex(model => SameModel(model, _runner.Model));
+        var currentIndex = candidates.FindIndex(candidate => SameModel(candidate.Model, _runner.Model));
         var nextIndex = currentIndex < 0 ? 0 : (currentIndex + 1) % candidates.Count;
         var next = candidates[nextIndex];
-        var selected = _runner.SelectModel(next.Provider, next.Id);
+        var selected = _runner.SelectModel(next.Model.Provider, next.Model.Id);
         _settingsStore?.SaveDefaultModel(selected);
+        ApplyScopedThinkingOverride(next.ThinkingLevel);
         _treeSessionController?.SyncFromRunner(_runner);
         PersistSession();
         await WriteSuccessAsync(
@@ -486,16 +499,12 @@ public sealed class CodingAgentRpcHost
         }
 
         var rawLevel = GetRequiredString(command, "level").Trim();
-        var level = ParseThinkingLevelOrNull(rawLevel);
-        if (level is null &&
-            !rawLevel.Equals("off", StringComparison.OrdinalIgnoreCase) &&
-            !rawLevel.Equals("none", StringComparison.OrdinalIgnoreCase))
+        if (!CodingAgentThinkingLevels.TryParse(rawLevel, out var level))
         {
             throw new ArgumentException($"Unsupported thinking level '{rawLevel}'. Expected off, minimal, low, medium, high, or xhigh.");
         }
 
-        _runner.ThinkingLevel = level;
-        SaveThinkingLevel(level);
+        SetAndSaveThinkingLevel(level);
         await WriteSuccessAsync(id, "set_thinking_level", cancellationToken: cancellationToken).ConfigureAwait(false);
     }
 
@@ -508,7 +517,7 @@ public sealed class CodingAgentRpcHost
             return;
         }
 
-        _runner.ThinkingLevel = CycleThinkingLevel(_runner.ThinkingLevel);
+        _runner.ThinkingLevel = CodingAgentThinkingLevels.CycleForModel(_runner.Model, _runner.ThinkingLevel);
         SaveThinkingLevel(_runner.ThinkingLevel);
         var level = FormatThinkingLevelRaw(_runner.ThinkingLevel);
         await WriteExplicitDataSuccessAsync(
@@ -1161,45 +1170,70 @@ public sealed class CodingAgentRpcHost
         };
     }
 
-    private List<Model> GetModelCycleCandidates(out bool isScoped)
+    private List<CodingAgentScopedModelEntry> GetModelCycleCandidates(out bool isScoped)
     {
-        var availableModels = GetAvailableModels();
+        var registeredModels = GetRegisteredModels();
+        var availableModels = GetAuthConfiguredModels(registeredModels);
         var enabledModels = _settingsStore?.Load().EnabledModels;
         if (enabledModels is null || enabledModels.Count == 0)
         {
             isScoped = false;
-            return availableModels;
+            return availableModels
+                .Select(static model => new CodingAgentScopedModelEntry(model, null))
+                .ToList();
         }
 
-        var candidates = new List<Model>();
+        var candidates = new List<CodingAgentScopedModelEntry>();
         foreach (var enabledModel in enabledModels)
         {
-            if (TryResolveModelReference(enabledModel, availableModels, out var model) &&
-                !candidates.Any(candidate => SameModel(candidate, model)))
+            if (!CodingAgentScopedModelPatterns.TryResolve(enabledModel, registeredModels, out var entry, out _))
             {
-                candidates.Add(model);
+                continue;
+            }
+
+            var model = availableModels.FirstOrDefault(candidate => SameModel(candidate, entry.Model));
+            if (model is not null && !candidates.Any(candidate => SameModel(candidate.Model, model)))
+            {
+                candidates.Add(new CodingAgentScopedModelEntry(model, entry.ThinkingLevel));
             }
         }
 
         if (candidates.Count == 0)
         {
             isScoped = false;
-            return availableModels;
+            return availableModels
+                .Select(static model => new CodingAgentScopedModelEntry(model, null))
+                .ToList();
         }
 
         isScoped = true;
         return candidates;
     }
 
-    private List<Model> GetAvailableModels()
+    private IReadOnlyList<Model> GetRegisteredModels()
     {
-        var models = new List<Model>();
-        foreach (var provider in _runner.GetProviders())
+        return CodingAgentModelAvailability.GetRegisteredModels(_runner);
+    }
+
+    private IReadOnlyList<Model> GetAuthConfiguredModels(IReadOnlyList<Model>? registeredModels = null)
+    {
+        return CodingAgentModelAvailability.GetAuthConfiguredModels(_runner, registeredModels);
+    }
+
+    private Model SelectConfiguredModel(string provider, string modelId)
+    {
+        var registeredModels = GetRegisteredModels();
+        if (!TryResolveModelReference($"{provider}/{modelId}", registeredModels, out var registeredModel))
         {
-            models.AddRange(_runner.GetModels(provider));
+            throw new KeyNotFoundException($"model '{provider}/{modelId}' is not registered");
         }
 
-        return models;
+        if (!GetAuthConfiguredModels(registeredModels).Any(model => SameModel(model, registeredModel)))
+        {
+            throw new InvalidOperationException($"model '{registeredModel.Provider}/{registeredModel.Id}' does not have configured auth");
+        }
+
+        return _runner.SelectModel(registeredModel.Provider, registeredModel.Id);
     }
 
     private static bool TryResolveModelReference(string reference, IReadOnlyList<Model> availableModels, out Model model)
@@ -1775,7 +1809,7 @@ public sealed class CodingAgentRpcHost
             .EnumerateArray()
             .Select(ReadNullableString)
             .Where(static value => !string.IsNullOrWhiteSpace(value))
-            .Select(static value => value!)
+            .Select(static value => value!.Trim())
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
         return models.Length == 0 ? null : models;
@@ -1801,15 +1835,7 @@ public sealed class CodingAgentRpcHost
 
     private static string? NormalizeThinkingLevelOrNull(string? value)
     {
-        if (string.IsNullOrWhiteSpace(value) ||
-            value.Equals("off", StringComparison.OrdinalIgnoreCase) ||
-            value.Equals("none", StringComparison.OrdinalIgnoreCase))
-        {
-            return null;
-        }
-
-        var level = ParseThinkingLevelOrNull(value);
-        if (level is null)
+        if (!CodingAgentThinkingLevels.TryParse(value, out var level))
         {
             throw new ArgumentException($"Unsupported thinking level '{value}'. Expected off, minimal, low, medium, high, or xhigh.");
         }
@@ -1843,49 +1869,27 @@ public sealed class CodingAgentRpcHost
         return mode;
     }
 
-    private static string FormatThinkingLevel(ThinkingLevel? level) => level switch
-    {
-        null => "off",
-        ThinkingLevel.Minimal => "minimal",
-        ThinkingLevel.Low => "low",
-        ThinkingLevel.Medium => "medium",
-        ThinkingLevel.High => "high",
-        ThinkingLevel.ExtraHigh => "xhigh",
-        _ => "off"
-    };
+    private static string FormatThinkingLevel(ThinkingLevel? level) =>
+        CodingAgentThinkingLevels.Format(level);
 
     private static string? FormatThinkingLevelRaw(ThinkingLevel? level) =>
-        level is null ? null : FormatThinkingLevel(level);
+        CodingAgentThinkingLevels.FormatRaw(level);
 
-    private static ThinkingLevel? ParseThinkingLevelOrNull(string value)
+    private static ThinkingLevel? ParseThinkingLevelOrNull(string? value) =>
+        CodingAgentThinkingLevels.ParseOrNull(value);
+
+    private ThinkingLevel? SetAndSaveThinkingLevel(ThinkingLevel? requested)
     {
-        if (value.Equals("off", StringComparison.OrdinalIgnoreCase) ||
-            value.Equals("none", StringComparison.OrdinalIgnoreCase))
-        {
-            return null;
-        }
-
-        return value.ToLowerInvariant() switch
-        {
-            "minimal" => ThinkingLevel.Minimal,
-            "low" => ThinkingLevel.Low,
-            "medium" or "med" => ThinkingLevel.Medium,
-            "high" => ThinkingLevel.High,
-            "xhigh" or "extrahigh" or "extra-high" => ThinkingLevel.ExtraHigh,
-            _ => null
-        };
+        var effective = CodingAgentThinkingLevels.ClampForModel(_runner.Model, requested);
+        _runner.ThinkingLevel = effective;
+        SaveThinkingLevel(effective);
+        return effective;
     }
 
-    private static ThinkingLevel? CycleThinkingLevel(ThinkingLevel? current) => current switch
+    private void ClampCurrentThinkingLevel()
     {
-        null => ThinkingLevel.Low,
-        ThinkingLevel.Minimal => ThinkingLevel.Low,
-        ThinkingLevel.Low => ThinkingLevel.Medium,
-        ThinkingLevel.Medium => ThinkingLevel.High,
-        ThinkingLevel.High => ThinkingLevel.ExtraHigh,
-        ThinkingLevel.ExtraHigh => null,
-        _ => ThinkingLevel.Low
-    };
+        SetAndSaveThinkingLevel(_runner.ThinkingLevel);
+    }
 
     private void SaveThinkingLevel(ThinkingLevel? level)
     {
@@ -1896,6 +1900,18 @@ public sealed class CodingAgentRpcHost
 
         var settings = _settingsStore.Load();
         _settingsStore.Save(settings with { DefaultThinkingLevel = FormatThinkingLevelRaw(level) });
+    }
+
+    private void ApplyScopedThinkingOverride(string? thinkingLevel)
+    {
+        if (thinkingLevel is null)
+        {
+            ClampCurrentThinkingLevel();
+            return;
+        }
+
+        var level = CodingAgentScopedModelPatterns.ParseThinkingLevelOrNull(thinkingLevel);
+        SetAndSaveThinkingLevel(level);
     }
 
     private sealed record RpcResponse(

@@ -20,6 +20,9 @@ public enum EditorAction
     HistoryPrev,
     HistoryNext,
     ReverseSearch,
+    CycleModelForward,
+    CycleModelBackward,
+    SelectModel,
 }
 
 public readonly record struct KeyBinding(ConsoleKey Key, ConsoleModifiers Modifiers)

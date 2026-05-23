@@ -60,15 +60,12 @@ Tau 当前是本地开发者工具链项目，安全边界要围绕“**本地 A
 
 ## 依赖与供应链
 
-仓库级依赖与 provenance 约束见：
+Tau 当前没有保留旧 harness-init 的 GitHub Actions / SBOM / provenance 脚手架。供应链边界先按真实 .NET 项目状态处理：
 
-- `docs/SUPPLY_CHAIN_SECURITY.md`
-
-Tau 当前还缺少的是：
-
-- .NET / NuGet 真实构建链进入 CI
-- 与真实发布产物对应的 SBOM / provenance
-- 导出/share、运行态日志和跨运行态配置迁移的进一步脱敏边界
+- NuGet 依赖变化必须能通过 `scripts/verify-dotnet.ps1` / `scripts/verify-dotnet.sh` 的 restore、build、test 暴露。
+- 真实发布产物出现前，不维护仓库元数据包式的 release / provenance 占位流程。
+- 后续如果重新接入 CI、SBOM 或 provenance，必须基于 Tau 的真实可执行产物和当前依赖链重新建文档，不恢复旧模板占位。
+- 导出/share、运行态日志和跨运行态配置迁移仍需要继续守住默认脱敏边界。
 
 ## 本地配置参考
 

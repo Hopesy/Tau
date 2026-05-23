@@ -219,15 +219,9 @@ runner.FollowUpMode = CodingAgentQueueModes.ToAgentQueueMode(settings.FollowUpMo
 var autoCompaction = CodingAgentAutoCompactionOptions.FromEnvironment();
 if (!string.IsNullOrWhiteSpace(settings.DefaultThinkingLevel))
 {
-    runner.ThinkingLevel = settings.DefaultThinkingLevel.ToLowerInvariant() switch
-    {
-        "minimal" => Tau.Ai.ThinkingLevel.Minimal,
-        "low" => Tau.Ai.ThinkingLevel.Low,
-        "medium" or "med" => Tau.Ai.ThinkingLevel.Medium,
-        "high" => Tau.Ai.ThinkingLevel.High,
-        "xhigh" or "extrahigh" or "extra-high" => Tau.Ai.ThinkingLevel.ExtraHigh,
-        _ => null
-    };
+    runner.ThinkingLevel = CodingAgentThinkingLevels.ClampForModel(
+        runner.Model,
+        CodingAgentThinkingLevels.ParseOrNull(settings.DefaultThinkingLevel));
 }
 using var cts = new CancellationTokenSource();
 
@@ -268,11 +262,18 @@ var host = new CodingAgentHost(
     contextFileStore: contextFileStore,
     themeStore: themeStore,
     extensionCommandStore: extensionCommandStore,
-    autoCompaction: autoCompaction.WithEnabledOverride(settings.AutoCompactionEnabled),
+    autoCompaction: autoCompaction,
+    autoCompactionEnabled: settings.AutoCompactionEnabled,
     retryOptions: CodingAgentRetryOptions.FromSettingsOrEnvironment(settings),
     turnInputSource: editor is null ? null : new SystemConsoleCodingAgentTurnInputSource(),
     historySnapshotProvider: editor is null ? null : limit => editor.History.Snapshot(limit),
     treeNavigator: editor is null ? null : CreateTreeNavigator(keyReader),
+    themeSelector: editor is null ? null : CodingAgentThemeSelector.CreateConsoleSelector(keyReader),
+    settingsSelector: editor is null ? null : CodingAgentSettingsSelector.CreateConsoleSelector(keyReader),
+    scopedModelsSelector: editor is null ? null : CodingAgentScopedModelsSelector.CreateConsoleSelector(keyReader),
+    authSelector: editor is null ? null : CodingAgentAuthSelector.CreateConsoleSelector(keyReader),
+    thinkingSelector: editor is null ? null : CodingAgentThinkingSelector.CreateConsoleSelector(keyReader),
+    modelSelector: editor is null ? null : CodingAgentModelSelector.CreateConsoleSelector(keyReader),
     keyBindings: editor?.KeyBindings,
     extensionResourceState: extensionResourceState,
     reloadKeyBindings: editor is null

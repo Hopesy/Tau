@@ -49,6 +49,27 @@ public class CodingAgentThemeStoreTests
     }
 
     [Fact]
+    public void ThemeSelector_CreateSelectList_SelectsCurrentThemeAndKeepsLocationDescription()
+    {
+        var themePath = Path.Combine(Path.GetTempPath(), "tau-theme-selector-" + Guid.NewGuid().ToString("N") + ".json");
+        var status = new CodingAgentThemeStatus(
+            [
+                new CodingAgentTheme("dark", null, "builtin", new Dictionary<string, string>(), new Dictionary<string, string>()),
+                new CodingAgentTheme("solarized", themePath, "project", new Dictionary<string, string>(), new Dictionary<string, string>()),
+                new CodingAgentTheme("light", null, "builtin", new Dictionary<string, string>(), new Dictionary<string, string>())
+            ],
+            []);
+
+        var selector = CodingAgentThemeSelector.CreateSelectList(status, "solarized");
+
+        Assert.Equal("solarized", selector.SelectedItem?.Value);
+        Assert.Equal(3, selector.FilteredItems.Count);
+        var selected = selector.SelectedItem;
+        Assert.NotNull(selected);
+        Assert.Equal($"project {themePath}", selected.Description);
+    }
+
+    [Fact]
     public void LoadStatus_ReportsInvalidJsonMissingColorsAndMissingExplicitPaths()
     {
         var directory = Path.Combine(Path.GetTempPath(), "tau-themes-invalid-" + Guid.NewGuid().ToString("N"));

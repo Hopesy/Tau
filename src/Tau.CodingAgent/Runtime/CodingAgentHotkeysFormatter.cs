@@ -24,7 +24,10 @@ internal static class CodingAgentHotkeysFormatter
             [EditorAction.KillToLineEnd] = "Delete to line end",
             [EditorAction.HistoryPrev] = "Previous input history",
             [EditorAction.HistoryNext] = "Next input history",
-            [EditorAction.ReverseSearch] = "Reverse search input history"
+            [EditorAction.ReverseSearch] = "Reverse search input history",
+            [EditorAction.CycleModelForward] = "Cycle to next model",
+            [EditorAction.CycleModelBackward] = "Cycle to previous model",
+            [EditorAction.SelectModel] = "Open model selector"
         };
 
     public static string Format(IKeyBindingMap bindings)
@@ -70,6 +73,9 @@ internal static class CodingAgentHotkeysFormatter
         EditorAction.HistoryPrev => "history-prev",
         EditorAction.HistoryNext => "history-next",
         EditorAction.ReverseSearch => "reverse-search",
+        EditorAction.CycleModelForward => "cycle-model-forward",
+        EditorAction.CycleModelBackward => "cycle-model-backward",
+        EditorAction.SelectModel => "select-model",
         _ => action.ToString().ToLowerInvariant()
     };
 

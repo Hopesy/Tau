@@ -1,6 +1,8 @@
 using Tau.Agent;
+using Tau.Agent.Runtime;
 using Tau.Ai;
 using Tau.CodingAgent.Runtime;
+using Tau.Tui.Abstractions;
 using Tau.Tui.Runtime;
 
 namespace Tau.CodingAgent.Tests;
@@ -1020,6 +1022,7 @@ public class CodingAgentHostTests
         terminal.QueueInput("exit");
 
         var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.ConfigureAuth("google");
         var settingsStore = new CodingAgentSettingsStore(settingsPath);
         var host = new CodingAgentHost(new InteractiveConsoleSession(terminal), runner, settingsStore: settingsStore);
 
@@ -1059,6 +1062,136 @@ public class CodingAgentHostTests
 
         Assert.Empty(runner.Inputs);
         Assert.Contains("status> model: openai/gpt-5.4", terminal.FlattenedText());
+    }
+
+    [Fact]
+    public async Task RunAsync_ModelSelectCommand_UsesSelectorAndPersistsDefaultModel()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-model-select-host-{Guid.NewGuid():N}");
+        var settingsPath = Path.Combine(directory, "settings.json");
+        var terminal = new FakeTerminal();
+        terminal.QueueInput("/model select");
+        terminal.QueueInput("exit");
+
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.ConfigureAuth("openai", "google");
+        var settingsStore = new CodingAgentSettingsStore(settingsPath);
+        var host = new CodingAgentHost(
+            new InteractiveConsoleSession(terminal),
+            runner,
+            settingsStore: settingsStore,
+            modelSelector: (_, _) => Task.FromResult<string?>("google/gemini-2.5-pro"));
+
+        try
+        {
+            await host.RunAsync();
+
+            Assert.Empty(runner.Inputs);
+            Assert.Equal("google", runner.Model.Provider);
+            Assert.Equal("gemini-2.5-pro", runner.Model.Id);
+            Assert.Equal("google", settingsStore.Load().DefaultProvider);
+            Assert.Contains("status> model: google/gemini-2.5-pro", terminal.FlattenedText(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task RunAsync_ModelCycleKey_UsesScopedModelsAndPersistsDefaultModel()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-cycle-host-{Guid.NewGuid():N}");
+        var settingsPath = Path.Combine(directory, "settings.json");
+        var terminal = new FakeTerminal();
+        var keyReader = new ScriptedKeyReader();
+        keyReader.EnqueueRaw(new ConsoleKeyInfo('\x10', ConsoleKey.P, shift: false, alt: false, control: true));
+        keyReader.EnqueueRaw(new ConsoleKeyInfo('\x03', ConsoleKey.C, shift: false, alt: false, control: true));
+        var renderer = new CapturingRenderer();
+        var editor = new InteractiveInputEditor(keyReader, renderer);
+
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.ConfigureAuth("openai", "google");
+        var settingsStore = new CodingAgentSettingsStore(settingsPath);
+        settingsStore.Save(new CodingAgentSettingsSnapshot(
+            "openai",
+            "gpt-5.4",
+            EnabledModels: ["openai/gpt-5.4", "google/gemini-2.5-pro"]));
+        var host = new CodingAgentHost(
+            new InteractiveConsoleSession(terminal, editor),
+            runner,
+            settingsStore: settingsStore);
+
+        try
+        {
+            await host.RunAsync();
+
+            Assert.Empty(runner.Inputs);
+            Assert.Equal("google", runner.Model.Provider);
+            Assert.Equal("gemini-2.5-pro", runner.Model.Id);
+
+            var settings = settingsStore.Load();
+            Assert.Equal("google", settings.DefaultProvider);
+            Assert.Equal("gemini-2.5-pro", settings.DefaultModel);
+            Assert.Equal(["openai/gpt-5.4", "google/gemini-2.5-pro"], settings.EnabledModels);
+            Assert.Contains("status> model: google/gemini-2.5-pro (scoped)", terminal.FlattenedText());
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task RunAsync_ModelSelectKey_UsesSelectorAndPreservesDraft()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-model-select-key-host-{Guid.NewGuid():N}");
+        var settingsPath = Path.Combine(directory, "settings.json");
+        var terminal = new FakeTerminal();
+        var keyReader = new ScriptedKeyReader();
+        foreach (var ch in "draft")
+        {
+            keyReader.EnqueueRaw(new ConsoleKeyInfo(ch, ConsoleKey.NoName, shift: false, alt: false, control: false));
+        }
+
+        keyReader.EnqueueRaw(new ConsoleKeyInfo('\x0C', ConsoleKey.L, shift: false, alt: false, control: true));
+        keyReader.EnqueueRaw(new ConsoleKeyInfo('\x03', ConsoleKey.C, shift: false, alt: false, control: true));
+        var renderer = new CapturingRenderer();
+        var editor = new InteractiveInputEditor(keyReader, renderer);
+
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.ConfigureAuth("openai", "google");
+        var settingsStore = new CodingAgentSettingsStore(settingsPath);
+        var host = new CodingAgentHost(
+            new InteractiveConsoleSession(terminal, editor),
+            runner,
+            settingsStore: settingsStore,
+            modelSelector: (_, _) => Task.FromResult<string?>("google/gemini-2.5-pro"));
+
+        try
+        {
+            await host.RunAsync();
+
+            Assert.Empty(runner.Inputs);
+            Assert.Equal("google", runner.Model.Provider);
+            Assert.Equal("gemini-2.5-pro", runner.Model.Id);
+            Assert.Equal("draft", editor.Buffer.Draft);
+            Assert.Equal("google", settingsStore.Load().DefaultProvider);
+            Assert.Contains("status> model: google/gemini-2.5-pro", terminal.FlattenedText(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
     }
 
     [Fact]
@@ -1102,6 +1235,123 @@ public class CodingAgentHostTests
             Assert.Contains("retry: enabled 2 attempts, base 50ms", output, StringComparison.Ordinal);
             Assert.Contains("default thinking: high", output, StringComparison.Ordinal);
             Assert.Contains("scoped models: 1 enabled (google/gemini-2.5-pro)", output, StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task RunAsync_SettingsCommand_UsesInteractiveSelectorWhenAvailable()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-settings-selector-host-{Guid.NewGuid():N}");
+        var settingsPath = Path.Combine(directory, "settings.json");
+        var terminal = new FakeTerminal();
+        terminal.QueueInput("/settings");
+        terminal.QueueInput("exit");
+
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var settingsStore = new CodingAgentSettingsStore(settingsPath);
+        settingsStore.Save(new CodingAgentSettingsSnapshot(
+            "openai",
+            "gpt-5.4",
+            SteeringMode: "one-at-a-time"));
+        var host = new CodingAgentHost(
+            new InteractiveConsoleSession(terminal),
+            runner,
+            settingsStore: settingsStore,
+            settingsSelector: (_, _) => Task.FromResult<string?>(CodingAgentSettingsSelector.SteeringModeAction));
+
+        try
+        {
+            await host.RunAsync();
+
+            Assert.Empty(runner.Inputs);
+            Assert.Equal(AgentQueueMode.All, runner.SteeringMode);
+            Assert.Equal("all", settingsStore.Load().SteeringMode);
+            Assert.Contains("status> steering mode: all", terminal.FlattenedText(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task RunAsync_ScopedModelsCommand_UsesInteractiveSelectorWhenAvailable()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-scoped-models-selector-host-{Guid.NewGuid():N}");
+        var settingsPath = Path.Combine(directory, "settings.json");
+        var terminal = new FakeTerminal();
+        terminal.QueueInput("/scoped-models");
+        terminal.QueueInput("exit");
+
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var settingsStore = new CodingAgentSettingsStore(settingsPath);
+        var host = new CodingAgentHost(
+            new InteractiveConsoleSession(terminal),
+            runner,
+            settingsStore: settingsStore,
+            scopedModelsSelector: (_, _) => Task.FromResult(
+                CodingAgentScopedModelsSelection.Saved(["google/gemini-2.5-pro"])));
+
+        try
+        {
+            await host.RunAsync();
+
+            Assert.Empty(runner.Inputs);
+            Assert.Equal(["google/gemini-2.5-pro"], settingsStore.Load().EnabledModels);
+            Assert.Contains("status> scoped models: 1/2 enabled", terminal.FlattenedText(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task RunAsync_ThemeSelectCommand_RendersSelectedThemeAndPersistsSettings()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-theme-select-host-{Guid.NewGuid():N}");
+        var projectThemes = Path.Combine(directory, ".tau", "themes");
+        Directory.CreateDirectory(projectThemes);
+        await File.WriteAllTextAsync(
+            Path.Combine(projectThemes, "solarized.json"),
+            CodingAgentThemeStoreTests.CreateThemeJson("solarized"));
+        var settingsPath = Path.Combine(directory, "settings.json");
+        var terminal = new FakeTerminal();
+        terminal.QueueInput("/theme select");
+        terminal.QueueInput("exit");
+
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var settingsStore = new CodingAgentSettingsStore(settingsPath);
+        var host = new CodingAgentHost(
+            new InteractiveConsoleSession(terminal),
+            runner,
+            settingsStore: settingsStore,
+            themeStore: new CodingAgentThemeStore(
+                cwd: directory,
+                userThemesDirectory: Path.Combine(directory, "missing-user-themes"),
+                explicitPaths: []),
+            themeSelector: (_, _, _) => Task.FromResult<string?>("solarized"));
+
+        try
+        {
+            await host.RunAsync();
+
+            Assert.Empty(runner.Inputs);
+            Assert.Equal("solarized", settingsStore.Load().Theme);
+            Assert.Contains("status> theme: solarized", terminal.FlattenedText(), StringComparison.Ordinal);
         }
         finally
         {
@@ -1342,6 +1592,28 @@ public class CodingAgentHostTests
     }
 
     [Fact]
+    public async Task RunAsync_AuthSelectCommand_UsesSelectorAndRendersSelectedStatus()
+    {
+        var terminal = new FakeTerminal();
+        terminal.QueueInput("/auth select");
+        terminal.QueueInput("exit");
+
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>())
+        {
+            AuthStatus = new("openai", false, "none", false, true, "No credentials found.")
+        };
+        var host = new CodingAgentHost(
+            new InteractiveConsoleSession(terminal),
+            runner,
+            authSelector: (_, _) => Task.FromResult<string?>("google"));
+
+        await host.RunAsync();
+
+        Assert.Empty(runner.Inputs);
+        Assert.Contains("status> auth google: missing via none. No credentials found.", terminal.FlattenedText());
+    }
+
+    [Fact]
     public async Task RunAsync_LoginCommand_WithoutRegisteredProvider_ReportsError()
     {
         var terminal = new FakeTerminal();
@@ -1358,6 +1630,36 @@ public class CodingAgentHostTests
 
         Assert.Empty(runner.Inputs);
         Assert.Contains("error> login anthropic: No OAuth login flow is registered", terminal.FlattenedText());
+    }
+
+    [Fact]
+    public async Task RunAsync_LoginCommandWithSelector_RendersOAuthSuccess()
+    {
+        var terminal = new FakeTerminal();
+        terminal.QueueInput("/login");
+        terminal.QueueInput("exit");
+
+        var oauthProvider = new FakeOAuthProvider { Id = "google", Name = "Google" };
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>())
+        {
+            AuthStatus = new("openai", false, "none", false, true, "No credentials found."),
+            OAuthProvider = oauthProvider
+        };
+        var host = new CodingAgentHost(
+            new InteractiveConsoleSession(terminal),
+            runner,
+            authSelector: (_, _) => Task.FromResult<string?>("google"));
+
+        await host.RunAsync();
+
+        Assert.Empty(runner.Inputs);
+        Assert.Equal(1, oauthProvider.LoginCalls);
+        var saved = runner.SavedOAuthCredentials;
+        Assert.True(saved.HasValue);
+        Assert.Equal("google", saved.Value.ProviderId);
+        Assert.Contains(
+            "status> login google: authenticated successfully. Credentials saved to auth.json.",
+            terminal.FlattenedText());
     }
 
     [Fact]
@@ -1381,6 +1683,80 @@ public class CodingAgentHostTests
         Assert.Contains(
             "status> logout anthropic: auth.json credentials removed. Environment variables and models.json credentials are unchanged.",
             terminal.FlattenedText());
+    }
+
+    [Fact]
+    public async Task RunAsync_LogoutCommandWithSelector_RendersOAuthLogoutSuccess()
+    {
+        var terminal = new FakeTerminal();
+        terminal.QueueInput("/logout");
+        terminal.QueueInput("exit");
+
+        var oauthProvider = new FakeOAuthProvider { Id = "google", Name = "Google" };
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>())
+        {
+            AuthStatus = new("openai", false, "none", false, false, "No credentials found."),
+            OAuthProvider = oauthProvider,
+            LogoutResult = true
+        };
+        runner.AuthStatuses["google"] = new("google", true, "auth.json oauth", true, true, "OAuth credentials found in auth.json.");
+        var host = new CodingAgentHost(
+            new InteractiveConsoleSession(terminal),
+            runner,
+            authSelector: (_, _) => Task.FromResult<string?>("google"));
+
+        await host.RunAsync();
+
+        Assert.Empty(runner.Inputs);
+        Assert.Equal(["google"], runner.LoggedOutProviders);
+        Assert.Contains(
+            "status> logout google: auth.json credentials removed. Environment variables and models.json credentials are unchanged.",
+            terminal.FlattenedText());
+    }
+
+    [Fact]
+    public async Task RunAsync_ThinkingSelectCommand_UsesSelectorAndRendersStatus()
+    {
+        var settingsPath = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-host-thinking-{Guid.NewGuid():N}.json");
+        var terminal = new FakeTerminal();
+        terminal.QueueInput("/thinking select");
+        terminal.QueueInput("exit");
+
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>())
+        {
+            ThinkingLevel = ThinkingLevel.Low
+        };
+        var settingsStore = new CodingAgentSettingsStore(settingsPath);
+        settingsStore.Save(new CodingAgentSettingsSnapshot(null, null, DefaultThinkingLevel: "low"));
+        var selectorStates = new List<CodingAgentThinkingSelectorState>();
+        var host = new CodingAgentHost(
+            new InteractiveConsoleSession(terminal),
+            runner,
+            settingsStore: settingsStore,
+            thinkingSelector: (state, _) =>
+            {
+                selectorStates.Add(state);
+                return Task.FromResult<string?>("medium");
+            });
+
+        try
+        {
+            await host.RunAsync();
+
+            Assert.Empty(runner.Inputs);
+            Assert.Single(selectorStates);
+            Assert.Equal(ThinkingLevel.Low, selectorStates[0].CurrentLevel);
+            Assert.Equal(ThinkingLevel.Medium, runner.ThinkingLevel);
+            Assert.Equal("medium", settingsStore.Load().DefaultThinkingLevel);
+            Assert.Contains("status> thinking: medium", terminal.FlattenedText());
+        }
+        finally
+        {
+            if (File.Exists(settingsPath))
+            {
+                File.Delete(settingsPath);
+            }
+        }
     }
 
     [Fact]
@@ -1565,6 +1941,38 @@ public class CodingAgentHostTests
     {
         await inputTask.WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
         yield return new AgentEndEvent();
+    }
+
+    private sealed class ScriptedKeyReader : IConsoleKeyReader
+    {
+        private readonly Queue<ConsoleKeyInfo> _keys = new();
+
+        public void EnqueueRaw(ConsoleKeyInfo key) => _keys.Enqueue(key);
+
+        public ValueTask<ConsoleKeyInfo> ReadKeyAsync(CancellationToken cancellationToken = default)
+        {
+            if (_keys.Count == 0)
+            {
+                throw new InvalidOperationException("No more queued keys.");
+            }
+
+            return ValueTask.FromResult(_keys.Dequeue());
+        }
+    }
+
+    private sealed class CapturingRenderer : IInteractiveRenderer
+    {
+        public int WindowWidth => 80;
+
+        public void WritePrompt(string prompt, ConsoleColor? color = null) { }
+
+        public void Render(string buffer, int cursorIndex) { }
+
+        public void RenderSearch(string pattern, string? match, int cursorInMatch) { }
+
+        public void Commit() { }
+
+        public void Cancel() { }
     }
 
     private sealed class ScriptedTurnInputSource(params CodingAgentTurnInput[] inputs) : ICodingAgentTurnInputSource

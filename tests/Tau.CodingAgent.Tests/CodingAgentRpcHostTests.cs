@@ -93,6 +93,7 @@ public sealed class CodingAgentRpcHostTests
     public async Task RunAsync_GetStateSetModelMessagesAndCommandsReturnStructuredData()
     {
         var runner = new FakeCodingAgentRunner((_, _) => EmptyRun());
+        runner.ConfigureAuth("openai", "google");
         runner.MutableMessages.Add(new UserMessage("saved prompt"));
         var output = new StringWriter();
         var input = string.Join(
@@ -143,6 +144,36 @@ public sealed class CodingAgentRpcHostTests
             .ToArray();
         Assert.Contains("compact", commands);
         Assert.Contains("fork", commands);
+    }
+
+    [Fact]
+    public async Task RunAsync_GetAvailableModelsAndSetModelRequireConfiguredAuth()
+    {
+        var runner = new FakeCodingAgentRunner((_, _) => EmptyRun());
+        runner.ConfigureAuth("openai");
+        var output = new StringWriter();
+        var input = string.Join(
+            "\n",
+            "{\"id\":\"available1\",\"type\":\"get_available_models\"}",
+            "{\"id\":\"model1\",\"type\":\"set_model\",\"provider\":\"google\",\"modelId\":\"gemini-2.5-pro\"}",
+            string.Empty);
+        var host = new CodingAgentRpcHost(runner, new StringReader(input), output);
+
+        await host.RunAsync();
+
+        var lines = ReadJsonLines(output);
+        var availableModels = FindResponse(lines, "get_available_models")
+            .GetProperty("data")
+            .GetProperty("models")
+            .EnumerateArray()
+            .Select(model => $"{model.GetProperty("provider").GetString()}/{model.GetProperty("id").GetString()}")
+            .ToArray();
+        Assert.Equal(["openai/gpt-5.4"], availableModels);
+
+        var model = FindResponse(lines, "set_model");
+        Assert.False(model.GetProperty("success").GetBoolean());
+        Assert.Contains("configured auth", model.GetProperty("error").GetString(), StringComparison.OrdinalIgnoreCase);
+        Assert.Equal("openai", runner.Model.Provider);
     }
 
     [Fact]
@@ -252,6 +283,66 @@ public sealed class CodingAgentRpcHostTests
     }
 
     [Fact]
+    public async Task RunAsync_SetThinkingLevelClampsToCurrentModelCapabilities()
+    {
+        using var temp = TempDirectory.Create();
+        var settingsPath = Path.Combine(temp.Path, "settings.json");
+        var settingsStore = new CodingAgentSettingsStore(settingsPath);
+        settingsStore.Save(new CodingAgentSettingsSnapshot("google", "gemini-2.5-pro"));
+        var runner = new FakeCodingAgentRunner((_, _) => EmptyRun());
+        runner.SelectModel("google", "gemini-2.5-pro");
+        var output = new StringWriter();
+        var input = string.Join(
+            "\n",
+            "{\"id\":\"t1\",\"type\":\"set_thinking_level\",\"level\":\"xhigh\"}",
+            "{\"id\":\"s1\",\"type\":\"get_state\"}",
+            string.Empty);
+        var host = new CodingAgentRpcHost(
+            runner,
+            new StringReader(input),
+            output,
+            settingsStore: settingsStore);
+
+        await host.RunAsync();
+
+        var lines = ReadJsonLines(output);
+        Assert.True(FindResponse(lines, "set_thinking_level").GetProperty("success").GetBoolean());
+        Assert.Equal(ThinkingLevel.High, runner.ThinkingLevel);
+        Assert.Equal("high", FindResponse(lines, "get_state").GetProperty("data").GetProperty("thinkingLevel").GetString());
+        Assert.Equal("high", settingsStore.Load().DefaultThinkingLevel);
+    }
+
+    [Fact]
+    public async Task RunAsync_SetThinkingLevelTurnsOffForNonReasoningModel()
+    {
+        using var temp = TempDirectory.Create();
+        var settingsPath = Path.Combine(temp.Path, "settings.json");
+        var settingsStore = new CodingAgentSettingsStore(settingsPath);
+        settingsStore.Save(new CodingAgentSettingsSnapshot("openai", "gpt-5.4", DefaultThinkingLevel: "high"));
+        var runner = new FakeCodingAgentRunner((_, _) => EmptyRun());
+        runner.SetModelReasoning("openai", "gpt-5.4", false);
+        var output = new StringWriter();
+        var input = string.Join(
+            "\n",
+            "{\"id\":\"t1\",\"type\":\"set_thinking_level\",\"level\":\"high\"}",
+            "{\"id\":\"s1\",\"type\":\"get_state\"}",
+            string.Empty);
+        var host = new CodingAgentRpcHost(
+            runner,
+            new StringReader(input),
+            output,
+            settingsStore: settingsStore);
+
+        await host.RunAsync();
+
+        var lines = ReadJsonLines(output);
+        Assert.True(FindResponse(lines, "set_thinking_level").GetProperty("success").GetBoolean());
+        Assert.Null(runner.ThinkingLevel);
+        Assert.Equal("off", FindResponse(lines, "get_state").GetProperty("data").GetProperty("thinkingLevel").GetString());
+        Assert.Null(settingsStore.Load().DefaultThinkingLevel);
+    }
+
+    [Fact]
     public async Task RunAsync_ThinkingLevelCommandsValidateInputAndRejectActivePrompt()
     {
         var runner = new FakeCodingAgentRunner((_, ct) => BlockingRun(ct));
@@ -301,6 +392,7 @@ public sealed class CodingAgentRpcHostTests
         {
             ThinkingLevel = ThinkingLevel.High
         };
+        runner.ConfigureAuth("openai", "google");
         var output = new StringWriter();
         var input = string.Join(
             "\n",
@@ -339,6 +431,86 @@ public sealed class CodingAgentRpcHostTests
     }
 
     [Fact]
+    public async Task RunAsync_CycleModelAppliesScopedThinkingLevelOverride()
+    {
+        using var temp = TempDirectory.Create();
+        var settingsPath = Path.Combine(temp.Path, "settings.json");
+        var settingsStore = new CodingAgentSettingsStore(settingsPath);
+        settingsStore.Save(new CodingAgentSettingsSnapshot(
+            "openai",
+            "gpt-5.4",
+            DefaultThinkingLevel: "high",
+            EnabledModels: ["openai/gpt-5.4", "google/gemini-2.5-pro:off"]));
+        var runner = new FakeCodingAgentRunner((_, _) => EmptyRun())
+        {
+            ThinkingLevel = ThinkingLevel.High
+        };
+        runner.ConfigureAuth("openai", "google");
+        var output = new StringWriter();
+        var host = new CodingAgentRpcHost(
+            runner,
+            new StringReader("{\"id\":\"m1\",\"type\":\"cycle_model\"}\n"),
+            output,
+            settingsStore: settingsStore);
+
+        await host.RunAsync();
+
+        var cycle = FindResponse(ReadJsonLines(output), "cycle_model");
+        Assert.True(cycle.GetProperty("success").GetBoolean());
+        Assert.True(cycle.GetProperty("data").GetProperty("isScoped").GetBoolean());
+        Assert.Equal("google", cycle.GetProperty("data").GetProperty("model").GetProperty("provider").GetString());
+        Assert.Equal("gemini-2.5-pro", cycle.GetProperty("data").GetProperty("model").GetProperty("id").GetString());
+        Assert.Equal("off", cycle.GetProperty("data").GetProperty("thinkingLevel").GetString());
+        Assert.Null(runner.ThinkingLevel);
+
+        var saved = settingsStore.Load();
+        Assert.Equal("google", saved.DefaultProvider);
+        Assert.Equal("gemini-2.5-pro", saved.DefaultModel);
+        Assert.Null(saved.DefaultThinkingLevel);
+        Assert.Equal(["openai/gpt-5.4", "google/gemini-2.5-pro:off"], saved.EnabledModels);
+    }
+
+    [Fact]
+    public async Task RunAsync_CycleModelClampsScopedThinkingLevelOverride()
+    {
+        using var temp = TempDirectory.Create();
+        var settingsPath = Path.Combine(temp.Path, "settings.json");
+        var settingsStore = new CodingAgentSettingsStore(settingsPath);
+        settingsStore.Save(new CodingAgentSettingsSnapshot(
+            "openai",
+            "gpt-5.4",
+            DefaultThinkingLevel: "low",
+            EnabledModels: ["openai/gpt-5.4", "google/gemini-2.5-pro:xhigh"]));
+        var runner = new FakeCodingAgentRunner((_, _) => EmptyRun())
+        {
+            ThinkingLevel = ThinkingLevel.Low
+        };
+        runner.ConfigureAuth("openai", "google");
+        var output = new StringWriter();
+        var host = new CodingAgentRpcHost(
+            runner,
+            new StringReader("{\"id\":\"m1\",\"type\":\"cycle_model\"}\n"),
+            output,
+            settingsStore: settingsStore);
+
+        await host.RunAsync();
+
+        var cycle = FindResponse(ReadJsonLines(output), "cycle_model");
+        Assert.True(cycle.GetProperty("success").GetBoolean());
+        Assert.True(cycle.GetProperty("data").GetProperty("isScoped").GetBoolean());
+        Assert.Equal("google", cycle.GetProperty("data").GetProperty("model").GetProperty("provider").GetString());
+        Assert.Equal("gemini-2.5-pro", cycle.GetProperty("data").GetProperty("model").GetProperty("id").GetString());
+        Assert.Equal("high", cycle.GetProperty("data").GetProperty("thinkingLevel").GetString());
+        Assert.Equal(ThinkingLevel.High, runner.ThinkingLevel);
+
+        var saved = settingsStore.Load();
+        Assert.Equal("google", saved.DefaultProvider);
+        Assert.Equal("gemini-2.5-pro", saved.DefaultModel);
+        Assert.Equal("high", saved.DefaultThinkingLevel);
+        Assert.Equal(["openai/gpt-5.4", "google/gemini-2.5-pro:xhigh"], saved.EnabledModels);
+    }
+
+    [Fact]
     public async Task RunAsync_CycleModelReturnsExplicitNullWhenOnlyOneScopedModelIsAvailable()
     {
         using var temp = TempDirectory.Create();
@@ -349,6 +521,7 @@ public sealed class CodingAgentRpcHostTests
             "gpt-5.4",
             EnabledModels: ["openai/gpt-5.4"]));
         var runner = new FakeCodingAgentRunner((_, _) => EmptyRun());
+        runner.ConfigureAuth("openai");
         var output = new StringWriter();
         var host = new CodingAgentRpcHost(
             runner,
@@ -689,6 +862,7 @@ public sealed class CodingAgentRpcHostTests
             AutoCompactionEnabled: false,
             Theme: "dark"));
         var runner = new FakeCodingAgentRunner((_, _) => EmptyRun());
+        runner.ConfigureAuth("google");
         var output = new StringWriter();
         var updateJson = string.Join(
             "\n",
@@ -710,14 +884,14 @@ public sealed class CodingAgentRpcHostTests
         Assert.True(update.GetProperty("success").GetBoolean());
         Assert.Equal("google", runner.Model.Provider);
         Assert.Equal("gemini-2.5-pro", runner.Model.Id);
-        Assert.Equal(ThinkingLevel.ExtraHigh, runner.ThinkingLevel);
+        Assert.Equal(ThinkingLevel.High, runner.ThinkingLevel);
         Assert.Equal(AgentQueueMode.All, runner.SteeringMode);
         Assert.Equal(AgentQueueMode.All, runner.FollowUpMode);
 
         var state = FindResponse(lines, "get_state").GetProperty("data");
         Assert.True(state.GetProperty("autoRetryEnabled").GetBoolean());
         Assert.True(state.GetProperty("autoCompactionEnabled").GetBoolean());
-        Assert.Equal("xhigh", state.GetProperty("thinkingLevel").GetString());
+        Assert.Equal("high", state.GetProperty("thinkingLevel").GetString());
 
         var saved = settingsStore.Load();
         Assert.Equal("google", saved.DefaultProvider);
@@ -725,7 +899,7 @@ public sealed class CodingAgentRpcHostTests
         Assert.Equal("labeled-only", saved.TreeFilterMode);
         Assert.Equal(5, saved.RetryMaxAttempts);
         Assert.Equal(250, saved.RetryBaseDelayMilliseconds);
-        Assert.Equal("xhigh", saved.DefaultThinkingLevel);
+        Assert.Equal("high", saved.DefaultThinkingLevel);
         Assert.Equal(["google/gemini-2.5-pro", "openai/gpt-5.4"], saved.EnabledModels);
         Assert.Equal("all", saved.SteeringMode);
         Assert.Equal("all", saved.FollowUpMode);

@@ -136,4 +136,30 @@ public class CodingAgentSettingsStoreTests
             }
         }
     }
+
+    [Fact]
+    public void SaveAndLoad_PreservesScopedModelThinkingSuffixes()
+    {
+        var path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"tau-coding-agent-settings-thinking-scope-{Guid.NewGuid():N}.json");
+        var store = new CodingAgentSettingsStore(path);
+
+        try
+        {
+            store.Save(new CodingAgentSettingsSnapshot(
+                null,
+                null,
+                EnabledModels: [" openai/gpt-5.4:high ", "google/gemini-2.5-pro:off", "OPENAI/gpt-5.4:high"]));
+
+            var loaded = store.Load();
+
+            Assert.Equal(["openai/gpt-5.4:high", "google/gemini-2.5-pro:off"], loaded.EnabledModels);
+        }
+        finally
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+        }
+    }
 }

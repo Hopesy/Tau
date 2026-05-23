@@ -60,7 +60,8 @@ Tau 当前还处在移植收口期，所以可运维性目标要现实：
 
 ### 本地
 
-- 改 `src/` 下代码后，至少跑 `bash scripts/verify-dotnet.sh --skip-restore`
+- 改 `src/` 下代码后，Windows 本机优先跑 `powershell -ExecutionPolicy Bypass -File .\scripts\verify-dotnet.ps1 -SkipRestore`
+- bash 可用时，可跑 `bash scripts/verify-dotnet.sh --skip-restore`
 - 改关键运行路径时，补一轮 `dotnet run --project src/Tau.CodingAgent/Tau.CodingAgent.csproj --no-build`
 - 改 CLI 交互相关代码时，至少手工跑一轮 `Tau.CodingAgent`
 
@@ -68,21 +69,22 @@ Tau 当前还处在移植收口期，所以可运维性目标要现实：
 
 当前真实状态：
 
-- 已有 docs / hygiene / action pinning 检查
-- 已有 `scripts/verify-dotnet.sh` 作为项目级 .NET restore / build / test 门禁
-- `Tau.slnx` 仍不是可信 CI 入口
+- 旧 harness-init 的 docs / hygiene / action pinning / release package 脚手架已移除。
+- `scripts/verify-dotnet.ps1` 和 `scripts/verify-dotnet.sh` 是当前项目级 .NET restore / build / test 门禁。
+- `Tau.slnx` 已能 build，但日常排障仍优先使用显式项目顺序的 verify 脚本定位失败。
 
 近期目标：
 
 - 继续让 CI 成为 `Tau.CodingAgent` P0 路径的最小守门人
-- 单独追踪并解决 `Tau.slnx` / workload resolver 的 solution-level 构建异常
+- 真正需要远端 CI 时，基于 Tau 的 .NET 验证链重新接入，而不是恢复旧模板的通用 GitHub workflow 骨架。
 
 ## 常见故障排查顺序
 
 出现问题时，默认按这个顺序排：
 
 1. **能否完成项目级验证链**
-   - `bash scripts/verify-dotnet.sh --skip-restore`
+   - `powershell -ExecutionPolicy Bypass -File .\scripts\verify-dotnet.ps1 -SkipRestore`
+   - 或 `bash scripts/verify-dotnet.sh --skip-restore`
 2. **失败发生在启动前还是运行时**
    - 配置缺失 / 依赖装配 / provider 注册 / 命令入口
 3. **运行时卡在模型调用前、中、后哪个阶段**

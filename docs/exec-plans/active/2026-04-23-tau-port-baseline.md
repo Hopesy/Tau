@@ -47,7 +47,6 @@
   - `docs/ARCHITECTURE.md`
   - `docs/product-specs/tau-port-overview.md`
   - `docs/QUALITY_SCORE.md`
-  - `docs/CICD.md`
 - 相关代码路径：
   - `src/Tau.Ai/`
   - `src/Tau.Agent/`
