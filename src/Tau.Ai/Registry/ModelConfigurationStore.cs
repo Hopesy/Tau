@@ -141,6 +141,85 @@ public sealed class ModelConfigurationStore
         }
     }
 
+    internal IReadOnlyList<DynamicProviderRegistration> GetDynamicProviderRegistrations()
+    {
+        var doc = LoadDocument();
+        if (doc is null)
+        {
+            return [];
+        }
+
+        using (doc)
+        {
+            if (!TryGetProviders(doc.RootElement, out var providers))
+            {
+                return [];
+            }
+
+            var registrations = new Dictionary<string, DynamicProviderRegistration>(StringComparer.OrdinalIgnoreCase);
+            foreach (var providerProp in providers.EnumerateObject())
+            {
+                if (providerProp.Value.ValueKind != JsonValueKind.Object)
+                {
+                    continue;
+                }
+
+                AddDynamicProviderRegistrations(providerProp.Value, registrations);
+            }
+
+            return [.. registrations.Values];
+        }
+    }
+
+    private static void AddDynamicProviderRegistrations(
+        JsonElement providerConfig,
+        Dictionary<string, DynamicProviderRegistration> registrations)
+    {
+        var providerApi = NormalizeApi(GetString(providerConfig, "api"));
+        var providerBaseUrl = GetString(providerConfig, "baseUrl");
+        var providerRequestPath = GetRequestPath(providerConfig);
+        var providerIsOpenAiCompatible = IsOpenAiCompatibleRegistration(providerConfig);
+
+        if (providerIsOpenAiCompatible &&
+            !string.IsNullOrWhiteSpace(providerApi) &&
+            !string.IsNullOrWhiteSpace(providerBaseUrl))
+        {
+            registrations[providerApi] = new DynamicProviderRegistration(
+                providerApi,
+                providerBaseUrl!,
+                providerRequestPath);
+        }
+
+        if (!providerConfig.TryGetProperty("models", out var configuredModels) ||
+            configuredModels.ValueKind != JsonValueKind.Array)
+        {
+            return;
+        }
+
+        foreach (var configuredModel in configuredModels.EnumerateArray())
+        {
+            if (configuredModel.ValueKind != JsonValueKind.Object)
+            {
+                continue;
+            }
+
+            var modelApi = NormalizeApi(GetString(configuredModel, "api"));
+            var api = modelApi ?? providerApi;
+            var baseUrl = GetString(configuredModel, "baseUrl") ?? providerBaseUrl;
+            var requestPath = GetString(configuredModel, "requestPath") is { } modelRequestPath
+                ? NormalizeRequestPath(modelRequestPath)
+                : providerRequestPath;
+            var isOpenAiCompatible = IsOpenAiCompatibleRegistration(configuredModel) || providerIsOpenAiCompatible;
+
+            if (isOpenAiCompatible &&
+                !string.IsNullOrWhiteSpace(api) &&
+                !string.IsNullOrWhiteSpace(baseUrl))
+            {
+                registrations[api] = new DynamicProviderRegistration(api, baseUrl!, requestPath);
+            }
+        }
+    }
+
     private static void ApplyProvider(
         string providerName,
         JsonElement providerConfig,
@@ -708,6 +787,40 @@ public sealed class ModelConfigurationStore
         };
     }
 
+    private static bool IsOpenAiCompatibleRegistration(JsonElement element)
+    {
+        var kind = GetString(element, "apiKind") ?? GetString(element, "apiType");
+        if (string.IsNullOrWhiteSpace(kind))
+        {
+            return false;
+        }
+
+        return kind.Trim().ToLowerInvariant() switch
+        {
+            "openai-compatible" => true,
+            "openai-completions" => true,
+            DefaultApi => true,
+            _ => false
+        };
+    }
+
+    private static string GetRequestPath(JsonElement element)
+    {
+        var requestPath = GetString(element, "requestPath");
+        if (string.IsNullOrWhiteSpace(requestPath))
+        {
+            return "/chat/completions";
+        }
+
+        return NormalizeRequestPath(requestPath);
+    }
+
+    private static string NormalizeRequestPath(string requestPath)
+    {
+        requestPath = requestPath.Trim();
+        return requestPath.StartsWith('/') ? requestPath : $"/{requestPath}";
+    }
+
     private static bool TryGetString(JsonElement element, string propertyName, out string? value)
     {
         value = GetString(element, propertyName);
@@ -789,3 +902,8 @@ internal sealed record ModelRequestConfigurationStatus(
 
     public bool IsConfigured => HasApiKey || HasCredentialHeader;
 }
+
+internal sealed record DynamicProviderRegistration(
+    string Api,
+    string BaseUrl,
+    string RequestPath);

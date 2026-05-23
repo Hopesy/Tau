@@ -10,7 +10,9 @@ public static class WebChatJsonlImporter
     {
         if (string.IsNullOrWhiteSpace(jsonl))
         {
-            throw new InvalidDataException("JSONL session header is required.");
+            throw new WebChatJsonlImportException(
+                "missing_session_header",
+                "JSONL session header is required.");
         }
 
         using var reader = new StringReader(jsonl);
@@ -30,7 +32,10 @@ public static class WebChatJsonlImporter
 
             if (string.IsNullOrWhiteSpace(line))
             {
-                throw new InvalidDataException($"JSONL line {lineNumber} is empty.");
+                throw new WebChatJsonlImportException(
+                    "empty_line",
+                    $"JSONL line {lineNumber} is empty.",
+                    lineNumber);
             }
 
             var type = ReadType(line, lineNumber);
@@ -38,7 +43,10 @@ public static class WebChatJsonlImporter
             {
                 if (!string.Equals(type, "session", StringComparison.Ordinal))
                 {
-                    throw new InvalidDataException("First JSONL line must be a session header.");
+                    throw new WebChatJsonlImportException(
+                        "missing_session_header",
+                        "First JSONL line must be a session header.",
+                        lineNumber);
                 }
 
                 header = Deserialize(line, WebUiJsonlContext.Default.WebChatJsonlSessionHeader, lineNumber);
@@ -48,7 +56,10 @@ public static class WebChatJsonlImporter
 
             if (!string.Equals(type, "message", StringComparison.Ordinal))
             {
-                throw new InvalidDataException($"JSONL line {lineNumber} must be a message entry.");
+                throw new WebChatJsonlImportException(
+                    "invalid_entry_type",
+                    $"JSONL line {lineNumber} must be a message entry.",
+                    lineNumber);
             }
 
             var entry = Deserialize(line, WebUiJsonlContext.Default.WebChatJsonlMessageEntry, lineNumber);
@@ -67,7 +78,9 @@ public static class WebChatJsonlImporter
 
         if (header is null)
         {
-            throw new InvalidDataException("JSONL session header is required.");
+            throw new WebChatJsonlImportException(
+                "missing_session_header",
+                "JSONL session header is required.");
         }
 
         return new WebChatSessionDto(
@@ -90,14 +103,21 @@ public static class WebChatJsonlImporter
                 typeElement.ValueKind != JsonValueKind.String ||
                 string.IsNullOrWhiteSpace(typeElement.GetString()))
             {
-                throw new InvalidDataException($"JSONL line {lineNumber} is missing a type field.");
+                throw new WebChatJsonlImportException(
+                    "missing_type",
+                    $"JSONL line {lineNumber} is missing a type field.",
+                    lineNumber);
             }
 
             return typeElement.GetString()!;
         }
         catch (JsonException ex)
         {
-            throw new InvalidDataException($"JSONL line {lineNumber} is not valid JSON.", ex);
+            throw new WebChatJsonlImportException(
+                "invalid_json",
+                $"JSONL line {lineNumber} is not valid JSON.",
+                lineNumber,
+                ex);
         }
     }
 
@@ -106,11 +126,18 @@ public static class WebChatJsonlImporter
         try
         {
             return JsonSerializer.Deserialize(line, jsonTypeInfo) ??
-                throw new InvalidDataException($"JSONL line {lineNumber} could not be deserialized.");
+                throw new WebChatJsonlImportException(
+                    "invalid_webui_jsonl",
+                    $"JSONL line {lineNumber} could not be deserialized.",
+                    lineNumber);
         }
         catch (JsonException ex)
         {
-            throw new InvalidDataException($"JSONL line {lineNumber} is not valid WebUi JSONL.", ex);
+            throw new WebChatJsonlImportException(
+                "invalid_webui_jsonl",
+                $"JSONL line {lineNumber} is not valid WebUi JSONL.",
+                lineNumber,
+                ex);
         }
     }
 
@@ -118,13 +145,16 @@ public static class WebChatJsonlImporter
     {
         if (header.Version != 1)
         {
-            throw new InvalidDataException($"Unsupported WebUi JSONL version '{header.Version}'.");
+            throw new WebChatJsonlImportException(
+                "unsupported_version",
+                $"Unsupported WebUi JSONL version '{header.Version}'.",
+                1);
         }
 
-        RequireText(header.Id, "session id");
-        RequireText(header.Title, "session title");
-        RequireText(header.Provider, "session provider");
-        RequireText(header.Model, "session model");
+        RequireText(header.Id, "session id", 1);
+        RequireText(header.Title, "session title", 1);
+        RequireText(header.Provider, "session provider", 1);
+        RequireText(header.Model, "session model", 1);
     }
 
     private static void ValidateMessageEntry(
@@ -133,19 +163,25 @@ public static class WebChatJsonlImporter
         HashSet<string> seenMessageIds,
         int lineNumber)
     {
-        RequireText(entry.Id, $"message id at line {lineNumber}");
-        RequireText(entry.Role, $"message role at line {lineNumber}");
+        RequireText(entry.Id, $"message id at line {lineNumber}", lineNumber);
+        RequireText(entry.Role, $"message role at line {lineNumber}", lineNumber);
 
         if (!seenMessageIds.Add(entry.Id))
         {
-            throw new InvalidDataException($"JSONL line {lineNumber} has duplicate message id '{entry.Id}'.");
+            throw new WebChatJsonlImportException(
+                "duplicate_message_id",
+                $"JSONL line {lineNumber} has duplicate message id '{entry.Id}'.",
+                lineNumber);
         }
 
         if (previousMessageId is null)
         {
             if (!string.IsNullOrWhiteSpace(entry.ParentId))
             {
-                throw new InvalidDataException($"JSONL line {lineNumber} must not have a parentId for the first message.");
+                throw new WebChatJsonlImportException(
+                    "invalid_parent_chain",
+                    $"JSONL line {lineNumber} must not have a parentId for the first message.",
+                    lineNumber);
             }
 
             return;
@@ -153,15 +189,39 @@ public static class WebChatJsonlImporter
 
         if (!string.Equals(entry.ParentId, previousMessageId, StringComparison.Ordinal))
         {
-            throw new InvalidDataException($"JSONL line {lineNumber} does not continue the linear parent chain.");
+            throw new WebChatJsonlImportException(
+                "invalid_parent_chain",
+                $"JSONL line {lineNumber} does not continue the linear parent chain.",
+                lineNumber);
         }
     }
 
-    private static void RequireText(string? value, string fieldName)
+    private static void RequireText(string? value, string fieldName, int? lineNumber)
     {
         if (string.IsNullOrWhiteSpace(value))
         {
-            throw new InvalidDataException($"WebUi JSONL is missing {fieldName}.");
+            throw new WebChatJsonlImportException(
+                "missing_field",
+                $"WebUi JSONL is missing {fieldName}.",
+                lineNumber);
         }
     }
+}
+
+public sealed class WebChatJsonlImportException : Exception
+{
+    public WebChatJsonlImportException(
+        string code,
+        string message,
+        int? lineNumber = null,
+        Exception? innerException = null)
+        : base(message, innerException)
+    {
+        Code = code;
+        LineNumber = lineNumber;
+    }
+
+    public string Code { get; }
+
+    public int? LineNumber { get; }
 }

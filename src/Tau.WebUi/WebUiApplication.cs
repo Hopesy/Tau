@@ -9,6 +9,10 @@ namespace Tau.WebUi;
 
 public static class WebUiApplication
 {
+    private const string JsonlContentType = "application/x-ndjson; charset=utf-8";
+    private const string JsonlImportProblemTitle = "Invalid WebUi JSONL import";
+    private static readonly char[] PortableInvalidFileNameChars = ['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
+
     public static IEndpointRouteBuilder MapWebUiEndpoints(this IEndpointRouteBuilder app)
     {
         app.MapGet("/", () => Results.Content(WebUiPage.Html, "text/html; charset=utf-8"));
@@ -82,7 +86,7 @@ public static class WebUiApplication
             var jsonl = WebChatJsonlExporter.Render(session);
             return Results.File(
                 Encoding.UTF8.GetBytes(jsonl),
-                "application/x-ndjson; charset=utf-8",
+                JsonlContentType,
                 $"{SafeFileName(session.Title)}.tau-webui-session.jsonl");
         });
         app.MapGet("/api/sessions/{id}/export.md", (string id, WebChatService chat) =>
@@ -124,12 +128,24 @@ public static class WebUiApplication
         });
         app.MapPost("/api/sessions/import.jsonl", async Task<IResult> (HttpRequest request, WebChatService chat, CancellationToken cancellationToken) =>
         {
+            if (!IsSupportedJsonlImportContentType(request.ContentType))
+            {
+                return JsonlProblem(
+                    "unsupported_content_type",
+                    $"Unsupported JSONL import content type '{request.ContentType}'. Use application/x-ndjson.",
+                    StatusCodes.Status415UnsupportedMediaType);
+            }
+
             try
             {
                 using var reader = new StreamReader(request.Body, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
                 var jsonl = await reader.ReadToEndAsync(cancellationToken).ConfigureAwait(false);
                 var session = WebChatJsonlImporter.Parse(jsonl);
                 return Results.Ok(chat.ImportSession(session));
+            }
+            catch (WebChatJsonlImportException ex)
+            {
+                return JsonlProblem(ex.Code, ex.Message, StatusCodes.Status400BadRequest, ex.LineNumber);
             }
             catch (Exception ex)
             {
@@ -207,10 +223,44 @@ public static class WebUiApplication
     private static bool HasMessageInput(SendMessageRequest request) =>
         !string.IsNullOrWhiteSpace(request.Text) || request.Attachments is { Count: > 0 };
 
+    private static IResult JsonlProblem(string code, string detail, int statusCode, int? lineNumber = null)
+    {
+        var extensions = new Dictionary<string, object?>
+        {
+            ["code"] = code
+        };
+        if (lineNumber is not null)
+        {
+            extensions["line"] = lineNumber.Value;
+        }
+
+        return Results.Problem(
+            detail: detail,
+            statusCode: statusCode,
+            title: JsonlImportProblemTitle,
+            extensions: extensions);
+    }
+
+    private static bool IsSupportedJsonlImportContentType(string? contentType)
+    {
+        if (string.IsNullOrWhiteSpace(contentType))
+        {
+            return true;
+        }
+
+        var mediaType = contentType.Split(';', 2)[0].Trim();
+        return mediaType.Equals("application/x-ndjson", StringComparison.OrdinalIgnoreCase) ||
+            mediaType.Equals("application/jsonl", StringComparison.OrdinalIgnoreCase) ||
+            mediaType.Equals("application/json-lines", StringComparison.OrdinalIgnoreCase) ||
+            mediaType.Equals("text/plain", StringComparison.OrdinalIgnoreCase);
+    }
+
     private static string SafeFileName(string value)
     {
         var invalid = Path.GetInvalidFileNameChars();
-        var cleaned = new string(value.Select(ch => invalid.Contains(ch) ? '-' : ch).ToArray()).Trim();
+        var cleaned = new string(value
+            .Select(ch => char.IsControl(ch) || invalid.Contains(ch) || PortableInvalidFileNameChars.Contains(ch) ? '-' : ch)
+            .ToArray()).Trim();
         return string.IsNullOrWhiteSpace(cleaned) ? "tau-session" : cleaned;
     }
 }

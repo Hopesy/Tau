@@ -1,10 +1,132 @@
+using System.Text.Json;
 using Tau.Ai.Providers;
+using Tau.Ai.Registry;
 using Tau.Ai.Streaming;
 
 namespace Tau.Ai.Tests;
 
 public sealed class ModelConfigurationStoreTests
 {
+    [Fact]
+    public async Task RegisterConfiguredProviders_RegistersOpenAiCompatibleApiFromModelsJson()
+    {
+        using var scope = EnvironmentVariableScope.Acquire();
+        var tempDir = Path.Combine(Path.GetTempPath(), $"tau-dynamic-provider-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+
+        try
+        {
+            var modelsPath = Path.Combine(tempDir, "models.json");
+            var authPath = Path.Combine(tempDir, "auth.json");
+            File.WriteAllText(authPath, "{}");
+            File.WriteAllText(modelsPath, """
+                {
+                  "providers": {
+                    "local-proxy": {
+                      "baseUrl": "https://proxy.example.test/v1",
+                      "api": "custom-openai-api",
+                      "apiKind": "openai-compatible",
+                      "apiKey": "DYNAMIC_PROVIDER_KEY",
+                      "authHeader": true,
+                      "headers": {
+                        "X-Provider": "provider-secret"
+                      },
+                      "models": [
+                        {
+                          "id": "proxy-model",
+                          "name": "Proxy Model"
+                        }
+                      ]
+                    }
+                  }
+                }
+                """);
+            scope.Set("TAU_MODELS_FILE", modelsPath);
+            scope.Set("TAU_AUTH_FILE", authPath);
+            scope.Set("DYNAMIC_PROVIDER_KEY", "dynamic-key");
+
+            using var handler = new OpenAiResponsesProviderTests.StubHandler(_ => OpenAiResponsesProviderTests.SseResponse(
+                """
+                data: {"choices":[{"delta":{"content":"ok"},"finish_reason":null}]}
+
+                data: {"choices":[{"delta":{},"finish_reason":"stop"}]}
+
+                data: [DONE]
+
+                """));
+            using var client = new HttpClient(handler);
+            var configurationStore = new ModelConfigurationStore([modelsPath]);
+            var catalog = new ModelCatalog(configurationStore: configurationStore);
+            var model = catalog.GetModel("local-proxy", "proxy-model");
+            var registry = new ProviderRegistry();
+
+            BuiltInProviders.RegisterAll(registry, configurationStore, client);
+
+            Assert.Equal("custom-openai-api", model.Api);
+            Assert.Contains("custom-openai-api", registry.RegisteredApis);
+
+            var events = await OpenAiResponsesProviderTests.CollectAsync(StreamFunctions.Stream(
+                registry,
+                model,
+                new LlmContext { Messages = [new UserMessage("hi")] },
+                new StreamOptions()));
+
+            Assert.Equal("proxy.example.test", handler.RequestUri!.Host);
+            Assert.Equal("/v1/chat/completions", handler.RequestUri.AbsolutePath);
+            var request = Assert.Single(handler.Requests);
+            Assert.Equal("Bearer", request.Headers.Authorization!.Scheme);
+            Assert.Equal("dynamic-key", request.Headers.Authorization.Parameter);
+            Assert.Contains("provider-secret", request.Headers.GetValues("X-Provider"));
+
+            using var body = JsonDocument.Parse(handler.CapturedBody);
+            Assert.Equal("proxy-model", body.RootElement.GetProperty("model").GetString());
+            Assert.True(body.RootElement.GetProperty("stream").GetBoolean());
+
+            var done = Assert.Single(events.OfType<DoneEvent>());
+            Assert.Equal("ok", Assert.IsType<TextContent>(Assert.Single(done.Message.Content)).Text);
+            Assert.Equal("custom-openai-api", done.Message.Api);
+        }
+        finally
+        {
+            Directory.Delete(tempDir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void RegisterConfiguredProviders_IgnoresUnknownApiWithoutOpenAiCompatibleMarker()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), $"tau-dynamic-provider-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+
+        try
+        {
+            var modelsPath = Path.Combine(tempDir, "models.json");
+            File.WriteAllText(modelsPath, """
+                {
+                  "providers": {
+                    "local-proxy": {
+                      "baseUrl": "https://proxy.example.test/v1",
+                      "api": "custom-openai-api",
+                      "apiKey": "literal-key",
+                      "models": [
+                        { "id": "proxy-model" }
+                      ]
+                    }
+                  }
+                }
+                """);
+
+            var registry = new ProviderRegistry();
+            BuiltInProviders.RegisterAll(registry, new ModelConfigurationStore([modelsPath]));
+
+            Assert.DoesNotContain("custom-openai-api", registry.RegisteredApis);
+        }
+        finally
+        {
+            Directory.Delete(tempDir, recursive: true);
+        }
+    }
+
     [Fact]
     public async Task StreamFunctions_ResolvesModelsJsonRequestAuthAndHeaders()
     {

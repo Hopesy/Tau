@@ -9,6 +9,7 @@ public sealed class PodDefinition
     public string? Endpoint { get; set; }
     public string? SshHost { get; set; }
     public int? SshPort { get; set; }
+    public string? ModelsPath { get; set; }
     public bool Enabled { get; set; } = true;
     public List<string> Tags { get; set; } = [];
 }

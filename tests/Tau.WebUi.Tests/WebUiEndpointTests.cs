@@ -60,6 +60,8 @@ public sealed class WebUiEndpointTests
         var jsonlExport = await fixture.Client.GetAsync($"/api/sessions/{session.Id}/export.jsonl");
         jsonlExport.EnsureSuccessStatusCode();
         Assert.Equal("application/x-ndjson", jsonlExport.Content.Headers.ContentType?.MediaType);
+        Assert.Equal("utf-8", jsonlExport.Content.Headers.ContentType?.CharSet);
+        Assert.Equal("attachment", jsonlExport.Content.Headers.ContentDisposition?.DispositionType);
         Assert.Equal(
             "Endpoint JSONL.tau-webui-session.jsonl",
             jsonlExport.Content.Headers.ContentDisposition?.FileNameStar);
@@ -95,6 +97,30 @@ public sealed class WebUiEndpointTests
         var missing = await fixture.Client.GetAsync("/api/sessions/does-not-exist/export.jsonl");
 
         Assert.Equal(HttpStatusCode.NotFound, missing.StatusCode);
+    }
+
+    [Fact]
+    public async Task ExportJsonlEndpoint_SanitizesDownloadFileName()
+    {
+        await using var fixture = await WebUiEndpointFixture.StartAsync(StreamOk);
+        var created = await fixture.Client.PostAsync(
+            "/api/sessions",
+            JsonBody(
+                new CreateSessionRequest("Bad:Name/JSONL*?", "openai", "gpt-5.4"),
+                WebUiEndpointJsonContext.Default.CreateSessionRequest));
+        created.EnsureSuccessStatusCode();
+        var session = JsonSerializer.Deserialize(
+            await created.Content.ReadAsStringAsync(),
+            WebUiEndpointJsonContext.Default.WebChatSessionDto);
+        Assert.NotNull(session);
+
+        var jsonlExport = await fixture.Client.GetAsync($"/api/sessions/{session!.Id}/export.jsonl");
+
+        jsonlExport.EnsureSuccessStatusCode();
+        Assert.Equal("application/x-ndjson", jsonlExport.Content.Headers.ContentType?.MediaType);
+        Assert.Equal(
+            "Bad-Name-JSONL--.tau-webui-session.jsonl",
+            jsonlExport.Content.Headers.ContentDisposition?.FileNameStar);
     }
 
     [Fact]
@@ -152,9 +178,13 @@ public sealed class WebUiEndpointTests
     }
 
     [Theory]
-    [InlineData("{not-json}\n", "not valid JSON")]
-    [InlineData("{\"type\":\"message\",\"id\":\"message-000001\",\"parentId\":null,\"timestamp\":\"2026-05-23T01:03:00+00:00\",\"role\":\"user\",\"text\":\"hello\"}\n", "First JSONL line must be a session header")]
-    public async Task ImportJsonlEndpoint_ReturnsBadRequestForMalformedJsonl(string jsonl, string expectedMessage)
+    [InlineData("{not-json}\n", "invalid_json", 1, "not valid JSON")]
+    [InlineData("{\"type\":\"message\",\"id\":\"message-000001\",\"parentId\":null,\"timestamp\":\"2026-05-23T01:03:00+00:00\",\"role\":\"user\",\"text\":\"hello\"}\n", "missing_session_header", 1, "First JSONL line must be a session header")]
+    public async Task ImportJsonlEndpoint_ReturnsProblemDetailsForMalformedJsonl(
+        string jsonl,
+        string expectedCode,
+        int expectedLineNumber,
+        string expectedMessage)
     {
         await using var fixture = await WebUiEndpointFixture.StartAsync(StreamOk);
 
@@ -162,12 +192,57 @@ public sealed class WebUiEndpointTests
             "/api/sessions/import.jsonl",
             new StringContent(jsonl, Encoding.UTF8, "application/x-ndjson"));
 
-        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
-        Assert.Contains(expectedMessage, await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        await AssertJsonlProblemAsync(
+            response,
+            HttpStatusCode.BadRequest,
+            expectedCode,
+            expectedLineNumber,
+            expectedMessage);
+    }
+
+    [Fact]
+    public async Task ImportJsonlEndpoint_RejectsUnsupportedContentTypeWithProblemDetails()
+    {
+        await using var fixture = await WebUiEndpointFixture.StartAsync(StreamOk);
+
+        var response = await fixture.Client.PostAsync(
+            "/api/sessions/import.jsonl",
+            new StringContent("{}", Encoding.UTF8, "application/json"));
+
+        await AssertJsonlProblemAsync(
+            response,
+            HttpStatusCode.UnsupportedMediaType,
+            "unsupported_content_type",
+            null,
+            "Use application/x-ndjson");
     }
 
     private static StringContent JsonBody<T>(T value, JsonTypeInfo<T> jsonTypeInfo) =>
         new(JsonSerializer.Serialize(value, jsonTypeInfo), Encoding.UTF8, "application/json");
+
+    private static async Task AssertJsonlProblemAsync(
+        HttpResponseMessage response,
+        HttpStatusCode expectedStatus,
+        string expectedCode,
+        int? expectedLineNumber,
+        string expectedDetail)
+    {
+        Assert.Equal(expectedStatus, response.StatusCode);
+        Assert.Equal("application/problem+json", response.Content.Headers.ContentType?.MediaType);
+        using var problem = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        Assert.Equal("Invalid WebUi JSONL import", problem.RootElement.GetProperty("title").GetString());
+        Assert.Equal((int)expectedStatus, problem.RootElement.GetProperty("status").GetInt32());
+        Assert.Equal(expectedCode, problem.RootElement.GetProperty("code").GetString());
+        Assert.Contains(expectedDetail, problem.RootElement.GetProperty("detail").GetString(), StringComparison.Ordinal);
+        if (expectedLineNumber is null)
+        {
+            Assert.False(problem.RootElement.TryGetProperty("line", out _));
+        }
+        else
+        {
+            Assert.Equal(expectedLineNumber.Value, problem.RootElement.GetProperty("line").GetInt32());
+        }
+    }
 
     private static async IAsyncEnumerable<AgentEvent> StreamOk(
         string input,

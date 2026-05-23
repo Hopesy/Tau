@@ -38,6 +38,7 @@ builder.Services.AddSingleton<IDelegationAgentRunner, RuntimeDelegationAgentRunn
 builder.Services.AddSingleton<ChannelStatusStore>();
 builder.Services.AddSingleton<MomEventProcessor>();
 builder.Services.AddSingleton<FileDelegationProcessor>();
+builder.Services.AddSingleton<MomLocalDelegationFlow>();
 builder.Services.AddSingleton<MomChannelRunRegistry>();
 builder.Services.AddSingleton<MomChannelMessageProcessor>();
 builder.Services.AddSingleton<MomChannelQueueDispatcher>();
@@ -72,8 +73,7 @@ if (commandLine.ValidateSandbox)
 
 if (commandLine.RunOnce)
 {
-    var eventProcessor = host.Services.GetRequiredService<MomEventProcessor>();
-    var processor = host.Services.GetRequiredService<FileDelegationProcessor>();
+    var flow = host.Services.GetRequiredService<MomLocalDelegationFlow>();
     var options = host.Services.GetRequiredService<MomOptions>();
     var logger = host.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Tau.Mom.RunOnce");
     logger.LogInformation(
@@ -84,10 +84,9 @@ if (commandLine.RunOnce)
         options.DefaultProvider,
         options.DefaultModel ?? "<default>",
         options.DefaultWorkingDirectory);
-    var queued = await eventProcessor.ProcessDueEventsAsync().ConfigureAwait(false);
-    logger.LogInformation("Queued {Count} due event(s).", queued);
-    var count = await processor.ProcessPendingAsync().ConfigureAwait(false);
-    logger.LogInformation("Processed {Count} file(s).", count);
+    var result = await flow.ProcessOnceAsync().ConfigureAwait(false);
+    logger.LogInformation("Queued {Count} due event(s).", result.QueuedEvents);
+    logger.LogInformation("Processed {Count} file(s).", result.ProcessedRequests);
     return;
 }
 

@@ -991,7 +991,7 @@ public class CodingAgentCommandRouterTests
     public void CommandCatalog_HelpLine_MatchesSupportedCommandNames()
     {
         Assert.Equal(
-            "commands: /help, /reload, /hotkeys, /settings, /theme, /name, /copy, /files, /export, /share, /import, /new, /session, /tree, /label, /fork, /clone, /resume, /quit, /model, /provider, /models, /providers, /scoped-models, /prompts, /skills, /extensions, /auth, /login, /logout, /changelog, /retry, /thinking, /history, /find, /clear, /compact",
+            "commands: /help, /reload, /hotkeys, /settings, /theme, /name, /copy, /files, /export, /share, /import, /new, /session, /metadata, /tree, /label, /fork, /clone, /resume, /quit, /model, /provider, /models, /providers, /scoped-models, /prompts, /skills, /extensions, /auth, /login, /logout, /changelog, /retry, /thinking, /history, /find, /clear, /compact",
             CodingAgentCommandCatalog.HelpLine);
         Assert.All(CodingAgentCommandCatalog.SupportedCommands, command =>
         {
@@ -1012,7 +1012,7 @@ public class CodingAgentCommandRouterTests
         Assert.True(result.Handled);
         Assert.False(result.IsError);
         Assert.Equal(
-            "commands: /help, /reload, /hotkeys, /settings, /theme, /name, /copy, /files, /export, /share, /import, /new, /session, /tree, /label, /fork, /clone, /resume, /quit, /model, /provider, /models, /providers, /scoped-models, /prompts, /skills, /extensions, /auth, /login, /logout, /changelog, /retry, /thinking, /history, /find, /clear, /compact",
+            "commands: /help, /reload, /hotkeys, /settings, /theme, /name, /copy, /files, /export, /share, /import, /new, /session, /metadata, /tree, /label, /fork, /clone, /resume, /quit, /model, /provider, /models, /providers, /scoped-models, /prompts, /skills, /extensions, /auth, /login, /logout, /changelog, /retry, /thinking, /history, /find, /clear, /compact",
             result.Message);
         Assert.Empty(runner.Inputs);
     }
@@ -2941,6 +2941,109 @@ public class CodingAgentCommandRouterTests
                 Directory.Delete(directory, recursive: true);
             }
         }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_MetadataCommand_ShowsTreeHeaderAndRecentMetadata()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-coding-agent-metadata-" + Guid.NewGuid().ToString("N"));
+        var treePath = Path.Combine(directory, "session.jsonl");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>())
+        {
+            SessionName = "metadata slice"
+        };
+        runner.MutableMessages.Add(new UserMessage("inspect session metadata"));
+        runner.MutableMessages.Add(new AssistantMessage([new TextContent("metadata ready")]));
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+            var tree = new CodingAgentTreeSessionController(
+                new CodingAgentTreeSessionStore(treePath, cwd: directory));
+            var router = new CodingAgentCommandRouter(runner, treeSessionController: tree);
+
+            var result = await router.TryHandleAsync("/metadata");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.NotNull(result.Message);
+            Assert.Contains($"metadata: file {treePath}", result.Message, StringComparison.Ordinal);
+            Assert.Contains($"cwd: {directory}", result.Message, StringComparison.Ordinal);
+            Assert.Contains("parent session: none", result.Message, StringComparison.Ordinal);
+            Assert.Contains("counts: entries 4, branch entries 4, messages 2, branch messages 2, branches 0, labels 0", result.Message, StringComparison.Ordinal);
+            Assert.Contains("latest metadata (2):", result.Message, StringComparison.Ordinal);
+            Assert.Contains("model openai/gpt-5.4", result.Message, StringComparison.Ordinal);
+            Assert.Contains("session name metadata slice", result.Message, StringComparison.Ordinal);
+            Assert.Empty(runner.Inputs);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_MetadataCommand_InspectsSpecificTreeEntry()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-coding-agent-entry-metadata-" + Guid.NewGuid().ToString("N"));
+        var treePath = Path.Combine(directory, "session.jsonl");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.MutableMessages.Add(new UserMessage("inspect this metadata"));
+        runner.MutableMessages.Add(new AssistantMessage([new TextContent("entry details")]));
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+            var tree = CodingAgentTreeSessionController.OpenOrCreate(treePath);
+            tree.SyncFromRunner(runner);
+            var userEntryId = ReadMessageEntryId(treePath, "user", "inspect this metadata");
+            tree.AppendLabelChange(userEntryId, "checkpoint");
+            var router = new CodingAgentCommandRouter(runner, treeSessionController: tree);
+
+            var result = await router.TryHandleAsync($"/metadata {userEntryId}");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.NotNull(result.Message);
+            Assert.Contains($"entry: {userEntryId}", result.Message, StringComparison.Ordinal);
+            Assert.Contains("type: message", result.Message, StringComparison.Ordinal);
+            Assert.Contains("path: branch", result.Message, StringComparison.Ordinal);
+            Assert.Contains("depth: 1, children 1", result.Message, StringComparison.Ordinal);
+            Assert.Contains("label: checkpoint", result.Message, StringComparison.Ordinal);
+            Assert.Contains("message role: user", result.Message, StringComparison.Ordinal);
+            Assert.Contains("content types: text", result.Message, StringComparison.Ordinal);
+            Assert.Contains("preview: inspect this metadata", result.Message, StringComparison.Ordinal);
+            Assert.Empty(runner.Inputs);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_MetadataCommand_RequiresTreeSessionAndRejectsExtraArgs()
+    {
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var router = new CodingAgentCommandRouter(runner);
+
+        var unavailable = await router.TryHandleAsync("/metadata");
+        var extraArgs = await router.TryHandleAsync("/metadata one two");
+
+        Assert.True(unavailable.Handled);
+        Assert.True(unavailable.IsError);
+        Assert.Equal("tree sessions are not enabled", unavailable.Message);
+
+        Assert.True(extraArgs.Handled);
+        Assert.True(extraArgs.IsError);
+        Assert.Equal("usage: /metadata [entry-id]", extraArgs.Message);
+        Assert.Empty(runner.Inputs);
     }
 
     [Fact]

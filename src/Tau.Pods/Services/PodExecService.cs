@@ -16,7 +16,11 @@ public sealed class PodExecService
         _executeProcessAsync = executeProcessAsync ?? ExecuteProcessAsync;
     }
 
-    public async Task<PodExecResult> ExecuteAsync(PodDefinition pod, string command, CancellationToken cancellationToken = default)
+    public async Task<PodExecResult> ExecuteAsync(
+        PodDefinition pod,
+        string command,
+        CancellationToken cancellationToken = default,
+        bool keepAlive = false)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(command);
 
@@ -56,6 +60,13 @@ public sealed class PodExecService
             psi.ArgumentList.Add("BatchMode=yes");
             psi.ArgumentList.Add("-o");
             psi.ArgumentList.Add("ConnectTimeout=5");
+            if (keepAlive)
+            {
+                psi.ArgumentList.Add("-o");
+                psi.ArgumentList.Add("ServerAliveInterval=30");
+                psi.ArgumentList.Add("-o");
+                psi.ArgumentList.Add("ServerAliveCountMax=120");
+            }
             psi.ArgumentList.Add(host);
             psi.ArgumentList.Add(command);
 

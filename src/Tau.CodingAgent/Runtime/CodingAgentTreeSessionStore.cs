@@ -270,6 +270,8 @@ public sealed class CodingAgentTreeSessionController
 
     public string FormatTree(CodingAgentTreeFormatOptions options) => Store.FormatTree(options);
 
+    public string FormatMetadata(string? entryId = null) => Store.FormatMetadata(entryId);
+
     public IReadOnlyList<CodingAgentTreeViewItem> EnumerateView(CodingAgentTreeFormatOptions options) =>
         Store.EnumerateView(options);
 
@@ -984,6 +986,48 @@ public sealed class CodingAgentTreeSessionStore
     public string FormatTree(int maxEntries = 24) =>
         FormatTree(new CodingAgentTreeFormatOptions(maxEntries));
 
+    public string FormatMetadata(string? entryId = null)
+    {
+        var state = ReadState();
+        var branch = state.GetBranch(state.LeafId);
+        var branchIds = branch
+            .Select(static entry => entry.Id)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var lines = new List<string>
+        {
+            $"metadata: file {_path}, session {state.Header.Id}, leaf {FormatEntryId(state.LeafId)}",
+            $"cwd: {state.Header.Cwd}",
+            $"parent session: {FormatOptionalValue(state.Header.ParentSession)}",
+            $"counts: entries {state.Entries.Count}, branch entries {branch.Count}, messages {state.Entries.Count(static entry => entry.Type == MessageType)}, branch messages {branch.Count(static entry => entry.Type == MessageType)}, branches {state.BranchPointCount}, labels {state.LabelsById.Count}"
+        };
+
+        if (!string.IsNullOrWhiteSpace(entryId))
+        {
+            var entry = state.ResolveEntryId(entryId);
+            AppendEntryMetadata(lines, state, branchIds, entry);
+            return string.Join('\n', lines);
+        }
+
+        var metadataEntries = state.Entries
+            .Where(static entry => entry.Type != MessageType)
+            .TakeLast(8)
+            .ToArray();
+        if (metadataEntries.Length == 0)
+        {
+            lines.Add("latest metadata: none");
+        }
+        else
+        {
+            lines.Add($"latest metadata ({metadataEntries.Length}):");
+            foreach (var entry in metadataEntries)
+            {
+                lines.Add($"  {entry.Id} <- {FormatEntryId(entry.ParentId)} {DescribeEntry(entry)}");
+            }
+        }
+
+        return string.Join('\n', lines);
+    }
+
     public string FormatTree(CodingAgentTreeFormatOptions options)
     {
         var state = ReadState();
@@ -1087,6 +1131,137 @@ public sealed class CodingAgentTreeSessionStore
         }
 
         return items;
+    }
+
+    private static void AppendEntryMetadata(
+        ICollection<string> lines,
+        TreeState state,
+        HashSet<string> branchIds,
+        CodingAgentTreeSessionEntry entry)
+    {
+        var childCount = state.Entries.Count(candidate =>
+            string.Equals(candidate.ParentId, entry.Id, StringComparison.OrdinalIgnoreCase));
+        lines.Add($"entry: {entry.Id}");
+        lines.Add($"type: {entry.Type}");
+        lines.Add($"parent: {FormatEntryId(entry.ParentId)}");
+        lines.Add($"timestamp: {entry.Timestamp:O}");
+        lines.Add($"path: {FormatPathState(state, branchIds, entry)}");
+        lines.Add($"depth: {GetDepth(entry, state.ById)}, children {childCount}");
+        if (state.LabelsById.TryGetValue(entry.Id, out var label))
+        {
+            lines.Add($"label: {label}");
+        }
+
+        switch (entry.Type)
+        {
+            case MessageType when entry.Message is not null:
+                lines.Add($"message role: {entry.Message.Role}");
+                AppendIfPresent(lines, "tool call id", entry.Message.ToolCallId);
+                lines.Add($"content types: {FormatContentTypes(entry.Message)}");
+                AppendIfPresent(lines, "preview", PreviewMessage(entry.Message));
+                break;
+
+            case ModelChangeType:
+                lines.Add($"model: {FormatProviderModel(entry.Provider, entry.Model)}");
+                break;
+
+            case SessionInfoType:
+                lines.Add($"action: {FormatOptionalValue(entry.Action)}");
+                lines.Add($"name: {FormatOptionalValue(entry.Name)}");
+                lines.Add($"model: {FormatProviderModel(entry.Provider, entry.Model)}");
+                break;
+
+            case LabelType:
+                lines.Add($"target: {FormatEntryId(entry.TargetId)}");
+                lines.Add($"value: {FormatOptionalValue(entry.Label)}");
+                break;
+
+            case CompactionType:
+                lines.Add($"tokens before: {entry.TokensBefore.GetValueOrDefault()}");
+                lines.Add($"first kept entry: {FormatEntryId(entry.FirstKeptEntryId)}");
+                lines.Add($"from hook: {FormatNullableBoolean(entry.FromHook)}");
+                lines.Add($"split turn: {FormatNullableBoolean(entry.IsSplitTurn)}");
+                AppendIfPresent(lines, "summary", PreviewText(entry.Summary));
+                AppendIfPresent(lines, "turn prefix summary", PreviewText(entry.TurnPrefixSummary));
+                break;
+
+            case BranchSummaryType:
+                lines.Add($"from entry: {FormatEntryId(entry.FromId)}");
+                lines.Add($"from hook: {FormatNullableBoolean(entry.FromHook)}");
+                AppendIfPresent(lines, "summary", PreviewText(entry.Summary));
+                AppendList(lines, "read files", entry.ReadFiles);
+                AppendList(lines, "modified files", entry.ModifiedFiles);
+                break;
+
+            case AutoRetryStartType:
+                lines.Add($"attempt: {entry.Attempt.GetValueOrDefault()}/{entry.MaxAttempts.GetValueOrDefault()}");
+                lines.Add($"delay ms: {entry.DelayMs.GetValueOrDefault()}");
+                AppendIfPresent(lines, "error", PreviewText(entry.ErrorMessage));
+                break;
+
+            case AutoRetryEndType:
+                lines.Add($"success: {FormatNullableBoolean(entry.Success)}");
+                lines.Add($"attempt: {entry.Attempt.GetValueOrDefault()}");
+                AppendIfPresent(lines, "final error", PreviewText(entry.FinalError));
+                break;
+        }
+    }
+
+    private static string FormatEntryId(string? id) =>
+        string.IsNullOrWhiteSpace(id) ? "none" : id;
+
+    private static string FormatOptionalValue(string? value) =>
+        NormalizeName(value) ?? "none";
+
+    private static string FormatPathState(
+        TreeState state,
+        HashSet<string> branchIds,
+        CodingAgentTreeSessionEntry entry)
+    {
+        if (entry.Id.Equals(state.LeafId, StringComparison.OrdinalIgnoreCase))
+        {
+            return "leaf";
+        }
+
+        return branchIds.Contains(entry.Id) ? "branch" : "off-branch";
+    }
+
+    private static string FormatProviderModel(string? provider, string? model) =>
+        string.IsNullOrWhiteSpace(provider) && string.IsNullOrWhiteSpace(model)
+            ? "none"
+            : $"{FormatOptionalValue(provider)}/{FormatOptionalValue(model)}";
+
+    private static string FormatNullableBoolean(bool? value) => value switch
+    {
+        true => "true",
+        false => "false",
+        null => "none"
+    };
+
+    private static string FormatContentTypes(CodingAgentSessionMessage message)
+    {
+        var contentTypes = message.Content
+            .Select(static content => content.Type)
+            .Where(static type => !string.IsNullOrWhiteSpace(type))
+            .ToArray();
+        return contentTypes.Length == 0 ? "none" : string.Join(", ", contentTypes);
+    }
+
+    private static void AppendIfPresent(ICollection<string> lines, string label, string? value)
+    {
+        var normalized = NormalizeName(value);
+        if (normalized is not null)
+        {
+            lines.Add($"{label}: {normalized}");
+        }
+    }
+
+    private static void AppendList(ICollection<string> lines, string label, IReadOnlyList<string>? values)
+    {
+        if (values is { Count: > 0 })
+        {
+            lines.Add($"{label}: {string.Join(", ", values)}");
+        }
     }
 
     private void EnsureSessionFile()

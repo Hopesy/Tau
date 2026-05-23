@@ -2,14 +2,14 @@ namespace Tau.Ai.Tests;
 
 internal sealed class EnvironmentVariableScope : IDisposable
 {
-    private static readonly object SyncRoot = new();
+    private static readonly SemaphoreSlim SyncRoot = new(1, 1);
 
     private readonly Dictionary<string, string?> _originalValues = new(StringComparer.OrdinalIgnoreCase);
     private bool _disposed;
 
     private EnvironmentVariableScope()
     {
-        Monitor.Enter(SyncRoot);
+        SyncRoot.Wait();
     }
 
     public static EnvironmentVariableScope Acquire() => new();
@@ -39,6 +39,6 @@ internal sealed class EnvironmentVariableScope : IDisposable
         }
 
         _disposed = true;
-        Monitor.Exit(SyncRoot);
+        SyncRoot.Release();
     }
 }

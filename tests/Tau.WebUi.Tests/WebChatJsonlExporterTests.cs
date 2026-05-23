@@ -114,13 +114,58 @@ public sealed class WebChatJsonlExporterTests
     }
 
     [Theory]
-    [InlineData("{not-json}\n", "not valid JSON")]
-    [InlineData("{\"type\":\"message\",\"id\":\"message-000001\",\"parentId\":null,\"timestamp\":\"2026-05-23T01:03:00+00:00\",\"role\":\"user\",\"text\":\"hello\"}\n", "First JSONL line must be a session header")]
-    public void Parse_RejectsMalformedJsonlAndMissingSessionHeader(string jsonl, string expectedMessage)
+    [InlineData("{not-json}\n", "invalid_json", 1, "not valid JSON")]
+    [InlineData("{\"type\":\"message\",\"id\":\"message-000001\",\"parentId\":null,\"timestamp\":\"2026-05-23T01:03:00+00:00\",\"role\":\"user\",\"text\":\"hello\"}\n", "missing_session_header", 1, "First JSONL line must be a session header")]
+    public void Parse_RejectsMalformedJsonlAndMissingSessionHeader(
+        string jsonl,
+        string expectedCode,
+        int expectedLineNumber,
+        string expectedMessage)
     {
-        var error = Assert.Throws<InvalidDataException>(() => WebChatJsonlImporter.Parse(jsonl));
+        var error = Assert.Throws<WebChatJsonlImportException>(() => WebChatJsonlImporter.Parse(jsonl));
 
+        Assert.Equal(expectedCode, error.Code);
+        Assert.Equal(expectedLineNumber, error.LineNumber);
         Assert.Contains(expectedMessage, error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Parse_RejectsUnsupportedVersionWithStableErrorCode()
+    {
+        var jsonl = ValidHeader(version: 2);
+
+        var error = Assert.Throws<WebChatJsonlImportException>(() => WebChatJsonlImporter.Parse(jsonl));
+
+        Assert.Equal("unsupported_version", error.Code);
+        Assert.Equal(1, error.LineNumber);
+        Assert.Contains("Unsupported WebUi JSONL version '2'", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Parse_RejectsDuplicateMessageIdsWithStableErrorCode()
+    {
+        var jsonl = ValidHeader() +
+            MessageLine("message-000001", null) +
+            MessageLine("message-000001", "message-000001");
+
+        var error = Assert.Throws<WebChatJsonlImportException>(() => WebChatJsonlImporter.Parse(jsonl));
+
+        Assert.Equal("duplicate_message_id", error.Code);
+        Assert.Equal(3, error.LineNumber);
+        Assert.Contains("duplicate message id 'message-000001'", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Parse_RejectsNonLinearParentChainWithStableErrorCode()
+    {
+        var jsonl = ValidHeader() +
+            MessageLine("message-000001", "unexpected-parent");
+
+        var error = Assert.Throws<WebChatJsonlImportException>(() => WebChatJsonlImporter.Parse(jsonl));
+
+        Assert.Equal("invalid_parent_chain", error.Code);
+        Assert.Equal(2, error.LineNumber);
+        Assert.Contains("must not have a parentId for the first message", error.Message, StringComparison.Ordinal);
     }
 
     private static WebChatSessionDto CreateJsonlSession()
@@ -163,5 +208,14 @@ public sealed class WebChatJsonlExporterTests
                     ["start:read", "end:tool-1:ok"],
                     ToolCalls: [toolCall])
             ]);
+    }
+
+    private static string ValidHeader(int version = 1) =>
+        $"{{\"type\":\"session\",\"version\":{version},\"id\":\"session-1\",\"createdAt\":\"2026-05-23T01:02:03+00:00\",\"updatedAt\":\"2026-05-23T01:05:03+00:00\",\"title\":\"JSONL baseline\",\"provider\":\"openai\",\"model\":\"gpt-5.4\",\"source\":\"tau-webui\"}}\n";
+
+    private static string MessageLine(string id, string? parentId)
+    {
+        var parentJson = parentId is null ? "null" : $"\"{parentId}\"";
+        return $"{{\"type\":\"message\",\"id\":\"{id}\",\"parentId\":{parentJson},\"timestamp\":\"2026-05-23T01:03:00+00:00\",\"role\":\"user\",\"text\":\"hello\"}}\n";
     }
 }

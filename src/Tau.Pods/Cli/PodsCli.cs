@@ -17,6 +17,7 @@ public static class PodsCli
         var probeService = new PodProbeService(logSink: logSink);
         var execService = new PodExecService();
         var lifecycleService = new PodLifecycleService(execService);
+        var modelService = new PodModelService(execService);
 
         if (args.Length == 0 || IsHelp(args[0]))
         {
@@ -41,6 +42,7 @@ public static class PodsCli
             "restart" => await RestartAsync(args, path, store, validator, lifecycleService).ConfigureAwait(false),
             "logs" => await LogsAsync(args, path, store, validator, lifecycleService).ConfigureAwait(false),
             "deployments" => await DeploymentsAsync(args, path, store, validator, lifecycleService).ConfigureAwait(false),
+            "model" => await ModelAsync(args, store, validator, modelService).ConfigureAwait(false),
             _ => Unknown(command)
         };
     }
@@ -366,6 +368,113 @@ public static class PodsCli
         return result.Success ? 0 : 1;
     }
 
+    private static async Task<int> ModelAsync(
+        string[] args,
+        PodsConfigStore store,
+        PodsConfigValidator validator,
+        PodModelService modelService)
+    {
+        if (args.Length < 2)
+        {
+            Console.Error.WriteLine("Usage: model <list|pull|remove|status> [path] <pod-id> [model-id]");
+            return 1;
+        }
+
+        var subcommand = args[1].ToLowerInvariant();
+        return subcommand switch
+        {
+            "list" => await ModelListAsync(args, store, validator, modelService).ConfigureAwait(false),
+            "pull" => await ModelPullAsync(args, store, validator, modelService).ConfigureAwait(false),
+            "remove" => await ModelRemoveAsync(args, store, validator, modelService).ConfigureAwait(false),
+            "status" => await ModelStatusAsync(args, store, validator, modelService).ConfigureAwait(false),
+            _ => UnknownModelSubcommand(subcommand)
+        };
+    }
+
+    private static async Task<int> ModelListAsync(
+        string[] args,
+        PodsConfigStore store,
+        PodsConfigValidator validator,
+        PodModelService modelService)
+    {
+        if (!TryParseModelCommand(args, minValueCount: 0, "Usage: model list [path] <pod-id>", out var parsed))
+        {
+            return 1;
+        }
+
+        var pod = LoadPodOrReport(parsed.ConfigPath, parsed.PodId, store, validator, out var exitCode);
+        if (pod is null) return exitCode;
+
+        var result = await modelService.ListAsync(pod).ConfigureAwait(false);
+        Console.WriteLine($"{result.PodId} | ok={result.Success} | {result.Summary}");
+        foreach (var model in result.Models)
+        {
+            Console.WriteLine($"- {model.ModelId} | cache={model.CacheDirectory}");
+        }
+
+        return result.Success ? 0 : 1;
+    }
+
+    private static async Task<int> ModelPullAsync(
+        string[] args,
+        PodsConfigStore store,
+        PodsConfigValidator validator,
+        PodModelService modelService)
+    {
+        if (!TryParseModelCommand(args, minValueCount: 1, "Usage: model pull [path] <pod-id> <model-id>", out var parsed))
+        {
+            return 1;
+        }
+
+        var pod = LoadPodOrReport(parsed.ConfigPath, parsed.PodId, store, validator, out var exitCode);
+        if (pod is null) return exitCode;
+
+        var modelId = parsed.Values[0];
+        var result = await modelService.PullAsync(pod, modelId).ConfigureAwait(false);
+        Console.WriteLine($"{result.PodId} | ok={result.Success} | operation={result.Operation} | model={result.ModelId} | {result.Summary}");
+        return result.Success ? 0 : 1;
+    }
+
+    private static async Task<int> ModelRemoveAsync(
+        string[] args,
+        PodsConfigStore store,
+        PodsConfigValidator validator,
+        PodModelService modelService)
+    {
+        if (!TryParseModelCommand(args, minValueCount: 1, "Usage: model remove [path] <pod-id> <model-id>", out var parsed))
+        {
+            return 1;
+        }
+
+        var pod = LoadPodOrReport(parsed.ConfigPath, parsed.PodId, store, validator, out var exitCode);
+        if (pod is null) return exitCode;
+
+        var modelId = parsed.Values[0];
+        var result = await modelService.RemoveAsync(pod, modelId).ConfigureAwait(false);
+        Console.WriteLine($"{result.PodId} | ok={result.Success} | operation={result.Operation} | model={result.ModelId} | {result.Summary}");
+        return result.Success ? 0 : 1;
+    }
+
+    private static async Task<int> ModelStatusAsync(
+        string[] args,
+        PodsConfigStore store,
+        PodsConfigValidator validator,
+        PodModelService modelService)
+    {
+        if (!TryParseModelCommand(args, minValueCount: 1, "Usage: model status [path] <pod-id> <model-id>", out var parsed))
+        {
+            return 1;
+        }
+
+        var pod = LoadPodOrReport(parsed.ConfigPath, parsed.PodId, store, validator, out var exitCode);
+        if (pod is null) return exitCode;
+
+        var modelId = parsed.Values[0];
+        var result = await modelService.StatusAsync(pod, modelId).ConfigureAwait(false);
+        Console.WriteLine($"{result.PodId} | ok={result.Success} | present={result.Present} | model={result.ModelId} | {result.Summary}");
+        return result.Success ? 0 : 1;
+    }
+
     private static PodsConfig? LoadOrReport(string path, PodsConfigStore store, PodsConfigValidator validator, out int exitCode)
     {
         exitCode = 0;
@@ -391,10 +500,38 @@ public static class PodsCli
         return config;
     }
 
+    private static PodDefinition? LoadPodOrReport(
+        string path,
+        string podId,
+        PodsConfigStore store,
+        PodsConfigValidator validator,
+        out int exitCode)
+    {
+        var config = LoadOrReport(path, store, validator, out exitCode);
+        if (config is null) return null;
+
+        var pod = config.Pods.FirstOrDefault(p => p.Id.Equals(podId, StringComparison.OrdinalIgnoreCase));
+        if (pod is null)
+        {
+            Console.Error.WriteLine($"Pod not found: {podId}");
+            exitCode = 1;
+            return null;
+        }
+
+        return pod;
+    }
+
     private static int Unknown(string command)
     {
         Console.Error.WriteLine($"Unknown command: {command}");
         PrintHelp();
+        return 1;
+    }
+
+    private static int UnknownModelSubcommand(string subcommand)
+    {
+        Console.Error.WriteLine($"Unknown model subcommand: {subcommand}");
+        Console.Error.WriteLine("Usage: model <list|pull|remove|status> [path] <pod-id> [model-id]");
         return 1;
     }
 
@@ -432,6 +569,38 @@ public static class PodsCli
         return true;
     }
 
+    private static bool TryParseModelCommand(
+        string[] args,
+        int minValueCount,
+        string usage,
+        out TargetCommandArguments parsed)
+    {
+        parsed = new TargetCommandArguments(DefaultConfigPath, string.Empty, []);
+        if (args.Length < 3 + minValueCount)
+        {
+            Console.Error.WriteLine(usage);
+            return false;
+        }
+
+        var targetIndex = 2;
+        var configPath = DefaultConfigPath;
+        if (args.Length >= 4 + minValueCount && LooksLikeConfigPath(args[2]))
+        {
+            configPath = args[2];
+            targetIndex = 3;
+        }
+
+        var values = args.Skip(targetIndex + 1).ToArray();
+        if (values.Length < minValueCount)
+        {
+            Console.Error.WriteLine(usage);
+            return false;
+        }
+
+        parsed = new TargetCommandArguments(configPath, args[targetIndex], values);
+        return true;
+    }
+
     private static bool LooksLikeConfigPath(string value) =>
         File.Exists(value) ||
         value.EndsWith(".json", StringComparison.OrdinalIgnoreCase) ||
@@ -454,6 +623,10 @@ public static class PodsCli
         Console.WriteLine("  restart [path] <id> <name>     Restart a deployment on a pod");
         Console.WriteLine("  logs [path] <id> <name> [tail] Fetch deployment logs from a pod");
         Console.WriteLine("  deployments [path] <id>        List deployments on a pod");
+        Console.WriteLine("  model list [path] <id>         List cached models on an ssh pod");
+        Console.WriteLine("  model pull [path] <id> <model> Pull a Hugging Face model on an ssh pod");
+        Console.WriteLine("  model remove [path] <id> <model> Remove a cached model from an ssh pod");
+        Console.WriteLine("  model status [path] <id> <model> Check whether a model is cached");
     }
 
     private sealed record TargetCommandArguments(string ConfigPath, string PodId, IReadOnlyList<string> Values);

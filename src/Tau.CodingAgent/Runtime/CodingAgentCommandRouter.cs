@@ -130,6 +130,7 @@ public sealed class CodingAgentCommandRouter
                 "/new" => HandleNewCommand(parts),
                 "/quit" => HandleQuitCommand(parts),
                 "/session" => HandleSessionCommand(parts),
+                "/metadata" => HandleMetadataCommand(parts),
                 "/tree" => HandleTreeCommand(parts),
                 "/label" => HandleLabelCommand(input, parts),
                 "/fork" => await HandleForkCommandAsync(input, parts, cancellationToken).ConfigureAwait(false),
@@ -801,6 +802,23 @@ public sealed class CodingAgentCommandRouter
 
         return CodingAgentCommandResult.Status(
             $"session: name {FormatSessionName(stats.SessionName)}, model {stats.Provider}/{stats.Model}, messages {stats.TotalMessages} (user {stats.UserMessages}, assistant {stats.AssistantMessages}, tool {stats.ToolResultMessages}, toolCalls {stats.ToolCalls}), tokens {tokenBudget}, retry {FormatRetryPolicy(_retryOptions)}, file {file}");
+    }
+
+    private CodingAgentCommandResult HandleMetadataCommand(IReadOnlyList<string> parts)
+    {
+        if (parts.Count > 2)
+        {
+            return CodingAgentCommandResult.Error(CodingAgentCommandCatalog.Usage("/metadata"));
+        }
+
+        if (_treeSessionController is null)
+        {
+            return CodingAgentCommandResult.Error("tree sessions are not enabled");
+        }
+
+        _treeSessionController.SyncFromRunner(_runner);
+        var entryId = parts.Count == 2 ? parts[1] : null;
+        return CodingAgentCommandResult.Status(_treeSessionController.FormatMetadata(entryId));
     }
 
     private CodingAgentCommandResult HandleTreeCommand(IReadOnlyList<string> parts)

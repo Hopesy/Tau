@@ -108,7 +108,7 @@ public static class WebUiPage
                 <button id="import-session" class="secondary">Import</button>
                 <button id="refresh" class="secondary">Refresh</button>
               </div>
-              <input id="session-import-input" type="file" accept="application/json,.json" hidden />
+              <input id="session-import-input" type="file" accept="application/json,application/x-ndjson,.json,.jsonl" hidden />
               <div id="sessions"></div>
             </aside>
             <main>
@@ -748,6 +748,15 @@ public static class WebUiPage
               window.location.href = `/api/sessions/${encodeURIComponent(sessionId)}/export`;
             }
 
+            function isJsonlSessionFile(file) {
+              const name = (file.name || '').toLowerCase();
+              const type = (file.type || '').toLowerCase();
+              return name.endsWith('.jsonl') ||
+                type === 'application/x-ndjson' ||
+                type === 'application/jsonl' ||
+                type === 'application/json-lines';
+            }
+
             async function deleteSession(sessionId) {
               const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, { method: 'DELETE' });
               if (!response.ok && response.status !== 404) throw new Error(await response.text());
@@ -762,12 +771,18 @@ public static class WebUiPage
             }
 
             async function importSessionFile(file) {
-              const session = JSON.parse(await file.text());
-              const imported = await fetchJson('/api/sessions/import', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(session)
-              });
+              const text = await file.text();
+              const imported = isJsonlSessionFile(file)
+                ? await fetchJson('/api/sessions/import.jsonl', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-ndjson' },
+                    body: text
+                  })
+                : await fetchJson('/api/sessions/import', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(JSON.parse(text))
+                  });
               currentSessionId = imported.id;
               rememberCurrentSession(imported.id);
               await loadStatus();

@@ -2,8 +2,7 @@ namespace Tau.Mom;
 
 public class Worker(
     ILogger<Worker> logger,
-    MomEventProcessor eventProcessor,
-    FileDelegationProcessor processor,
+    MomLocalDelegationFlow flow,
     MomOptions options) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -16,16 +15,15 @@ public class Worker(
 
         while (!stoppingToken.IsCancellationRequested)
         {
-            var queued = await eventProcessor.ProcessDueEventsAsync(stoppingToken).ConfigureAwait(false);
-            if (queued > 0)
+            var result = await flow.ProcessOnceAsync(stoppingToken).ConfigureAwait(false);
+            if (result.QueuedEvents > 0)
             {
-                logger.LogInformation("Queued {Queued} due mom event(s).", queued);
+                logger.LogInformation("Queued {Queued} due mom event(s).", result.QueuedEvents);
             }
 
-            var processed = await processor.ProcessPendingAsync(stoppingToken).ConfigureAwait(false);
-            if (processed > 0)
+            if (result.ProcessedRequests > 0)
             {
-                logger.LogInformation("Processed {Processed} delegation request(s).", processed);
+                logger.LogInformation("Processed {Processed} delegation request(s).", result.ProcessedRequests);
             }
 
             await Task.Delay(TimeSpan.FromSeconds(Math.Max(1, options.PollIntervalSeconds)), stoppingToken).ConfigureAwait(false);

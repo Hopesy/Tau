@@ -47,6 +47,7 @@ public sealed class PodsConfigStore
                     Region = "ap-south-1",
                     SshHost = "pods.example.internal",
                     SshPort = 22,
+                    ModelsPath = "/mnt/models",
                     Enabled = false,
                     Tags = ["staging"]
                 }
