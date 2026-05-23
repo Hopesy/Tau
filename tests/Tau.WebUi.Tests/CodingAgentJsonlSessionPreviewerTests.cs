@@ -1,9 +1,12 @@
+using Tau.Ai;
 using Tau.WebUi.Services;
 
 namespace Tau.WebUi.Tests;
 
 public sealed class CodingAgentJsonlSessionPreviewerTests
 {
+    private const string Secret = "sk-EXAMPLE_BASE_KEY_99999999";
+
     [Fact]
     public void Parse_ReturnsHeaderAndMessageTimelineSummary()
     {
@@ -44,6 +47,22 @@ public sealed class CodingAgentJsonlSessionPreviewerTests
         Assert.Equal("tool-1", toolResult.ToolCallId);
         Assert.True(toolResult.IsError);
         Assert.Equal("not found", toolResult.TextPreview);
+    }
+
+    [Fact]
+    public void Parse_RedactsPreviewTextValuesAndDisabledRedactorPreservesOriginal()
+    {
+        var jsonl = ValidHeader() +
+            $"{{\"type\":\"message\",\"id\":\"entry-user\",\"parentId\":null,\"timestamp\":\"2026-05-23T02:01:00+00:00\",\"message\":{{\"role\":\"user\",\"content\":[{{\"type\":\"text\",\"text\":\"{Secret}\"}}]}}}}\n";
+
+        var preview = CodingAgentJsonlSessionPreviewer.Parse(jsonl, redactor: new TauSecretRedactor(enabled: true));
+
+        var message = Assert.Single(preview.Messages);
+        Assert.Equal(TauSecretRedactor.Placeholder, message.TextPreview);
+        Assert.Equal(TauSecretRedactor.Placeholder.Length, message.TextLength);
+
+        var unredacted = CodingAgentJsonlSessionPreviewer.Parse(jsonl, redactor: new TauSecretRedactor(enabled: false));
+        Assert.Equal(Secret, Assert.Single(unredacted.Messages).TextPreview);
     }
 
     [Fact]

@@ -154,14 +154,16 @@ public sealed class WebChatService
 
     public CodingAgentJsonlSessionPreviewDto PreviewCodingAgentJsonlSession(
         string jsonl,
-        string? filePath = null) =>
-        CodingAgentJsonlSessionPreviewer.Parse(jsonl, filePath);
+        string? filePath = null,
+        TauSecretRedactor? redactor = null) =>
+        CodingAgentJsonlSessionPreviewer.Parse(jsonl, filePath, redactor);
 
     public WebChatSessionDto ImportCodingAgentJsonlSession(
         string jsonl,
-        string? filePath = null)
+        string? filePath = null,
+        TauSecretRedactor? redactor = null)
     {
-        var preview = PreviewCodingAgentJsonlSession(jsonl, filePath);
+        var preview = PreviewCodingAgentJsonlSession(jsonl, filePath, redactor);
         var timestamp = preview.Timestamp == default ? DateTimeOffset.UtcNow : preview.Timestamp;
         var messages = preview.Messages
             .Select(CreateImportedCodingAgentMessage)

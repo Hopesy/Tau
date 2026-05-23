@@ -4,6 +4,7 @@
 
 | 日期 | 功能域 | 用户价值 | 变更摘要 |
 | --- | --- | --- | --- |
+| 2026-05-23 | WebUi | WebUi JSONL 导出、再导入和 CodingAgent JSONL 预览/保守导入默认不会把常见 token pattern 原文带入 Web transcript 或持久化会话。 | `WebChatJsonlExporter`、`WebChatJsonlImporter` 和 `CodingAgentJsonlSessionPreviewer` 复用 `JsonlSecretRedactor`；默认递归脱敏 JSON string value，保留 field key / number / bool / null，`TAU_WEBUI_REDACT_SECRETS=0` 可关闭。测试覆盖 export、import、preview 和 disabled redactor opt-out。 |
 | 2026-05-23 | Ai | runtime event JSONL 日志的脱敏规则和其它 JSONL writer 共享同一实现，field key / number / bool / null 不会被误改。 | `JsonlTauLogSink` 改为先生成完整 JSONL 行，再调用 `JsonlSecretRedactor.RedactLine`；category、event 和 field value 作为 string value 脱敏，object key 保留，`TAU_LOG_REDACT_SECRETS=0` 继续作为 opt-out。 |
 | 2026-05-23 | CodingAgent | JSONL tree session 默认不会把常见 token pattern 原文持久化到本地 session 文件。 | `CodingAgentTreeSessionStore` 写 `session` header、entries、branch export 和 append entry 时统一通过 `JsonlSecretRedactor`；默认按 `TAU_CODING_AGENT_REDACT_SECRETS` 脱敏 string value，`0/false` 可关闭，读取恢复按已写入内容工作。 |
 | 2026-05-23 | Pods | `vllm plan` 可以输出机器可读 JSON，外部脚本不必解析文本段落。 | 新增 `vllm plan --json [path] <pod-id> <model-id> [deployment-name]`；JSON 包含 pod/deployment/model/modelPath/port/servedModel/unit/serveCommand/systemdUnit/metadata/metadataJson/remoteCommand，仍然只生成 plan，不执行 SSH、不调用 `systemctl`。 |

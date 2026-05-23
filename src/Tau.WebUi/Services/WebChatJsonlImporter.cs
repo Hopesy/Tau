@@ -1,12 +1,13 @@
 using System.Text.Json;
 using System.Text.Json.Serialization.Metadata;
+using Tau.Ai;
 using Tau.WebUi.Contracts;
 
 namespace Tau.WebUi.Services;
 
 public static class WebChatJsonlImporter
 {
-    public static WebChatSessionDto Parse(string jsonl)
+    public static WebChatSessionDto Parse(string jsonl, TauSecretRedactor? redactor = null)
     {
         if (string.IsNullOrWhiteSpace(jsonl))
         {
@@ -21,6 +22,7 @@ public static class WebChatJsonlImporter
         var seenMessageIds = new HashSet<string>(StringComparer.Ordinal);
         string? previousMessageId = null;
         var lineNumber = 0;
+        redactor ??= TauSecretRedactor.ForEnvironmentVariable(TauSecretRedactor.WebUiEnvironmentVariable);
 
         while (reader.ReadLine() is { } line)
         {
@@ -38,7 +40,8 @@ public static class WebChatJsonlImporter
                     lineNumber);
             }
 
-            var type = ReadType(line, lineNumber);
+            var redactedLine = JsonlSecretRedactor.RedactLine(line, redactor);
+            var type = ReadType(redactedLine, lineNumber);
             if (lineNumber == 1)
             {
                 if (!string.Equals(type, "session", StringComparison.Ordinal))
@@ -49,7 +52,7 @@ public static class WebChatJsonlImporter
                         lineNumber);
                 }
 
-                header = Deserialize(line, WebUiJsonlContext.Default.WebChatJsonlSessionHeader, lineNumber);
+                header = Deserialize(redactedLine, WebUiJsonlContext.Default.WebChatJsonlSessionHeader, lineNumber);
                 ValidateHeader(header);
                 continue;
             }
@@ -62,7 +65,7 @@ public static class WebChatJsonlImporter
                     lineNumber);
             }
 
-            var entry = Deserialize(line, WebUiJsonlContext.Default.WebChatJsonlMessageEntry, lineNumber);
+            var entry = Deserialize(redactedLine, WebUiJsonlContext.Default.WebChatJsonlMessageEntry, lineNumber);
             ValidateMessageEntry(entry, previousMessageId, seenMessageIds, lineNumber);
             messages.Add(new WebChatMessageDto(
                 entry.Role,

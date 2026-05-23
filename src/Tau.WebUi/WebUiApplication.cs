@@ -85,7 +85,8 @@ public static class WebUiApplication
                 return Results.NotFound();
             }
 
-            var jsonl = WebChatJsonlExporter.Render(session);
+            var redactor = TauSecretRedactor.ForEnvironmentVariable(TauSecretRedactor.WebUiEnvironmentVariable);
+            var jsonl = WebChatJsonlExporter.Render(session, redactor);
             return Results.File(
                 Encoding.UTF8.GetBytes(jsonl),
                 JsonlContentType,
@@ -143,7 +144,8 @@ public static class WebUiApplication
             {
                 using var reader = new StreamReader(request.Body, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
                 var jsonl = await reader.ReadToEndAsync(cancellationToken).ConfigureAwait(false);
-                var session = WebChatJsonlImporter.Parse(jsonl);
+                var redactor = TauSecretRedactor.ForEnvironmentVariable(TauSecretRedactor.WebUiEnvironmentVariable);
+                var session = WebChatJsonlImporter.Parse(jsonl, redactor);
                 return Results.Ok(chat.ImportSession(session));
             }
             catch (WebChatJsonlImportException ex)
@@ -170,7 +172,8 @@ public static class WebUiApplication
             {
                 using var reader = new StreamReader(request.Body, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
                 var jsonl = await reader.ReadToEndAsync(cancellationToken).ConfigureAwait(false);
-                return Results.Ok(chat.PreviewCodingAgentJsonlSession(jsonl));
+                var redactor = TauSecretRedactor.ForEnvironmentVariable(TauSecretRedactor.WebUiEnvironmentVariable);
+                return Results.Ok(chat.PreviewCodingAgentJsonlSession(jsonl, redactor: redactor));
             }
             catch (CodingAgentJsonlPreviewException ex)
             {
@@ -197,7 +200,8 @@ public static class WebUiApplication
             {
                 using var reader = new StreamReader(request.Body, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
                 var jsonl = await reader.ReadToEndAsync(cancellationToken).ConfigureAwait(false);
-                return Results.Ok(chat.ImportCodingAgentJsonlSession(jsonl));
+                var redactor = TauSecretRedactor.ForEnvironmentVariable(TauSecretRedactor.WebUiEnvironmentVariable);
+                return Results.Ok(chat.ImportCodingAgentJsonlSession(jsonl, redactor: redactor));
             }
             catch (CodingAgentJsonlPreviewException ex)
             {

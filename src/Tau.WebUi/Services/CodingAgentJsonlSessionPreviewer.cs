@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Tau.Ai;
 using Tau.WebUi.Contracts;
 
 namespace Tau.WebUi.Services;
@@ -7,17 +8,20 @@ public static class CodingAgentJsonlSessionPreviewer
 {
     private const int PreviewTextLimit = 160;
 
-    public static CodingAgentJsonlSessionPreviewDto ParseFile(string path)
+    public static CodingAgentJsonlSessionPreviewDto ParseFile(string path, TauSecretRedactor? redactor = null)
     {
         if (string.IsNullOrWhiteSpace(path))
         {
             throw new ArgumentException("CodingAgent JSONL path is required.", nameof(path));
         }
 
-        return Parse(File.ReadAllText(path), path);
+        return Parse(File.ReadAllText(path), path, redactor);
     }
 
-    public static CodingAgentJsonlSessionPreviewDto Parse(string jsonl, string? filePath = null)
+    public static CodingAgentJsonlSessionPreviewDto Parse(
+        string jsonl,
+        string? filePath = null,
+        TauSecretRedactor? redactor = null)
     {
         if (string.IsNullOrWhiteSpace(jsonl))
         {
@@ -32,6 +36,7 @@ public static class CodingAgentJsonlSessionPreviewer
         var seenEntryIds = new HashSet<string>(StringComparer.Ordinal);
         var entryCount = 0;
         var lineNumber = 0;
+        redactor ??= TauSecretRedactor.ForEnvironmentVariable(TauSecretRedactor.WebUiEnvironmentVariable);
 
         while (reader.ReadLine() is { } line)
         {
@@ -49,7 +54,8 @@ public static class CodingAgentJsonlSessionPreviewer
                     lineNumber);
             }
 
-            var type = ReadType(line, lineNumber);
+            var redactedLine = JsonlSecretRedactor.RedactLine(line, redactor);
+            var type = ReadType(redactedLine, lineNumber);
             if (lineNumber == 1)
             {
                 if (!string.Equals(type, "session", StringComparison.Ordinal))
@@ -60,12 +66,12 @@ public static class CodingAgentJsonlSessionPreviewer
                         lineNumber);
                 }
 
-                header = Deserialize(line, WebUiCodingAgentJsonlContext.Default.CodingAgentJsonlSessionHeader, lineNumber);
+                header = Deserialize(redactedLine, WebUiCodingAgentJsonlContext.Default.CodingAgentJsonlSessionHeader, lineNumber);
                 ValidateHeader(header, lineNumber);
                 continue;
             }
 
-            var entry = Deserialize(line, WebUiCodingAgentJsonlContext.Default.CodingAgentJsonlSessionEntry, lineNumber);
+            var entry = Deserialize(redactedLine, WebUiCodingAgentJsonlContext.Default.CodingAgentJsonlSessionEntry, lineNumber);
             ValidateEntry(entry, seenEntryIds, lineNumber);
             entryCount++;
 

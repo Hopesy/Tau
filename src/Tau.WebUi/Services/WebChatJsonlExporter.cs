@@ -1,18 +1,21 @@
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
+using Tau.Ai;
 using Tau.WebUi.Contracts;
 
 namespace Tau.WebUi.Services;
 
 public static class WebChatJsonlExporter
 {
-    public static string Render(WebChatSessionDto session)
+    public static string Render(WebChatSessionDto session, TauSecretRedactor? redactor = null)
     {
         if (session is null)
         {
             throw new ArgumentNullException(nameof(session));
         }
+
+        redactor ??= TauSecretRedactor.ForEnvironmentVariable(TauSecretRedactor.WebUiEnvironmentVariable);
 
         var builder = new StringBuilder(Math.Max(1024, session.Messages.Count * 512));
         var header = new WebChatJsonlSessionHeader(
@@ -25,7 +28,7 @@ public static class WebChatJsonlExporter
             session.Provider,
             session.Model,
             "tau-webui");
-        AppendJsonl(builder, header, WebUiJsonlContext.Default.WebChatJsonlSessionHeader);
+        AppendJsonl(builder, header, WebUiJsonlContext.Default.WebChatJsonlSessionHeader, redactor);
 
         string? parentId = null;
         for (var index = 0; index < session.Messages.Count; index++)
@@ -44,16 +47,21 @@ public static class WebChatJsonlExporter
                 message.ToolEvents,
                 message.ToolCalls,
                 message.Attachments);
-            AppendJsonl(builder, entry, WebUiJsonlContext.Default.WebChatJsonlMessageEntry);
+            AppendJsonl(builder, entry, WebUiJsonlContext.Default.WebChatJsonlMessageEntry, redactor);
             parentId = id;
         }
 
         return builder.ToString();
     }
 
-    private static void AppendJsonl<T>(StringBuilder builder, T value, System.Text.Json.Serialization.Metadata.JsonTypeInfo<T> jsonTypeInfo)
+    private static void AppendJsonl<T>(
+        StringBuilder builder,
+        T value,
+        System.Text.Json.Serialization.Metadata.JsonTypeInfo<T> jsonTypeInfo,
+        TauSecretRedactor redactor)
     {
-        builder.Append(JsonSerializer.Serialize(value, jsonTypeInfo));
+        var line = JsonSerializer.Serialize(value, jsonTypeInfo);
+        builder.Append(JsonlSecretRedactor.RedactLine(line, redactor));
         builder.Append('\n');
     }
 

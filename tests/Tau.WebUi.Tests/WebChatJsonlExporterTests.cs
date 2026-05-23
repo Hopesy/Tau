@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Tau.Ai;
 using Tau.WebUi.Contracts;
 using Tau.WebUi.Services;
 
@@ -6,6 +7,9 @@ namespace Tau.WebUi.Tests;
 
 public sealed class WebChatJsonlExporterTests
 {
+    private const string Secret = "sk-EXAMPLE_BASE_KEY_99999999";
+    private const string GitHubSecret = "ghp_AAAA1111BBBB2222CCCC3333DDDD4444EEEE";
+
     [Fact]
     public void Render_EmitsSessionHeaderAndMessageEntriesAsLfJsonl()
     {
@@ -89,6 +93,38 @@ public sealed class WebChatJsonlExporterTests
     }
 
     [Fact]
+    public void Render_RedactsStringValuesAndDisabledRedactorPreservesOriginal()
+    {
+        var session = CreateSecretJsonlSession();
+
+        var jsonl = WebChatJsonlExporter.Render(session, new TauSecretRedactor(enabled: true));
+
+        Assert.DoesNotContain(Secret, jsonl, StringComparison.Ordinal);
+        Assert.DoesNotContain(GitHubSecret, jsonl, StringComparison.Ordinal);
+        var lines = jsonl.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+
+        using var header = JsonDocument.Parse(lines[0]);
+        Assert.Equal($"Session {TauSecretRedactor.Placeholder}", header.RootElement.GetProperty("title").GetString());
+
+        using var firstMessage = JsonDocument.Parse(lines[1]);
+        Assert.Equal($"Use {TauSecretRedactor.Placeholder}", firstMessage.RootElement.GetProperty("text").GetString());
+        var attachment = firstMessage.RootElement.GetProperty("attachments")[0];
+        Assert.Equal(TauSecretRedactor.Placeholder, attachment.GetProperty("content").GetString());
+        Assert.Equal($"Attachment {TauSecretRedactor.Placeholder}", attachment.GetProperty("extractedText").GetString());
+
+        using var secondMessage = JsonDocument.Parse(lines[2]);
+        Assert.Equal($"Thinking {TauSecretRedactor.Placeholder}", secondMessage.RootElement.GetProperty("thinking").GetString());
+        Assert.Equal($"error {TauSecretRedactor.Placeholder}", secondMessage.RootElement.GetProperty("error").GetString());
+        var toolCall = secondMessage.RootElement.GetProperty("toolCalls")[0];
+        Assert.Equal($"{{\"token\":\"{TauSecretRedactor.Placeholder}\"}}", toolCall.GetProperty("arguments").GetString());
+        Assert.Equal($"Output {TauSecretRedactor.Placeholder}", toolCall.GetProperty("output").GetString());
+
+        var unredacted = WebChatJsonlExporter.Render(session, new TauSecretRedactor(enabled: false));
+        Assert.Contains(Secret, unredacted, StringComparison.Ordinal);
+        Assert.Contains(GitHubSecret, unredacted, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Parse_RoundTripsExporterOutputAsWebUiLocalSessionDto()
     {
         var session = CreateJsonlSession();
@@ -111,6 +147,29 @@ public sealed class WebChatJsonlExporterTests
         Assert.Equal("thinking", imported.Messages[1].Thinking);
         Assert.Equal("start:read", Assert.Single(imported.Messages[1].ToolEvents!, item => item == "start:read"));
         Assert.Equal("tool-1", Assert.Single(imported.Messages[1].ToolCalls!).Id);
+    }
+
+    [Fact]
+    public void Parse_RedactsImportedStringValuesAndDisabledRedactorPreservesOriginal()
+    {
+        var source = CreateSecretJsonlSession();
+        var rawJsonl = WebChatJsonlExporter.Render(source, new TauSecretRedactor(enabled: false));
+
+        var imported = WebChatJsonlImporter.Parse(rawJsonl, new TauSecretRedactor(enabled: true));
+
+        Assert.Equal($"Session {TauSecretRedactor.Placeholder}", imported.Title);
+        Assert.Equal($"Use {TauSecretRedactor.Placeholder}", imported.Messages[0].Text);
+        Assert.Equal(TauSecretRedactor.Placeholder, imported.Messages[0].Attachments![0].Content);
+        Assert.Equal($"Attachment {TauSecretRedactor.Placeholder}", imported.Messages[0].Attachments![0].ExtractedText);
+        Assert.Equal($"Thinking {TauSecretRedactor.Placeholder}", imported.Messages[1].Thinking);
+        Assert.Equal($"error {TauSecretRedactor.Placeholder}", imported.Messages[1].Error);
+        Assert.Equal($"{{\"token\":\"{TauSecretRedactor.Placeholder}\"}}", imported.Messages[1].ToolCalls![0].Arguments);
+        Assert.Equal($"Output {TauSecretRedactor.Placeholder}", imported.Messages[1].ToolCalls![0].Output);
+
+        var unredacted = WebChatJsonlImporter.Parse(rawJsonl, new TauSecretRedactor(enabled: false));
+        Assert.Contains(Secret, unredacted.Title, StringComparison.Ordinal);
+        Assert.Contains(Secret, unredacted.Messages[0].Text, StringComparison.Ordinal);
+        Assert.Equal(GitHubSecret, unredacted.Messages[0].Attachments![0].Content);
     }
 
     [Theory]
@@ -206,6 +265,49 @@ public sealed class WebChatJsonlExporterTests
                     assistantAt,
                     "thinking",
                     ["start:read", "end:tool-1:ok"],
+                    ToolCalls: [toolCall])
+            ]);
+    }
+
+    private static WebChatSessionDto CreateSecretJsonlSession()
+    {
+        var createdAt = DateTimeOffset.Parse("2026-05-23T01:02:03+00:00");
+        var updatedAt = DateTimeOffset.Parse("2026-05-23T01:05:03+00:00");
+        var userAt = DateTimeOffset.Parse("2026-05-23T01:03:00+00:00");
+        var assistantAt = DateTimeOffset.Parse("2026-05-23T01:04:00+00:00");
+        var attachment = new WebChatAttachmentDto(
+            "att-secret",
+            "document",
+            "secret.txt",
+            "text/plain",
+            42,
+            GitHubSecret,
+            $"Attachment {Secret}");
+        var toolCall = new WebChatToolCallDto(
+            "tool-secret",
+            "read",
+            "error",
+            $"{{\"token\":\"{Secret}\"}}",
+            $"Output {GitHubSecret}",
+            IsError: true,
+            CreatedAt: assistantAt);
+        return new WebChatSessionDto(
+            "session-secret",
+            $"Session {Secret}",
+            "openai",
+            "gpt-5.4",
+            createdAt,
+            updatedAt,
+            true,
+            [
+                new WebChatMessageDto("user", $"Use {Secret}", userAt, Attachments: [attachment]),
+                new WebChatMessageDto(
+                    "assistant",
+                    "done",
+                    assistantAt,
+                    $"Thinking {GitHubSecret}",
+                    ["start:read"],
+                    $"error {Secret}",
                     ToolCalls: [toolCall])
             ]);
     }
