@@ -20,6 +20,7 @@ internal sealed record BedrockProfileSnapshot
     public string? SsoRegion { get; init; }
     public string? SsoAccountId { get; init; }
     public string? SsoRoleName { get; init; }
+    public string? SsoRegistrationScopes { get; init; }
 
     public bool HasStaticCredentials =>
         !string.IsNullOrWhiteSpace(AccessKeyId) && !string.IsNullOrWhiteSpace(SecretAccessKey);

@@ -772,7 +772,7 @@ public static class WebUiPage
 
             async function importSessionFile(file) {
               const text = await file.text();
-              const imported = isJsonlSessionFile(file)
+              const importedResponse = isJsonlSessionFile(file)
                 ? await fetchJson('/api/sessions/import.jsonl', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/x-ndjson' },
@@ -783,6 +783,7 @@ public static class WebUiPage
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(JSON.parse(text))
                   });
+              const imported = importedResponse.session || importedResponse;
               currentSessionId = imported.id;
               rememberCurrentSession(imported.id);
               await loadStatus();

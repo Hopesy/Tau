@@ -155,15 +155,20 @@ public sealed class WebChatService
     public CodingAgentJsonlSessionPreviewDto PreviewCodingAgentJsonlSession(
         string jsonl,
         string? filePath = null,
+        CodingAgentJsonlPreviewOptions? options = null,
         TauSecretRedactor? redactor = null) =>
-        CodingAgentJsonlSessionPreviewer.Parse(jsonl, filePath, redactor);
+        CodingAgentJsonlSessionPreviewer.Parse(
+            jsonl,
+            filePath,
+            options ?? CodingAgentJsonlPreviewOptions.Default,
+            redactor);
 
-    public WebChatSessionDto ImportCodingAgentJsonlSession(
+    public CodingAgentJsonlImportResultDto ImportCodingAgentJsonlSession(
         string jsonl,
         string? filePath = null,
         TauSecretRedactor? redactor = null)
     {
-        var preview = PreviewCodingAgentJsonlSession(jsonl, filePath, redactor);
+        var preview = PreviewCodingAgentJsonlSession(jsonl, filePath, redactor: redactor);
         var timestamp = preview.Timestamp == default ? DateTimeOffset.UtcNow : preview.Timestamp;
         var messages = preview.Messages
             .Select(CreateImportedCodingAgentMessage)
@@ -181,7 +186,8 @@ public sealed class WebChatService
             Persisted: false,
             messages);
 
-        return ImportSession(session);
+        var imported = ImportSession(session);
+        return new CodingAgentJsonlImportResultDto(imported, preview.Tree, preview.Audit);
     }
 
     public WebChatSessionDto? CloneSession(string id)

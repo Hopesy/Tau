@@ -100,6 +100,8 @@ public sealed class TuiScrollbackBuffer
 
     public void PageDown() => ScrollDown(_height);
 
+    public void ScrollToTop() => _scrollOffsetFromBottom = MaxScrollOffset();
+
     public void ScrollToBottom() => _scrollOffsetFromBottom = 0;
 
     public IReadOnlyList<string> VisibleLines()
@@ -129,9 +131,10 @@ public sealed class TuiScrollbackBuffer
 
     private void ClampScrollOffset()
     {
-        var maxOffset = Math.Max(0, _lines.Count - Math.Min(_height, _lines.Count));
-        _scrollOffsetFromBottom = Math.Clamp(_scrollOffsetFromBottom, 0, maxOffset);
+        _scrollOffsetFromBottom = Math.Clamp(_scrollOffsetFromBottom, 0, MaxScrollOffset());
     }
+
+    private int MaxScrollOffset() => Math.Max(0, _lines.Count - Math.Min(_height, _lines.Count));
 
     private static string NormalizeLine(string? line) =>
         (line ?? string.Empty).Replace("\r", string.Empty, StringComparison.Ordinal).Replace('\n', ' ');

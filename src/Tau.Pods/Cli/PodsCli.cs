@@ -14,7 +14,8 @@ public static class PodsCli
     public static async Task<int> RunAsync(
         string[] args,
         PodExecService? execService = null,
-        PodVllmCommandPlanner? vllmPlanner = null)
+        PodVllmCommandPlanner? vllmPlanner = null,
+        PodVllmOrchestrationService? vllmService = null)
     {
         var store = new PodsConfigStore();
         var validator = new PodsConfigValidator();
@@ -24,6 +25,7 @@ public static class PodsCli
         var lifecycleService = new PodLifecycleService(execService);
         var modelService = new PodModelService(execService);
         vllmPlanner ??= new PodVllmCommandPlanner();
+        vllmService ??= new PodVllmOrchestrationService(execService, vllmPlanner);
 
         if (args.Length == 0 || IsHelp(args[0]))
         {
@@ -49,7 +51,7 @@ public static class PodsCli
             "logs" => await LogsAsync(args, path, store, validator, lifecycleService).ConfigureAwait(false),
             "deployments" => await DeploymentsAsync(args, path, store, validator, lifecycleService).ConfigureAwait(false),
             "model" => await ModelAsync(args, store, validator, modelService).ConfigureAwait(false),
-            "vllm" => Vllm(args, store, validator, vllmPlanner),
+            "vllm" => await Vllm(args, store, validator, vllmPlanner, vllmService).ConfigureAwait(false),
             _ => Unknown(command)
         };
     }
@@ -398,15 +400,16 @@ public static class PodsCli
         };
     }
 
-    private static int Vllm(
+    private static async Task<int> Vllm(
         string[] args,
         PodsConfigStore store,
         PodsConfigValidator validator,
-        PodVllmCommandPlanner planner)
+        PodVllmCommandPlanner planner,
+        PodVllmOrchestrationService service)
     {
         if (args.Length < 2)
         {
-            Console.Error.WriteLine("Usage: vllm <plan> [--json] [path] <pod-id> <model-id> [deployment-name]");
+            Console.Error.WriteLine("Usage: vllm <plan|preflight|deploy|status|health|stop> [--json] [path] <pod-id> <model-id|deployment-name> [deployment-name]");
             return 1;
         }
 
@@ -414,6 +417,11 @@ public static class PodsCli
         return subcommand switch
         {
             "plan" => VllmPlan(args, store, validator, planner),
+            "preflight" => await VllmPreflight(args, store, validator, service).ConfigureAwait(false),
+            "deploy" => await VllmDeploy(args, store, validator, service).ConfigureAwait(false),
+            "status" => await VllmStatus(args, store, validator, service).ConfigureAwait(false),
+            "health" => await VllmHealth(args, store, validator, service).ConfigureAwait(false),
+            "stop" => await VllmStop(args, store, validator, service).ConfigureAwait(false),
             _ => UnknownVllmSubcommand(subcommand)
         };
     }
@@ -445,6 +453,186 @@ public static class PodsCli
 
         PrintVllmPlanText(pod, plan);
         return 0;
+    }
+
+    private static async Task<int> VllmPreflight(
+        string[] args,
+        PodsConfigStore store,
+        PodsConfigValidator validator,
+        PodVllmOrchestrationService service)
+    {
+        var jsonOutput = TryConsumeFlag(args, "--json", startIndex: 2, out var positionalArgs);
+        if (!TryParseModelCommand(positionalArgs, minValueCount: 1, "Usage: vllm preflight [--json] [path] <pod-id> <model-id> [deployment-name]", out var parsed))
+        {
+            return 1;
+        }
+
+        var pod = LoadPodOrReport(parsed.ConfigPath, parsed.PodId, store, validator, out var exitCode);
+        if (pod is null) return exitCode;
+
+        var modelId = parsed.Values[0];
+        var deploymentName = parsed.Values.Count > 1 ? parsed.Values[1] : null;
+        var result = await service.PreflightAsync(pod, new PodVllmServeOptions(modelId, deploymentName)).ConfigureAwait(false);
+        if (jsonOutput)
+        {
+            PrintVllmPreflightJson(result);
+        }
+        else
+        {
+            PrintVllmPreflightText(result);
+        }
+
+        return result.Success ? 0 : 1;
+    }
+
+    private static async Task<int> VllmDeploy(
+        string[] args,
+        PodsConfigStore store,
+        PodsConfigValidator validator,
+        PodVllmOrchestrationService service)
+    {
+        var jsonOutput = TryConsumeFlag(args, "--json", startIndex: 2, out var deployArgs);
+        var skipHealth = TryConsumeFlag(deployArgs, "--no-health", startIndex: 2, out var healthArgs);
+        var healthAttempts = ConsumeIntOption(healthArgs, "--health-attempts", startIndex: 2, defaultValue: 12, out var backoffArgs, out var optionError);
+        if (optionError is not null)
+        {
+            Console.Error.WriteLine(optionError);
+            return 1;
+        }
+
+        var healthBackoffMs = ConsumeIntOption(backoffArgs, "--health-backoff-ms", startIndex: 2, defaultValue: 5000, out var positionalArgs, out optionError);
+        if (optionError is not null)
+        {
+            Console.Error.WriteLine(optionError);
+            return 1;
+        }
+
+        if (!TryParseModelCommand(positionalArgs, minValueCount: 1, "Usage: vllm deploy [--json] [--no-health] [path] <pod-id> <model-id> [deployment-name]", out var parsed))
+        {
+            return 1;
+        }
+
+        var pod = LoadPodOrReport(parsed.ConfigPath, parsed.PodId, store, validator, out var exitCode);
+        if (pod is null) return exitCode;
+
+        var modelId = parsed.Values[0];
+        var deploymentName = parsed.Values.Count > 1 ? parsed.Values[1] : null;
+        var result = await service.DeployAsync(
+            pod,
+            new PodVllmServeOptions(
+                modelId,
+                deploymentName,
+                WaitForHealth: !skipHealth,
+                HealthAttempts: healthAttempts,
+                HealthBackoffMilliseconds: healthBackoffMs)).ConfigureAwait(false);
+        if (jsonOutput)
+        {
+            PrintVllmOperationJson(result);
+        }
+        else
+        {
+            PrintVllmOperationText(result);
+        }
+
+        return result.Success ? 0 : 1;
+    }
+
+    private static async Task<int> VllmHealth(
+        string[] args,
+        PodsConfigStore store,
+        PodsConfigValidator validator,
+        PodVllmOrchestrationService service)
+    {
+        var jsonOutput = TryConsumeFlag(args, "--json", startIndex: 2, out var healthArgs);
+        var healthAttempts = ConsumeIntOption(healthArgs, "--health-attempts", startIndex: 2, defaultValue: 1, out var backoffArgs, out var optionError);
+        if (optionError is not null)
+        {
+            Console.Error.WriteLine(optionError);
+            return 1;
+        }
+
+        var healthBackoffMs = ConsumeIntOption(backoffArgs, "--health-backoff-ms", startIndex: 2, defaultValue: 0, out var positionalArgs, out optionError);
+        if (optionError is not null)
+        {
+            Console.Error.WriteLine(optionError);
+            return 1;
+        }
+
+        if (!TryParseModelCommand(positionalArgs, minValueCount: 1, "Usage: vllm health [--json] [path] <pod-id> <deployment-name>", out var parsed))
+        {
+            return 1;
+        }
+
+        var pod = LoadPodOrReport(parsed.ConfigPath, parsed.PodId, store, validator, out var exitCode);
+        if (pod is null) return exitCode;
+
+        var result = await service.HealthAsync(pod, parsed.Values[0], healthAttempts, healthBackoffMs).ConfigureAwait(false);
+        if (jsonOutput)
+        {
+            PrintVllmHealthJson(result);
+        }
+        else
+        {
+            PrintVllmHealthText(result);
+        }
+
+        return result.Success ? 0 : 1;
+    }
+
+    private static async Task<int> VllmStatus(
+        string[] args,
+        PodsConfigStore store,
+        PodsConfigValidator validator,
+        PodVllmOrchestrationService service)
+    {
+        var jsonOutput = TryConsumeFlag(args, "--json", startIndex: 2, out var positionalArgs);
+        if (!TryParseModelCommand(positionalArgs, minValueCount: 1, "Usage: vllm status [--json] [path] <pod-id> <deployment-name>", out var parsed))
+        {
+            return 1;
+        }
+
+        var pod = LoadPodOrReport(parsed.ConfigPath, parsed.PodId, store, validator, out var exitCode);
+        if (pod is null) return exitCode;
+
+        var result = await service.StatusAsync(pod, parsed.Values[0]).ConfigureAwait(false);
+        if (jsonOutput)
+        {
+            PrintVllmStatusJson(result);
+        }
+        else
+        {
+            PrintVllmStatusText(result);
+        }
+
+        return result.Success ? 0 : 1;
+    }
+
+    private static async Task<int> VllmStop(
+        string[] args,
+        PodsConfigStore store,
+        PodsConfigValidator validator,
+        PodVllmOrchestrationService service)
+    {
+        var jsonOutput = TryConsumeFlag(args, "--json", startIndex: 2, out var positionalArgs);
+        if (!TryParseModelCommand(positionalArgs, minValueCount: 1, "Usage: vllm stop [--json] [path] <pod-id> <deployment-name>", out var parsed))
+        {
+            return 1;
+        }
+
+        var pod = LoadPodOrReport(parsed.ConfigPath, parsed.PodId, store, validator, out var exitCode);
+        if (pod is null) return exitCode;
+
+        var result = await service.StopAsync(pod, parsed.Values[0]).ConfigureAwait(false);
+        if (jsonOutput)
+        {
+            PrintVllmOperationJson(result);
+        }
+        else
+        {
+            PrintVllmOperationText(result);
+        }
+
+        return result.Success ? 0 : 1;
     }
 
     private static void PrintVllmPlanText(PodDefinition pod, PodVllmServePlan plan)
@@ -492,6 +680,262 @@ public static class PodsCli
         }
 
         Console.WriteLine(Encoding.UTF8.GetString(output.ToArray()));
+    }
+
+    private static void PrintVllmOperationText(PodVllmOperationResult result)
+    {
+        Console.WriteLine($"{result.PodId} | ok={result.Success} | operation={result.Operation} | deployment={result.DeploymentName} | exit={result.ExitCode} | {result.Summary}");
+        Console.WriteLine("[remote-command]");
+        Console.WriteLine(result.Command);
+        if (result.Plan is not null)
+        {
+            Console.WriteLine("[serve-command]");
+            Console.WriteLine(result.Plan.ServeCommand);
+        }
+
+        if (result.Preflight is not null)
+        {
+            Console.WriteLine("[preflight]");
+            PrintVllmPreflightText(result.Preflight, includeCommand: true, prefix: "preflight-");
+        }
+
+        PrintStdStreams(result.StdOut, result.StdErr);
+        if (result.Health is not null)
+        {
+            Console.WriteLine("[health]");
+            PrintVllmHealthText(result.Health, includeCommand: true, streamPrefix: "health-");
+        }
+
+        if (result.Rollback is not null)
+        {
+            Console.WriteLine("[rollback]");
+            Console.WriteLine($"ok={result.Rollback.Success} | deployment={result.Rollback.DeploymentName} | exit={result.Rollback.ExitCode} | {result.Rollback.Summary}");
+            Console.WriteLine("[rollback-command]");
+            Console.WriteLine(result.Rollback.Command);
+            PrintStdStreams(result.Rollback.StdOut, result.Rollback.StdErr, prefix: "rollback-");
+        }
+    }
+
+    private static void PrintVllmStatusText(PodVllmStatusResult result)
+    {
+        Console.WriteLine($"{result.PodId} | ok={result.Success} | operation=status | deployment={result.DeploymentName} | state={result.State} | ready={result.Ready} | unhealthy={result.Unhealthy} | exit={result.ExitCode} | {result.Summary}");
+        Console.WriteLine("[remote-command]");
+        Console.WriteLine(result.Command);
+        PrintStdStreams(result.StdOut, result.StdErr);
+    }
+
+    private static void PrintVllmHealthText(
+        PodVllmHealthResult result,
+        bool includeCommand = true,
+        string prefix = "",
+        string streamPrefix = "")
+    {
+        Console.WriteLine($"{prefix}{result.PodId} | ok={result.Success} | operation=health | deployment={result.DeploymentName} | state={result.State} | ready={result.Ready} | unhealthy={result.Unhealthy} | failure={result.FailureKind} | attempts={result.Attempts}/{result.MaxAttempts} | exit={result.ExitCode} | {result.Summary}");
+        if (includeCommand)
+        {
+            Console.WriteLine("[health-command]");
+            Console.WriteLine(result.Command);
+        }
+
+        PrintStdStreams(result.StdOut, result.StdErr, prefix: streamPrefix);
+    }
+
+    private static void PrintVllmOperationJson(PodVllmOperationResult result)
+    {
+        using var output = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(output, new JsonWriterOptions { Indented = true }))
+        {
+            writer.WriteStartObject();
+            writer.WriteString("pod", result.PodId);
+            writer.WriteBoolean("ok", result.Success);
+            writer.WriteString("operation", result.Operation);
+            writer.WriteString("deployment", result.DeploymentName);
+            writer.WriteString("summary", result.Summary);
+            writer.WriteString("remoteCommand", result.Command);
+            writer.WriteNumber("exitCode", result.ExitCode);
+            writer.WriteString("stdout", result.StdOut);
+            writer.WriteString("stderr", result.StdErr);
+            if (result.Plan is not null)
+            {
+                writer.WritePropertyName("plan");
+                WriteVllmPlanObject(writer, result.Plan);
+            }
+            if (result.Preflight is not null)
+            {
+                writer.WritePropertyName("preflight");
+                WriteVllmPreflightObject(writer, result.Preflight);
+            }
+            if (result.Health is not null)
+            {
+                writer.WritePropertyName("health");
+                WriteVllmHealthObject(writer, result.Health);
+            }
+            if (result.Rollback is not null)
+            {
+                writer.WritePropertyName("rollback");
+                WriteVllmRollbackObject(writer, result.Rollback);
+            }
+            writer.WriteEndObject();
+        }
+
+        Console.WriteLine(Encoding.UTF8.GetString(output.ToArray()));
+    }
+
+    private static void PrintVllmStatusJson(PodVllmStatusResult result)
+    {
+        using var output = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(output, new JsonWriterOptions { Indented = true }))
+        {
+            writer.WriteStartObject();
+            writer.WriteString("pod", result.PodId);
+            writer.WriteBoolean("ok", result.Success);
+            writer.WriteString("operation", "status");
+            writer.WriteString("deployment", result.DeploymentName);
+            writer.WriteString("summary", result.Summary);
+            writer.WriteString("remoteCommand", result.Command);
+            writer.WriteNumber("exitCode", result.ExitCode);
+            writer.WriteString("state", result.State);
+            writer.WriteBoolean("ready", result.Ready);
+            writer.WriteBoolean("unhealthy", result.Unhealthy);
+            writer.WriteString("stdout", result.StdOut);
+            writer.WriteString("stderr", result.StdErr);
+            writer.WriteEndObject();
+        }
+
+        Console.WriteLine(Encoding.UTF8.GetString(output.ToArray()));
+    }
+
+    private static void PrintVllmHealthJson(PodVllmHealthResult result)
+    {
+        using var output = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(output, new JsonWriterOptions { Indented = true }))
+        {
+            WriteVllmHealthObject(writer, result);
+        }
+
+        Console.WriteLine(Encoding.UTF8.GetString(output.ToArray()));
+    }
+
+    private static void PrintVllmPreflightText(
+        PodVllmPreflightResult result,
+        bool includeCommand = true,
+        string prefix = "")
+    {
+        Console.WriteLine($"{prefix}{result.PodId} | ok={result.Success} | operation=preflight | deployment={result.DeploymentName} | model={result.ModelId} | modelCachePresent={result.ModelCachePresent} | snapshotCount={result.SnapshotCount} | vllmAvailable={result.VllmAvailable} | failure={result.FailureKind} | exit={result.ExitCode} | {result.Summary}");
+        Console.WriteLine($"{prefix}modelCachePath={result.ModelCachePath}");
+        Console.WriteLine($"{prefix}resolvedModelPath={result.ResolvedModelPath ?? "-"}");
+        if (includeCommand)
+        {
+            Console.WriteLine("[preflight-command]");
+            Console.WriteLine(result.Command);
+        }
+
+        PrintStdStreams(result.StdOut, result.StdErr, prefix: prefix);
+    }
+
+    private static void PrintVllmPreflightJson(PodVllmPreflightResult result)
+    {
+        using var output = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(output, new JsonWriterOptions { Indented = true }))
+        {
+            WriteVllmPreflightObject(writer, result);
+        }
+
+        Console.WriteLine(Encoding.UTF8.GetString(output.ToArray()));
+    }
+
+    private static void WriteVllmPlanObject(Utf8JsonWriter writer, PodVllmServePlan plan)
+    {
+        writer.WriteStartObject();
+        writer.WriteString("deployment", plan.DeploymentName);
+        writer.WriteString("model", plan.ModelId);
+        writer.WriteString("modelPath", plan.ModelPath);
+        writer.WriteNumber("port", plan.Port);
+        writer.WriteString("servedModel", plan.ServedModelName);
+        writer.WriteString("unit", plan.UnitName);
+        writer.WriteString("serveCommand", plan.ServeCommand);
+        writer.WriteString("systemdUnit", plan.SystemdUnit);
+        writer.WritePropertyName("metadata");
+        using (var metadata = JsonDocument.Parse(plan.MetadataJson))
+        {
+            metadata.RootElement.WriteTo(writer);
+        }
+        writer.WriteString("metadataJson", plan.MetadataJson);
+        writer.WriteString("planRemoteCommand", plan.RemoteCommand);
+        writer.WriteEndObject();
+    }
+
+    private static void WriteVllmPreflightObject(Utf8JsonWriter writer, PodVllmPreflightResult result)
+    {
+        writer.WriteStartObject();
+        writer.WriteString("pod", result.PodId);
+        writer.WriteBoolean("ok", result.Success);
+        writer.WriteString("operation", "preflight");
+        writer.WriteString("deployment", result.DeploymentName);
+        writer.WriteString("model", result.ModelId);
+        writer.WriteString("modelCachePath", result.ModelCachePath);
+        writer.WriteString("resolvedModelPath", result.ResolvedModelPath);
+        writer.WriteBoolean("modelCachePresent", result.ModelCachePresent);
+        writer.WriteNumber("snapshotCount", result.SnapshotCount);
+        writer.WriteBoolean("vllmAvailable", result.VllmAvailable);
+        writer.WriteString("failureKind", result.FailureKind);
+        writer.WriteString("summary", result.Summary);
+        writer.WriteString("remoteCommand", result.Command);
+        writer.WriteNumber("exitCode", result.ExitCode);
+        writer.WriteString("stdout", result.StdOut);
+        writer.WriteString("stderr", result.StdErr);
+        writer.WriteEndObject();
+    }
+
+    private static void WriteVllmHealthObject(Utf8JsonWriter writer, PodVllmHealthResult result)
+    {
+        writer.WriteStartObject();
+        writer.WriteString("pod", result.PodId);
+        writer.WriteBoolean("ok", result.Success);
+        writer.WriteString("operation", "health");
+        writer.WriteString("deployment", result.DeploymentName);
+        writer.WriteString("summary", result.Summary);
+        writer.WriteString("remoteCommand", result.Command);
+        writer.WriteNumber("exitCode", result.ExitCode);
+        writer.WriteString("state", result.State);
+        writer.WriteBoolean("ready", result.Ready);
+        writer.WriteBoolean("unhealthy", result.Unhealthy);
+        writer.WriteString("failureKind", result.FailureKind);
+        writer.WriteNumber("attempts", result.Attempts);
+        writer.WriteNumber("maxAttempts", result.MaxAttempts);
+        writer.WriteString("stdout", result.StdOut);
+        writer.WriteString("stderr", result.StdErr);
+        writer.WriteEndObject();
+    }
+
+    private static void WriteVllmRollbackObject(Utf8JsonWriter writer, PodVllmRollbackResult result)
+    {
+        writer.WriteStartObject();
+        writer.WriteString("pod", result.PodId);
+        writer.WriteBoolean("ok", result.Success);
+        writer.WriteString("operation", "rollback");
+        writer.WriteString("deployment", result.DeploymentName);
+        writer.WriteString("summary", result.Summary);
+        writer.WriteString("remoteCommand", result.Command);
+        writer.WriteNumber("exitCode", result.ExitCode);
+        writer.WriteString("stdout", result.StdOut);
+        writer.WriteString("stderr", result.StdErr);
+        writer.WriteEndObject();
+    }
+
+    private static void PrintStdStreams(string stdout, string stderr, string prefix = "")
+    {
+        if (!string.IsNullOrWhiteSpace(stdout))
+        {
+            Console.WriteLine($"[{prefix}stdout]");
+            Console.WriteLine(stdout.TrimEnd());
+        }
+
+        if (!string.IsNullOrWhiteSpace(stderr))
+        {
+            Console.WriteLine($"[{prefix}stderr]");
+            Console.WriteLine(stderr.TrimEnd());
+        }
     }
 
     private static async Task<int> ModelListAsync(
@@ -641,7 +1085,7 @@ public static class PodsCli
     private static int UnknownVllmSubcommand(string subcommand)
     {
         Console.Error.WriteLine($"Unknown vllm subcommand: {subcommand}");
-        Console.Error.WriteLine("Usage: vllm <plan> [--json] [path] <pod-id> <model-id> [deployment-name]");
+        Console.Error.WriteLine("Usage: vllm <plan|preflight|deploy|status|health|stop> [--json] [path] <pod-id> <model-id|deployment-name> [deployment-name]");
         return 1;
     }
 
@@ -664,6 +1108,39 @@ public static class PodsCli
 
         positionalArgs = values.ToArray();
         return found;
+    }
+
+    private static int ConsumeIntOption(
+        string[] args,
+        string option,
+        int startIndex,
+        int defaultValue,
+        out string[] positionalArgs,
+        out string? error)
+    {
+        error = null;
+        var value = defaultValue;
+        var values = new List<string>(args.Length);
+        for (var i = 0; i < args.Length; i++)
+        {
+            if (i >= startIndex && args[i].Equals(option, StringComparison.OrdinalIgnoreCase))
+            {
+                if (i + 1 >= args.Length || !int.TryParse(args[i + 1], System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out value) || value < 0)
+                {
+                    error = $"Invalid {option} value.";
+                    positionalArgs = args;
+                    return defaultValue;
+                }
+
+                i++;
+                continue;
+            }
+
+            values.Add(args[i]);
+        }
+
+        positionalArgs = values.ToArray();
+        return value;
     }
 
     private static bool TryParseTargetCommand(
@@ -757,6 +1234,11 @@ public static class PodsCli
         Console.WriteLine("  model remove [path] <id> <model> Remove a cached model from an ssh pod");
         Console.WriteLine("  model status [path] <id> <model> Check whether a model is cached");
         Console.WriteLine("  vllm plan [--json] [path] <id> <model> [name] Print a plan-only vLLM serve command");
+        Console.WriteLine("  vllm preflight [--json] [path] <id> <model> [name] Resolve remote HF snapshot path and vLLM availability");
+        Console.WriteLine("  vllm deploy [--json] [--no-health] [--health-attempts n] [--health-backoff-ms n] [path] <id> <model> [name] Execute a vLLM deploy plan on an ssh pod");
+        Console.WriteLine("  vllm status [--json] [path] <id> <name> Fetch remote vLLM deployment status");
+        Console.WriteLine("  vllm health [--json] [--health-attempts n] [--health-backoff-ms n] [path] <id> <name> Check remote vLLM /health readiness");
+        Console.WriteLine("  vllm stop [--json] [path] <id> <name> Stop a remote vLLM deployment");
     }
 
     private sealed record TargetCommandArguments(string ConfigPath, string PodId, IReadOnlyList<string> Values);

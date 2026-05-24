@@ -2029,6 +2029,66 @@ public class CodingAgentCommandRouterTests
     }
 
     [Fact]
+    public async Task TryHandleAsync_ExportHtmlCommand_RendersBlockquoteMarkdownBlocks()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-export-blockquote-blocks-{Guid.NewGuid():N}");
+        var htmlPath = Path.Combine(directory, "session.html");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.SessionName = "blockquote blocks export";
+        runner.MutableMessages.Add(new AssistantMessage(
+            [
+                new TextContent(
+                    """
+                    > ## Quoted plan
+                    > - quoted one
+                    >   - quoted child
+                    > 1. ordered quoted
+                    > > nested quote with `code`
+                    ```md
+                    > - not quoted list
+                    ```
+                    """)
+            ]));
+        var router = new CodingAgentCommandRouter(runner);
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+
+            var result = await router.TryHandleAsync($"/export {htmlPath}");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+
+            var html = File.ReadAllText(htmlPath);
+            var normalizedHtml = html.Replace("\r\n", "\n", StringComparison.Ordinal);
+            Assert.Contains("<blockquote>", html, StringComparison.Ordinal);
+            Assert.Contains("<h2>Quoted plan</h2>", html, StringComparison.Ordinal);
+            Assert.Contains(
+                """
+                <li>quoted one<ul>
+                <li>quoted child</li>
+                </ul>
+                </li>
+                """,
+                normalizedHtml,
+                StringComparison.Ordinal);
+            Assert.Contains("<ol>", html, StringComparison.Ordinal);
+            Assert.Contains("<li>ordered quoted</li>", html, StringComparison.Ordinal);
+            Assert.Contains("<p>nested quote with <code class=\"inline-code\">code</code></p>", html, StringComparison.Ordinal);
+            Assert.Contains("<code data-language=\"md\">&gt; - not quoted list</code>", html, StringComparison.Ordinal);
+            Assert.DoesNotContain("<p>- quoted one</p>", html, StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
     public async Task TryHandleAsync_ExportHtmlCommand_RendersMarkdownTaskLists()
     {
         var directory = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-export-task-list-{Guid.NewGuid():N}");
@@ -2109,20 +2169,31 @@ public class CodingAgentCommandRouterTests
             Assert.False(result.IsError);
 
             var html = File.ReadAllText(htmlPath);
-            // Top-level <ul> has exactly one opening (the outer list).
+            var normalizedHtml = html.Replace("\r\n", "\n", StringComparison.Ordinal);
             var ulOpens = System.Text.RegularExpressions.Regex.Matches(html, "<ul>").Count;
             Assert.True(ulOpens >= 2, $"expected at least two <ul> opens (outer + nested), saw {ulOpens}");
-            // The ordered nested list shows as <ol>.
             Assert.Contains("<ol>", html, StringComparison.Ordinal);
-            // The structure should keep inner items inside their outer item.
-            // Check the document contains the nested order: outer two, ordered inner, another inner, outer three.
-            var indexOuterTwo = html.IndexOf("outer two", StringComparison.Ordinal);
-            var indexOrderedInner = html.IndexOf("ordered inner", StringComparison.Ordinal);
-            var indexAnotherInner = html.IndexOf("another inner", StringComparison.Ordinal);
-            var indexOuterThree = html.IndexOf("outer three", StringComparison.Ordinal);
-            Assert.True(indexOuterTwo > 0 && indexOrderedInner > indexOuterTwo, "ordered inner should follow outer two");
-            Assert.True(indexAnotherInner > indexOrderedInner, "another inner should follow ordered inner");
-            Assert.True(indexOuterThree > indexAnotherInner, "outer three should follow inner list");
+            Assert.Contains(
+                """
+                <li>outer one<ul>
+                <li>inner one</li>
+                <li>inner two</li>
+                </ul>
+                </li>
+                """,
+                normalizedHtml,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                """
+                <li>outer two<ol>
+                <li>ordered inner</li>
+                <li>another inner</li>
+                </ol>
+                </li>
+                <li>outer three</li>
+                """,
+                normalizedHtml,
+                StringComparison.Ordinal);
         }
         finally
         {

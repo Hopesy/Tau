@@ -987,11 +987,19 @@ public static class CodingAgentHtmlSessionExporter
 
     private static void RenderMarkdownBlockContent(StringBuilder builder, string text)
     {
-        var paragraph = new StringBuilder();
-        var listStack = new List<(MarkdownListKind Kind, int Indent)>();
-        var inQuote = false;
+        RenderMarkdownBlockContent(builder, text, includeContainer: true);
+    }
 
-        builder.AppendLine("<div class=\"content-text rich-text\">");
+    private static void RenderMarkdownBlockContent(StringBuilder builder, string text, bool includeContainer)
+    {
+        var paragraph = new StringBuilder();
+        var listStack = new List<MarkdownListFrame>();
+
+        if (includeContainer)
+        {
+            builder.AppendLine("<div class=\"content-text rich-text\">");
+        }
+
         var lines = ReadLines(text);
         for (var lineIndex = 0; lineIndex < lines.Count; lineIndex++)
         {
@@ -1000,7 +1008,6 @@ public static class CodingAgentHtmlSessionExporter
             {
                 FlushParagraph();
                 CloseList();
-                CloseQuote();
                 continue;
             }
 
@@ -1008,7 +1015,6 @@ public static class CodingAgentHtmlSessionExporter
             {
                 FlushParagraph();
                 CloseList();
-                CloseQuote();
                 AppendMarkdownTable(builder, table);
                 lineIndex += consumedLines - 1;
                 continue;
@@ -1018,7 +1024,6 @@ public static class CodingAgentHtmlSessionExporter
             {
                 FlushParagraph();
                 CloseList();
-                CloseQuote();
                 builder.Append("<h")
                     .Append(headingLevel.ToString(CultureInfo.InvariantCulture))
                     .Append(">");
@@ -1033,7 +1038,6 @@ public static class CodingAgentHtmlSessionExporter
             {
                 FlushParagraph();
                 CloseList();
-                CloseQuote();
                 builder.AppendLine("<hr>");
                 continue;
             }
@@ -1041,18 +1045,14 @@ public static class CodingAgentHtmlSessionExporter
             if (TryParseUnorderedListItem(line, out var unorderedItem, out var unorderedIndent))
             {
                 FlushParagraph();
-                CloseQuote();
-                AdjustListStack(MarkdownListKind.Unordered, unorderedIndent);
-                AppendMarkdownListItem(builder, unorderedItem);
+                AppendMarkdownListItem(MarkdownListKind.Unordered, unorderedIndent, unorderedItem);
                 continue;
             }
 
             if (TryParseOrderedListItem(line, out var orderedItem, out var orderedIndent))
             {
                 FlushParagraph();
-                CloseQuote();
-                AdjustListStack(MarkdownListKind.Ordered, orderedIndent);
-                AppendMarkdownListItem(builder, orderedItem);
+                AppendMarkdownListItem(MarkdownListKind.Ordered, orderedIndent, orderedItem);
                 continue;
             }
 
@@ -1060,15 +1060,21 @@ public static class CodingAgentHtmlSessionExporter
             {
                 FlushParagraph();
                 CloseList();
-                EnsureQuote();
-                builder.Append("<p>");
-                builder.AppendPlainTextMarkup(quoteText);
-                builder.AppendLine("</p>");
+                var quoteLines = new List<string> { quoteText };
+                while (lineIndex + 1 < lines.Count &&
+                    TryParseBlockQuoteLine(lines[lineIndex + 1], out var nextQuoteText))
+                {
+                    quoteLines.Add(nextQuoteText);
+                    lineIndex++;
+                }
+
+                builder.AppendLine("<blockquote>");
+                RenderMarkdownBlockContent(builder, string.Join(Environment.NewLine, quoteLines), includeContainer: false);
+                builder.AppendLine("</blockquote>");
                 continue;
             }
 
             CloseList();
-            CloseQuote();
             if (paragraph.Length > 0)
             {
                 paragraph.AppendLine();
@@ -1079,8 +1085,10 @@ public static class CodingAgentHtmlSessionExporter
 
         FlushParagraph();
         CloseList();
-        CloseQuote();
-        builder.AppendLine("</div>");
+        if (includeContainer)
+        {
+            builder.AppendLine("</div>");
+        }
 
         void FlushParagraph()
         {
@@ -1095,28 +1103,31 @@ public static class CodingAgentHtmlSessionExporter
             paragraph.Clear();
         }
 
-        void AdjustListStack(MarkdownListKind kind, int indent)
+        void AppendMarkdownListItem(MarkdownListKind kind, int indent, string itemText)
         {
-            // Pop deeper-or-equal indents that no longer fit the new line.
+            EnsureList(kind, indent);
+
+            var frame = listStack[^1];
+            CloseOpenListItem(frame);
+            AppendMarkdownListItemStart(builder, itemText);
+            frame.HasOpenItem = true;
+        }
+
+        void EnsureList(MarkdownListKind kind, int indent)
+        {
             while (listStack.Count > 0 && listStack[^1].Indent > indent)
             {
-                var popped = listStack[^1];
-                listStack.RemoveAt(listStack.Count - 1);
-                builder.AppendLine(popped.Kind == MarkdownListKind.Ordered ? "</ol>" : "</ul>");
+                CloseTopList();
             }
 
-            // If the deepest open list has the same indent but a different kind,
-            // close it before opening the new one.
             if (listStack.Count > 0 && listStack[^1].Indent == indent && listStack[^1].Kind != kind)
             {
-                var popped = listStack[^1];
-                listStack.RemoveAt(listStack.Count - 1);
-                builder.AppendLine(popped.Kind == MarkdownListKind.Ordered ? "</ol>" : "</ul>");
+                CloseTopList();
             }
 
             if (listStack.Count == 0 || listStack[^1].Indent < indent)
             {
-                listStack.Add((kind, indent));
+                listStack.Add(new MarkdownListFrame(kind, indent));
                 builder.AppendLine(kind == MarkdownListKind.Ordered ? "<ol>" : "<ul>");
             }
         }
@@ -1125,33 +1136,29 @@ public static class CodingAgentHtmlSessionExporter
         {
             while (listStack.Count > 0)
             {
-                var popped = listStack[^1];
-                listStack.RemoveAt(listStack.Count - 1);
-                builder.AppendLine(popped.Kind == MarkdownListKind.Ordered ? "</ol>" : "</ul>");
+                CloseTopList();
             }
         }
 
-        void EnsureQuote()
+        void CloseTopList()
         {
-            if (inQuote)
+            var frame = listStack[^1];
+            CloseOpenListItem(frame);
+            listStack.RemoveAt(listStack.Count - 1);
+            builder.AppendLine(frame.Kind == MarkdownListKind.Ordered ? "</ol>" : "</ul>");
+        }
+
+        void CloseOpenListItem(MarkdownListFrame frame)
+        {
+            if (!frame.HasOpenItem)
             {
                 return;
             }
 
-            builder.AppendLine("<blockquote>");
-            inQuote = true;
+            builder.AppendLine("</li>");
+            frame.HasOpenItem = false;
         }
 
-        void CloseQuote()
-        {
-            if (!inQuote)
-            {
-                return;
-            }
-
-            builder.AppendLine("</blockquote>");
-            inQuote = false;
-        }
     }
 
     private static IReadOnlyList<string> ReadLines(string text)
@@ -1281,7 +1288,7 @@ public static class CodingAgentHtmlSessionExporter
         builder.AppendLine("</table></div>");
     }
 
-    private static void AppendMarkdownListItem(StringBuilder builder, string itemText)
+    private static void AppendMarkdownListItemStart(StringBuilder builder, string itemText)
     {
         if (TryParseTaskListItem(itemText, out var isChecked, out var taskText))
         {
@@ -1293,13 +1300,12 @@ public static class CodingAgentHtmlSessionExporter
 
             builder.Append("> <span>");
             builder.AppendPlainTextMarkup(taskText);
-            builder.AppendLine("</span></li>");
+            builder.Append("</span>");
             return;
         }
 
         builder.Append("<li>");
         builder.AppendPlainTextMarkup(itemText);
-        builder.AppendLine("</li>");
     }
 
     private static bool TryParseTaskListItem(
@@ -1522,9 +1528,13 @@ public static class CodingAgentHtmlSessionExporter
             return false;
         }
 
-        quoteText = trimmed.Length > 1 && trimmed[1] == ' '
-            ? trimmed[2..].Trim()
-            : trimmed[1..].Trim();
+        quoteText = trimmed.Length > 1 ? trimmed[1..] : string.Empty;
+        if (quoteText.Length > 0 && quoteText[0] == ' ')
+        {
+            quoteText = quoteText[1..];
+        }
+
+        quoteText = quoteText.TrimEnd();
         return true;
     }
 
@@ -3737,6 +3747,15 @@ public static class CodingAgentHtmlSessionExporter
         None,
         Unordered,
         Ordered
+    }
+
+    private sealed class MarkdownListFrame(MarkdownListKind kind, int indent)
+    {
+        public MarkdownListKind Kind { get; } = kind;
+
+        public int Indent { get; } = indent;
+
+        public bool HasOpenItem { get; set; }
     }
 
     private const string Css = """

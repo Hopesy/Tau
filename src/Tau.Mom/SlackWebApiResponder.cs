@@ -4,7 +4,7 @@ using System.Text.Json;
 
 namespace Tau.Mom;
 
-public sealed class SlackWebApiResponder : IMomChannelResponder
+public sealed class SlackWebApiResponder : IMomChannelMessageRuntimeResponder
 {
     private readonly MomOptions _options;
     private readonly HttpClient _httpClient;
@@ -39,6 +39,72 @@ public sealed class SlackWebApiResponder : IMomChannelResponder
         CancellationToken cancellationToken = default)
     {
         return Task.CompletedTask;
+    }
+
+    public Task<string?> StartResponseAsync(
+        MomChannelMessage message,
+        string text,
+        CancellationToken cancellationToken = default)
+    {
+        return string.IsNullOrWhiteSpace(message.ThreadTs)
+            ? RespondAsync(message, text, cancellationToken)
+            : RespondInThreadAsync(message, text, cancellationToken);
+    }
+
+    public async Task UpdateResponseAsync(
+        MomChannelMessage message,
+        string responseTs,
+        string text,
+        CancellationToken cancellationToken = default)
+    {
+        EnsureToken();
+        if (string.IsNullOrWhiteSpace(responseTs))
+        {
+            throw new InvalidOperationException("Slack response timestamp is required.");
+        }
+
+        var payload = new Dictionary<string, string>
+        {
+            ["channel"] = message.ChannelId,
+            ["ts"] = responseTs.Trim(),
+            ["text"] = text
+        };
+        var json = JsonSerializer.Serialize(payload);
+        using var request = new HttpRequestMessage(HttpMethod.Post, "chat.update")
+        {
+            Content = new StringContent(json, Encoding.UTF8, "application/json")
+        };
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _options.SlackBotToken!.Trim());
+
+        using var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
+        await EnsureSlackOkAsync(response, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task DeleteResponseAsync(
+        MomChannelMessage message,
+        string responseTs,
+        CancellationToken cancellationToken = default)
+    {
+        EnsureToken();
+        if (string.IsNullOrWhiteSpace(responseTs))
+        {
+            throw new InvalidOperationException("Slack response timestamp is required.");
+        }
+
+        var payload = new Dictionary<string, string>
+        {
+            ["channel"] = message.ChannelId,
+            ["ts"] = responseTs.Trim()
+        };
+        var json = JsonSerializer.Serialize(payload);
+        using var request = new HttpRequestMessage(HttpMethod.Post, "chat.delete")
+        {
+            Content = new StringContent(json, Encoding.UTF8, "application/json")
+        };
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _options.SlackBotToken!.Trim());
+
+        using var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
+        await EnsureSlackOkAsync(response, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task UploadFileAsync(

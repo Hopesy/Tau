@@ -3,26 +3,6 @@ using Tau.Pods.Models;
 
 namespace Tau.Pods.Services;
 
-public sealed record PodVllmServeOptions(
-    string ModelId,
-    string? DeploymentName = null,
-    int Port = 8000,
-    string? ServedModelName = null,
-    IReadOnlyDictionary<string, string>? Environment = null,
-    IReadOnlyList<string>? ExtraArgs = null);
-
-public sealed record PodVllmServePlan(
-    string DeploymentName,
-    string ModelId,
-    string ModelPath,
-    int Port,
-    string ServedModelName,
-    string UnitName,
-    string ServeCommand,
-    string SystemdUnit,
-    string MetadataJson,
-    string RemoteCommand);
-
 public sealed class PodVllmCommandPlanner
 {
     private const string DefaultModelsPath = "$HOME/.cache/huggingface/hub";
@@ -38,7 +18,9 @@ public sealed class PodVllmCommandPlanner
         var servedModelName = string.IsNullOrWhiteSpace(options.ServedModelName)
             ? deploymentName
             : options.ServedModelName.Trim();
-        var modelPath = BuildModelPath(GetModelsPath(pod), options.ModelId);
+        var modelPath = string.IsNullOrWhiteSpace(options.ResolvedModelPath)
+            ? BuildModelCachePath(pod, options.ModelId)
+            : options.ResolvedModelPath.Trim();
         var unitName = $"tau-pod-{deploymentName}.service";
         var serveCommand = BuildServeCommand(modelPath, port, servedModelName, options.Environment, options.ExtraArgs);
         var unit = BuildSystemdUnit(unitName, serveCommand);
@@ -60,6 +42,14 @@ public sealed class PodVllmCommandPlanner
             unit,
             metadata,
             remoteCommand);
+    }
+
+    public string BuildModelCachePath(PodDefinition pod, string modelId)
+    {
+        ArgumentNullException.ThrowIfNull(pod);
+        ArgumentException.ThrowIfNullOrWhiteSpace(modelId);
+
+        return BuildModelPath(GetModelsPath(pod), modelId);
     }
 
     private static string BuildServeCommand(
@@ -121,7 +111,7 @@ public sealed class PodVllmCommandPlanner
         "Restart=on-failure\n" +
         "RestartSec=5\n\n" +
         "[Install]\n" +
-        "WantedBy=multi-user.target";
+        "WantedBy=default.target";
 
     private static string BuildMetadataJson(
         string modelId,

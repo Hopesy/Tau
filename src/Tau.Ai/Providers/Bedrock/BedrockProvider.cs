@@ -378,6 +378,7 @@ public record BedrockOptions : StreamOptions
     public string? SsoTokenCacheFile { get; init; }
     public string? SsoTokenCacheDirectory { get; init; }
     public string? SsoPortalEndpoint { get; init; }
+    public string? SsoOidcEndpoint { get; init; }
     public string? ContainerCredentialsRelativeUri { get; init; }
     public string? ContainerCredentialsFullUri { get; init; }
     public string? ContainerAuthorizationToken { get; init; }

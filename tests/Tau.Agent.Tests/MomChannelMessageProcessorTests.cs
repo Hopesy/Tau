@@ -77,6 +77,74 @@ public sealed class MomChannelMessageProcessorTests
     }
 
     [Fact]
+    public async Task ProcessAsync_WithRuntimeResponder_StartsPlaceholderAndUpdatesFinalMessage()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"tau-mom-channel-runtime-{Guid.NewGuid():N}");
+
+        try
+        {
+            var runner = new FakeDelegationAgentRunner();
+            var responder = new RecordingRuntimeResponder();
+            var processor = CreateProcessor(CreateOptions(root), runner);
+
+            var processed = await processor.ProcessAsync(
+                new MomChannelMessage("C123OPS", "summarize incident", "1778351400.123456", "U123"),
+                responder);
+
+            Assert.True(processed);
+            Assert.Equal([true, false], responder.Typing);
+            var start = Assert.Single(responder.Starts);
+            Assert.Equal("_Thinking_ ...", start.Text);
+            var update = Assert.Single(responder.Updates);
+            Assert.Equal("runtime-response-ts", update.ResponseTs);
+            Assert.Equal("stub-response", update.Text);
+            Assert.Empty(responder.Deletes);
+            Assert.Empty(responder.Responses);
+            Assert.Empty(responder.ThreadResponses);
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task ProcessAsync_WithSilentRuntimeResponse_DeletesPlaceholderWithoutPostingFinalMessage()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"tau-mom-channel-runtime-{Guid.NewGuid():N}");
+
+        try
+        {
+            var runner = new FakeDelegationAgentRunner { Response = "[SILENT]" };
+            var responder = new RecordingRuntimeResponder();
+            var processor = CreateProcessor(CreateOptions(root), runner);
+
+            var processed = await processor.ProcessAsync(
+                new MomChannelMessage("C123OPS", "quiet periodic check", "1778351400.123456", "U123"),
+                responder);
+
+            Assert.True(processed);
+            var start = Assert.Single(responder.Starts);
+            Assert.Equal("_Thinking_ ...", start.Text);
+            var delete = Assert.Single(responder.Deletes);
+            Assert.Equal("runtime-response-ts", delete.ResponseTs);
+            Assert.Empty(responder.Updates);
+            Assert.Empty(responder.Responses);
+            Assert.Empty(responder.ThreadResponses);
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
     public async Task ProcessAsync_WhenChannelIsRunning_RespondsBusyWithoutDelegating()
     {
         var root = Path.Combine(Path.GetTempPath(), $"tau-mom-channel-{Guid.NewGuid():N}");
@@ -279,12 +347,13 @@ public sealed class MomChannelMessageProcessorTests
     private sealed class FakeDelegationAgentRunner : IDelegationAgentRunner
     {
         public List<DelegationRequest> Requests { get; } = [];
+        public string Response { get; init; } = "stub-response";
 
         public Task<DelegationExecution> ExecuteAsync(DelegationRequest request, CancellationToken cancellationToken = default)
         {
             Requests.Add(request);
             return Task.FromResult(new DelegationExecution(
-                "stub-response",
+                Response,
                 [],
                 Error: null,
                 request.Provider ?? "unknown",
@@ -400,6 +469,59 @@ public sealed class MomChannelMessageProcessorTests
         public Task UploadFileAsync(MomChannelMessage message, string filePath, string? title = null, CancellationToken cancellationToken = default)
         {
             Uploads.Add((message, filePath, title));
+            return Task.CompletedTask;
+        }
+    }
+
+    private sealed class RecordingRuntimeResponder : IMomChannelMessageRuntimeResponder
+    {
+        public List<(MomChannelMessage Message, string Text)> Responses { get; } = [];
+        public List<(MomChannelMessage Message, string Text)> ThreadResponses { get; } = [];
+        public List<(MomChannelMessage Message, string Text)> Starts { get; } = [];
+        public List<(MomChannelMessage Message, string ResponseTs, string Text)> Updates { get; } = [];
+        public List<(MomChannelMessage Message, string ResponseTs)> Deletes { get; } = [];
+        public List<bool> Typing { get; } = [];
+        public List<(MomChannelMessage Message, string FilePath, string? Title)> Uploads { get; } = [];
+
+        public Task<string?> RespondAsync(MomChannelMessage message, string text, CancellationToken cancellationToken = default)
+        {
+            Responses.Add((message, text));
+            return Task.FromResult<string?>("response-ts");
+        }
+
+        public Task<string?> RespondInThreadAsync(MomChannelMessage message, string text, CancellationToken cancellationToken = default)
+        {
+            ThreadResponses.Add((message, text));
+            return Task.FromResult<string?>("thread-response-ts");
+        }
+
+        public Task SetTypingAsync(MomChannelMessage message, bool isTyping, CancellationToken cancellationToken = default)
+        {
+            Typing.Add(isTyping);
+            return Task.CompletedTask;
+        }
+
+        public Task UploadFileAsync(MomChannelMessage message, string filePath, string? title = null, CancellationToken cancellationToken = default)
+        {
+            Uploads.Add((message, filePath, title));
+            return Task.CompletedTask;
+        }
+
+        public Task<string?> StartResponseAsync(MomChannelMessage message, string text, CancellationToken cancellationToken = default)
+        {
+            Starts.Add((message, text));
+            return Task.FromResult<string?>("runtime-response-ts");
+        }
+
+        public Task UpdateResponseAsync(MomChannelMessage message, string responseTs, string text, CancellationToken cancellationToken = default)
+        {
+            Updates.Add((message, responseTs, text));
+            return Task.CompletedTask;
+        }
+
+        public Task DeleteResponseAsync(MomChannelMessage message, string responseTs, CancellationToken cancellationToken = default)
+        {
+            Deletes.Add((message, responseTs));
             return Task.CompletedTask;
         }
     }

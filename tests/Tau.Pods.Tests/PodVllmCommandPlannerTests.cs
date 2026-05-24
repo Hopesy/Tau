@@ -41,6 +41,7 @@ public sealed class PodVllmCommandPlannerTests
         Assert.Contains("--served-model-name 'llama-8b'", plan.ServeCommand, StringComparison.Ordinal);
         Assert.Contains("'--tensor-parallel-size' '2'", plan.ServeCommand, StringComparison.Ordinal);
         Assert.Contains("ExecStart=/usr/bin/env bash -lc", plan.SystemdUnit, StringComparison.Ordinal);
+        Assert.Contains("WantedBy=default.target", plan.SystemdUnit, StringComparison.Ordinal);
         Assert.Contains("cat > ~/.tau_pods/llama-8b--rm.service <<'EOF'", plan.RemoteCommand, StringComparison.Ordinal);
         Assert.Contains("planned llama-8b--rm", plan.RemoteCommand, StringComparison.Ordinal);
 

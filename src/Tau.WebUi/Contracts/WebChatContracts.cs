@@ -77,7 +77,40 @@ public sealed record CodingAgentJsonlSessionPreviewDto(
     string? FilePath,
     int EntryCount,
     int MessageCount,
+    CodingAgentJsonlPreviewFilterDto Filter,
+    CodingAgentJsonlTreeMetadataDto Tree,
+    CodingAgentJsonlImportAuditDto Audit,
     IReadOnlyList<CodingAgentJsonlTimelineMessageDto> Messages);
+
+public sealed record CodingAgentJsonlPreviewFilterDto(
+    string? Search,
+    bool CurrentBranchOnly,
+    int TotalMessageCount,
+    int MatchedMessageCount,
+    IReadOnlyList<string> MatchedEntryIds);
+
+public sealed record CodingAgentJsonlTreeMetadataDto(
+    string? LeafEntryId,
+    int RootEntryCount,
+    int BranchPointCount,
+    int BranchEntryCount,
+    int BranchMessageCount,
+    int LabelCount,
+    IReadOnlyDictionary<string, int> EntryTypes,
+    IReadOnlyList<string> CurrentBranchEntryIds,
+    IReadOnlyList<CodingAgentJsonlEntryMetadataDto> Entries);
+
+public sealed record CodingAgentJsonlEntryMetadataDto(
+    string EntryId,
+    string Type,
+    string? ParentEntryId,
+    DateTimeOffset Timestamp,
+    int Depth,
+    int ChildCount,
+    bool IsCurrentLeaf,
+    bool IsOnCurrentBranch,
+    string? Label = null,
+    DateTimeOffset? LabelTimestamp = null);
 
 public sealed record CodingAgentJsonlTimelineMessageDto(
     string EntryId,
@@ -92,6 +125,44 @@ public sealed record CodingAgentJsonlTimelineMessageDto(
     int ImageCount,
     string? ToolCallId = null,
     bool? IsError = null);
+
+public sealed record CodingAgentJsonlImportAuditDto(
+    bool IsBranched,
+    bool WillImportTimelineMessagesOnly,
+    bool WillImportCurrentBranchOnly,
+    int ImportedMessageCount,
+    int NonImportedEntryCount,
+    int CurrentBranchMessageCount,
+    int OffBranchMessageCount,
+    IReadOnlyList<CodingAgentJsonlBranchTimelineEntryDto> CurrentBranchTimeline,
+    IReadOnlyList<CodingAgentJsonlBranchLabelDto> BranchLabels,
+    IReadOnlyList<CodingAgentJsonlAuditWarningDto> Warnings);
+
+public sealed record CodingAgentJsonlBranchTimelineEntryDto(
+    string EntryId,
+    string Type,
+    DateTimeOffset Timestamp,
+    string? Role,
+    string? TextPreview,
+    string? Label,
+    bool IsCurrentLeaf,
+    bool WillImportAsMessage);
+
+public sealed record CodingAgentJsonlBranchLabelDto(
+    string EntryId,
+    string Label,
+    DateTimeOffset Timestamp,
+    bool IsOnCurrentBranch);
+
+public sealed record CodingAgentJsonlAuditWarningDto(
+    string Code,
+    string Message,
+    string? EntryId = null);
+
+public sealed record CodingAgentJsonlImportResultDto(
+    WebChatSessionDto Session,
+    CodingAgentJsonlTreeMetadataDto SourceTree,
+    CodingAgentJsonlImportAuditDto SourceAudit);
 
 public sealed record WebUiModelOptionDto(
     string Id,

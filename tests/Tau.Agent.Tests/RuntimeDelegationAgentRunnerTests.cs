@@ -3,6 +3,7 @@ using Tau.Agent;
 using Tau.Agent.Runtime;
 using Tau.Ai;
 using Tau.Ai.Auth;
+using Tau.Ai.Observability;
 using Tau.CodingAgent.Runtime;
 using Tau.Mom;
 
@@ -25,11 +26,16 @@ public class RuntimeDelegationAgentRunnerTests
         };
 
         var fake = new ScriptedRunner(model);
-        var delegationRunner = new RuntimeDelegationAgentRunner((_, _) => fake);
+        var logSink = new CapturingTauLogSink();
+        var delegationRunner = new RuntimeDelegationAgentRunner(
+            new MomOptions(),
+            (_, _, _, _) => fake,
+            logSink);
 
         var partial = new AssistantMessage();
         fake.Events =
         [
+            new MessageStartEvent(partial),
             new MessageUpdateEvent(new TextDeltaEvent(0, "hello ", partial)),
             new ToolExecutionStartEvent("tool-1", "shell"),
             new ToolExecutionEndEvent("tool-1", new ToolResult([new TextContent("ok")], IsError: false)),
@@ -74,6 +80,70 @@ public class RuntimeDelegationAgentRunnerTests
                 Assert.NotNull(evt.DurationMs);
                 Assert.True(evt.DurationMs >= 0);
             });
+
+        Assert.Equal(
+            [
+                "delegation.start",
+                "response.start",
+                "tool.start",
+                "tool.end",
+                "response.end",
+                "usage",
+                "delegation.end"
+            ],
+            logSink.Events.Select(static evt => evt.Event).ToArray());
+
+        var toolEnd = logSink.Events.Single(static evt => evt.Event == "tool.end");
+        Assert.Equal("tool-1", toolEnd.Fields["toolCallId"]);
+        Assert.Equal("shell", toolEnd.Fields["toolName"]);
+        Assert.Equal("false", toolEnd.Fields["isError"]);
+        Assert.NotNull(toolEnd.Fields["durationMs"]);
+        Assert.Equal("ok", toolEnd.Fields["preview"]);
+
+        var responseEnd = logSink.Events.Single(static evt => evt.Event == "response.end");
+        Assert.Equal("end_turn", responseEnd.Fields["stopReason"]);
+        Assert.Equal("11", responseEnd.Fields["characters"]);
+        Assert.Equal("hello world", responseEnd.Fields["preview"]);
+
+        var usage = logSink.Events.Single(static evt => evt.Event == "usage");
+        Assert.Equal("1000000", usage.Fields["inputTokens"]);
+        Assert.Equal("1000000", usage.Fields["outputTokens"]);
+        Assert.Equal("0", usage.Fields["cacheReadTokens"]);
+        Assert.Equal("0", usage.Fields["cacheWriteTokens"]);
+        Assert.Equal("10", usage.Fields["totalCost"]);
+
+        var end = logSink.Events.Single(static evt => evt.Event == "delegation.end");
+        Assert.Equal("end_turn", end.Fields["stopReason"]);
+        Assert.Equal("1", end.Fields["toolCalls"]);
+        Assert.Equal(Path.GetFullPath(Path.GetTempPath()), end.Fields["workingDirectory"]);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_WhenCancelled_LogsDelegationEndBeforeRethrow()
+    {
+        var model = new Model { Provider = "openai", Id = "gpt-5.4", Name = "GPT-5.4", Api = "openai-responses" };
+        var fake = new ScriptedRunner(model) { Events = [new AgentEndEvent()] };
+        var logSink = new CapturingTauLogSink();
+        var delegationRunner = new RuntimeDelegationAgentRunner(
+            new MomOptions(),
+            (_, _, _, _) => fake,
+            logSink);
+        using var cancellation = new CancellationTokenSource();
+        await cancellation.CancelAsync();
+
+        await Assert.ThrowsAsync<OperationCanceledException>(() =>
+            delegationRunner.ExecuteAsync(new DelegationRequest(
+                "stop",
+                Provider: "openai",
+                Model: "gpt-5.4",
+                WorkingDirectory: Path.GetTempPath()), cancellation.Token));
+
+        Assert.Equal(["delegation.start", "delegation.end"], logSink.Events.Select(static evt => evt.Event).ToArray());
+        var end = logSink.Events.Single(static evt => evt.Event == "delegation.end");
+        Assert.Equal("cancelled", end.Fields["stopReason"]);
+        Assert.Null(end.Fields["error"]);
+        Assert.Equal("0", end.Fields["toolCalls"]);
+        Assert.Equal(Path.GetFullPath(Path.GetTempPath()), end.Fields["workingDirectory"]);
     }
 
     [Fact]
@@ -686,6 +756,16 @@ public class RuntimeDelegationAgentRunnerTests
         {
             var text = string.Join(Environment.NewLine, input.OfType<TextContent>().Select(content => content.Text));
             return RunAsync(text, cancellationToken);
+        }
+    }
+
+    private sealed class CapturingTauLogSink : ITauLogSink
+    {
+        public List<TauLogEvent> Events { get; } = [];
+
+        public void Log(TauLogEvent evt)
+        {
+            Events.Add(evt);
         }
     }
 }

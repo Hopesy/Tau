@@ -59,6 +59,61 @@ public sealed class SlackWebApiResponderTests
     }
 
     [Fact]
+    public async Task UpdateResponseAsync_PostsSlackMessageUpdate()
+    {
+        var handler = new RecordingHandler(_ => JsonResponse("""
+        { "ok": true, "ts": "1778351400.777777" }
+        """));
+        using var client = new HttpClient(handler);
+        var responder = new SlackWebApiResponder(new MomOptions
+        {
+            SlackBotToken = "xoxb-test-token",
+            SlackApiBaseUrl = "https://slack.test/api/"
+        }, client);
+
+        await responder.UpdateResponseAsync(
+            new MomChannelMessage("C123OPS", "hello", "1778351400.123456", "U123"),
+            "1778351400.777777",
+            "final answer");
+
+        var request = Assert.Single(handler.Requests);
+        Assert.Equal(HttpMethod.Post, request.Method);
+        Assert.Equal("https://slack.test/api/chat.update", request.RequestUri!.ToString());
+        Assert.Equal("Bearer", request.AuthorizationScheme);
+        Assert.Equal("xoxb-test-token", request.AuthorizationParameter);
+        Assert.Contains("\"channel\":\"C123OPS\"", request.Body, StringComparison.Ordinal);
+        Assert.Contains("\"ts\":\"1778351400.777777\"", request.Body, StringComparison.Ordinal);
+        Assert.Contains("\"text\":\"final answer\"", request.Body, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task DeleteResponseAsync_PostsSlackMessageDelete()
+    {
+        var handler = new RecordingHandler(_ => JsonResponse("""
+        { "ok": true }
+        """));
+        using var client = new HttpClient(handler);
+        var responder = new SlackWebApiResponder(new MomOptions
+        {
+            SlackBotToken = "xoxb-test-token",
+            SlackApiBaseUrl = "https://slack.test/api/"
+        }, client);
+
+        await responder.DeleteResponseAsync(
+            new MomChannelMessage("C123OPS", "hello", "1778351400.123456", "U123"),
+            "1778351400.777777");
+
+        var request = Assert.Single(handler.Requests);
+        Assert.Equal(HttpMethod.Post, request.Method);
+        Assert.Equal("https://slack.test/api/chat.delete", request.RequestUri!.ToString());
+        Assert.Equal("Bearer", request.AuthorizationScheme);
+        Assert.Equal("xoxb-test-token", request.AuthorizationParameter);
+        Assert.Contains("\"channel\":\"C123OPS\"", request.Body, StringComparison.Ordinal);
+        Assert.Contains("\"ts\":\"1778351400.777777\"", request.Body, StringComparison.Ordinal);
+        Assert.DoesNotContain("text", request.Body, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task UploadFileAsync_UsesSlackUploadV2MultipartPayload()
     {
         var root = Path.Combine(Path.GetTempPath(), $"tau-slack-upload-{Guid.NewGuid():N}");

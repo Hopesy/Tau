@@ -118,6 +118,7 @@ function Invoke-MomSmoke {
     $eventsPath = Join-Path $smokeRoot 'events'
     $workingDirectory = Join-Path $smokeRoot 'workdir'
     $channelDirectory = Join-Path $workingDirectory 'smoke-channel'
+    $runtimeLogPath = Join-Path $smokeRoot 'tau-runtime-log.jsonl'
 
     New-Item -ItemType Directory -Force -Path $inboxPath, $outboxPath, $archivePath, $eventsPath, $workingDirectory | Out-Null
     Set-Content -Path (Join-Path $eventsPath 'smoke-event.json') -Value '{"type":"immediate","channelId":"smoke-channel","text":"smoke request"}'
@@ -127,6 +128,7 @@ function Invoke-MomSmoke {
     $previousArchive = $env:Mom__ArchivePath
     $previousEvents = $env:Mom__EventsPath
     $previousWorkdir = $env:Mom__DefaultWorkingDirectory
+    $previousTauLogFile = $env:TAU_LOG_FILE
 
     try {
         $env:Mom__InboxPath = $inboxPath
@@ -134,6 +136,7 @@ function Invoke-MomSmoke {
         $env:Mom__ArchivePath = $archivePath
         $env:Mom__EventsPath = $eventsPath
         $env:Mom__DefaultWorkingDirectory = $workingDirectory
+        $env:TAU_LOG_FILE = $runtimeLogPath
 
         Invoke-DotnetCommand -Arguments @('run', '--project', 'src/Tau.Mom/Tau.Mom.csproj', '--no-build', '--', '--once')
 
@@ -196,6 +199,16 @@ function Invoke-MomSmoke {
             $promptDebugContent -notmatch '"restoredMessageCount":') {
             throw "Mom smoke prompt debug snapshot did not include expected prompt context"
         }
+
+        if (-not (Test-Path $runtimeLogPath)) {
+            throw "Mom smoke did not create Tau runtime log at $runtimeLogPath"
+        }
+
+        $runtimeLogContent = Get-Content -Path $runtimeLogPath -Raw
+        if ($runtimeLogContent -notmatch '"event":"delegation.start"' -or
+            $runtimeLogContent -notmatch '"event":"delegation.end"') {
+            throw "Mom smoke Tau runtime log did not include delegation start/end events"
+        }
     }
     finally {
         if ($null -eq $previousInbox) { Remove-Item Env:Mom__InboxPath -ErrorAction SilentlyContinue } else { $env:Mom__InboxPath = $previousInbox }
@@ -203,6 +216,7 @@ function Invoke-MomSmoke {
         if ($null -eq $previousArchive) { Remove-Item Env:Mom__ArchivePath -ErrorAction SilentlyContinue } else { $env:Mom__ArchivePath = $previousArchive }
         if ($null -eq $previousEvents) { Remove-Item Env:Mom__EventsPath -ErrorAction SilentlyContinue } else { $env:Mom__EventsPath = $previousEvents }
         if ($null -eq $previousWorkdir) { Remove-Item Env:Mom__DefaultWorkingDirectory -ErrorAction SilentlyContinue } else { $env:Mom__DefaultWorkingDirectory = $previousWorkdir }
+        if ($null -eq $previousTauLogFile) { Remove-Item Env:TAU_LOG_FILE -ErrorAction SilentlyContinue } else { $env:TAU_LOG_FILE = $previousTauLogFile }
     }
 }
 
@@ -221,6 +235,7 @@ $testProjects = @(
     'tests/Tau.Agent.Tests/Tau.Agent.Tests.csproj',
     'tests/Tau.Tui.Tests/Tau.Tui.Tests.csproj',
     'tests/Tau.CodingAgent.Tests/Tau.CodingAgent.Tests.csproj',
+    'tests/Tau.WebUi.Tests/Tau.WebUi.Tests.csproj',
     'tests/Tau.Pods.Tests/Tau.Pods.Tests.csproj'
 )
 

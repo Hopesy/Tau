@@ -237,6 +237,31 @@ public sealed class WebUiEndpointTests
         Assert.Equal("parent-session.jsonl", preview.ParentSession);
         Assert.Equal(4, preview.EntryCount);
         Assert.Equal(3, preview.MessageCount);
+        Assert.Null(preview.Filter.Search);
+        Assert.False(preview.Filter.CurrentBranchOnly);
+        Assert.Equal(3, preview.Filter.TotalMessageCount);
+        Assert.Equal(3, preview.Filter.MatchedMessageCount);
+        Assert.Equal(["entry-user", "entry-assistant", "entry-tool"], preview.Filter.MatchedEntryIds);
+        Assert.Equal("entry-tool", preview.Tree.LeafEntryId);
+        Assert.Equal(1, preview.Tree.RootEntryCount);
+        Assert.Equal(0, preview.Tree.BranchPointCount);
+        Assert.Equal(4, preview.Tree.BranchEntryCount);
+        Assert.Equal(3, preview.Tree.BranchMessageCount);
+        Assert.Equal(0, preview.Tree.LabelCount);
+        Assert.Equal(3, preview.Tree.EntryTypes["message"]);
+        Assert.Equal(1, preview.Tree.EntryTypes["model_change"]);
+        Assert.Equal(["entry-user", "entry-model", "entry-assistant", "entry-tool"], preview.Tree.CurrentBranchEntryIds);
+        Assert.Equal("entry-tool", Assert.Single(preview.Tree.Entries, entry => entry.IsCurrentLeaf).EntryId);
+        Assert.False(preview.Audit.IsBranched);
+        Assert.True(preview.Audit.WillImportTimelineMessagesOnly);
+        Assert.False(preview.Audit.WillImportCurrentBranchOnly);
+        Assert.Equal(3, preview.Audit.ImportedMessageCount);
+        Assert.Equal(1, preview.Audit.NonImportedEntryCount);
+        Assert.Equal(3, preview.Audit.CurrentBranchMessageCount);
+        Assert.Equal(0, preview.Audit.OffBranchMessageCount);
+        Assert.Equal(["entry-user", "entry-model", "entry-assistant", "entry-tool"], preview.Audit.CurrentBranchTimeline.Select(entry => entry.EntryId).ToArray());
+        Assert.Contains(preview.Audit.Warnings, warning => warning.Code == "non_message_entries_not_imported_as_messages");
+        Assert.Contains(preview.Audit.Warnings, warning => warning.Code == "webchat_import_is_linearized");
         Assert.Equal("user", preview.Messages[0].Role);
         Assert.Equal("hello coding agent", preview.Messages[0].TextPreview);
         Assert.Equal("entry-model", preview.Messages[1].ParentEntryId);
@@ -244,6 +269,44 @@ public sealed class WebUiEndpointTests
         Assert.Equal(1, preview.Messages[1].ToolCallCount);
         Assert.Equal("tool-1", preview.Messages[2].ToolCallId);
         Assert.True(preview.Messages[2].IsError);
+
+        var sessionsResponse = await fixture.Client.GetAsync("/api/sessions");
+        sessionsResponse.EnsureSuccessStatusCode();
+        var sessions = JsonSerializer.Deserialize(
+            await sessionsResponse.Content.ReadAsStringAsync(),
+            WebUiEndpointJsonContext.Default.WebChatSessionDtoArray);
+        Assert.Empty(sessions ?? []);
+    }
+
+    [Fact]
+    public async Task CodingAgentJsonlPreviewEndpoint_CanFilterCurrentBranchAndSearchWithoutPersisting()
+    {
+        await using var fixture = await WebUiEndpointFixture.StartAsync(StreamOk);
+
+        var response = await fixture.Client.PostAsync(
+            "/api/sessions/import.coding-agent-jsonl/preview?currentBranchOnly=true&search=after",
+            new StringContent(BranchedCodingAgentJsonl(), Encoding.UTF8, "application/x-ndjson"));
+
+        response.EnsureSuccessStatusCode();
+        var preview = JsonSerializer.Deserialize(
+            await response.Content.ReadAsStringAsync(),
+            WebUiEndpointJsonContext.Default.CodingAgentJsonlSessionPreviewDto);
+
+        Assert.NotNull(preview);
+        Assert.Equal(5, preview!.MessageCount);
+        Assert.Equal("after", preview.Filter.Search);
+        Assert.True(preview.Filter.CurrentBranchOnly);
+        Assert.Equal(5, preview.Filter.TotalMessageCount);
+        Assert.Equal(1, preview.Filter.MatchedMessageCount);
+        Assert.Equal(["entry-after-summary"], preview.Filter.MatchedEntryIds);
+        Assert.Equal("entry-label", preview.Tree.LeafEntryId);
+        Assert.Equal(5, preview.Tree.BranchEntryCount);
+        Assert.Equal(3, preview.Audit.CurrentBranchMessageCount);
+        Assert.Equal(2, preview.Audit.OffBranchMessageCount);
+
+        var message = Assert.Single(preview.Messages);
+        Assert.Equal("entry-after-summary", message.EntryId);
+        Assert.Equal("after summary", message.TextPreview);
 
         var sessionsResponse = await fixture.Client.GetAsync("/api/sessions");
         sessionsResponse.EnsureSuccessStatusCode();
@@ -263,11 +326,13 @@ public sealed class WebUiEndpointTests
             new StringContent(ValidCodingAgentJsonl(), Encoding.UTF8, "application/x-ndjson"));
 
         response.EnsureSuccessStatusCode();
-        var imported = JsonSerializer.Deserialize(
+        var result = JsonSerializer.Deserialize(
             await response.Content.ReadAsStringAsync(),
-            WebUiEndpointJsonContext.Default.WebChatSessionDto);
+            WebUiEndpointJsonContext.Default.CodingAgentJsonlImportResultDto);
+        Assert.NotNull(result);
+        var imported = result!.Session;
         Assert.NotNull(imported);
-        Assert.NotEqual("coding-session-1", imported!.Id);
+        Assert.NotEqual("coding-session-1", imported.Id);
         Assert.Equal("Imported CodingAgent session coding-session-1", imported.Title);
         Assert.True(imported.Persisted);
         Assert.Equal(3, imported.Messages.Count);
@@ -280,6 +345,10 @@ public sealed class WebUiEndpointTests
         Assert.Equal("assistant", imported.Messages[2].Role);
         Assert.Contains("not found", imported.Messages[2].Text, StringComparison.Ordinal);
         Assert.Contains("[tool result: tool-1; status=error]", imported.Messages[2].Text, StringComparison.Ordinal);
+        Assert.Equal("entry-tool", result.SourceTree.LeafEntryId);
+        Assert.Equal(1, result.SourceAudit.NonImportedEntryCount);
+        Assert.Equal(3, result.SourceAudit.ImportedMessageCount);
+        Assert.Contains(result.SourceAudit.Warnings, warning => warning.Code == "webchat_import_is_linearized");
 
         var fetched = await fixture.Client.GetAsync($"/api/sessions/{imported.Id}");
         fetched.EnsureSuccessStatusCode();
@@ -319,17 +388,56 @@ public sealed class WebUiEndpointTests
             new StringContent(CodingAgentJsonlWithToolOnlyMessages(), Encoding.UTF8, "application/x-ndjson"));
 
         response.EnsureSuccessStatusCode();
-        var imported = JsonSerializer.Deserialize(
+        var result = JsonSerializer.Deserialize(
             await response.Content.ReadAsStringAsync(),
-            WebUiEndpointJsonContext.Default.WebChatSessionDto);
-        Assert.NotNull(imported);
-        Assert.Equal(2, imported!.Messages.Count);
+            WebUiEndpointJsonContext.Default.CodingAgentJsonlImportResultDto);
+        Assert.NotNull(result);
+        var imported = result!.Session;
+        Assert.Equal(2, imported.Messages.Count);
         Assert.Equal("assistant", imported.Messages[0].Role);
         Assert.False(string.IsNullOrWhiteSpace(imported.Messages[0].Text));
         Assert.Contains("[tool call: 1]", imported.Messages[0].Text, StringComparison.Ordinal);
         Assert.Equal("assistant", imported.Messages[1].Role);
         Assert.False(string.IsNullOrWhiteSpace(imported.Messages[1].Text));
         Assert.Contains("[tool result: tool-2; status=ok]", imported.Messages[1].Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CodingAgentJsonlImportEndpoint_ReturnsSourceTreeAuditForBranchedSession()
+    {
+        await using var fixture = await WebUiEndpointFixture.StartAsync(StreamOk);
+
+        var response = await fixture.Client.PostAsync(
+            "/api/sessions/import.coding-agent-jsonl",
+            new StringContent(BranchedCodingAgentJsonl(), Encoding.UTF8, "application/x-ndjson"));
+
+        response.EnsureSuccessStatusCode();
+        var result = JsonSerializer.Deserialize(
+            await response.Content.ReadAsStringAsync(),
+            WebUiEndpointJsonContext.Default.CodingAgentJsonlImportResultDto);
+        Assert.NotNull(result);
+        Assert.Equal(5, result!.Session.Messages.Count);
+        Assert.Equal("entry-label", result.SourceTree.LeafEntryId);
+        Assert.Equal(2, result.SourceTree.BranchPointCount);
+        Assert.True(result.SourceAudit.IsBranched);
+        Assert.True(result.SourceAudit.WillImportTimelineMessagesOnly);
+        Assert.False(result.SourceAudit.WillImportCurrentBranchOnly);
+        Assert.Equal(5, result.SourceAudit.ImportedMessageCount);
+        Assert.Equal(4, result.SourceAudit.NonImportedEntryCount);
+        Assert.Equal(3, result.SourceAudit.CurrentBranchMessageCount);
+        Assert.Equal(2, result.SourceAudit.OffBranchMessageCount);
+        Assert.Equal(["entry-root", "entry-left", "entry-summary", "entry-after-summary", "entry-label"], result.SourceAudit.CurrentBranchTimeline.Select(entry => entry.EntryId).ToArray());
+        Assert.False(result.SourceAudit.CurrentBranchTimeline[2].WillImportAsMessage);
+        Assert.Equal("abandoned", result.SourceAudit.CurrentBranchTimeline[2].TextPreview);
+
+        var label = Assert.Single(result.SourceAudit.BranchLabels);
+        Assert.Equal("entry-root", label.EntryId);
+        Assert.Equal("checkpoint", label.Label);
+        Assert.True(label.IsOnCurrentBranch);
+        Assert.Contains(result.SourceAudit.Warnings, warning => warning.Code == "branch_tree_not_persisted");
+        Assert.Contains(result.SourceAudit.Warnings, warning => warning.Code == "off_branch_messages_in_timeline");
+        Assert.Contains(result.SourceAudit.Warnings, warning => warning.Code == "non_message_entries_not_imported_as_messages");
+        Assert.Contains(result.SourceAudit.Warnings, warning => warning.Code == "webchat_import_is_linearized");
     }
 
     [Fact]
@@ -442,6 +550,18 @@ public sealed class WebUiEndpointTests
         "{\"type\":\"message\",\"id\":\"entry-tool-call-only\",\"parentId\":null,\"timestamp\":\"2026-05-23T02:02:00+00:00\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"toolCall\",\"id\":\"tool-2\",\"name\":\"read\",\"arguments\":\"{}\"}]}}\n" +
         "{\"type\":\"message\",\"id\":\"entry-tool-result-empty\",\"parentId\":\"entry-tool-call-only\",\"timestamp\":\"2026-05-23T02:03:00+00:00\",\"message\":{\"role\":\"toolResult\",\"toolCallId\":\"tool-2\",\"isError\":false,\"content\":[]}}\n";
 
+    private static string BranchedCodingAgentJsonl() =>
+        ValidCodingAgentHeader() +
+        "{\"type\":\"message\",\"id\":\"entry-root\",\"parentId\":null,\"timestamp\":\"2026-05-23T02:01:00+00:00\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"root\"}]}}\n" +
+        "{\"type\":\"message\",\"id\":\"entry-left\",\"parentId\":\"entry-root\",\"timestamp\":\"2026-05-23T02:02:00+00:00\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"left\"}]}}\n" +
+        "{\"type\":\"message\",\"id\":\"entry-right\",\"parentId\":\"entry-root\",\"timestamp\":\"2026-05-23T02:03:00+00:00\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"right\"}]}}\n" +
+        "{\"type\":\"message\",\"id\":\"entry-right-assistant\",\"parentId\":\"entry-right\",\"timestamp\":\"2026-05-23T02:04:00+00:00\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"right done\"}]}}\n" +
+        "{\"type\":\"label\",\"id\":\"entry-label-set\",\"parentId\":\"entry-right-assistant\",\"timestamp\":\"2026-05-23T02:05:00+00:00\",\"targetId\":\"entry-root\",\"label\":\"checkpoint\"}\n" +
+        "{\"type\":\"branch_summary\",\"id\":\"entry-summary\",\"parentId\":\"entry-left\",\"timestamp\":\"2026-05-23T02:06:00+00:00\",\"fromId\":\"entry-left\",\"summary\":\"abandoned\"}\n" +
+        "{\"type\":\"message\",\"id\":\"entry-after-summary\",\"parentId\":\"entry-summary\",\"timestamp\":\"2026-05-23T02:07:00+00:00\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"after summary\"}]}}\n" +
+        "{\"type\":\"label\",\"id\":\"entry-label-clear\",\"parentId\":\"entry-after-summary\",\"timestamp\":\"2026-05-23T02:08:00+00:00\",\"targetId\":\"entry-after-summary\",\"label\":\"temp\"}\n" +
+        "{\"type\":\"label\",\"id\":\"entry-label\",\"parentId\":\"entry-after-summary\",\"timestamp\":\"2026-05-23T02:09:00+00:00\",\"targetId\":\"entry-after-summary\",\"label\":\"\"}\n";
+
     private static string ValidCodingAgentHeader() =>
         "{\"type\":\"session\",\"version\":3,\"id\":\"coding-session-1\",\"timestamp\":\"2026-05-23T02:00:00+00:00\",\"cwd\":\"C:\\\\Users\\\\zhouh\\\\Desktop\\\\Tau\",\"parentSession\":\"parent-session.jsonl\"}\n";
 
@@ -501,5 +621,14 @@ public sealed class WebUiEndpointTests
 [JsonSerializable(typeof(WebChatSessionDto))]
 [JsonSerializable(typeof(WebChatSessionDto[]))]
 [JsonSerializable(typeof(CodingAgentJsonlSessionPreviewDto))]
+[JsonSerializable(typeof(CodingAgentJsonlTreeMetadataDto))]
+[JsonSerializable(typeof(CodingAgentJsonlEntryMetadataDto))]
+[JsonSerializable(typeof(CodingAgentJsonlImportAuditDto))]
+[JsonSerializable(typeof(CodingAgentJsonlBranchTimelineEntryDto))]
+[JsonSerializable(typeof(CodingAgentJsonlBranchLabelDto))]
+[JsonSerializable(typeof(CodingAgentJsonlAuditWarningDto))]
+[JsonSerializable(typeof(CodingAgentJsonlImportResultDto))]
+[JsonSerializable(typeof(Dictionary<string, int>))]
+[JsonSerializable(typeof(IReadOnlyDictionary<string, int>))]
 [JsonSourceGenerationOptions(JsonSerializerDefaults.Web)]
 internal sealed partial class WebUiEndpointJsonContext : JsonSerializerContext;

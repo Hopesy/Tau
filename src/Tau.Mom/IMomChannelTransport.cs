@@ -30,3 +30,22 @@ public interface IMomChannelResponder
         string? title = null,
         CancellationToken cancellationToken = default);
 }
+
+public interface IMomChannelMessageRuntimeResponder : IMomChannelResponder
+{
+    Task<string?> StartResponseAsync(
+        MomChannelMessage message,
+        string text,
+        CancellationToken cancellationToken = default);
+
+    Task UpdateResponseAsync(
+        MomChannelMessage message,
+        string responseTs,
+        string text,
+        CancellationToken cancellationToken = default);
+
+    Task DeleteResponseAsync(
+        MomChannelMessage message,
+        string responseTs,
+        CancellationToken cancellationToken = default);
+}

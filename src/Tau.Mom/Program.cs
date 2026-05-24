@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Options;
+using Tau.Ai.Observability;
 using Tau.Mom;
 
 var commandLine = MomCommandLine.Parse(args);
@@ -34,6 +35,7 @@ builder.Services.AddSingleton(sp =>
         RunningStatusStaleAfterMinutes = configured.RunningStatusStaleAfterMinutes
     };
 });
+builder.Services.AddSingleton<ITauLogSink>(_ => JsonlTauLogSink.FromEnvironment() is { } sink ? sink : NullTauLogSink.Instance);
 builder.Services.AddSingleton<IDelegationAgentRunner, RuntimeDelegationAgentRunner>();
 builder.Services.AddSingleton<ChannelStatusStore>();
 builder.Services.AddSingleton<MomEventProcessor>();

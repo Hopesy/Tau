@@ -121,6 +121,19 @@ public sealed class TuiScrollbackBufferTests
     }
 
     [Fact]
+    public void ScrollToTop_JumpsToOldestVisibleViewport()
+    {
+        var buffer = new TuiScrollbackBuffer(height: 2);
+        buffer.Append(["one", "two", "three", "four", "five"]);
+
+        buffer.ScrollToTop();
+
+        Assert.False(buffer.IsFollowingBottom);
+        Assert.Equal(3, buffer.ScrollOffsetFromBottom);
+        Assert.Equal(["one", "two"], buffer.VisibleLines());
+    }
+
+    [Fact]
     public void Constructor_ClampsHeightAndMaxLines()
     {
         var buffer = new TuiScrollbackBuffer(height: 0, maxLines: 0);

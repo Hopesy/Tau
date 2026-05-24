@@ -91,6 +91,10 @@ public sealed class MomChannelMessageProcessor
         await _statusStore.WriteRunningAsync(requestId, request, startedAt, cancellationToken)
             .ConfigureAwait(false);
         await responder.SetTypingAsync(message, true, cancellationToken).ConfigureAwait(false);
+        var runtimeResponder = responder as IMomChannelMessageRuntimeResponder;
+        var responseTs = runtimeResponder is null
+            ? null
+            : await runtimeResponder.StartResponseAsync(message, "_Thinking_ ...", cancellationToken).ConfigureAwait(false);
 
         DelegationExecution execution;
         var cancelledByStop = false;
@@ -148,11 +152,23 @@ public sealed class MomChannelMessageProcessor
         var response = !string.IsNullOrWhiteSpace(execution.Response)
             ? execution.Response
             : string.IsNullOrWhiteSpace(execution.Error) ? "_No response._" : $"Error: {execution.Error}";
-        if (!string.IsNullOrWhiteSpace(message.ThreadTs))
+        var silentResponse = IsSilentResponse(response);
+        if (runtimeResponder is not null && !string.IsNullOrWhiteSpace(responseTs))
+        {
+            if (silentResponse)
+            {
+                await runtimeResponder.DeleteResponseAsync(message, responseTs, cancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                await runtimeResponder.UpdateResponseAsync(message, responseTs, response, cancellationToken).ConfigureAwait(false);
+            }
+        }
+        else if (!silentResponse && !string.IsNullOrWhiteSpace(message.ThreadTs))
         {
             await responder.RespondInThreadAsync(message, response, cancellationToken).ConfigureAwait(false);
         }
-        else
+        else if (!silentResponse)
         {
             await responder.RespondAsync(message, response, cancellationToken).ConfigureAwait(false);
         }
@@ -202,5 +218,13 @@ public sealed class MomChannelMessageProcessor
     private static string BuildRequestId(MomChannelMessage message)
     {
         return $"channel:{MomChannelWorkspace.MakeSafePathSegment(message.ChannelId)}:{MomChannelWorkspace.MakeSafePathSegment(message.Ts)}";
+    }
+
+    private static bool IsSilentResponse(string? response)
+    {
+        var trimmed = response?.Trim();
+        return !string.IsNullOrWhiteSpace(trimmed) &&
+            (string.Equals(trimmed, "[SILENT]", StringComparison.OrdinalIgnoreCase) ||
+                trimmed.StartsWith("[SILENT]", StringComparison.OrdinalIgnoreCase));
     }
 }

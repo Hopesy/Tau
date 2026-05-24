@@ -19,6 +19,7 @@ internal static class BedrockProfileCredentialsResolver
         var ssoSession = FirstNonEmpty(Get(credentials, "sso_session"), Get(config, "sso_session"));
         var ssoStartUrl = FirstNonEmpty(Get(credentials, "sso_start_url"), Get(config, "sso_start_url"));
         var ssoRegion = FirstNonEmpty(Get(credentials, "sso_region"), Get(config, "sso_region"));
+        var ssoRegistrationScopes = FirstNonEmpty(Get(credentials, "sso_registration_scopes"), Get(config, "sso_registration_scopes"));
 
         if (!string.IsNullOrWhiteSpace(ssoSession) && !string.IsNullOrWhiteSpace(configPath) && File.Exists(configPath))
         {
@@ -27,6 +28,7 @@ internal static class BedrockProfileCredentialsResolver
             {
                 ssoStartUrl = FirstNonEmpty(ssoStartUrl, Get(ssoSection, "sso_start_url"));
                 ssoRegion = FirstNonEmpty(ssoRegion, Get(ssoSection, "sso_region"));
+                ssoRegistrationScopes = FirstNonEmpty(ssoRegistrationScopes, Get(ssoSection, "sso_registration_scopes"));
             }
         }
 
@@ -49,7 +51,8 @@ internal static class BedrockProfileCredentialsResolver
             SsoStartUrl = ssoStartUrl,
             SsoRegion = ssoRegion,
             SsoAccountId = FirstNonEmpty(Get(credentials, "sso_account_id"), Get(config, "sso_account_id")),
-            SsoRoleName = FirstNonEmpty(Get(credentials, "sso_role_name"), Get(config, "sso_role_name"))
+            SsoRoleName = FirstNonEmpty(Get(credentials, "sso_role_name"), Get(config, "sso_role_name")),
+            SsoRegistrationScopes = ssoRegistrationScopes
         };
     }
 

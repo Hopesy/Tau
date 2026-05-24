@@ -130,6 +130,8 @@ public sealed class TuiTranscriptViewport
 
     public void PageDown() => _scrollback.PageDown();
 
+    public void ScrollTop() => _scrollback.ScrollToTop();
+
     public void ScrollBottom() => _scrollback.ScrollToBottom();
 
     public IReadOnlyList<string> Render()
