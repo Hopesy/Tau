@@ -16,13 +16,42 @@ public sealed record TuiTranscriptOverlayOptions(
     int Row = 0,
     int Column = 0,
     bool InitiallyHidden = false,
-    Func<int, int, bool>? IsVisible = null);
+    Func<int, int, bool>? IsVisible = null,
+    int? MinWidth = null,
+    int? MaxHeight = null,
+    TuiTranscriptOverlayAnchor? Anchor = null,
+    int OffsetRow = 0,
+    int OffsetColumn = 0,
+    TuiTranscriptOverlayMargin? Margin = null);
+
+public enum TuiTranscriptOverlayAnchor
+{
+    TopLeft,
+    TopCenter,
+    TopRight,
+    LeftCenter,
+    Center,
+    RightCenter,
+    BottomLeft,
+    BottomCenter,
+    BottomRight
+}
+
+public sealed record TuiTranscriptOverlayMargin(
+    int Top = 0,
+    int Right = 0,
+    int Bottom = 0,
+    int Left = 0)
+{
+    public static TuiTranscriptOverlayMargin All(int value) => new(value, value, value, value);
+}
 
 public sealed class TuiTranscriptOverlayHandle
 {
     private readonly Action _close;
     private readonly Action<bool> _setHidden;
     private readonly Func<bool> _isHidden;
+    private readonly Func<bool> _isVisible;
     private readonly Action _focus;
     private readonly Func<bool> _isFocused;
     private readonly Func<bool> _isClosed;
@@ -31,6 +60,7 @@ public sealed class TuiTranscriptOverlayHandle
         Action close,
         Action<bool> setHidden,
         Func<bool> isHidden,
+        Func<bool> isVisible,
         Action focus,
         Func<bool> isFocused,
         Func<bool> isClosed)
@@ -38,12 +68,14 @@ public sealed class TuiTranscriptOverlayHandle
         _close = close;
         _setHidden = setHidden;
         _isHidden = isHidden;
+        _isVisible = isVisible;
         _focus = focus;
         _isFocused = isFocused;
         _isClosed = isClosed;
     }
 
     public bool IsHidden => _isHidden();
+    public bool IsVisible => _isVisible();
     public bool IsFocused => _isFocused();
     public bool IsClosed => _isClosed();
 
@@ -126,13 +158,16 @@ public sealed class TuiTranscriptViewportHost
         {
             FocusOverlay(entry);
         }
-
-        HideCursor();
+        else
+        {
+            RefreshOverlayFocus();
+        }
 
         return new TuiTranscriptOverlayHandle(
             close: () => CloseOverlay(entry),
             setHidden: hidden => SetOverlayHidden(entry, hidden),
             isHidden: () => entry.Hidden,
+            isVisible: () => _overlays.Contains(entry) && IsOverlayVisible(entry),
             focus: () => FocusOverlay(entry),
             isFocused: () => ReferenceEquals(_focusedOverlay, entry),
             isClosed: () => !_overlays.Contains(entry));
@@ -141,6 +176,7 @@ public sealed class TuiTranscriptViewportHost
     public TuiTranscriptRenderResult Render(bool force = false)
     {
         Viewport.Resize(_surface.Width, _surface.Height);
+        RefreshOverlayFocus();
         var baseFrame = new TuiRenderFrame(Viewport.Width, Viewport.Height, Viewport.Render());
         var frame = ComposeFrame(baseFrame);
         var diff = TuiDiffRenderer.Diff(_previousFrame, frame, force);
@@ -154,8 +190,22 @@ public sealed class TuiTranscriptViewportHost
             HasVisibleOverlay);
     }
 
+    public void RefreshOverlayFocus()
+    {
+        var hadFocusedOverlay = _focusedOverlay is not null;
+        var topVisible = TopVisibleOverlay();
+        if (!ReferenceEquals(_focusedOverlay, topVisible))
+        {
+            _focusedOverlay = topVisible;
+        }
+
+        SyncCursorWithOverlayVisibility(hadFocusedOverlay);
+    }
+
     private void CloseOverlay(OverlayEntry entry)
     {
+        var wasVisible = ReferenceEquals(_focusedOverlay, entry) ||
+            (_overlays.Contains(entry) && IsOverlayVisible(entry));
         if (!_overlays.Remove(entry))
         {
             return;
@@ -165,6 +215,8 @@ public sealed class TuiTranscriptViewportHost
         {
             _focusedOverlay = TopVisibleOverlay();
         }
+
+        SyncCursorWithOverlayVisibility(wasVisible);
     }
 
     private void SetOverlayHidden(OverlayEntry entry, bool hidden)
@@ -174,6 +226,7 @@ public sealed class TuiTranscriptViewportHost
             return;
         }
 
+        var wasVisible = ReferenceEquals(_focusedOverlay, entry) || IsOverlayVisible(entry);
         entry.Hidden = hidden;
         if (hidden && ReferenceEquals(_focusedOverlay, entry))
         {
@@ -183,6 +236,8 @@ public sealed class TuiTranscriptViewportHost
         {
             FocusOverlay(entry);
         }
+
+        SyncCursorWithOverlayVisibility(wasVisible);
     }
 
     private void FocusOverlay(OverlayEntry entry)
@@ -195,6 +250,18 @@ public sealed class TuiTranscriptViewportHost
         entry.FocusOrder = ++_focusOrder;
         _focusedOverlay = entry;
         HideCursor();
+    }
+
+    private void SyncCursorWithOverlayVisibility(bool hadVisibleOverlay)
+    {
+        if (_focusedOverlay is not null)
+        {
+            HideCursor();
+        }
+        else if (hadVisibleOverlay)
+        {
+            ShowCursor();
+        }
     }
 
     private OverlayEntry? TopVisibleOverlay() =>
@@ -239,21 +306,132 @@ public sealed class TuiTranscriptViewportHost
 
     private static void CompositeOverlay(List<string> target, OverlayEntry overlay, int width, int height)
     {
-        var overlayWidth = Math.Clamp(overlay.Options.Width ?? Math.Min(80, width), 1, width);
-        var row = Math.Clamp(overlay.Options.Row, 0, Math.Max(0, height - 1));
-        var column = Math.Clamp(overlay.Options.Column, 0, Math.Max(0, width - overlayWidth));
-        var rendered = overlay.Component.Render(overlayWidth);
-
-        for (var index = 0; index < rendered.Count && row + index < height; index++)
+        var sizing = ResolveOverlaySizing(overlay.Options, width, height);
+        var rendered = overlay.Component.Render(sizing.Width);
+        if (sizing.MaxHeight is int maxHeight && rendered.Count > maxHeight)
         {
-            target[row + index] = CompositeLine(
-                target[row + index],
+            rendered = rendered.Take(maxHeight).ToArray();
+        }
+
+        var position = ResolveOverlayPosition(
+            overlay.Options,
+            sizing,
+            rendered.Count,
+            width,
+            height);
+
+        for (var index = 0; index < rendered.Count && position.Row + index < height; index++)
+        {
+            target[position.Row + index] = CompositeLine(
+                target[position.Row + index],
                 rendered[index],
-                column,
-                overlayWidth,
+                position.Column,
+                sizing.Width,
                 width);
         }
     }
+
+    private static OverlaySizing ResolveOverlaySizing(
+        TuiTranscriptOverlayOptions options,
+        int width,
+        int height)
+    {
+        var margin = NormalizeMargin(options.Margin);
+        var availableWidth = Math.Max(1, width - margin.Left - margin.Right);
+        var availableHeight = Math.Max(1, height - margin.Top - margin.Bottom);
+        var overlayWidth = options.Width ?? Math.Min(80, availableWidth);
+        if (options.MinWidth is int minWidth)
+        {
+            overlayWidth = Math.Max(overlayWidth, Math.Max(1, minWidth));
+        }
+
+        overlayWidth = Math.Clamp(overlayWidth, 1, availableWidth);
+        int? maxHeight = null;
+        if (options.MaxHeight is int requestedMaxHeight)
+        {
+            maxHeight = Math.Clamp(requestedMaxHeight, 1, availableHeight);
+        }
+
+        return new OverlaySizing(overlayWidth, maxHeight, margin);
+    }
+
+    private static OverlayPosition ResolveOverlayPosition(
+        TuiTranscriptOverlayOptions options,
+        OverlaySizing sizing,
+        int renderedHeight,
+        int width,
+        int height)
+    {
+        var margin = sizing.Margin;
+        var effectiveHeight = sizing.MaxHeight is int maxHeight
+            ? Math.Min(renderedHeight, maxHeight)
+            : renderedHeight;
+        var availableWidth = Math.Max(1, width - margin.Left - margin.Right);
+        var availableHeight = Math.Max(1, height - margin.Top - margin.Bottom);
+        var hasLayoutBounds = options.Anchor is not null || options.Margin is not null || options.MaxHeight is not null;
+
+        var row = options.Anchor is null
+            ? options.Row
+            : ResolveAnchorRow(options.Anchor.Value, effectiveHeight, availableHeight, margin.Top);
+        var column = options.Anchor is null
+            ? options.Column
+            : ResolveAnchorColumn(options.Anchor.Value, sizing.Width, availableWidth, margin.Left);
+
+        row += options.OffsetRow;
+        column += options.OffsetColumn;
+
+        var minRow = hasLayoutBounds ? margin.Top : 0;
+        var maxRow = hasLayoutBounds
+            ? Math.Max(minRow, height - margin.Bottom - effectiveHeight)
+            : Math.Max(0, height - 1);
+        var minColumn = options.Margin is null ? 0 : margin.Left;
+        var maxColumn = Math.Max(minColumn, width - margin.Right - sizing.Width);
+
+        return new OverlayPosition(
+            Math.Clamp(row, minRow, maxRow),
+            Math.Clamp(column, minColumn, maxColumn));
+    }
+
+    private static int ResolveAnchorRow(
+        TuiTranscriptOverlayAnchor anchor,
+        int overlayHeight,
+        int availableHeight,
+        int marginTop) =>
+        anchor switch
+        {
+            TuiTranscriptOverlayAnchor.TopLeft or
+            TuiTranscriptOverlayAnchor.TopCenter or
+            TuiTranscriptOverlayAnchor.TopRight => marginTop,
+            TuiTranscriptOverlayAnchor.BottomLeft or
+            TuiTranscriptOverlayAnchor.BottomCenter or
+            TuiTranscriptOverlayAnchor.BottomRight => marginTop + Math.Max(0, availableHeight - overlayHeight),
+            _ => marginTop + Math.Max(0, availableHeight - overlayHeight) / 2
+        };
+
+    private static int ResolveAnchorColumn(
+        TuiTranscriptOverlayAnchor anchor,
+        int overlayWidth,
+        int availableWidth,
+        int marginLeft) =>
+        anchor switch
+        {
+            TuiTranscriptOverlayAnchor.TopLeft or
+            TuiTranscriptOverlayAnchor.LeftCenter or
+            TuiTranscriptOverlayAnchor.BottomLeft => marginLeft,
+            TuiTranscriptOverlayAnchor.TopRight or
+            TuiTranscriptOverlayAnchor.RightCenter or
+            TuiTranscriptOverlayAnchor.BottomRight => marginLeft + Math.Max(0, availableWidth - overlayWidth),
+            _ => marginLeft + Math.Max(0, availableWidth - overlayWidth) / 2
+        };
+
+    private static TuiTranscriptOverlayMargin NormalizeMargin(TuiTranscriptOverlayMargin? margin) =>
+        margin is null
+            ? new TuiTranscriptOverlayMargin()
+            : new TuiTranscriptOverlayMargin(
+                Math.Max(0, margin.Top),
+                Math.Max(0, margin.Right),
+                Math.Max(0, margin.Bottom),
+                Math.Max(0, margin.Left));
 
     private static string CompositeLine(
         string baseLine,
@@ -317,6 +495,13 @@ public sealed class TuiTranscriptViewportHost
 
         return string.Concat(result);
     }
+
+    private readonly record struct OverlaySizing(
+        int Width,
+        int? MaxHeight,
+        TuiTranscriptOverlayMargin Margin);
+
+    private readonly record struct OverlayPosition(int Row, int Column);
 
     private sealed class OverlayEntry(
         ITuiComponent component,

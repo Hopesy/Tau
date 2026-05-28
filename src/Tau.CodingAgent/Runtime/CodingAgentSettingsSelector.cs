@@ -37,6 +37,20 @@ public static class CodingAgentSettingsSelector
             cancellationToken);
     }
 
+    public static Func<CodingAgentSettingsSelectorState, CancellationToken, Task<string?>> CreateCompositionSelector(
+        TuiCompositionSession session)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+
+        return async (state, cancellationToken) =>
+        {
+            var selector = CreateSelectList(state);
+            var result = await TuiCompositionOverlaySessions.RunAsync(selector, session, cancellationToken)
+                .ConfigureAwait(false);
+            return result.HasSelection ? result.SelectedItem?.Value : null;
+        };
+    }
+
     public static TuiSelectList CreateSelectList(CodingAgentSettingsSelectorState state, int maxVisible = 8)
     {
         ArgumentNullException.ThrowIfNull(state);

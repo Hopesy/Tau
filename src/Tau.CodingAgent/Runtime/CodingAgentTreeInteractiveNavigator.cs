@@ -20,7 +20,8 @@ public sealed class CodingAgentTreeInteractiveNavigator
         string? SelectedEntryId,
         int LastIndex,
         int Frames,
-        IReadOnlySet<string>? FoldedEntryIds = null);
+        IReadOnlySet<string>? FoldedEntryIds = null,
+        string? LabelEditEntryId = null);
 
     public async Task<Result> NavigateAsync(
         IReadOnlyList<CodingAgentTreeViewItem> items,
@@ -28,6 +29,7 @@ public sealed class CodingAgentTreeInteractiveNavigator
         TextWriter writer,
         Action? clearScreen = null,
         IEnumerable<string>? initialFoldedEntryIds = null,
+        string? initialSelectedEntryId = null,
         Action<IReadOnlySet<string>>? foldedEntryIdsChanged = null,
         CancellationToken cancellationToken = default)
     {
@@ -49,10 +51,11 @@ public sealed class CodingAgentTreeInteractiveNavigator
             initialFoldedEntryIds?.Where(static id => !string.IsNullOrWhiteSpace(id)).Select(static id => id.Trim()) ?? [],
             StringComparer.OrdinalIgnoreCase);
         var showInspector = false;
+        var showLabelTimestamps = items.Any(static item => item.LabelTimestampsEnabled);
         visibleItems = ApplyFilter(items, FilterCycle[filterIndex], searchPattern, foldedEntryIds);
-        selected = FindIndexById(visibleItems, items[^1].EntryId);
+        selected = FindIndexById(visibleItems, initialSelectedEntryId ?? items[^1].EntryId);
 
-        Render(items, visibleItems, selected, writer, clearScreen, searchPattern, FilterCycle[filterIndex], foldedEntryIds, showInspector);
+        Render(items, visibleItems, selected, writer, clearScreen, searchPattern, FilterCycle[filterIndex], foldedEntryIds, showInspector, showLabelTimestamps);
         frames++;
 
         while (true)
@@ -165,6 +168,86 @@ public sealed class CodingAgentTreeInteractiveNavigator
                         continue;
                     }
                     break;
+                case ConsoleKey.D:
+                    if ((key.Modifiers & ConsoleModifiers.Control) != 0 &&
+                        (key.Modifiers & (ConsoleModifiers.Alt | ConsoleModifiers.Shift)) == 0)
+                    {
+                        var currentEntryId = visibleItems.Count > 0 ? visibleItems[selected].EntryId : null;
+                        filterIndex = FindFilterIndex(CodingAgentTreeFilterMode.Default);
+                        ClearFoldedEntryIds(foldedEntryIds, foldedEntryIdsChanged);
+                        visibleItems = ApplyFilter(items, FilterCycle[filterIndex], searchPattern, foldedEntryIds);
+                        selected = FindIndexById(visibleItems, currentEntryId);
+                    }
+                    else
+                    {
+                        continue;
+                    }
+                    break;
+                case ConsoleKey.T:
+                    if ((key.Modifiers & ConsoleModifiers.Control) != 0 &&
+                        (key.Modifiers & (ConsoleModifiers.Alt | ConsoleModifiers.Shift)) == 0)
+                    {
+                        var currentEntryId = visibleItems.Count > 0 ? visibleItems[selected].EntryId : null;
+                        filterIndex = ToggleFilterMode(filterIndex, CodingAgentTreeFilterMode.NoTools);
+                        ClearFoldedEntryIds(foldedEntryIds, foldedEntryIdsChanged);
+                        visibleItems = ApplyFilter(items, FilterCycle[filterIndex], searchPattern, foldedEntryIds);
+                        selected = FindIndexById(visibleItems, currentEntryId);
+                    }
+                    else if ((key.Modifiers & ConsoleModifiers.Shift) != 0 &&
+                             (key.Modifiers & (ConsoleModifiers.Control | ConsoleModifiers.Alt)) == 0)
+                    {
+                        showLabelTimestamps = !showLabelTimestamps;
+                    }
+                    else
+                    {
+                        continue;
+                    }
+                    break;
+                case ConsoleKey.U:
+                    if ((key.Modifiers & ConsoleModifiers.Control) != 0 &&
+                        (key.Modifiers & ConsoleModifiers.Alt) == 0)
+                    {
+                        var currentEntryId = visibleItems.Count > 0 ? visibleItems[selected].EntryId : null;
+                        filterIndex = ToggleFilterMode(filterIndex, CodingAgentTreeFilterMode.UserOnly);
+                        ClearFoldedEntryIds(foldedEntryIds, foldedEntryIdsChanged);
+                        visibleItems = ApplyFilter(items, FilterCycle[filterIndex], searchPattern, foldedEntryIds);
+                        selected = FindIndexById(visibleItems, currentEntryId);
+                    }
+                    else
+                    {
+                        continue;
+                    }
+                    break;
+                case ConsoleKey.A:
+                    if ((key.Modifiers & ConsoleModifiers.Control) != 0 &&
+                        (key.Modifiers & (ConsoleModifiers.Alt | ConsoleModifiers.Shift)) == 0)
+                    {
+                        var currentEntryId = visibleItems.Count > 0 ? visibleItems[selected].EntryId : null;
+                        filterIndex = ToggleFilterMode(filterIndex, CodingAgentTreeFilterMode.All);
+                        ClearFoldedEntryIds(foldedEntryIds, foldedEntryIdsChanged);
+                        visibleItems = ApplyFilter(items, FilterCycle[filterIndex], searchPattern, foldedEntryIds);
+                        selected = FindIndexById(visibleItems, currentEntryId);
+                    }
+                    else
+                    {
+                        continue;
+                    }
+                    break;
+                case ConsoleKey.O:
+                    if ((key.Modifiers & ConsoleModifiers.Control) != 0 &&
+                        (key.Modifiers & ConsoleModifiers.Alt) == 0)
+                    {
+                        var currentEntryId = visibleItems.Count > 0 ? visibleItems[selected].EntryId : null;
+                        filterIndex = CycleFilterMode(filterIndex, backward: (key.Modifiers & ConsoleModifiers.Shift) != 0);
+                        ClearFoldedEntryIds(foldedEntryIds, foldedEntryIdsChanged);
+                        visibleItems = ApplyFilter(items, FilterCycle[filterIndex], searchPattern, foldedEntryIds);
+                        selected = FindIndexById(visibleItems, currentEntryId);
+                    }
+                    else
+                    {
+                        continue;
+                    }
+                    break;
                 case ConsoleKey.Oem2: // '/' on US layout
                 case ConsoleKey.Divide:
                     searchPattern = await ReadSearchPatternAsync(reader, writer, cancellationToken).ConfigureAwait(false);
@@ -205,17 +288,44 @@ public sealed class CodingAgentTreeInteractiveNavigator
                         continue;
                     }
                     break;
+                case ConsoleKey.L:
+                    if ((key.Modifiers & ConsoleModifiers.Control) != 0 &&
+                        (key.Modifiers & (ConsoleModifiers.Alt | ConsoleModifiers.Shift)) == 0)
+                    {
+                        var currentEntryId = visibleItems.Count > 0 ? visibleItems[selected].EntryId : null;
+                        filterIndex = ToggleFilterMode(filterIndex, CodingAgentTreeFilterMode.LabeledOnly);
+                        ClearFoldedEntryIds(foldedEntryIds, foldedEntryIdsChanged);
+                        visibleItems = ApplyFilter(items, FilterCycle[filterIndex], searchPattern, foldedEntryIds);
+                        selected = FindIndexById(visibleItems, currentEntryId);
+                    }
+                    else if ((key.Modifiers & ConsoleModifiers.Shift) != 0 &&
+                        (key.Modifiers & (ConsoleModifiers.Control | ConsoleModifiers.Alt)) == 0 &&
+                        visibleItems.Count > 0)
+                    {
+                        return new Result(
+                            null,
+                            selected,
+                            frames,
+                            SnapshotFoldedEntryIds(foldedEntryIds),
+                            visibleItems[selected].EntryId);
+                    }
+                    else
+                    {
+                        continue;
+                    }
+
+                    break;
                 default:
                     continue;
             }
 
             if (visibleItems.Count == 0)
             {
-                Render(items, visibleItems, 0, writer, clearScreen, searchPattern, FilterCycle[filterIndex], foldedEntryIds, showInspector);
+                Render(items, visibleItems, 0, writer, clearScreen, searchPattern, FilterCycle[filterIndex], foldedEntryIds, showInspector, showLabelTimestamps);
             }
             else
             {
-                Render(items, visibleItems, selected, writer, clearScreen, searchPattern, FilterCycle[filterIndex], foldedEntryIds, showInspector);
+                Render(items, visibleItems, selected, writer, clearScreen, searchPattern, FilterCycle[filterIndex], foldedEntryIds, showInspector, showLabelTimestamps);
             }
             frames++;
         }
@@ -284,7 +394,7 @@ public sealed class CodingAgentTreeInteractiveNavigator
         if (!string.IsNullOrWhiteSpace(searchPattern))
         {
             filtered = filtered.Where(item =>
-                item.DisplayLine.Contains(searchPattern, StringComparison.OrdinalIgnoreCase));
+                (item.SearchText ?? item.DisplayLine).Contains(searchPattern, StringComparison.OrdinalIgnoreCase));
         }
 
         if (foldedEntryIds.Count > 0)
@@ -516,6 +626,17 @@ public sealed class CodingAgentTreeInteractiveNavigator
         return Math.Max(0, items.Count - 1);
     }
 
+    private static int FindFilterIndex(CodingAgentTreeFilterMode targetMode)
+    {
+        var index = Array.IndexOf(FilterCycle, targetMode);
+        return index >= 0 ? index : 0;
+    }
+
+    private static int CycleFilterMode(int currentIndex, bool backward) =>
+        backward
+            ? (currentIndex - 1 + FilterCycle.Length) % FilterCycle.Length
+            : (currentIndex + 1) % FilterCycle.Length;
+
     private static bool MatchesFilterMode(CodingAgentTreeViewItem item, CodingAgentTreeFilterMode mode)
     {
         return mode switch
@@ -526,7 +647,7 @@ public sealed class CodingAgentTreeInteractiveNavigator
             CodingAgentTreeFilterMode.UserOnly =>
                 item.DisplayLine.Contains("message user", StringComparison.OrdinalIgnoreCase),
             CodingAgentTreeFilterMode.LabeledOnly =>
-                item.DisplayLine.Contains('[') && item.DisplayLine.Contains(']'),
+                item.HasLabel,
             _ => true
         };
     }
@@ -540,7 +661,8 @@ public sealed class CodingAgentTreeInteractiveNavigator
         string? searchPattern,
         CodingAgentTreeFilterMode filterMode,
         IReadOnlySet<string> foldedEntryIds,
-        bool showInspector)
+        bool showInspector,
+        bool showLabelTimestamps)
     {
         clearScreen?.Invoke();
 
@@ -552,7 +674,8 @@ public sealed class CodingAgentTreeInteractiveNavigator
             ? $", entry {items[selected].EntryId}, type {FormatEntryType(items[selected])}, depth {items[selected].Depth}{FormatSelectedFlags(items[selected])}"
             : string.Empty;
         var foldedLabel = foldedEntryIds.Count > 0 ? $", folded {foldedEntryIds.Count}" : string.Empty;
-        builder.AppendLine($"tree navigator: {items.Count} entries, {countLabel}{selectedMeta}, filter={filterLabel}{searchLabel}{foldedLabel} - j/k move, Left/Right page, Ctrl/Alt+Left/Right branch, f filter, / search, n/N next/prev, Space fold, i inspect, Enter select, q quit");
+        var labelTimeLabel = showLabelTimestamps ? " [+label time]" : string.Empty;
+        builder.AppendLine($"tree navigator: {items.Count} entries, {countLabel}{selectedMeta}, filter={filterLabel}{searchLabel}{foldedLabel}{labelTimeLabel} - j/k move, Left/Right page, Ctrl/Alt+Left/Right branch, f filter, Ctrl+D default, Ctrl+T no-tools, Ctrl+U user-only, Ctrl+L labeled, Ctrl+A all, Ctrl+O/Shift+Ctrl+O cycle, / search, n/N next/prev, Shift+L label, Shift+T label time, Space fold, i inspect, Enter select, q quit");
 
         if (items.Count == 0)
         {
@@ -569,7 +692,7 @@ public sealed class CodingAgentTreeInteractiveNavigator
             {
                 var prefix = i == selected ? ">>" : "  ";
                 var folded = foldedEntryIds.Contains(items[i].EntryId) ? " [folded]" : string.Empty;
-                builder.AppendLine($"{prefix} {items[i].DisplayLine}{folded}");
+                builder.AppendLine($"{prefix} {FormatDisplayLine(items[i], showLabelTimestamps)}{folded}");
             }
         }
 
@@ -610,6 +733,17 @@ public sealed class CodingAgentTreeInteractiveNavigator
 
     private static string FormatEntryType(CodingAgentTreeViewItem item) =>
         string.IsNullOrWhiteSpace(item.EntryType) ? "entry" : item.EntryType;
+
+    private static string FormatDisplayLine(CodingAgentTreeViewItem item, bool showLabelTimestamps) =>
+        (item.BaseDisplayLine ?? item.DisplayLine) +
+        (showLabelTimestamps ? item.LabelTimestampSuffix ?? string.Empty : string.Empty);
+
+    private static int ToggleFilterMode(int currentIndex, CodingAgentTreeFilterMode toggleMode)
+    {
+        var currentMode = FilterCycle[currentIndex];
+        var nextMode = currentMode == toggleMode ? CodingAgentTreeFilterMode.Default : toggleMode;
+        return Array.IndexOf(FilterCycle, nextMode);
+    }
 
     private static string FormatSelectedFlags(CodingAgentTreeViewItem item)
     {

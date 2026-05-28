@@ -119,7 +119,8 @@ public static class CodingAgentJsonlSessionPreviewer
         }
 
         var tree = CreateTreeMetadata(entries);
-        var audit = CreateImportAudit(entries, messages, tree);
+        var audit = CreateImportAudit(entries, messages, tree, options);
+        var importStrategy = CreateImportStrategy(tree, audit);
         var filteredMessages = FilterMessages(messages, tree, options);
         var filter = CreateFilterMetadata(messages, filteredMessages, options);
         return new CodingAgentJsonlSessionPreviewDto(
@@ -134,6 +135,7 @@ public static class CodingAgentJsonlSessionPreviewer
             filter,
             tree,
             audit,
+            importStrategy,
             filteredMessages);
     }
 
@@ -305,7 +307,8 @@ public static class CodingAgentJsonlSessionPreviewer
     private static CodingAgentJsonlImportAuditDto CreateImportAudit(
         IReadOnlyList<CodingAgentJsonlSessionEntry> entries,
         IReadOnlyList<CodingAgentJsonlTimelineMessageDto> messages,
-        CodingAgentJsonlTreeMetadataDto tree)
+        CodingAgentJsonlTreeMetadataDto tree,
+        CodingAgentJsonlPreviewOptions options)
     {
         var byId = entries.ToDictionary(static entry => entry.Id, StringComparer.OrdinalIgnoreCase);
         var messageEntryIds = messages
@@ -335,16 +338,24 @@ public static class CodingAgentJsonlSessionPreviewer
                 entry.IsOnCurrentBranch))
             .ToArray();
 
-        var nonImportedEntryCount = entries.Count(entry => !messageEntryIds.Contains(entry.Id));
+        var importedMessageCount = options.CurrentBranchOnly
+            ? messages.Count(message => currentBranchSet.Contains(message.EntryId))
+            : messages.Count;
+        var importedMessageEntryIds = options.CurrentBranchOnly
+            ? messageEntryIds
+                .Where(currentBranchSet.Contains)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase)
+            : messageEntryIds;
+        var nonImportedEntryCount = entries.Count(entry => !importedMessageEntryIds.Contains(entry.Id));
         var offBranchMessageCount = messages.Count(message => !currentBranchSet.Contains(message.EntryId));
         var isBranched = tree.BranchPointCount > 0 || tree.RootEntryCount > 1 || offBranchMessageCount > 0;
-        var warnings = CreateAuditWarnings(entries, isBranched, offBranchMessageCount, nonImportedEntryCount);
+        var warnings = CreateAuditWarnings(entries, isBranched, offBranchMessageCount, nonImportedEntryCount, options.CurrentBranchOnly);
 
         return new CodingAgentJsonlImportAuditDto(
             isBranched,
             WillImportTimelineMessagesOnly: true,
-            WillImportCurrentBranchOnly: false,
-            messages.Count,
+            WillImportCurrentBranchOnly: options.CurrentBranchOnly,
+            importedMessageCount,
             nonImportedEntryCount,
             tree.BranchMessageCount,
             offBranchMessageCount,
@@ -373,17 +384,18 @@ public static class CodingAgentJsonlSessionPreviewer
         IReadOnlyList<CodingAgentJsonlSessionEntry> entries,
         bool isBranched,
         int offBranchMessageCount,
-        int nonImportedEntryCount)
+        int nonImportedEntryCount,
+        bool currentBranchOnly)
     {
         var warnings = new List<CodingAgentJsonlAuditWarningDto>();
         if (isBranched)
         {
             warnings.Add(new CodingAgentJsonlAuditWarningDto(
                 "branch_tree_not_persisted",
-                "Source CodingAgent JSONL contains branch/tree structure; WebUi keeps it only in preview/import audit metadata."));
+                "Source CodingAgent JSONL contains branch/tree structure; WebUi keeps it as source metadata only and does not make it the active WebChat timeline."));
         }
 
-        if (offBranchMessageCount > 0)
+        if (offBranchMessageCount > 0 && !currentBranchOnly)
         {
             warnings.Add(new CodingAgentJsonlAuditWarningDto(
                 "off_branch_messages_in_timeline",
@@ -403,7 +415,7 @@ public static class CodingAgentJsonlSessionPreviewer
 
         warnings.Add(new CodingAgentJsonlAuditWarningDto(
             "webchat_import_is_linearized",
-            "CodingAgent JSONL import is linearized into WebChat session messages; source tree metadata is returned as audit data only."));
+            "CodingAgent JSONL import is linearized into WebChat session messages; source tree metadata is preserved as session source metadata."));
 
         return warnings;
     }
@@ -439,6 +451,22 @@ public static class CodingAgentJsonlSessionPreviewer
             filteredMessages.Count,
             filteredMessages.Select(static message => message.EntryId).ToArray());
     }
+
+    private static CodingAgentJsonlImportStrategyDto CreateImportStrategy(
+        CodingAgentJsonlTreeMetadataDto tree,
+        CodingAgentJsonlImportAuditDto audit) =>
+        new(
+            audit.WillImportCurrentBranchOnly
+                ? "conservative-current-branch-linearized"
+                : "conservative-timeline-linearized",
+            tree.LeafEntryId,
+            audit.WillImportCurrentBranchOnly,
+            audit.WillImportTimelineMessagesOnly,
+            PersistsBranchTree: false,
+            audit.Warnings
+                .Select(static warning => warning.Code)
+                .Distinct(StringComparer.Ordinal)
+                .ToArray());
 
     private static bool MatchesSearch(CodingAgentJsonlTimelineMessageDto message, string query) =>
         message.EntryId.Contains(query, StringComparison.OrdinalIgnoreCase) ||

@@ -37,7 +37,7 @@ internal static class OpenAiMessageConverter
         var hasNonText = msg.Content.Any(c => c is not TextContent);
         if (!hasNonText)
         {
-            var text = string.Join("", msg.Content.OfType<TextContent>().Select(t => t.Text));
+            var text = SanitizeText(string.Join("", msg.Content.OfType<TextContent>().Select(t => t.Text)));
             return new Dictionary<string, object> { ["role"] = "user", ["content"] = text };
         }
 
@@ -47,7 +47,7 @@ internal static class OpenAiMessageConverter
             switch (block)
             {
                 case TextContent text:
-                    parts.Add(new Dictionary<string, object> { ["type"] = "text", ["text"] = text.Text });
+                    parts.Add(new Dictionary<string, object> { ["type"] = "text", ["text"] = SanitizeText(text.Text) });
                     break;
                 case ImageContent image when supportsImages:
                     parts.Add(new Dictionary<string, object>
@@ -80,8 +80,8 @@ internal static class OpenAiMessageConverter
             : [];
 
         if (textParts.Count > 0 || thinkingParts.Count > 0)
-            result["content"] = string.Concat(
-                thinkingParts.Select(t => t.Thinking).Concat(textParts.Select(t => t.Text)));
+            result["content"] = SanitizeText(string.Concat(
+                thinkingParts.Select(t => t.Thinking).Concat(textParts.Select(t => t.Text))));
 
         if (toolCalls.Count > 0)
         {
@@ -108,7 +108,7 @@ internal static class OpenAiMessageConverter
 
     private static object ConvertToolResultMessage(ToolResultMessage msg)
     {
-        var text = string.Join("", msg.Content.OfType<TextContent>().Select(t => t.Text));
+        var text = SanitizeText(string.Join("", msg.Content.OfType<TextContent>().Select(t => t.Text)));
         return new Dictionary<string, object>
         {
             ["role"] = "tool",
@@ -116,6 +116,9 @@ internal static class OpenAiMessageConverter
             ["content"] = text
         };
     }
+
+    private static string SanitizeText(string text) =>
+        Tau.Ai.UnicodeTextSanitizer.RemoveUnpairedSurrogates(text);
 
     public static JsonElement ConvertTools(IReadOnlyList<Tool> tools, bool supportsStrictMode = false)
     {

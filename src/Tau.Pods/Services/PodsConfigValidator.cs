@@ -25,6 +25,15 @@ public sealed class PodsConfigValidator
             if (string.IsNullOrWhiteSpace(pod.Region)) errors.Add($"Pod {pod.Id}: region is required.");
             if (string.IsNullOrWhiteSpace(pod.Endpoint) && string.IsNullOrWhiteSpace(pod.SshHost)) errors.Add($"Pod {pod.Id}: either endpoint or sshHost must be configured.");
             if (pod.SshPort is < 1 or > 65535) errors.Add($"Pod {pod.Id}: sshPort must be between 1 and 65535.");
+            if (!PodSetupPlanner.IsSupportedVllmVersion(pod.VllmVersion))
+            {
+                errors.Add($"Pod {pod.Id}: vllmVersion must be release, nightly, or gpt-oss.");
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(config.ActivePodId) && !ids.Contains(config.ActivePodId))
+        {
+            errors.Add($"Active pod not found: {config.ActivePodId}");
         }
 
         return errors;

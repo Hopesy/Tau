@@ -346,6 +346,62 @@ public class CodingAgentHostTests
     }
 
     [Fact]
+    public async Task RunAsync_RetryableTurnPassesStableTreeSessionLogContextToRunner()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-log-context-{Guid.NewGuid():N}");
+        var sessionPath = Path.Combine(directory, "session.json");
+        var treePath = Path.Combine(directory, "session.jsonl");
+        var terminal = new FakeTerminal();
+        terminal.QueueInput("retry turn");
+        terminal.QueueInput("exit");
+
+        var attempts = 0;
+        var runner = new FakeCodingAgentRunner((_, _) => RunAttempt(++attempts));
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+            var tree = CodingAgentTreeSessionController.OpenOrCreate(treePath);
+            var sessionId = tree.GetSummary().SessionId;
+            var host = new CodingAgentHost(
+                new InteractiveConsoleSession(terminal),
+                runner,
+                new CodingAgentSessionStore(sessionPath),
+                treeSessionController: tree,
+                retryOptions: new CodingAgentRetryOptions(2, 0));
+
+            await host.RunAsync();
+
+            Assert.Equal(2, runner.RunLogContexts.Count);
+            var first = runner.RunLogContexts[0];
+            var second = runner.RunLogContexts[1];
+            Assert.NotNull(first);
+            Assert.NotNull(second);
+            Assert.False(string.IsNullOrWhiteSpace(first.CorrelationId));
+            Assert.False(string.IsNullOrWhiteSpace(first.MessageId));
+            Assert.Equal(sessionId, first.SessionId);
+            Assert.Equal(first.CorrelationId, second.CorrelationId);
+            Assert.Equal(first.MessageId, second.MessageId);
+            Assert.Equal(first.SessionId, second.SessionId);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+
+        static async IAsyncEnumerable<AgentEvent> RunAttempt(int attempt)
+        {
+            yield return attempt == 1
+                ? new AgentEndEvent("429 rate limit")
+                : new AgentEndEvent();
+            await Task.CompletedTask;
+        }
+    }
+
+    [Fact]
     public async Task RunAsync_NonRetryableAgentEndError_DoesNotRetryAndRollsBack()
     {
         var path = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-nonretry-{Guid.NewGuid():N}.json");

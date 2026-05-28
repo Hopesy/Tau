@@ -181,17 +181,17 @@ public sealed class CodingAgentModelSelectorTests
 
         Assert.True(component.HandleInput(CharKey('g')).Consumed);
         Assert.Equal("g", component.Filter);
-        Assert.Equal(["openai/gpt-5.4", "google/gemini-2.5-pro"], component.FilteredItems.Select(item => item.Value).ToArray());
+        Assert.Equal(["google/gemini-2.5-pro", "openai/gpt-5.4"], component.FilteredItems.Select(item => item.Value).ToArray());
         Assert.Contains("Search: g", component.Render(80), StringComparer.Ordinal);
 
         Assert.True(component.HandleInput(CharKey('e')).Consumed);
         Assert.Equal("ge", component.Filter);
-        Assert.Equal(["google/gemini-2.5-pro"], component.FilteredItems.Select(item => item.Value).ToArray());
+        Assert.Equal(["google/gemini-2.5-pro", "openai/gpt-5.4"], component.FilteredItems.Select(item => item.Value).ToArray());
         Assert.Contains("Search: ge", component.Render(80), StringComparer.Ordinal);
 
         Assert.True(component.HandleInput(Key(ConsoleKey.Backspace)).Consumed);
         Assert.Equal("g", component.Filter);
-        Assert.Equal(["openai/gpt-5.4", "google/gemini-2.5-pro"], component.FilteredItems.Select(item => item.Value).ToArray());
+        Assert.Equal(["google/gemini-2.5-pro", "openai/gpt-5.4"], component.FilteredItems.Select(item => item.Value).ToArray());
     }
 
     [Fact]

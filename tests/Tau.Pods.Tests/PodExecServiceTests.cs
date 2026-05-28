@@ -28,6 +28,7 @@ public class PodExecServiceTests
 
         Assert.False(result.Success);
         Assert.Equal("http", result.Transport);
+        Assert.Equal(PodExecFailureKinds.UnsupportedTransport, result.FailureKind);
         Assert.Contains("do not support remote exec yet", result.Summary, StringComparison.OrdinalIgnoreCase);
         Assert.False(processStarted);
     }
@@ -71,6 +72,7 @@ public class PodExecServiceTests
         Assert.Equal("ssh", result.Transport);
         Assert.Equal(0, result.ExitCode);
         Assert.Equal("hello\n", result.StdOut);
+        Assert.Equal(PodExecFailureKinds.None, result.FailureKind);
         Assert.Contains("ssh exec ok", result.Summary, StringComparison.OrdinalIgnoreCase);
     }
 
@@ -86,7 +88,22 @@ public class PodExecServiceTests
         Assert.Equal("ssh", result.Transport);
         Assert.Equal(255, result.ExitCode);
         Assert.Equal("permission denied\n", result.StdErr);
+        Assert.Equal(PodExecFailureKinds.SshAuthFailed, result.FailureKind);
         Assert.Contains("ssh exec failed (255)", result.Summary, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_WithSshPod_ClassifiesGenericRemoteCommandFailure()
+    {
+        var service = new PodExecService((_, _) =>
+            Task.FromResult(new PodExecService.ProcessExecutionResult(42, string.Empty, "systemd failed\n")));
+
+        var result = await service.ExecuteAsync(SshPod(), "systemctl --user start tau-pod.service");
+
+        Assert.False(result.Success);
+        Assert.Equal(42, result.ExitCode);
+        Assert.Equal(PodExecFailureKinds.SshExecFailed, result.FailureKind);
+        Assert.Contains("ssh exec failed (42)", result.Summary, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -100,6 +117,7 @@ public class PodExecServiceTests
         Assert.False(result.Success);
         Assert.Equal(-1, result.ExitCode);
         Assert.Equal("ssh process start failed", result.Summary);
+        Assert.Equal(PodExecFailureKinds.SshProcessStartFailed, result.FailureKind);
         Assert.Contains("Win32Exception", result.StdErr, StringComparison.Ordinal);
         Assert.Contains("ssh executable not found", result.StdErr, StringComparison.Ordinal);
         Assert.DoesNotContain("uptime", result.StdErr, StringComparison.Ordinal);
@@ -116,6 +134,7 @@ public class PodExecServiceTests
         Assert.False(result.Success);
         Assert.Equal(-1, result.ExitCode);
         Assert.Equal("ssh process runner failed", result.Summary);
+        Assert.Equal(PodExecFailureKinds.SshProcessRunnerFailed, result.FailureKind);
         Assert.Contains("IOException", result.StdErr, StringComparison.Ordinal);
         Assert.Contains("pipe closed unexpectedly", result.StdErr, StringComparison.Ordinal);
     }
@@ -131,6 +150,7 @@ public class PodExecServiceTests
         Assert.False(result.Success);
         Assert.Equal(-1, result.ExitCode);
         Assert.Equal("ssh process start failed", result.Summary);
+        Assert.Equal(PodExecFailureKinds.SshProcessStartFailed, result.FailureKind);
         Assert.Contains("Win32Exception", result.StdErr, StringComparison.Ordinal);
     }
 
@@ -150,6 +170,7 @@ public class PodExecServiceTests
         Assert.False(result.Success);
         Assert.Equal(-1, result.ExitCode);
         Assert.Equal("ssh exec cancelled", result.Summary);
+        Assert.Equal(PodExecFailureKinds.SshExecCancelled, result.FailureKind);
         Assert.Contains("cancelled", result.StdErr, StringComparison.OrdinalIgnoreCase);
     }
 

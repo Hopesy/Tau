@@ -35,6 +35,32 @@ public class PodsConfigValidatorTests
     }
 
     [Fact]
+    public void Validate_ActivePodMustReferenceExistingPod()
+    {
+        var validator = new PodsConfigValidator();
+        var config = new PodsConfig
+        {
+            ActivePodId = "missing-pod",
+            Pods =
+            [
+                new PodDefinition
+                {
+                    Id = "gpu-a",
+                    Provider = "ssh",
+                    Model = "llama",
+                    Region = "lab",
+                    SshHost = "pods.example.internal",
+                    SshPort = 22
+                }
+            ]
+        };
+
+        var errors = validator.Validate(config);
+
+        Assert.Contains(errors, error => error.Contains("Active pod not found: missing-pod", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void SaveAndLoad_RoundTripsConfig()
     {
         var store = new PodsConfigStore();
@@ -47,6 +73,7 @@ public class PodsConfigValidatorTests
             var loaded = store.Load(path);
 
             Assert.Equal(config.Pods.Count, loaded.Pods.Count);
+            Assert.Equal(config.ActivePodId, loaded.ActivePodId);
             Assert.Equal(config.Pods[0].Id, loaded.Pods[0].Id);
             Assert.Equal(config.Pods[1].SshHost, loaded.Pods[1].SshHost);
         }

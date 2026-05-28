@@ -318,7 +318,7 @@ internal static class BedrockSsoResolver
         if (registration.Error is not null)
         {
             return SsoTokenRefreshOutcome.Failure(
-                RedactKnownSsoValues(registration.Error, tokenCache.ClientSecret, tokenCache.RefreshToken));
+                RedactKnownSsoCacheValues(registration.Error, tokenCache));
         }
 
         var ssoRegion = ResolveSsoRegion(profile, tokenCache);
@@ -350,6 +350,10 @@ internal static class BedrockSsoResolver
         {
             response = await httpClient.SendAsync(request, HttpCompletionOption.ResponseContentRead, cancellationToken)
                 .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception ex)
         {
@@ -403,18 +407,38 @@ internal static class BedrockSsoResolver
         var ssoRegion = ResolveSsoRegion(profile, tokenCache);
         var scopes = ResolveRegistrationScopes(profile, tokenCache);
 
+        var hasClientRegistration =
+            !string.IsNullOrWhiteSpace(tokenCache.ClientId) &&
+            !string.IsNullOrWhiteSpace(tokenCache.ClientSecret);
         var registrationExpirationParsed = TryParseOptionalTimestamp(
             tokenCache.RegistrationExpiresAt,
             "registrationExpiresAt",
             out var registrationExpiresAt,
             out _);
-        var existingRegistrationUsable = registrationExpirationParsed &&
-            (registrationExpiresAt is null || registrationExpiresAt.Value > clock());
+        var existingRegistrationUsable = hasClientRegistration &&
+            registrationExpirationParsed &&
+            registrationExpiresAt is not null &&
+            registrationExpiresAt.Value > clock();
 
-        if (!string.IsNullOrWhiteSpace(tokenCache.ClientId) &&
-            !string.IsNullOrWhiteSpace(tokenCache.ClientSecret) &&
-            existingRegistrationUsable)
+        if (existingRegistrationUsable)
         {
+            return SsoClientRegistrationOutcome.Success(
+                tokenCache.ClientId!,
+                tokenCache.ClientSecret!,
+                registrationExpiresAt,
+                clientIdIssuedAt: null,
+                startUrl,
+                ssoRegion,
+                scopes);
+        }
+
+        if (hasClientRegistration &&
+            registrationExpirationParsed &&
+            registrationExpiresAt is null &&
+            (string.IsNullOrWhiteSpace(startUrl) || string.IsNullOrWhiteSpace(ssoRegion)))
+        {
+            // Older cache entries can omit registrationExpiresAt. Keep that legacy
+            // refresh path only when there is not enough metadata to renew the client.
             return SsoClientRegistrationOutcome.Success(
                 tokenCache.ClientId!,
                 tokenCache.ClientSecret!,
@@ -460,9 +484,14 @@ internal static class BedrockSsoResolver
             response = await httpClient.SendAsync(request, HttpCompletionOption.ResponseContentRead, cancellationToken)
                 .ConfigureAwait(false);
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
         catch (Exception ex)
         {
-            return SsoClientRegistrationOutcome.Failure($"SSO OIDC RegisterClient request failed: {ex.Message}");
+            var detail = RedactKnownSsoCacheValues(ex.Message, tokenCache);
+            return SsoClientRegistrationOutcome.Failure($"SSO OIDC RegisterClient request failed: {detail}");
         }
 
         using (response)
@@ -470,11 +499,19 @@ internal static class BedrockSsoResolver
             var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
             if (!response.IsSuccessStatusCode)
             {
+                var detail = RedactKnownSsoCacheValues(ExtractOidcError(body), tokenCache);
                 return SsoClientRegistrationOutcome.Failure(
-                    $"SSO OIDC RegisterClient returned HTTP {(int)response.StatusCode}: {ExtractOidcError(body)}");
+                    $"SSO OIDC RegisterClient returned HTTP {(int)response.StatusCode}: {detail}");
             }
 
-            return ParseRegisterClientResponse(body, startUrl, ssoRegion, scopes);
+            return ParseRegisterClientResponse(
+                body,
+                startUrl,
+                ssoRegion,
+                scopes,
+                tokenCache.AccessToken,
+                tokenCache.ClientSecret,
+                tokenCache.RefreshToken);
         }
     }
 
@@ -482,7 +519,8 @@ internal static class BedrockSsoResolver
         string json,
         string startUrl,
         string ssoRegion,
-        IReadOnlyList<string> scopes)
+        IReadOnlyList<string> scopes,
+        params string?[] sensitiveValues)
     {
         JsonDocument document;
         try
@@ -491,8 +529,9 @@ internal static class BedrockSsoResolver
         }
         catch (JsonException ex)
         {
+            var detail = RedactKnownSsoValues(ex.Message, sensitiveValues);
             return SsoClientRegistrationOutcome.Failure(
-                $"SSO OIDC RegisterClient response is not valid JSON: {ex.Message}");
+                $"SSO OIDC RegisterClient response is not valid JSON: {detail}");
         }
 
         using (document)
@@ -929,6 +968,13 @@ internal static class BedrockSsoResolver
 
         return redacted;
     }
+
+    private static string RedactKnownSsoCacheValues(string value, SsoTokenCache tokenCache) =>
+        RedactKnownSsoValues(
+            value,
+            tokenCache.AccessToken,
+            tokenCache.ClientSecret,
+            tokenCache.RefreshToken);
 
     private static string? FirstNonEmpty(params string?[] values) =>
         values.FirstOrDefault(value => !string.IsNullOrWhiteSpace(value));

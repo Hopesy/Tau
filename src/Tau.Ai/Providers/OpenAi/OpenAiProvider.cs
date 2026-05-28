@@ -131,7 +131,7 @@ public sealed class OpenAiProvider : IStreamProvider
             messages.Add(new Dictionary<string, object>
             {
                 ["role"] = model.Reasoning && compatibility.SupportsDeveloperRole ? "developer" : "system",
-                ["content"] = context.SystemPrompt!
+                ["content"] = UnicodeTextSanitizer.RemoveUnpairedSurrogates(context.SystemPrompt!)
             });
         }
 

@@ -134,7 +134,7 @@ public class CodingAgentTreeInteractiveNavigatorTests
         new("u1", ">  u1  <- _ message user hello", false, true),
         new("a1", "*  a1  <- u1 message assistant [tool-only] read_file", false, true),
         new("t1", "*  t1  <- a1 message toolResult done", false, true),
-        new("u2", ">  u2  <- t1 message user [labeled] world", true, true),
+        new("u2", ">  u2  <- t1 message user [labeled] world", true, true, HasLabel: true),
     ];
 
     private static IReadOnlyList<CodingAgentTreeViewItem> MakeNestedItems() =>
@@ -221,6 +221,81 @@ public class CodingAgentTreeInteractiveNavigatorTests
         var rendered = writer.ToString();
         Assert.Contains("filter=notools", rendered, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("2 entries", rendered, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task NavigateAsync_CtrlUTogglesUserOnly_AndCtrlATogglesAll()
+    {
+        var items = MakeFilterableItems();
+        var navigator = new CodingAgentTreeInteractiveNavigator();
+
+        var userOnlyReader = new FakeKeyReader();
+        userOnlyReader.EnqueueRaw(new ConsoleKeyInfo('\0', ConsoleKey.U, shift: false, alt: false, control: true));
+        userOnlyReader.EnqueueKey(ConsoleKey.Enter);
+
+        var userOnlyWriter = new StringWriter();
+        var userOnlyResult = await navigator.NavigateAsync(items, userOnlyReader, userOnlyWriter);
+
+        Assert.Equal("u2", userOnlyResult.SelectedEntryId);
+        var userOnlyRendered = userOnlyWriter.ToString();
+        Assert.Contains("filter=useronly", userOnlyRendered, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("2 entries", userOnlyRendered, StringComparison.Ordinal);
+
+        var allReader = new FakeKeyReader();
+        allReader.EnqueueRaw(new ConsoleKeyInfo('\0', ConsoleKey.A, shift: false, alt: false, control: true));
+        allReader.EnqueueKey(ConsoleKey.Enter);
+
+        var allWriter = new StringWriter();
+        var allResult = await navigator.NavigateAsync(items, allReader, allWriter);
+
+        Assert.Equal("u2", allResult.SelectedEntryId);
+        var allRendered = allWriter.ToString();
+        Assert.Contains("filter=all", allRendered, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("4 entries", allRendered, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task NavigateAsync_FilterHotkeysMatchUpstreamParity()
+    {
+        var items = MakeFilterableItems();
+        var navigator = new CodingAgentTreeInteractiveNavigator();
+
+        var noToolsReader = new FakeKeyReader();
+        noToolsReader.EnqueueRaw(new ConsoleKeyInfo('\0', ConsoleKey.T, shift: false, alt: false, control: true));
+        noToolsReader.EnqueueKey(ConsoleKey.Enter);
+        var noToolsWriter = new StringWriter();
+        var noToolsResult = await navigator.NavigateAsync(items, noToolsReader, noToolsWriter);
+        Assert.Equal("u2", noToolsResult.SelectedEntryId);
+        Assert.Contains("filter=notools", noToolsWriter.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("2 entries", noToolsWriter.ToString(), StringComparison.Ordinal);
+
+        var labeledReader = new FakeKeyReader();
+        labeledReader.EnqueueRaw(new ConsoleKeyInfo('\0', ConsoleKey.L, shift: false, alt: false, control: true));
+        labeledReader.EnqueueKey(ConsoleKey.Enter);
+        var labeledWriter = new StringWriter();
+        var labeledResult = await navigator.NavigateAsync(items, labeledReader, labeledWriter);
+        Assert.Equal("u2", labeledResult.SelectedEntryId);
+        Assert.Contains("filter=labeledonly", labeledWriter.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("1 entries", labeledWriter.ToString(), StringComparison.Ordinal);
+
+        var defaultReader = new FakeKeyReader();
+        defaultReader.EnqueueRaw(new ConsoleKeyInfo('\0', ConsoleKey.L, shift: false, alt: false, control: true));
+        defaultReader.EnqueueRaw(new ConsoleKeyInfo('\0', ConsoleKey.D, shift: false, alt: false, control: true));
+        defaultReader.EnqueueKey(ConsoleKey.Enter);
+        var defaultWriter = new StringWriter();
+        var defaultResult = await navigator.NavigateAsync(items, defaultReader, defaultWriter);
+        Assert.Equal("u2", defaultResult.SelectedEntryId);
+        Assert.Contains("filter=default", defaultWriter.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("4 entries", defaultWriter.ToString(), StringComparison.Ordinal);
+
+        var cycleReader = new FakeKeyReader();
+        cycleReader.EnqueueRaw(new ConsoleKeyInfo('\0', ConsoleKey.O, shift: false, alt: false, control: true));
+        cycleReader.EnqueueRaw(new ConsoleKeyInfo('\0', ConsoleKey.O, shift: true, alt: false, control: true));
+        cycleReader.EnqueueKey(ConsoleKey.Enter);
+        var cycleWriter = new StringWriter();
+        var cycleResult = await navigator.NavigateAsync(items, cycleReader, cycleWriter);
+        Assert.Equal("u2", cycleResult.SelectedEntryId);
+        Assert.Contains("filter=default", cycleWriter.ToString(), StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -327,6 +402,54 @@ public class CodingAgentTreeInteractiveNavigatorTests
         Assert.Equal(2, changes.Count);
         Assert.Contains("root", changes[0]);
         Assert.Empty(changes[1]);
+    }
+
+    [Fact]
+    public async Task NavigateAsync_ShiftTTogglesLabelTimestampsInRenderedLines()
+    {
+        var items = new[]
+        {
+            new CodingAgentTreeViewItem(
+                "entry",
+                ">  entry <- _ message user labeled [important]",
+                true,
+                true,
+                null,
+                0,
+                "message",
+                SearchText: "message user labeled important",
+                BaseDisplayLine: ">  entry <- _ message user labeled [important]",
+                LabelTimestampSuffix: " @2026-05-24 18:00:00 +08:00",
+                LabelTimestampsEnabled: false)
+        };
+
+        var reader = new FakeKeyReader();
+        reader.EnqueueRaw(new ConsoleKeyInfo('T', ConsoleKey.T, shift: true, alt: false, control: false));
+        reader.EnqueueKey(ConsoleKey.Enter);
+
+        var writer = new StringWriter();
+        var navigator = new CodingAgentTreeInteractiveNavigator();
+        var result = await navigator.NavigateAsync(items, reader, writer);
+
+        Assert.Equal("entry", result.SelectedEntryId);
+        var rendered = writer.ToString();
+        Assert.Contains("[+label time]", rendered, StringComparison.Ordinal);
+        Assert.Contains("@2026-05-24 18:00:00 +08:00", rendered, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task NavigateAsync_ShiftLReturnsLabelEditRequestForSelectedEntry()
+    {
+        var items = MakeItems("a", "b", "c");
+        var reader = new FakeKeyReader();
+        reader.EnqueueRaw(new ConsoleKeyInfo('L', ConsoleKey.L, shift: true, alt: false, control: false));
+
+        var navigator = new CodingAgentTreeInteractiveNavigator();
+        var result = await navigator.NavigateAsync(items, reader, new StringWriter());
+
+        Assert.Null(result.SelectedEntryId);
+        Assert.Equal("c", result.LabelEditEntryId);
+        Assert.Equal(2, result.LastIndex);
     }
 
     [Fact]

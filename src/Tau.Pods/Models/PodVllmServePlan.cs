@@ -10,7 +10,9 @@ public sealed record PodVllmServeOptions(
     bool WaitForHealth = true,
     int HealthAttempts = 12,
     int HealthBackoffMilliseconds = 5000,
-    string? ResolvedModelPath = null);
+    string? ResolvedModelPath = null,
+    string? Revision = null,
+    bool Prefetch = false);
 
 public sealed record PodVllmServePlan(
     string DeploymentName,
@@ -22,4 +24,6 @@ public sealed record PodVllmServePlan(
     string ServeCommand,
     string SystemdUnit,
     string MetadataJson,
-    string RemoteCommand);
+    string RemoteCommand,
+    bool UsesSnapshotDiscovery = false,
+    string? Revision = null);

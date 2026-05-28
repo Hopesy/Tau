@@ -57,6 +57,11 @@ public sealed class GeminiCliOAuthProvider : IOAuthProvider
 
             if (completed == callbackTask)
             {
+                if (callbacks is IOAuthManualCodeInputController manualCodeController)
+                {
+                    manualCodeController.CancelManualCodeInput();
+                }
+
                 var result = await callbackTask.ConfigureAwait(false);
                 if (result is not null)
                 {

@@ -86,6 +86,25 @@ public sealed class TuiComponentTests
     }
 
     [Fact]
+    public void SelectList_FilterUsesFuzzySortingAndEmptyFilterRestoresOriginalOrder()
+    {
+        var list = new TuiSelectList(
+            [
+                new TuiSelectItem("a_p_p", "a_p_p"),
+                new TuiSelectItem("app", "app"),
+                new TuiSelectItem("application", "application"),
+            ]);
+
+        list.SetFilter("app");
+
+        Assert.Equal(["app", "application", "a_p_p"], list.FilteredItems.Select(static item => item.Value));
+
+        list.SetFilter(string.Empty);
+
+        Assert.Equal(["a_p_p", "app", "application"], list.FilteredItems.Select(static item => item.Value));
+    }
+
+    [Fact]
     public void SelectList_RendersFooterHintAfterItemsAndScrollInfo()
     {
         var list = new TuiSelectList(
@@ -199,6 +218,28 @@ public sealed class TuiComponentTests
         list.HandleInput(Key(ConsoleKey.X, control: true));
         Assert.Equal(["openai/a", "openai/b"], list.SelectedValues);
         Assert.Equal(changed, list.SelectedValues);
+    }
+
+    [Fact]
+    public void MultiSelectList_FilterUsesFuzzySortingAndEmptyFilterKeepsDisplayOrder()
+    {
+        var list = new TuiMultiSelectList(
+            [
+                new TuiMultiSelectItem("a_p_p", "a_p_p"),
+                new TuiMultiSelectItem("app", "app"),
+                new TuiMultiSelectItem("application", "application"),
+            ],
+            selectedValues: ["a_p_p"]);
+
+        Assert.Equal(["a_p_p", "app", "application"], list.FilteredItems.Select(static item => item.Value));
+
+        list.SetFilter("app");
+
+        Assert.Equal(["app", "application", "a_p_p"], list.FilteredItems.Select(static item => item.Value));
+
+        list.SetFilter(string.Empty);
+
+        Assert.Equal(["a_p_p", "app", "application"], list.FilteredItems.Select(static item => item.Value));
     }
 
     [Fact]

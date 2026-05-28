@@ -36,7 +36,8 @@ public sealed class PodExecService
                 string.Empty,
                 string.Empty,
                 TimeSpan.Zero,
-                "endpoint pods do not support remote exec yet");
+                "endpoint pods do not support remote exec yet",
+                PodExecFailureKinds.UnsupportedTransport);
         }
 
         var host = pod.SshHost ?? string.Empty;
@@ -84,7 +85,8 @@ public sealed class PodExecService
                     execution.StdOut,
                     string.IsNullOrWhiteSpace(execution.StdErr) ? "ssh exec cancelled before completion" : execution.StdErr,
                     watch.Elapsed,
-                    "ssh exec cancelled");
+                    "ssh exec cancelled",
+                    PodExecFailureKinds.SshExecCancelled);
             }
 
             if (!execution.Started)
@@ -99,11 +101,13 @@ public sealed class PodExecService
                     execution.StdOut,
                     execution.StdErr,
                     watch.Elapsed,
-                    "ssh process start failed");
+                    "ssh process start failed",
+                    PodExecFailureKinds.SshProcessStartFailed);
             }
 
             var success = execution.ExitCode == 0;
             var summary = success ? "ssh exec ok" : $"ssh exec failed ({execution.ExitCode})";
+            var failureKind = success ? PodExecFailureKinds.None : ClassifySshExitFailure(execution);
 
             return new PodExecResult(
                 pod.Id,
@@ -115,7 +119,8 @@ public sealed class PodExecService
                 execution.StdOut,
                 execution.StdErr,
                 watch.Elapsed,
-                summary);
+                summary,
+                failureKind);
         }
         catch (OperationCanceledException)
         {
@@ -130,7 +135,8 @@ public sealed class PodExecService
                 string.Empty,
                 "ssh exec cancelled before completion",
                 watch.Elapsed,
-                "ssh exec cancelled");
+                "ssh exec cancelled",
+                PodExecFailureKinds.SshExecCancelled);
         }
         catch (Exception ex) when (IsProcessStartException(ex))
         {
@@ -145,7 +151,8 @@ public sealed class PodExecService
                 string.Empty,
                 FormatProcessError("ssh process start failed", ex),
                 watch.Elapsed,
-                "ssh process start failed");
+                "ssh process start failed",
+                PodExecFailureKinds.SshProcessStartFailed);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -160,7 +167,8 @@ public sealed class PodExecService
                 string.Empty,
                 FormatProcessError("ssh process runner failed", ex),
                 watch.Elapsed,
-                "ssh process runner failed");
+                "ssh process runner failed",
+                PodExecFailureKinds.SshProcessRunnerFailed);
         }
     }
 
@@ -225,6 +233,40 @@ public sealed class PodExecService
             ? $"{prefix}: {ex.GetType().Name}"
             : $"{prefix}: {ex.GetType().Name}: {message}";
     }
+
+    private static string ClassifySshExitFailure(ProcessExecutionResult execution)
+    {
+        var text = string.Join('\n', execution.StdErr, execution.StdOut);
+        if (Contains(text, "Permission denied") || Contains(text, "publickey") || Contains(text, "Authentication failed"))
+        {
+            return PodExecFailureKinds.SshAuthFailed;
+        }
+
+        if (Contains(text, "Host key verification failed") || Contains(text, "REMOTE HOST IDENTIFICATION HAS CHANGED"))
+        {
+            return PodExecFailureKinds.SshHostKeyFailed;
+        }
+
+        if (Contains(text, "Could not resolve hostname") || Contains(text, "Name or service not known") || Contains(text, "No such host is known"))
+        {
+            return PodExecFailureKinds.SshHostUnresolved;
+        }
+
+        if (Contains(text, "Connection timed out") || Contains(text, "Operation timed out") || Contains(text, "connect to host") && Contains(text, "timed out"))
+        {
+            return PodExecFailureKinds.SshConnectTimeout;
+        }
+
+        if (Contains(text, "Connection refused") || Contains(text, "No route to host") || Contains(text, "Connection reset by peer") || Contains(text, "Connection closed"))
+        {
+            return PodExecFailureKinds.SshConnectionFailed;
+        }
+
+        return PodExecFailureKinds.SshExecFailed;
+    }
+
+    private static bool Contains(string text, string value) =>
+        text.Contains(value, StringComparison.OrdinalIgnoreCase);
 
     public sealed record ProcessExecutionResult(
         int ExitCode,

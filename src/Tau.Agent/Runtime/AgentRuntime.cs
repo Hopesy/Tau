@@ -117,7 +117,7 @@ public sealed class AgentRuntime
 
                         await foreach (var toolEvt in ToolExecutor.ExecuteToolCallsAsync(
                             toolCalls, config.Tools, config.Interceptors,
-                            State.Messages, config.DefaultExecutionMode, config.LogSink, token))
+                            State.Messages, config.DefaultExecutionMode, config.LogSink, config.LogContext, token))
                         {
                             yield return toolEvt;
 

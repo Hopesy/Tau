@@ -52,7 +52,14 @@ public class RuntimeDelegationAgentRunnerTests
             "say hi",
             Provider: "openai",
             Model: "gpt-5.4",
-            WorkingDirectory: Path.GetTempPath()));
+            WorkingDirectory: Path.GetTempPath(),
+            Metadata: new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["requestId"] = "req-42",
+                ["channel"] = "C123OPS",
+                ["threadTs"] = "1778351000.000001",
+                ["ts"] = "1778351400.123456"
+            }));
 
         Assert.Equal("hello world", execution.Response);
         Assert.Null(execution.Error);
@@ -92,6 +99,17 @@ public class RuntimeDelegationAgentRunnerTests
                 "delegation.end"
             ],
             logSink.Events.Select(static evt => evt.Event).ToArray());
+        Assert.All(logSink.Events, evt =>
+        {
+            Assert.Equal("req-42", evt.Fields["correlationId"]);
+            Assert.Equal("req-42", evt.Fields["messageId"]);
+            Assert.Equal("C123OPS:1778351000.000001", evt.Fields["sessionId"]);
+        });
+        var runnerContext = Assert.Single(fake.RunLogContexts);
+        Assert.NotNull(runnerContext);
+        Assert.Equal("req-42", runnerContext!.CorrelationId);
+        Assert.Equal("req-42", runnerContext.MessageId);
+        Assert.Equal("C123OPS:1778351000.000001", runnerContext.SessionId);
 
         var toolEnd = logSink.Events.Single(static evt => evt.Event == "tool.end");
         Assert.Equal("tool-1", toolEnd.Fields["toolCallId"]);
@@ -692,6 +710,7 @@ public class RuntimeDelegationAgentRunnerTests
         public ThinkingLevel? ThinkingLevel { get; set; }
         public AgentQueueMode SteeringMode { get; set; } = AgentQueueMode.OneAtATime;
         public AgentQueueMode FollowUpMode { get; set; } = AgentQueueMode.OneAtATime;
+        public List<TauRuntimeLogContext?> RunLogContexts { get; } = [];
         public string? LastInput { get; private set; }
         public CodingAgentSessionSnapshot? RestoredSnapshot { get; private set; }
 
@@ -714,10 +733,13 @@ public class RuntimeDelegationAgentRunnerTests
         public Task<CodingAgentBranchSummaryResult> SummarizeBranchAsync(
             IReadOnlyList<ChatMessage> messages,
             string? customInstructions = null,
+            bool replaceInstructions = false,
             CancellationToken cancellationToken = default) =>
             throw new NotSupportedException();
         public void Steer(string input) { }
+        public void Steer(IReadOnlyList<ContentBlock> input) { }
         public void FollowUp(string input) { }
+        public void FollowUp(IReadOnlyList<ContentBlock> input) { }
         public void RestoreSession(CodingAgentSessionSnapshot snapshot)
         {
             RestoredSnapshot = snapshot;
@@ -756,6 +778,24 @@ public class RuntimeDelegationAgentRunnerTests
         {
             var text = string.Join(Environment.NewLine, input.OfType<TextContent>().Select(content => content.Text));
             return RunAsync(text, cancellationToken);
+        }
+
+        public IAsyncEnumerable<AgentEvent> RunAsync(
+            string input,
+            TauRuntimeLogContext? logContext,
+            CancellationToken cancellationToken)
+        {
+            RunLogContexts.Add(logContext);
+            return RunAsync(input, cancellationToken);
+        }
+
+        public IAsyncEnumerable<AgentEvent> RunAsync(
+            IReadOnlyList<ContentBlock> input,
+            TauRuntimeLogContext? logContext,
+            CancellationToken cancellationToken)
+        {
+            RunLogContexts.Add(logContext);
+            return RunAsync(input, cancellationToken);
         }
     }
 

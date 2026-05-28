@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using Tau.Agent;
 using Tau.Ai;
@@ -32,7 +33,7 @@ public sealed class MomBashTool : IAgentTool
 
     public string Name => "bash";
     public string Label => "bash";
-    public string Description => $"Execute a shell command in the current Mom sandbox. Output is truncated to the last {MomToolOutputTruncator.DefaultMaxLines} lines or {MomToolOutputTruncator.DefaultMaxBytes / 1024}KB.";
+    public string Description => $"Execute a shell command in the current Mom sandbox. Output is truncated to the last {MomToolOutputTruncator.DefaultMaxLines} lines or {MomToolOutputTruncator.DefaultMaxBytes / 1024}KB. If truncated, the full output is saved to a temp file.";
     public ToolExecutionMode ExecutionMode => ToolExecutionMode.Sequential;
 
     public JsonElement ParameterSchema { get; } = JsonDocument.Parse("""
@@ -74,14 +75,17 @@ public sealed class MomBashTool : IAgentTool
         }
 
         var truncation = MomToolOutputTruncator.TruncateTail(output);
+        var fullOutputPath = truncation.Truncated
+            ? await WriteFullOutputAsync(output, ct).ConfigureAwait(false)
+            : null;
         var text = string.IsNullOrEmpty(truncation.Content) ? "(no output)" : truncation.Content;
         if (truncation.Truncated)
         {
             var startLine = Math.Max(1, truncation.TotalLines - truncation.OutputLines + 1);
             var endLine = truncation.TotalLines;
             text += truncation.LastLinePartial
-                ? $"\n\n[Showing last {MomToolOutputTruncator.FormatSize(truncation.OutputBytes)} of line {endLine}.]"
-                : $"\n\n[Showing lines {startLine}-{endLine} of {truncation.TotalLines}.]";
+                ? $"\n\n[Showing last {MomToolOutputTruncator.FormatSize(truncation.OutputBytes)} of line {endLine}. Full output: {fullOutputPath}]"
+                : $"\n\n[Showing lines {startLine}-{endLine} of {truncation.TotalLines}. Full output: {fullOutputPath}]";
         }
 
         if (result.ExitCode != 0)
@@ -92,9 +96,20 @@ public sealed class MomBashTool : IAgentTool
         return new ToolResult(
             [new TextContent(text)],
             IsError: result.ExitCode != 0 || result.TimedOut,
-            Details: truncation.Truncated ? truncation : null);
+            Details: truncation.Truncated ? new MomBashToolDetails(truncation, fullOutputPath) : null);
+    }
+
+    private static async Task<string> WriteFullOutputAsync(string output, CancellationToken ct)
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"mom-bash-{Guid.NewGuid():N}.log");
+        await File.WriteAllTextAsync(path, output, Encoding.UTF8, ct).ConfigureAwait(false);
+        return path;
     }
 }
+
+public sealed record MomBashToolDetails(
+    MomToolTruncationResult? Truncation,
+    string? FullOutputPath);
 
 public sealed class MomReadTool : IAgentTool
 {
@@ -317,8 +332,12 @@ public sealed class MomEditTool : IAgentTool
             return new ToolResult([new TextContent($"No changes made to {path}.")], IsError: true);
         }
 
+        var diff = GenerateDiffString(content, updated);
+
         await File.WriteAllTextAsync(hostPath, updated, ct).ConfigureAwait(false);
-        return new ToolResult([new TextContent($"Successfully replaced text in {_executor.ToWorkspacePath(hostPath)}.")]);
+        return new ToolResult(
+            [new TextContent($"Successfully replaced text in {_executor.ToWorkspacePath(hostPath)}. Changed {oldText.Length} characters to {newText.Length} characters.")],
+            Details: new MomEditToolDetails(diff));
     }
 
     private static int CountOccurrences(string text, string search)
@@ -338,7 +357,86 @@ public sealed class MomEditTool : IAgentTool
 
         return count;
     }
+
+    private static string GenerateDiffString(string oldContent, string newContent, int contextLines = 4)
+    {
+        var oldLines = SplitLines(oldContent);
+        var newLines = SplitLines(newContent);
+        var prefix = 0;
+        while (prefix < oldLines.Length &&
+               prefix < newLines.Length &&
+               oldLines[prefix].Equals(newLines[prefix], StringComparison.Ordinal))
+        {
+            prefix++;
+        }
+
+        var oldSuffix = oldLines.Length - 1;
+        var newSuffix = newLines.Length - 1;
+        while (oldSuffix >= prefix &&
+               newSuffix >= prefix &&
+               oldLines[oldSuffix].Equals(newLines[newSuffix], StringComparison.Ordinal))
+        {
+            oldSuffix--;
+            newSuffix--;
+        }
+
+        var maxLineNumber = Math.Max(oldLines.Length, newLines.Length);
+        var width = Math.Max(1, maxLineNumber.ToString().Length);
+        var lines = new List<string>();
+
+        var contextStart = Math.Max(0, prefix - contextLines);
+        var contextEnd = Math.Min(oldLines.Length - 1, oldSuffix + contextLines);
+        if (contextStart > 0)
+        {
+            lines.Add($" {new string(' ', width)} ...");
+        }
+
+        for (var i = contextStart; i < prefix; i++)
+        {
+            lines.Add($" {FormatLineNumber(i + 1, width)} {oldLines[i]}");
+        }
+
+        for (var i = prefix; i <= oldSuffix; i++)
+        {
+            lines.Add($"-{FormatLineNumber(i + 1, width)} {oldLines[i]}");
+        }
+
+        for (var i = prefix; i <= newSuffix; i++)
+        {
+            lines.Add($"+{FormatLineNumber(i + 1, width)} {newLines[i]}");
+        }
+
+        for (var i = oldSuffix + 1; i <= contextEnd; i++)
+        {
+            lines.Add($" {FormatLineNumber(i + 1, width)} {oldLines[i]}");
+        }
+
+        if (contextEnd < oldLines.Length - 1)
+        {
+            lines.Add($" {new string(' ', width)} ...");
+        }
+
+        return string.Join("\n", lines);
+    }
+
+    private static string[] SplitLines(string content)
+    {
+        var lines = content.Split('\n');
+        if (lines.Length > 0 && lines[^1].Length == 0)
+        {
+            return lines[..^1];
+        }
+
+        return lines;
+    }
+
+    private static string FormatLineNumber(int lineNumber, int width)
+    {
+        return lineNumber.ToString().PadLeft(width);
+    }
 }
+
+public sealed record MomEditToolDetails(string Diff);
 
 public sealed class MomAttachTool : IAgentTool
 {
@@ -387,7 +485,25 @@ public sealed class MomAttachTool : IAgentTool
             return Task.FromResult(new ToolResult([new TextContent($"File not found: {path}")], IsError: true));
         }
 
-        _attachFile?.Invoke(hostPath, string.IsNullOrWhiteSpace(title) ? Path.GetFileName(hostPath) : title.Trim());
-        return Task.FromResult(new ToolResult([new TextContent($"Attached file: {Path.GetFileName(hostPath)}")]));
+        var fileName = Path.GetFileName(hostPath);
+        var attachmentTitle = string.IsNullOrWhiteSpace(title) ? fileName : title.Trim();
+        _attachFile?.Invoke(hostPath, attachmentTitle);
+
+        var details = new MomAttachToolDetails(
+            path,
+            _executor.ToWorkspacePath(hostPath),
+            fileName,
+            attachmentTitle,
+            new FileInfo(hostPath).Length);
+        return Task.FromResult(new ToolResult(
+            [new TextContent($"Attached file: {attachmentTitle}")],
+            Details: details));
     }
 }
+
+public sealed record MomAttachToolDetails(
+    string Path,
+    string WorkspacePath,
+    string FileName,
+    string Title,
+    long SizeBytes);

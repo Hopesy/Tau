@@ -4,6 +4,7 @@ using System.Text;
 using Tau.Agent;
 using Tau.Ai;
 using Tau.Ai.Auth;
+using Tau.Ai.Observability;
 using Tau.Ai.Registry;
 using Tau.CodingAgent.Runtime;
 using Tau.WebUi.Contracts;
@@ -16,22 +17,37 @@ public sealed class WebChatService
     private readonly string _defaultProvider;
     private readonly string _defaultModel;
     private readonly ModelCatalog _catalog;
-    private readonly ProviderAuthResolver _authResolver = new();
+    private readonly ProviderAuthResolver _authResolver;
     private readonly WebChatStore _store;
-    private readonly Func<string, string, IReadOnlyList<ChatMessage>?, ICodingAgentRunner> _runnerFactory;
+    private readonly Func<string, string, IReadOnlyList<ChatMessage>?, TauRuntimeLogContext?, ICodingAgentRunner> _runnerFactory;
 
-    public WebChatService(WebChatStore store)
-        : this(store, WebUiRunnerFactory.Create)
+    public WebChatService(WebChatStore store, ITauLogSink? logSink = null)
+        : this(
+            store,
+            (provider, model, history, logContext) => WebUiRunnerFactory.Create(provider, model, history, logSink, logContext),
+            logSink)
     {
     }
 
     public WebChatService(
         WebChatStore store,
         Func<string, string, IReadOnlyList<ChatMessage>?, ICodingAgentRunner> runnerFactory)
+        : this(
+            store,
+            (provider, model, history, _) => runnerFactory(provider, model, history))
+    {
+    }
+
+    public WebChatService(
+        WebChatStore store,
+        Func<string, string, IReadOnlyList<ChatMessage>?, TauRuntimeLogContext?, ICodingAgentRunner> runnerFactory,
+        ITauLogSink? logSink = null,
+        ProviderAuthResolver? authResolver = null)
     {
         _store = store;
         _runnerFactory = runnerFactory;
-        _catalog = new ModelCatalog();
+        _authResolver = authResolver ?? new ProviderAuthResolver(logSink: logSink);
+        _catalog = new ModelCatalog(_authResolver);
         var selection = _catalog.ResolveSelection(
             Environment.GetEnvironmentVariable("TAU_PROVIDER"),
             Environment.GetEnvironmentVariable("TAU_MODEL"));
@@ -166,9 +182,10 @@ public sealed class WebChatService
     public CodingAgentJsonlImportResultDto ImportCodingAgentJsonlSession(
         string jsonl,
         string? filePath = null,
+        CodingAgentJsonlPreviewOptions? options = null,
         TauSecretRedactor? redactor = null)
     {
-        var preview = PreviewCodingAgentJsonlSession(jsonl, filePath, redactor: redactor);
+        var preview = PreviewCodingAgentJsonlSession(jsonl, filePath, options, redactor);
         var timestamp = preview.Timestamp == default ? DateTimeOffset.UtcNow : preview.Timestamp;
         var messages = preview.Messages
             .Select(CreateImportedCodingAgentMessage)
@@ -176,6 +193,8 @@ public sealed class WebChatService
         var updatedAt = messages.Length == 0
             ? timestamp
             : messages.Max(static message => message.Timestamp);
+        var sourceStrategy = CreateCodingAgentImportStrategy(preview);
+        var sourceMetadata = CreateCodingAgentSourceMetadata(preview, sourceStrategy);
         var session = new WebChatSessionDto(
             preview.SessionId,
             $"Imported CodingAgent session {preview.SessionId}",
@@ -184,10 +203,18 @@ public sealed class WebChatService
             timestamp,
             updatedAt,
             Persisted: false,
-            messages);
+            messages,
+            sourceMetadata);
 
         var imported = ImportSession(session);
-        return new CodingAgentJsonlImportResultDto(imported, preview.Tree, preview.Audit);
+        return new CodingAgentJsonlImportResultDto(
+            imported,
+            preview.Tree,
+            preview.Audit,
+            sourceStrategy,
+            imported.SourceMetadata ?? sourceMetadata,
+            preview.Audit.Warnings,
+            CreateCodingAgentImportSummary(preview, imported.Messages.Count));
     }
 
     public WebChatSessionDto? CloneSession(string id)
@@ -332,6 +359,36 @@ public sealed class WebChatService
         return string.Join("\n\n", parts);
     }
 
+    private static CodingAgentJsonlImportStrategyDto CreateCodingAgentImportStrategy(CodingAgentJsonlSessionPreviewDto preview) =>
+        preview.ImportStrategy;
+
+    private static WebChatSessionSourceMetadataDto CreateCodingAgentSourceMetadata(
+        CodingAgentJsonlSessionPreviewDto preview,
+        CodingAgentJsonlImportStrategyDto sourceStrategy) =>
+        new(
+            "coding-agent-jsonl",
+            preview.SessionId,
+            preview.Version,
+            preview.Timestamp,
+            preview.Cwd,
+            preview.ParentSession,
+            preview.FilePath,
+            preview.EntryCount,
+            preview.MessageCount,
+            preview.Tree,
+            preview.Audit,
+            sourceStrategy);
+
+    private static CodingAgentJsonlImportResultSummaryDto CreateCodingAgentImportSummary(
+        CodingAgentJsonlSessionPreviewDto preview,
+        int importedMessageCount) =>
+        new(
+            importedMessageCount,
+            preview.EntryCount,
+            preview.MessageCount,
+            preview.Audit.Warnings.Count,
+            CurrentBranchOnly: preview.Audit.WillImportCurrentBranchOnly);
+
     private void Persist()
     {
         _store.Save(_sessions.Values
@@ -344,13 +401,13 @@ public sealed class WebChatService
     {
         private readonly SemaphoreSlim _gate = new(1, 1);
         private readonly List<WebChatMessageDto> _messages = [];
-        private readonly Func<string, string, IReadOnlyList<ChatMessage>?, ICodingAgentRunner> _runnerFactory;
+        private readonly Func<string, string, IReadOnlyList<ChatMessage>?, TauRuntimeLogContext?, ICodingAgentRunner> _runnerFactory;
 
         public WebChatSession(
             string? title,
             string provider,
             string model,
-            Func<string, string, IReadOnlyList<ChatMessage>?, ICodingAgentRunner> runnerFactory)
+            Func<string, string, IReadOnlyList<ChatMessage>?, TauRuntimeLogContext?, ICodingAgentRunner> runnerFactory)
         {
             _runnerFactory = runnerFactory;
             Id = Guid.NewGuid().ToString("N");
@@ -369,7 +426,8 @@ public sealed class WebChatService
             DateTimeOffset createdAt,
             DateTimeOffset updatedAt,
             IReadOnlyList<WebChatMessageDto> messages,
-            Func<string, string, IReadOnlyList<ChatMessage>?, ICodingAgentRunner> runnerFactory)
+            WebChatSessionSourceMetadataDto? sourceMetadata,
+            Func<string, string, IReadOnlyList<ChatMessage>?, TauRuntimeLogContext?, ICodingAgentRunner> runnerFactory)
         {
             _runnerFactory = runnerFactory;
             Id = id;
@@ -378,6 +436,7 @@ public sealed class WebChatService
             Model = model;
             CreatedAt = createdAt;
             UpdatedAt = updatedAt;
+            SourceMetadata = sourceMetadata;
             _messages.AddRange(messages);
         }
 
@@ -387,23 +446,24 @@ public sealed class WebChatService
         public string Model { get; private set; }
         public DateTimeOffset CreatedAt { get; }
         public DateTimeOffset UpdatedAt { get; private set; }
+        public WebChatSessionSourceMetadataDto? SourceMetadata { get; }
 
         public static WebChatSession FromDto(
             WebChatSessionDto dto,
-            Func<string, string, IReadOnlyList<ChatMessage>?, ICodingAgentRunner> runnerFactory)
+            Func<string, string, IReadOnlyList<ChatMessage>?, TauRuntimeLogContext?, ICodingAgentRunner> runnerFactory)
         {
-            return new WebChatSession(dto.Id, dto.Title, dto.Provider, dto.Model, dto.CreatedAt, dto.UpdatedAt, dto.Messages, runnerFactory);
+            return new WebChatSession(dto.Id, dto.Title, dto.Provider, dto.Model, dto.CreatedAt, dto.UpdatedAt, dto.Messages, dto.SourceMetadata, runnerFactory);
         }
 
         public static WebChatSession FromImportedDto(
             WebChatSessionDto dto,
             string provider,
             string model,
-            Func<string, string, IReadOnlyList<ChatMessage>?, ICodingAgentRunner> runnerFactory)
+            Func<string, string, IReadOnlyList<ChatMessage>?, TauRuntimeLogContext?, ICodingAgentRunner> runnerFactory)
         {
             var now = DateTimeOffset.UtcNow;
             var title = string.IsNullOrWhiteSpace(dto.Title) ? $"Imported {now:HH:mm:ss}" : dto.Title.Trim();
-            return new WebChatSession(Guid.NewGuid().ToString("N"), title, provider, model, now, now, dto.Messages, runnerFactory);
+            return new WebChatSession(Guid.NewGuid().ToString("N"), title, provider, model, now, now, dto.Messages, dto.SourceMetadata, runnerFactory);
         }
 
         public void UpdateSettings(string? title, string provider, string model)
@@ -426,7 +486,7 @@ public sealed class WebChatService
 
         public WebChatSessionDto ToDto(bool persisted)
         {
-            return new WebChatSessionDto(Id, Title, Provider, Model, CreatedAt, UpdatedAt, persisted, _messages.ToArray());
+            return new WebChatSessionDto(Id, Title, Provider, Model, CreatedAt, UpdatedAt, persisted, _messages.ToArray(), SourceMetadata);
         }
 
         public async Task<WebChatSessionDto> SendAsync(CancellationToken cancellationToken)
@@ -463,7 +523,11 @@ public sealed class WebChatService
                     Timestamp: latestUserMessage.Timestamp,
                     Attachments: latestUserMessage.Attachments);
 
-                var runner = _runnerFactory(Provider, Model, BuildHistoryWithoutLatestUser());
+                var logContext = new TauRuntimeLogContext(
+                    CorrelationId: Guid.NewGuid().ToString("N"),
+                    SessionId: Id,
+                    MessageId: Guid.NewGuid().ToString("N"));
+                var runner = _runnerFactory(Provider, Model, BuildHistoryWithoutLatestUser(), logContext);
                 var assistant = new StringBuilder();
                 var thinking = new StringBuilder();
                 var toolEvents = new List<string>();

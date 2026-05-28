@@ -1,5 +1,6 @@
 using Tau.Ai.Auth;
 using Tau.Ai.Auth.OAuth;
+using Tau.Ai.Observability;
 
 namespace Tau.Ai.Tests;
 
@@ -31,6 +32,33 @@ public sealed class ProviderAuthResolverTests
         Assert.True(status.IsConfigured);
         Assert.Equal("environment", status.Source);
         Assert.DoesNotContain("secret-openai-key", status.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void GetStatus_LogsRuntimeEventWithoutLeakingSecret()
+    {
+        using var scope = EnvironmentVariableScope.Acquire();
+        scope.Set("OPENAI_API_KEY", "secret-openai-key");
+        scope.Set("TAU_AUTH_FILE", Path.Combine(Path.GetTempPath(), $"missing-auth-{Guid.NewGuid():N}.json"));
+        var sink = new CapturingLogSink();
+        var resolver = new ProviderAuthResolver(logSink: sink);
+
+        var status = resolver.GetStatus("openai");
+
+        Assert.True(status.IsConfigured);
+        var evt = Assert.Single(sink.Events);
+        Assert.Equal("auth", evt.Category);
+        Assert.Equal("status.checked", evt.Event);
+        Assert.Equal("openai", evt.Fields["provider"]);
+        Assert.Equal("true", evt.Fields["configured"]);
+        Assert.Equal("environment", evt.Fields["source"]);
+        Assert.Equal("false", evt.Fields["usesOAuth"]);
+        Assert.Equal("false", evt.Fields["canLogin"]);
+        Assert.False(evt.Fields.ContainsKey("message"));
+        var fields = string.Join(
+            Environment.NewLine,
+            evt.Fields.Select(field => $"{field.Key}={field.Value}"));
+        Assert.DoesNotContain("secret-openai-key", fields, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -351,6 +379,13 @@ public sealed class ProviderAuthResolverTests
 
         public Model ModifyModel(Model model, OAuthCredentials credentials) =>
             model with { BaseUrl = "https://mutated.example.com" };
+    }
+
+    private sealed class CapturingLogSink : ITauLogSink
+    {
+        public List<TauLogEvent> Events { get; } = [];
+
+        public void Log(TauLogEvent evt) => Events.Add(evt);
     }
 
     private static string CreateSecretCommand(string tempDir, string markerPath)

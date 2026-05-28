@@ -24,6 +24,10 @@ public static class WebUiPage
             .composer { border-top: 1px solid rgba(255,255,255,.08); border-bottom: none; display: grid; gap: 10px; }
             .composer-row { display: grid; grid-template-columns: 1fr auto; gap: 12px; align-items: stretch; }
             .composer-actions { display: grid; gap: 8px; align-content: start; }
+            .sidebar-actions { margin-top: 16px; display: flex; gap: 8px; flex-wrap: wrap; }
+            .import-toggle { margin-top: 12px; display: flex; align-items: center; gap: 8px; width: fit-content; color: #bfd0ff; text-transform: none; letter-spacing: 0; cursor: pointer; }
+            .import-toggle input { width: 14px; height: 14px; margin: 0; padding: 0; border: none; background: transparent; accent-color: #3567ff; flex: 0 0 auto; }
+            .import-toggle span { color: inherit; }
             button { background: #3567ff; color: white; border: none; border-radius: 10px; padding: 10px 14px; cursor: pointer; }
             button.secondary { background: #1b2745; }
             button:disabled { opacity: .55; cursor: default; }
@@ -103,11 +107,15 @@ public static class WebUiPage
             <aside>
               <h1>Tau Web UI</h1>
               <div id="status" class="meta">Loading status…</div>
-              <div style="margin-top:16px; display:flex; gap:8px;">
+              <div class="sidebar-actions">
                 <button id="new-session">New Session</button>
                 <button id="import-session" class="secondary">Import</button>
                 <button id="refresh" class="secondary">Refresh</button>
               </div>
+              <label class="import-toggle">
+                <input id="import-current-branch-only" type="checkbox" />
+                <span>Current branch only</span>
+              </label>
               <input id="session-import-input" type="file" accept="application/json,application/x-ndjson,.json,.jsonl" hidden />
               <div id="sessions"></div>
             </aside>
@@ -600,15 +608,113 @@ public static class WebUiPage
               }
             }
 
+            function createDefaultSessionMeta(session) {
+              if (!session) return 'No session selected.';
+              const persisted = session.persisted ? 'persisted' : 'memory';
+              const messageCount = Array.isArray(session.messages) ? session.messages.length : 0;
+              return `provider=${session.provider} | model=${session.model} | messages=${messageCount} | storage=${persisted}`;
+            }
+
+            function collectCodingAgentWarningCodes(importStrategy, audit) {
+              const fromStrategy = Array.isArray(importStrategy?.warningCodes)
+                ? importStrategy.warningCodes.filter(Boolean)
+                : [];
+              const fromAudit = Array.isArray(audit?.warnings)
+                ? audit.warnings.map(warning => warning?.code).filter(Boolean)
+                : [];
+              return [...new Set([...fromStrategy, ...fromAudit])];
+            }
+
+            function createCodingAgentImportSummaryText(importedMessageCount, sourceEntryCount, sourceMessageCount, warningCount, currentBranchOnly, importStrategy, audit, verb) {
+              const scopedCurrentBranchOnly = typeof importStrategy?.currentBranchOnly === 'boolean'
+                ? importStrategy.currentBranchOnly
+                : currentBranchOnly;
+              const parts = [
+                `${pluralize(safeCount(importedMessageCount, 0), 'message')} imported`,
+                `source ${pluralize(safeCount(sourceEntryCount, 0), 'entry', 'entries')} / ${pluralize(safeCount(sourceMessageCount, safeCount(importedMessageCount, 0)), 'message')}`,
+                `${pluralize(safeCount(warningCount, 0), 'warning')}`
+              ];
+              parts.push(`currentBranchOnly=${scopedCurrentBranchOnly === true ? 'true' : scopedCurrentBranchOnly === false ? 'false' : 'unknown'}`);
+              if (importStrategy?.strategy) {
+                parts.push(`strategy=${importStrategy.strategy}`);
+              }
+              if (typeof importStrategy?.importsTimelineMessagesOnly === 'boolean') {
+                parts.push(`timelineOnly=${importStrategy.importsTimelineMessagesOnly}`);
+              }
+              if (typeof importStrategy?.persistsBranchTree === 'boolean') {
+                parts.push(`branchTreePersisted=${importStrategy.persistsBranchTree}`);
+                if (!importStrategy.persistsBranchTree) {
+                  parts.push('branch tree not persisted');
+                }
+              }
+              if (importStrategy?.sourceLeafEntryId) {
+                parts.push(`leaf=${importStrategy.sourceLeafEntryId}`);
+              }
+              const warningCodes = collectCodingAgentWarningCodes(importStrategy, audit);
+              if (warningCodes.length > 0) {
+                parts.push(`warningCodes=${warningCodes.join(',')}`);
+              } else if (safeCount(warningCount, 0) === 0) {
+                parts.push('warningCodes=none');
+              }
+
+              return `${verb || 'imported'} CodingAgent JSONL: ${parts.join(' | ')}`;
+            }
+
+            function createCodingAgentPreviewNotice(preview) {
+              if (!preview?.importStrategy) return null;
+              return createCodingAgentImportSummaryText(
+                preview.audit?.importedMessageCount,
+                preview.entryCount,
+                preview.messageCount,
+                preview.audit?.warnings?.length,
+                preview.audit?.willImportCurrentBranchOnly,
+                preview.importStrategy,
+                preview.audit,
+                'preview');
+            }
+
+            function createCodingAgentSourceMetadataNotice(sourceMetadata, importedMessageCount, summary, sourceStrategy, sourceAudit) {
+              const importStrategy = sourceMetadata?.importStrategy || sourceStrategy || summary?.sourceStrategy;
+              const audit = sourceMetadata?.audit || sourceAudit || summary?.sourceAudit;
+              if (summary) {
+                return createCodingAgentImportSummaryText(
+                  summary.importedMessageCount,
+                  summary.sourceEntryCount,
+                  summary.sourceMessageCount,
+                  summary.warningCount,
+                  summary.currentBranchOnly,
+                  importStrategy,
+                  audit);
+              }
+
+              if (sourceMetadata?.kind !== 'coding-agent-jsonl') {
+                return null;
+              }
+
+              return createCodingAgentImportSummaryText(
+                importedMessageCount,
+                sourceMetadata.entryCount,
+                sourceMetadata.messageCount,
+                sourceMetadata.audit?.warnings?.length,
+                sourceMetadata.audit?.willImportCurrentBranchOnly,
+                importStrategy,
+                audit);
+            }
+
+            function createSessionMetaText(session) {
+              if (!session) return 'No session selected.';
+              return createCodingAgentSourceMetadataNotice(
+                session.sourceMetadata,
+                Array.isArray(session.messages) ? session.messages.length : 0)
+                || createDefaultSessionMeta(session);
+            }
+
             function applySessionSettings(session) {
               document.getElementById('session-title').value = session?.title || '';
               const providerSelect = document.getElementById('provider');
               providerSelect.value = session?.provider || providerSelect.value;
               bindModels(providerSelect.value, session?.model);
-              const persisted = session?.persisted ? 'persisted' : 'memory';
-              document.getElementById('session-meta').textContent = session
-                ? `provider=${session.provider} | model=${session.model} | messages=${session.messages.length} | storage=${persisted}`
-                : 'No session selected.';
+              document.getElementById('session-meta').textContent = createSessionMetaText(session);
               refreshAuthStatus(providerSelect.value, document.getElementById('model').value);
             }
 
@@ -757,6 +863,126 @@ public static class WebUiPage
                 type === 'application/json-lines';
             }
 
+            function firstJsonlLine(text) {
+              const normalized = (text || '').replace(/^\uFEFF/, '');
+              const index = normalized.indexOf('\n');
+              return (index >= 0 ? normalized.slice(0, index) : normalized).trim();
+            }
+
+            function isCodingAgentJsonlContent(text) {
+              try {
+                const header = JSON.parse(firstJsonlLine(text));
+                return header &&
+                  header.type === 'session' &&
+                  header.source !== 'tau-webui' &&
+                  typeof header.cwd === 'string' &&
+                  header.cwd.trim().length > 0;
+              } catch {
+                return false;
+              }
+            }
+
+            function getCodingAgentJsonlImportCurrentBranchOnly() {
+              return document.getElementById('import-current-branch-only')?.checked ?? false;
+            }
+
+            function codingAgentJsonlImportQuery(currentBranchOnly) {
+              return `?currentBranchOnly=${currentBranchOnly ? 'true' : 'false'}`;
+            }
+
+            async function postJsonlImport(url, text) {
+              return await fetchJson(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-ndjson' },
+                body: text
+              });
+            }
+
+            async function previewCodingAgentJsonlImport(text, currentBranchOnly) {
+              return await postJsonlImport(`/api/sessions/import.coding-agent-jsonl/preview${codingAgentJsonlImportQuery(currentBranchOnly)}`, text);
+            }
+
+            async function importCodingAgentJsonlSession(text, preview, currentBranchOnly) {
+              const imported = await postJsonlImport(`/api/sessions/import.coding-agent-jsonl${codingAgentJsonlImportQuery(currentBranchOnly)}`, text);
+              return preview ? { ...imported, preview } : imported;
+            }
+
+            async function importJsonlSession(text) {
+              const currentBranchOnly = getCodingAgentJsonlImportCurrentBranchOnly();
+              if (isCodingAgentJsonlContent(text)) {
+                const preview = await previewCodingAgentJsonlImport(text, currentBranchOnly);
+                const notice = createCodingAgentPreviewNotice(preview);
+                if (notice) {
+                  document.getElementById('session-meta').textContent = notice;
+                }
+                return await importCodingAgentJsonlSession(text, preview, currentBranchOnly);
+              }
+
+              try {
+                return await postJsonlImport('/api/sessions/import.jsonl', text);
+              } catch (webUiError) {
+                let preview = null;
+                try {
+                  preview = await previewCodingAgentJsonlImport(text, currentBranchOnly);
+                  const notice = createCodingAgentPreviewNotice(preview);
+                  if (notice) {
+                    document.getElementById('session-meta').textContent = notice;
+                  }
+                } catch {
+                  // The import endpoint will return the user-facing parse error below.
+                }
+
+                try {
+                  return await importCodingAgentJsonlSession(text, preview, currentBranchOnly);
+                } catch (codingAgentError) {
+                  throw new Error(`WebUi JSONL import failed: ${webUiError.message || webUiError}; CodingAgent JSONL import failed: ${codingAgentError.message || codingAgentError}`);
+                }
+              }
+            }
+
+            function safeCount(value, fallback) {
+              const count = Number(value);
+              return Number.isFinite(count) && count >= 0 ? count : fallback;
+            }
+
+            function pluralize(count, singular, plural) {
+              return `${count} ${count === 1 ? singular : (plural || `${singular}s`)}`;
+            }
+
+            function createImportNotice(importedResponse, imported) {
+              const summary = importedResponse?.summary;
+              const preview = importedResponse?.preview;
+              const messages = Array.isArray(imported?.messages) ? imported.messages.length : 0;
+              const sourceMetadata = imported?.sourceMetadata || importedResponse?.sourceMetadata;
+              const sourceStrategy = importedResponse?.sourceStrategy || sourceMetadata?.importStrategy || preview?.importStrategy;
+              const sourceAudit = importedResponse?.sourceAudit || sourceMetadata?.audit || preview?.audit;
+              const sourceSummary = summary ? {
+                importedMessageCount: safeCount(summary.importedMessageCount, messages),
+                sourceEntryCount: safeCount(summary.sourceEntryCount, 0),
+                sourceMessageCount: safeCount(summary.sourceMessageCount, 0),
+                warningCount: safeCount(summary.warningCount, Array.isArray(importedResponse?.warnings) ? importedResponse.warnings.length : 0),
+                currentBranchOnly: summary.currentBranchOnly
+              } : preview ? {
+                importedMessageCount: safeCount(preview.audit?.importedMessageCount, messages),
+                sourceEntryCount: safeCount(preview.entryCount, 0),
+                sourceMessageCount: safeCount(preview.messageCount, messages),
+                warningCount: safeCount(preview.audit?.warnings?.length, 0),
+                currentBranchOnly: preview.audit?.willImportCurrentBranchOnly
+              } : null;
+              const sourceNotice = createCodingAgentSourceMetadataNotice(
+                sourceMetadata,
+                summary ? safeCount(summary.importedMessageCount, messages) : messages,
+                sourceSummary,
+                sourceStrategy,
+                sourceAudit);
+              if (sourceNotice) {
+                return sourceNotice;
+              }
+
+              const title = imported?.title || imported?.id || 'session';
+              return `imported ${title}: ${pluralize(messages, 'message')}`;
+            }
+
             async function deleteSession(sessionId) {
               const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, { method: 'DELETE' });
               if (!response.ok && response.status !== 404) throw new Error(await response.text());
@@ -773,11 +999,7 @@ public static class WebUiPage
             async function importSessionFile(file) {
               const text = await file.text();
               const importedResponse = isJsonlSessionFile(file)
-                ? await fetchJson('/api/sessions/import.jsonl', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/x-ndjson' },
-                    body: text
-                  })
+                ? await importJsonlSession(text)
                 : await fetchJson('/api/sessions/import', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -789,6 +1011,7 @@ public static class WebUiPage
               await loadStatus();
               await loadSessions();
               await openSession(imported.id);
+              document.getElementById('session-meta').textContent = createImportNotice(importedResponse, imported);
             }
 
             function renderSessions(sessions) {
@@ -945,7 +1168,15 @@ public static class WebUiPage
                 event.target.value = '';
               }
             });
-            document.getElementById('refresh').addEventListener('click', async () => { await loadStatus(); await loadCatalog(); await loadSessions(); });
+            document.getElementById('refresh').addEventListener('click', async () => {
+              await loadStatus();
+              await loadCatalog();
+              if (currentSessionId) {
+                await openSession(currentSessionId);
+              } else {
+                await loadSessions();
+              }
+            });
             document.getElementById('save-settings').addEventListener('click', saveSettings);
             document.getElementById('attach').addEventListener('click', () => document.getElementById('attachment-input').click());
             document.getElementById('attachment-input').addEventListener('change', async event => {

@@ -384,7 +384,7 @@ public sealed class GoogleGeminiCliProvider : IStreamProvider
 
         if (!string.IsNullOrEmpty(context.SystemPrompt))
         {
-            systemParts.Add(new Dictionary<string, object> { ["text"] = context.SystemPrompt! });
+            systemParts.Add(new Dictionary<string, object> { ["text"] = UnicodeTextSanitizer.RemoveUnpairedSurrogates(context.SystemPrompt!) });
         }
 
         if (systemParts.Count > 0)

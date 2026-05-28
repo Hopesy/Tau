@@ -2,7 +2,10 @@ namespace Tau.Pods.Models;
 
 public sealed record PodCachedModelInfo(
     string ModelId,
-    string CacheDirectory);
+    string CacheDirectory,
+    int SnapshotCount = 0,
+    string? ResolvedModelPath = null,
+    string SnapshotFailureKind = "unknown");
 
 public sealed record PodModelListResult(
     string PodId,
@@ -16,7 +19,8 @@ public sealed record PodModelOperationResult(
     string Operation,
     string ModelId,
     string Summary,
-    string? Output = null);
+    string? Output = null,
+    string? RequestedRevision = null);
 
 public sealed record PodModelStatusResult(
     string PodId,
@@ -24,4 +28,8 @@ public sealed record PodModelStatusResult(
     string ModelId,
     bool Present,
     string Summary,
-    string? Output = null);
+    string? Output = null,
+    string? ModelCachePath = null,
+    int SnapshotCount = 0,
+    string? ResolvedModelPath = null,
+    string SnapshotFailureKind = "unknown");

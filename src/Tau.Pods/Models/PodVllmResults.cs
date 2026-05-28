@@ -13,7 +13,9 @@ public sealed record PodVllmOperationResult(
     PodVllmServePlan? Plan = null,
     PodVllmHealthResult? Health = null,
     PodVllmRollbackResult? Rollback = null,
-    PodVllmPreflightResult? Preflight = null);
+    PodVllmPreflightResult? Preflight = null,
+    PodModelOperationResult? Prefetch = null,
+    string? PrefetchTriggerFailureKind = null);
 
 public sealed record PodVllmPreflightResult(
     string PodId,
@@ -30,7 +32,8 @@ public sealed record PodVllmPreflightResult(
     string Command,
     int ExitCode,
     string StdOut,
-    string StdErr);
+    string StdErr,
+    string? RequestedRevision = null);
 
 public sealed record PodVllmStatusResult(
     string PodId,
@@ -43,7 +46,8 @@ public sealed record PodVllmStatusResult(
     string StdErr,
     string State = "unknown",
     bool Ready = false,
-    bool Unhealthy = false);
+    bool Unhealthy = false,
+    string? MetadataJson = null);
 
 public sealed record PodVllmHealthResult(
     string PodId,
@@ -59,7 +63,8 @@ public sealed record PodVllmHealthResult(
     string Command,
     int ExitCode,
     string StdOut,
-    string StdErr);
+    string StdErr,
+    string? MetadataJson = null);
 
 public sealed record PodVllmRollbackResult(
     string PodId,
@@ -69,4 +74,5 @@ public sealed record PodVllmRollbackResult(
     string Command,
     int ExitCode,
     string StdOut,
-    string StdErr);
+    string StdErr,
+    string FailureKind = PodExecFailureKinds.None);

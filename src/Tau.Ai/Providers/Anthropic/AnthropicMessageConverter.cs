@@ -65,7 +65,7 @@ internal static class AnthropicMessageConverter
                     parts.Add(new Dictionary<string, object>
                     {
                         ["type"] = "text",
-                        ["text"] = text.Text
+                        ["text"] = SanitizeText(text.Text)
                     });
                     break;
                 case ImageContent image:
@@ -101,14 +101,14 @@ internal static class AnthropicMessageConverter
                     parts.Add(new Dictionary<string, object>
                     {
                         ["type"] = "text",
-                        ["text"] = text.Text
+                        ["text"] = SanitizeText(text.Text)
                     });
                     break;
                 case ThinkingContent thinking when !thinking.Redacted:
                     var thinkingBlock = new Dictionary<string, object>
                     {
                         ["type"] = "thinking",
-                        ["thinking"] = thinking.Thinking
+                        ["thinking"] = SanitizeText(thinking.Thinking)
                     };
                     if (thinking.ThinkingSignature is not null)
                         thinkingBlock["signature"] = thinking.ThinkingSignature;
@@ -135,7 +135,7 @@ internal static class AnthropicMessageConverter
 
     private static object ConvertToolResultBlock(ToolResultMessage msg)
     {
-        var content = msg.Content.OfType<TextContent>().FirstOrDefault()?.Text ?? "";
+        var content = SanitizeText(msg.Content.OfType<TextContent>().FirstOrDefault()?.Text ?? "");
         var result = new Dictionary<string, object>
         {
             ["type"] = "tool_result",
@@ -173,6 +173,9 @@ internal static class AnthropicMessageConverter
             ["input_schema"] = t.ParameterSchema
         }).ToList();
     }
+
+    private static string SanitizeText(string text) =>
+        UnicodeTextSanitizer.RemoveUnpairedSurrogates(text);
 }
 
 [JsonSourceGenerationOptions(DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]

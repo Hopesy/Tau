@@ -7,6 +7,7 @@ namespace Tau.WebUi.Services;
 [JsonSerializable(typeof(WebChatStoreDocument))]
 [JsonSerializable(typeof(WebChatSessionDto[]))]
 [JsonSerializable(typeof(WebChatSessionDto))]
+[JsonSerializable(typeof(WebChatSessionSourceMetadataDto))]
 [JsonSerializable(typeof(WebChatMessageDto))]
 [JsonSerializable(typeof(WebChatAttachmentDto))]
 [JsonSerializable(typeof(WebChatAttachmentDto[]))]
@@ -20,7 +21,10 @@ namespace Tau.WebUi.Services;
 [JsonSerializable(typeof(CodingAgentJsonlBranchTimelineEntryDto))]
 [JsonSerializable(typeof(CodingAgentJsonlBranchLabelDto))]
 [JsonSerializable(typeof(CodingAgentJsonlAuditWarningDto))]
+[JsonSerializable(typeof(CodingAgentJsonlImportStrategyDto))]
+[JsonSerializable(typeof(IReadOnlyList<CodingAgentJsonlAuditWarningDto>))]
 [JsonSerializable(typeof(CodingAgentJsonlImportResultDto))]
+[JsonSerializable(typeof(CodingAgentJsonlImportResultSummaryDto))]
 [JsonSerializable(typeof(Dictionary<string, int>))]
 [JsonSerializable(typeof(IReadOnlyDictionary<string, int>))]
 [JsonSerializable(typeof(CodingAgentJsonlTimelineMessageDto))]
@@ -40,6 +44,7 @@ internal sealed partial class WebUiNdjsonContext : JsonSerializerContext
 
 [JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]
 [JsonSerializable(typeof(WebChatJsonlSessionHeader))]
+[JsonSerializable(typeof(WebChatSessionSourceMetadataDto))]
 [JsonSerializable(typeof(WebChatJsonlMessageEntry))]
 internal sealed partial class WebUiJsonlContext : JsonSerializerContext
 {

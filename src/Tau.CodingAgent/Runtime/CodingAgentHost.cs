@@ -1,6 +1,8 @@
 using System.Text.Json;
 using Tau.Agent;
 using Tau.Ai;
+using Tau.Ai.Auth.OAuth;
+using Tau.Ai.Observability;
 using Tau.Tui.Abstractions;
 using Tau.Tui.Runtime;
 
@@ -13,6 +15,7 @@ public sealed class CodingAgentHost
 
     private readonly InteractiveConsoleSession _ui;
     private readonly ICodingAgentRunner _runner;
+    private readonly TuiCompositionSession? _compositionSession;
     private readonly CodingAgentSessionStore? _sessionStore;
     private readonly CodingAgentTreeSessionController? _treeSessionController;
     private readonly CodingAgentPromptTemplateStore? _promptTemplateStore;
@@ -22,6 +25,7 @@ public sealed class CodingAgentHost
     private CodingAgentAutoCompactionOptions _autoCompaction;
     private readonly CodingAgentCommandRouter _commandRouter;
     private readonly ICodingAgentTurnInputSource? _turnInputSource;
+    private readonly IDisposable? _compositionBinding;
     private CodingAgentRetryOptions _retryOptions;
     private bool _shutdownRendered;
 
@@ -43,19 +47,24 @@ public sealed class CodingAgentHost
         CodingAgentRetryOptions? retryOptions = null,
         ICodingAgentTurnInputSource? turnInputSource = null,
         Func<int, IReadOnlyList<string>>? historySnapshotProvider = null,
-        Func<IReadOnlyList<CodingAgentTreeViewItem>, CancellationToken, Task<CodingAgentTreeInteractiveNavigator.Result>>? treeNavigator = null,
+        Func<IReadOnlyList<CodingAgentTreeViewItem>, string?, CancellationToken, Task<CodingAgentTreeInteractiveNavigator.Result>>? treeNavigator = null,
         Func<CodingAgentThemeStatus, string?, CancellationToken, Task<string?>>? themeSelector = null,
         Func<CodingAgentSettingsSelectorState, CancellationToken, Task<string?>>? settingsSelector = null,
         Func<CodingAgentScopedModelsSelectorState, CancellationToken, Task<CodingAgentScopedModelsSelection>>? scopedModelsSelector = null,
         Func<CodingAgentAuthSelectorState, CancellationToken, Task<string?>>? authSelector = null,
         Func<CodingAgentThinkingSelectorState, CancellationToken, Task<string?>>? thinkingSelector = null,
         Func<CodingAgentModelSelectorState, CancellationToken, Task<string?>>? modelSelector = null,
+        Func<CodingAgentResumeSelectorState, CancellationToken, Task<CodingAgentResumeSelectionResult>>? resumeSelector = null,
+        Func<CodingAgentTreeMetadataSnapshot, CancellationToken, Task>? metadataViewer = null,
+        Func<IOAuthLoginCallbacks>? oauthLoginCallbacksFactory = null,
         IKeyBindingMap? keyBindings = null,
         CodingAgentExtensionResourceState? extensionResourceState = null,
-        Func<IKeyBindingMap?>? reloadKeyBindings = null)
+        Func<IKeyBindingMap?>? reloadKeyBindings = null,
+        TuiCompositionSession? compositionSession = null)
     {
         _ui = ui;
         _runner = runner;
+        _compositionSession = compositionSession;
         _sessionStore = sessionStore;
         _treeSessionController = treeSessionController;
         _promptTemplateStore = promptTemplateStore;
@@ -65,6 +74,8 @@ public sealed class CodingAgentHost
         _autoCompaction = _autoCompactionBase.WithEnabledOverride(autoCompactionEnabled);
         _retryOptions = retryOptions ?? CodingAgentRetryOptions.Disabled;
         _turnInputSource = turnInputSource;
+        _compositionBinding = compositionSession?.BindTranscript(ui);
+        RefreshCompositionStatus();
         _commandRouter = new CodingAgentCommandRouter(
             runner,
             settingsStore: settingsStore,
@@ -83,6 +94,10 @@ public sealed class CodingAgentHost
             autoCompactionChanged: enabled => _autoCompaction = _autoCompactionBase.WithEnabledOverride(enabled),
             historySnapshotProvider: historySnapshotProvider,
             clearScreenAction: () => _ui.ClearScreen(),
+            inputDraftSetter: draft => _ui.SetDraft(draft),
+            treeNavigationPrompt: PromptForTreeNavigationAsync,
+            sessionSwitchPrompt: PromptForSessionSwitchAsync,
+            treeLabelPrompt: PromptForTreeLabelAsync,
             treeNavigator: treeNavigator,
             themeSelector: themeSelector,
             settingsSelector: settingsSelector,
@@ -90,6 +105,9 @@ public sealed class CodingAgentHost
             authSelector: authSelector,
             thinkingSelector: thinkingSelector,
             modelSelector: modelSelector,
+            resumeSelector: resumeSelector,
+            metadataViewer: metadataViewer,
+            oauthLoginCallbacksFactory: oauthLoginCallbacksFactory,
             keyBindings: keyBindings,
             extensionResourceState: extensionResourceState,
             reloadKeyBindings: reloadKeyBindings);
@@ -97,6 +115,7 @@ public sealed class CodingAgentHost
 
     public async Task<int> RunAsync(CancellationToken cancellationToken = default)
     {
+        _compositionSession?.Start();
         _ui.ShowWelcome("Tau — Coding Agent", "Type your message, or 'exit' to quit.");
 
         while (!cancellationToken.IsCancellationRequested)
@@ -152,7 +171,7 @@ public sealed class CodingAgentHost
             }
             catch (OperationCanceledException)
             {
-                _ui.WriteCancelled();
+                WriteCancelled();
                 continue;
             }
 
@@ -163,9 +182,10 @@ public sealed class CodingAgentHost
 
         if (!_shutdownRendered)
         {
-            _ui.WriteShutdown("Goodbye!");
+            WriteShutdown("Goodbye!");
         }
 
+        _compositionSession?.Stop();
         return 0;
     }
 
@@ -223,7 +243,7 @@ public sealed class CodingAgentHost
                 .ConfigureAwait(false);
             _treeSessionController?.RecordCompaction(_runner, result with { FromHook = true });
             var messagesAfter = _treeSessionController is null ? result.MessagesAfter : _runner.Messages.Count;
-            _ui.WriteStatus(
+            WriteStatus(
                 $"auto-compacted session: {result.MessagesBefore} -> {messagesAfter} messages, estimated {estimatedTokens} tokens");
             PersistSession();
         }
@@ -233,20 +253,21 @@ public sealed class CodingAgentHost
         }
         catch (Exception ex)
         {
-            _ui.WriteRuntimeError($"auto-compaction failed: {ex.Message}");
+            WriteRuntimeError($"auto-compaction failed: {ex.Message}");
         }
     }
 
     private async Task RunTurnWithRetryAsync(string input, CancellationToken cancellationToken)
     {
         var rollbackSnapshot = CreateRollbackSnapshot();
+        var logContext = CreateTurnLogContext();
         var retryAttempt = 0;
         var overflowRecoveryAttempted = false;
         _ui.WriteUserMessage(input);
 
         while (true)
         {
-            var result = await RunSingleTurnAttemptAsync(input, cancellationToken).ConfigureAwait(false);
+            var result = await RunSingleTurnAttemptAsync(input, logContext, cancellationToken).ConfigureAwait(false);
             if (result.IsSuccess)
             {
                 if (retryAttempt > 0)
@@ -254,7 +275,7 @@ public sealed class CodingAgentHost
                     SyncTreeSessionAfterRecoveredRetry();
                     RecordAutoRetryEnd(success: true, retryAttempt);
                     var attemptLabel = retryAttempt == 1 ? "attempt" : "attempts";
-                    _ui.WriteStatus($"auto-retry recovered after {retryAttempt} {attemptLabel}");
+                    WriteStatus($"auto-retry recovered after {retryAttempt} {attemptLabel}");
                 }
 
                 return;
@@ -300,7 +321,7 @@ public sealed class CodingAgentHost
                     _retryOptions.MaxAttempts,
                     (int)delay.TotalMilliseconds,
                     result.ErrorMessage);
-                _ui.WriteStatus(
+                WriteStatus(
                     $"auto-retry {retryAttempt}/{_retryOptions.MaxAttempts} after {(int)delay.TotalMilliseconds}ms: {result.ErrorMessage}");
 
                 if (delay > TimeSpan.Zero)
@@ -311,8 +332,8 @@ public sealed class CodingAgentHost
                     }
                     catch (OperationCanceledException)
                     {
-                        _ui.WriteCancelled();
-                        _ui.WriteStatus("auto-retry cancelled during delay");
+                        WriteCancelled();
+                        WriteStatus("auto-retry cancelled during delay");
                         RecordAutoRetryEnd(success: false, retryAttempt, "Retry cancelled");
                         RollbackTurn(rollbackSnapshot, "rolled back cancelled turn");
                         return;
@@ -324,7 +345,7 @@ public sealed class CodingAgentHost
 
             if (!result.ErrorAlreadyRendered && !string.IsNullOrWhiteSpace(result.ErrorMessage))
             {
-                _ui.WriteRuntimeError(result.ErrorMessage);
+                WriteRuntimeError(result.ErrorMessage);
             }
 
             if (_retryOptions.IsEnabled &&
@@ -356,25 +377,27 @@ public sealed class CodingAgentHost
                 .ConfigureAwait(false);
             _treeSessionController?.RecordCompaction(_runner, result with { FromHook = true });
             var messagesAfter = _treeSessionController is null ? result.MessagesAfter : _runner.Messages.Count;
-            _ui.WriteStatus(
+            WriteStatus(
                 $"context overflow compacted session: {result.MessagesBefore} -> {messagesAfter} messages; retrying turn");
             PersistSession();
             return CodingAgentOverflowRecoveryResult.Recovered(CreateRollbackSnapshot());
         }
         catch (OperationCanceledException)
         {
-            _ui.WriteCancelled();
+            WriteCancelled();
+            RefreshCompositionStatus("[Cancelled]");
             return CodingAgentOverflowRecoveryResult.Cancelled();
         }
         catch (Exception ex)
         {
-            _ui.WriteRuntimeError($"context overflow recovery failed: {ex.Message}");
+            WriteRuntimeError($"context overflow recovery failed: {ex.Message}");
             return CodingAgentOverflowRecoveryResult.Failed();
         }
     }
 
     private async Task<CodingAgentTurnAttemptResult> RunSingleTurnAttemptAsync(
         string input,
+        TauRuntimeLogContext logContext,
         CancellationToken cancellationToken)
     {
         var errorAlreadyRendered = false;
@@ -383,7 +406,8 @@ public sealed class CodingAgentHost
 
         try
         {
-            var events = _runner.RunAsync(input, cancellationToken);
+            RefreshCompositionStatus("running");
+            var events = _runner.RunAsync(input, logContext, cancellationToken);
             turnInputTask = StartTurnInputListener(turnInputCts.Token);
 
             await foreach (var evt in events.ConfigureAwait(false))
@@ -402,7 +426,7 @@ public sealed class CodingAgentHost
         }
         catch (OperationCanceledException)
         {
-            _ui.WriteCancelled();
+            WriteCancelled();
             return CodingAgentTurnAttemptResult.Cancelled();
         }
         catch (Exception ex)
@@ -464,7 +488,7 @@ public sealed class CodingAgentHost
         }
         catch (Exception ex)
         {
-            _ui.WriteRuntimeError($"turn input listener failed: {ex.Message}");
+            WriteRuntimeError($"turn input listener failed: {ex.Message}");
         }
     }
 
@@ -474,22 +498,23 @@ public sealed class CodingAgentHost
         {
             if (result.IsError)
             {
-                _ui.WriteRuntimeError(result.Message);
+                WriteRuntimeError(result.Message);
             }
             else if (result.ShouldExit)
             {
-                _ui.WriteShutdown(result.Message);
+                WriteShutdown(result.Message);
                 _shutdownRendered = true;
             }
             else
             {
-                _ui.WriteStatus(result.Message);
+                WriteStatus(result.Message);
             }
         }
 
         if (result.ShouldExit && string.IsNullOrWhiteSpace(result.Message))
         {
             _shutdownRendered = true;
+            WriteShutdown("Goodbye!");
         }
     }
 
@@ -541,6 +566,32 @@ public sealed class CodingAgentHost
     private CodingAgentSessionSnapshot CreateRollbackSnapshot() =>
         new([.. _runner.Messages], _runner.Model.Provider, _runner.Model.Id, _runner.SessionName);
 
+    private TauRuntimeLogContext CreateTurnLogContext()
+    {
+        var turnId = Guid.NewGuid().ToString("N");
+        return new TauRuntimeLogContext(
+            CorrelationId: turnId,
+            SessionId: TryGetTreeSessionId(),
+            MessageId: turnId);
+    }
+
+    private string? TryGetTreeSessionId()
+    {
+        if (_treeSessionController is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            return _treeSessionController.GetSummary().SessionId;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException)
+        {
+            return null;
+        }
+    }
+
     private bool RestoreTurnSnapshot(CodingAgentSessionSnapshot snapshot)
     {
         try
@@ -550,7 +601,7 @@ public sealed class CodingAgentHost
         }
         catch (Exception ex)
         {
-            _ui.WriteRuntimeError($"turn rollback failed: {ex.Message}");
+            WriteRuntimeError($"turn rollback failed: {ex.Message}");
             return false;
         }
     }
@@ -568,7 +619,7 @@ public sealed class CodingAgentHost
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException)
         {
-            _ui.WriteRuntimeError($"tree session save failed: {ex.Message}");
+            WriteRuntimeError($"tree session save failed: {ex.Message}");
         }
     }
 
@@ -576,7 +627,7 @@ public sealed class CodingAgentHost
     {
         if (RestoreTurnSnapshot(snapshot))
         {
-            _ui.WriteStatus(message);
+            WriteStatus(message);
         }
     }
 
@@ -597,7 +648,7 @@ public sealed class CodingAgentHost
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException)
         {
-            _ui.WriteRuntimeError($"tree retry event save failed: {ex.Message}");
+            WriteRuntimeError($"tree retry event save failed: {ex.Message}");
         }
     }
 
@@ -614,7 +665,7 @@ public sealed class CodingAgentHost
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException)
         {
-            _ui.WriteRuntimeError($"tree retry event save failed: {ex.Message}");
+            WriteRuntimeError($"tree retry event save failed: {ex.Message}");
         }
     }
 
@@ -622,6 +673,141 @@ public sealed class CodingAgentHost
     {
         var spaceIndex = input.IndexOf(' ');
         return spaceIndex < 0 ? input : input[..spaceIndex];
+    }
+
+    private async Task<CodingAgentTreeNavigationDecision> PromptForTreeNavigationAsync(
+        CodingAgentTreeNavigationPromptState state,
+        CancellationToken cancellationToken)
+    {
+        return await PromptForNavigationDecisionAsync(
+                FormatTreeNavigationPromptLabel(state),
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private async Task<CodingAgentTreeNavigationDecision> PromptForSessionSwitchAsync(
+        CodingAgentSessionSwitchPromptState state,
+        CancellationToken cancellationToken)
+    {
+        return await PromptForNavigationDecisionAsync(
+                FormatSessionSwitchPromptLabel(state),
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private async Task<CodingAgentTreeNavigationDecision> PromptForNavigationDecisionAsync(
+        string switchLabel,
+        CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            _ui.WriteStatus(
+                $"{switchLabel}. [n] no summary, [s] summarize, [c] summarize with custom prompt, [q] cancel");
+
+            var choice = await _ui.ReadInputAsync("switch-summary> ", ConsoleColor.Yellow, cancellationToken)
+                .ConfigureAwait(false);
+            if (choice is null)
+            {
+                return CodingAgentTreeNavigationDecision.CancelledDecision;
+            }
+
+            var normalized = choice.Trim().ToLowerInvariant();
+            if (normalized.Length == 0 || normalized is "n" or "no" or "none")
+            {
+                return CodingAgentTreeNavigationDecision.NoSummary;
+            }
+
+            if (normalized is "q" or "quit" or "cancel")
+            {
+                return CodingAgentTreeNavigationDecision.CancelledDecision;
+            }
+
+            if (normalized is "s" or "sum" or "summary" or "summarize")
+            {
+                return CodingAgentTreeNavigationDecision.SummarizeWith();
+            }
+
+            if (normalized is "c" or "custom")
+            {
+                var customInstructions = await _ui.ReadInputAsync("summary-prompt> ", ConsoleColor.Yellow, cancellationToken)
+                    .ConfigureAwait(false);
+                if (customInstructions is null)
+                {
+                    continue;
+                }
+
+                return CodingAgentTreeNavigationDecision.SummarizeWith(customInstructions);
+            }
+
+            return CodingAgentTreeNavigationDecision.NoSummary;
+        }
+    }
+
+    private static string FormatTreeNavigationPromptLabel(CodingAgentTreeNavigationPromptState state)
+    {
+        return state.Reason switch
+        {
+            CodingAgentTreeNavigationReason.NewSession => FormatSessionSwitchPromptLabel(
+                new CodingAgentSessionSwitchPromptState(state.EntryCount, state.TokensBefore, state.Reason, state.TargetSessionPath)),
+            CodingAgentTreeNavigationReason.ResumeSession => FormatSessionSwitchPromptLabel(
+                new CodingAgentSessionSwitchPromptState(state.EntryCount, state.TokensBefore, state.Reason, state.TargetSessionPath)),
+            CodingAgentTreeNavigationReason.ImportSession => FormatSessionSwitchPromptLabel(
+                new CodingAgentSessionSwitchPromptState(state.EntryCount, state.TokensBefore, state.Reason, state.TargetSessionPath)),
+            _ => $"tree switch leaves {state.EntryCount} entries / ~{state.TokensBefore} tokens behind"
+        };
+    }
+
+    private static string FormatSessionSwitchPromptLabel(CodingAgentSessionSwitchPromptState state)
+    {
+        var label = state.Reason switch
+        {
+            CodingAgentTreeNavigationReason.NewSession => "new session",
+            CodingAgentTreeNavigationReason.ResumeSession => FormatSessionSwitchLabel("resume", state.TargetSessionPath),
+            CodingAgentTreeNavigationReason.ImportSession => FormatSessionSwitchLabel("import", state.TargetSessionPath),
+            _ => "session switch"
+        };
+        return $"{label} leaves {state.EntryCount} entries / ~{state.TokensBefore} tokens behind";
+    }
+
+    private static string FormatSessionSwitchLabel(string verb, string? targetSessionPath)
+    {
+        var fileName = string.IsNullOrWhiteSpace(targetSessionPath)
+            ? null
+            : Path.GetFileName(targetSessionPath);
+        return string.IsNullOrWhiteSpace(fileName)
+            ? $"{verb} switch"
+            : $"{verb} {fileName}";
+    }
+
+    private async Task<CodingAgentTreeLabelPromptResult> PromptForTreeLabelAsync(
+        CodingAgentTreeLabelPromptState state,
+        CancellationToken cancellationToken)
+    {
+        var currentLabel = string.IsNullOrWhiteSpace(state.CurrentLabel) ? "(none)" : state.CurrentLabel;
+        _ui.WriteStatus(
+            $"tree label {state.EntryId}: current {currentLabel}. Enter new label, empty/clear removes, cancel keeps current");
+
+        var input = await _ui.ReadInputAsync("label> ", ConsoleColor.Yellow, cancellationToken)
+            .ConfigureAwait(false);
+        if (input is null)
+        {
+            return CodingAgentTreeLabelPromptResult.CancelledResult;
+        }
+
+        var normalized = input.Trim();
+        if (normalized.Length == 0 || normalized.Equals("clear", StringComparison.OrdinalIgnoreCase))
+        {
+            return CodingAgentTreeLabelPromptResult.Saved(null);
+        }
+
+        if (normalized.Equals("cancel", StringComparison.OrdinalIgnoreCase) ||
+            normalized.Equals("q", StringComparison.OrdinalIgnoreCase) ||
+            normalized.Equals("quit", StringComparison.OrdinalIgnoreCase))
+        {
+            return CodingAgentTreeLabelPromptResult.CancelledResult;
+        }
+
+        return CodingAgentTreeLabelPromptResult.Saved(normalized);
     }
 
     private void PersistSession()
@@ -634,7 +820,7 @@ public sealed class CodingAgentHost
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
             {
-                _ui.WriteRuntimeError($"session save failed: {ex.Message}");
+                WriteRuntimeError($"session save failed: {ex.Message}");
             }
         }
 
@@ -644,8 +830,10 @@ public sealed class CodingAgentHost
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException)
         {
-            _ui.WriteRuntimeError($"tree session save failed: {ex.Message}");
+            WriteRuntimeError($"tree session save failed: {ex.Message}");
         }
+
+        RefreshCompositionStatus();
     }
 
     private void HandleEvent(AgentEvent evt)
@@ -669,13 +857,57 @@ public sealed class CodingAgentHost
                 break;
 
             case AgentEndEvent end when end.ErrorMessage is not null:
-                _ui.WriteRuntimeError(end.ErrorMessage);
+                WriteRuntimeError(end.ErrorMessage);
                 break;
 
             case AgentEndEvent:
                 _ui.CompleteAssistantTurn();
+                RefreshCompositionStatus();
                 break;
         }
+    }
+
+    private void RefreshCompositionStatus(string? statusLeftOverride = null)
+    {
+        if (_compositionSession is null)
+        {
+            return;
+        }
+
+        var left = string.IsNullOrWhiteSpace(statusLeftOverride)
+            ? FormatCompositionStatusLeft()
+            : statusLeftOverride;
+        var right = $"{_runner.Model.Provider}/{_runner.Model.Id}";
+        _compositionSession.SetStatus(left, right);
+    }
+
+    private string FormatCompositionStatusLeft() =>
+        string.IsNullOrWhiteSpace(_runner.SessionName)
+            ? "ready"
+            : $"session: {_runner.SessionName}";
+
+    private void WriteStatus(string message)
+    {
+        _ui.WriteStatus(message);
+        RefreshCompositionStatus(message);
+    }
+
+    private void WriteRuntimeError(string message)
+    {
+        _ui.WriteRuntimeError(message);
+        RefreshCompositionStatus($"error: {message}");
+    }
+
+    private void WriteShutdown(string message)
+    {
+        _ui.WriteShutdown(message);
+        RefreshCompositionStatus(message);
+    }
+
+    private void WriteCancelled()
+    {
+        _ui.WriteCancelled();
+        RefreshCompositionStatus("[Cancelled]");
     }
 
     private enum SlashInvocationPreparation

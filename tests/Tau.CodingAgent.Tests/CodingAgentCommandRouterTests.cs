@@ -4,6 +4,7 @@ using Tau.Agent;
 using Tau.Agent.Runtime;
 using Tau.Ai;
 using Tau.CodingAgent.Runtime;
+using Tau.CodingAgent.Tools;
 using Tau.Tui.Abstractions;
 using Tau.Tui.Runtime;
 
@@ -2505,6 +2506,121 @@ public class CodingAgentCommandRouterTests
     }
 
     [Fact]
+    public async Task TryHandleAsync_ExportHtmlCommand_RendersReadFileToolResultMetadata()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-export-read-file-{Guid.NewGuid():N}");
+        var htmlPath = Path.Combine(directory, "session.html");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.SessionName = "read file export";
+        runner.MutableMessages.Add(new AssistantMessage(
+        [
+            new ToolCallContent("call-read", "read_file", """{"path":"src/Program.cs"}""")
+        ]));
+        runner.MutableMessages.Add(new ToolResultMessage(
+            "call-read",
+            [new TextContent("using System;\nConsole.WriteLine(\"hello\");")]));
+        runner.MutableToolResultDetailsByToolCallId["call-read"] = ReadFileToolDetails.ForText(
+            "src/Program.cs",
+            "csharp",
+            startLine: 1,
+            endLine: 2,
+            totalLines: 20,
+            hasMore: true,
+            truncation: null);
+        var router = new CodingAgentCommandRouter(runner);
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+
+            var result = await router.TryHandleAsync($"/export {htmlPath}");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            var html = File.ReadAllText(htmlPath);
+            Assert.Contains("<div class=\"tool-result-section tool-result-metadata\">", html, StringComparison.Ordinal);
+            Assert.Contains("<dt>path</dt>", html, StringComparison.Ordinal);
+            Assert.Contains("<dd>src/Program.cs</dd>", html, StringComparison.Ordinal);
+            Assert.Contains("<dt>language</dt>", html, StringComparison.Ordinal);
+            Assert.Contains("<dd>csharp</dd>", html, StringComparison.Ordinal);
+            Assert.Contains("<dt>lines</dt>", html, StringComparison.Ordinal);
+            Assert.Contains("<dd>1-2</dd>", html, StringComparison.Ordinal);
+            Assert.Contains("<dt>total lines</dt>", html, StringComparison.Ordinal);
+            Assert.Contains("<dd>20</dd>", html, StringComparison.Ordinal);
+            Assert.Contains("<dt>has more</dt>", html, StringComparison.Ordinal);
+            Assert.Contains("<dd>true</dd>", html, StringComparison.Ordinal);
+            Assert.Contains("<code data-language=\"csharp\">", html, StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_ExportHtmlCommand_RendersListDirectoryToolResultDetails()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-export-ls-details-{Guid.NewGuid():N}");
+        var htmlPath = Path.Combine(directory, "session.html");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.SessionName = "ls export";
+        runner.MutableMessages.Add(new AssistantMessage(
+        [
+            new ToolCallContent("call-ls", "ls", """{"path":"src","limit":3}""")
+        ]));
+        runner.MutableMessages.Add(new ToolResultMessage(
+            "call-ls",
+            [new TextContent("src/\nProgram.cs\n[50.0KB limit reached]")]));
+        runner.MutableToolResultDetailsByToolCallId["call-ls"] = new ListDirectoryToolDetails(
+            Truncation: new ToolOutputTruncationResult(
+                Content: "src/\nProgram.cs",
+                Truncated: true,
+                TruncatedBy: "bytes",
+                TotalLines: 4,
+                TotalBytes: 65536,
+                OutputLines: 2,
+                OutputBytes: 120,
+                LastLinePartial: false,
+                FirstLineExceedsLimit: false,
+                MaxLines: int.MaxValue,
+                MaxBytes: 50 * 1024),
+            EntryLimitReached: 3);
+        var router = new CodingAgentCommandRouter(runner);
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+
+            var result = await router.TryHandleAsync($"/export {htmlPath}");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            var html = File.ReadAllText(htmlPath);
+            Assert.Contains("<span class=\"tool-summary-key\">limit</span>", html, StringComparison.Ordinal);
+            Assert.Contains("<span class=\"tool-summary-value\">3</span>", html, StringComparison.Ordinal);
+            Assert.Contains("<li class=\"tool-result-directory\">src/</li>", html, StringComparison.Ordinal);
+            Assert.Contains("<li>Program.cs</li>", html, StringComparison.Ordinal);
+            Assert.Contains("<li>[50.0KB limit reached]</li>", html, StringComparison.Ordinal);
+            Assert.DoesNotContain("<li class=\"tool-result-directory\">[50.0KB limit reached]</li>", html, StringComparison.Ordinal);
+            Assert.Contains("<div class=\"tool-result-label\">directory metadata</div>", html, StringComparison.Ordinal);
+            Assert.Contains("<dt>entry limit reached</dt>", html, StringComparison.Ordinal);
+            Assert.Contains("<dd>3 entries</dd>", html, StringComparison.Ordinal);
+            Assert.Contains("<dt>truncation</dt>", html, StringComparison.Ordinal);
+            Assert.Contains("bytes, output 2 lines / 120B, total 4 lines / 64.0KB", html, StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
     public async Task TryHandleAsync_ExportHtmlCommand_FoldsLongToolResults()
     {
         var directory = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-export-tool-fold-{Guid.NewGuid():N}");
@@ -2834,6 +2950,135 @@ public class CodingAgentCommandRouterTests
     }
 
     [Fact]
+    public async Task TryHandleAsync_ImportCommand_WithJsonlPathCanSummarizeCurrentBranchBeforeSwitching()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-coding-agent-import-jsonl-summary-" + Guid.NewGuid().ToString("N"));
+        var currentPath = Path.Combine(directory, "current.jsonl");
+        var importPath = Path.Combine(directory, "import.jsonl");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>())
+        {
+            SessionName = "current session"
+        };
+        runner.MutableMessages.Add(new UserMessage("current task"));
+        runner.MutableMessages.Add(new AssistantMessage([new TextContent("current answer")]));
+        runner.BranchSummaryHandler = (messages, instructions, replaceInstructions, _) =>
+        {
+            Assert.Equal("focus imported session", instructions);
+            Assert.False(replaceInstructions);
+            Assert.Equal(2, messages.Count);
+            Assert.Equal("current task", ReadText(messages[0]));
+            Assert.Equal("current answer", ReadText(messages[1]));
+            return Task.FromResult(new CodingAgentBranchSummaryResult("import summary body", messages.Count, 29));
+        };
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+            var currentTree = CodingAgentTreeSessionController.OpenOrCreate(currentPath);
+            currentTree.SyncFromRunner(runner);
+
+            var importedRunner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>())
+            {
+                SessionName = "imported session"
+            };
+            importedRunner.MutableMessages.Add(new UserMessage("imported task"));
+            importedRunner.MutableMessages.Add(new AssistantMessage([new TextContent("imported answer")]));
+            CodingAgentTreeSessionController.OpenOrCreate(importPath).SyncFromRunner(importedRunner);
+
+            CodingAgentSessionSwitchPromptState? capturedPromptState = null;
+            var router = new CodingAgentCommandRouter(
+                runner,
+                treeSessionController: currentTree,
+                sessionSwitchPrompt: (state, _) =>
+                {
+                    capturedPromptState = state;
+                    return Task.FromResult(CodingAgentTreeNavigationDecision.SummarizeWith("focus imported session"));
+                });
+
+            var result = await router.TryHandleAsync($"/import {importPath}");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Contains($"resumed session from {importPath}:", result.Message, StringComparison.Ordinal);
+            Assert.Contains("previous branch summary 2 entries, tokens ~29", result.Message, StringComparison.Ordinal);
+            Assert.Equal(importPath, currentTree.Path);
+            Assert.Equal("imported session", runner.SessionName);
+            Assert.Equal(2, runner.Messages.Count);
+            Assert.Equal("imported task", ReadText(runner.Messages[0]));
+            Assert.Equal("imported answer", ReadText(runner.Messages[1]));
+            Assert.NotNull(capturedPromptState);
+            Assert.Equal(CodingAgentTreeNavigationReason.ImportSession, capturedPromptState!.Reason);
+            Assert.Equal(Path.GetFullPath(importPath), capturedPromptState.TargetSessionPath);
+            Assert.Equal(2, capturedPromptState.EntryCount);
+
+            var summarizedCurrent = new CodingAgentTreeSessionController(new CodingAgentTreeSessionStore(currentPath));
+            var summarizedSnapshot = summarizedCurrent.LoadSnapshot();
+            Assert.Single(summarizedSnapshot.Messages);
+            Assert.Contains("import summary body", ReadText(summarizedSnapshot.Messages[0]), StringComparison.Ordinal);
+            Assert.Equal("current session", summarizedSnapshot.Name);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_ImportCommand_WithJsonlPathWhenSummaryPromptCancelled_KeepsCurrentSession()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-coding-agent-import-jsonl-cancel-" + Guid.NewGuid().ToString("N"));
+        var currentPath = Path.Combine(directory, "current.jsonl");
+        var importPath = Path.Combine(directory, "import.jsonl");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>())
+        {
+            SessionName = "current session"
+        };
+        runner.MutableMessages.Add(new UserMessage("current task"));
+        runner.MutableMessages.Add(new AssistantMessage([new TextContent("current answer")]));
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+            var currentTree = CodingAgentTreeSessionController.OpenOrCreate(currentPath);
+            currentTree.SyncFromRunner(runner);
+
+            var importedRunner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>())
+            {
+                SessionName = "imported session"
+            };
+            importedRunner.MutableMessages.Add(new UserMessage("imported task"));
+            CodingAgentTreeSessionController.OpenOrCreate(importPath).SyncFromRunner(importedRunner);
+
+            var router = new CodingAgentCommandRouter(
+                runner,
+                treeSessionController: currentTree,
+                sessionSwitchPrompt: (_, _) => Task.FromResult(CodingAgentTreeNavigationDecision.CancelledDecision));
+
+            var result = await router.TryHandleAsync($"/import {importPath}");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Equal("import cancelled", result.Message);
+            Assert.Equal(currentPath, currentTree.Path);
+            Assert.Equal("current session", runner.SessionName);
+            Assert.Equal(2, runner.Messages.Count);
+            Assert.Equal("current task", ReadText(runner.Messages[0]));
+            Assert.Equal("current answer", ReadText(runner.Messages[1]));
+            Assert.DoesNotContain("\"type\":\"branch_summary\"", File.ReadAllText(currentPath), StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
     public async Task TryHandleAsync_ImportCommandWithoutPath_ReturnsUsage()
     {
         var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
@@ -2901,6 +3146,162 @@ public class CodingAgentCommandRouterTests
         Assert.Empty(runner.Messages);
         Assert.Null(runner.SessionName);
         Assert.Empty(runner.Inputs);
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_NewCommand_CanSummarizeCurrentBranchBeforeResettingSession()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-coding-agent-new-summary-" + Guid.NewGuid().ToString("N"));
+        var treePath = Path.Combine(directory, "session.jsonl");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>())
+        {
+            SessionName = "current session"
+        };
+        runner.MutableMessages.Add(new UserMessage("current task"));
+        runner.MutableMessages.Add(new AssistantMessage([new TextContent("current answer")]));
+        runner.BranchSummaryHandler = (messages, instructions, replaceInstructions, _) =>
+        {
+            Assert.Equal("focus reset", instructions);
+            Assert.True(replaceInstructions);
+            Assert.Equal(2, messages.Count);
+            Assert.Equal("current task", ReadText(messages[0]));
+            Assert.Equal("current answer", ReadText(messages[1]));
+            return Task.FromResult(new CodingAgentBranchSummaryResult("new session summary body", messages.Count, 44));
+        };
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+            var tree = CodingAgentTreeSessionController.OpenOrCreate(treePath);
+            tree.SyncFromRunner(runner);
+
+            CodingAgentSessionSwitchPromptState? capturedPromptState = null;
+            var router = new CodingAgentCommandRouter(
+                runner,
+                treeSessionController: tree,
+                sessionSwitchPrompt: (state, _) =>
+                {
+                    capturedPromptState = state;
+                    return Task.FromResult(new CodingAgentTreeNavigationDecision(
+                        Cancelled: false,
+                        Summarize: true,
+                        CustomInstructions: "focus reset",
+                        ReplaceInstructions: true));
+                });
+
+            var result = await router.TryHandleAsync("/new");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Contains("started new session with model openai/gpt-5.4", result.Message, StringComparison.Ordinal);
+            Assert.Contains("previous branch summary 2 entries, tokens ~44", result.Message, StringComparison.Ordinal);
+            Assert.Equal(1, runner.ResetSessionCalls);
+            Assert.Empty(runner.Messages);
+            Assert.Null(runner.SessionName);
+            Assert.Empty(runner.Inputs);
+            Assert.NotNull(capturedPromptState);
+            Assert.Equal(CodingAgentTreeNavigationReason.NewSession, capturedPromptState!.Reason);
+            Assert.Null(capturedPromptState.TargetSessionPath);
+            Assert.Equal(2, capturedPromptState.EntryCount);
+
+            var persisted = File.ReadAllText(treePath);
+            Assert.Contains("\"type\":\"branch_summary\"", persisted, StringComparison.Ordinal);
+            Assert.Contains("new session summary body", persisted, StringComparison.Ordinal);
+            Assert.Contains("\"action\":\"new\"", persisted, StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_NewCommand_WhenSwitchSummaryPromptCancelled_KeepsCurrentSession()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-coding-agent-new-summary-cancel-" + Guid.NewGuid().ToString("N"));
+        var treePath = Path.Combine(directory, "session.jsonl");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>())
+        {
+            SessionName = "current session"
+        };
+        runner.MutableMessages.Add(new UserMessage("current task"));
+        runner.MutableMessages.Add(new AssistantMessage([new TextContent("current answer")]));
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+            var tree = CodingAgentTreeSessionController.OpenOrCreate(treePath);
+            tree.SyncFromRunner(runner);
+
+            var router = new CodingAgentCommandRouter(
+                runner,
+                treeSessionController: tree,
+                sessionSwitchPrompt: (_, _) => Task.FromResult(CodingAgentTreeNavigationDecision.CancelledDecision));
+
+            var result = await router.TryHandleAsync("/new");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Equal("new session cancelled", result.Message);
+            Assert.Equal(0, runner.ResetSessionCalls);
+            Assert.Equal("current session", runner.SessionName);
+            Assert.Equal(2, runner.Messages.Count);
+            Assert.Equal("current task", ReadText(runner.Messages[0]));
+            Assert.Equal("current answer", ReadText(runner.Messages[1]));
+            Assert.DoesNotContain("\"type\":\"branch_summary\"", File.ReadAllText(treePath), StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_NewCommand_WhenSessionSwitchHookCancels_KeepsCurrentSession()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-coding-agent-new-hook-cancel-" + Guid.NewGuid().ToString("N"));
+        var treePath = Path.Combine(directory, "session.jsonl");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>())
+        {
+            SessionName = "current session"
+        };
+        runner.MutableMessages.Add(new UserMessage("current task"));
+        runner.MutableMessages.Add(new AssistantMessage([new TextContent("current answer")]));
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+            var tree = CodingAgentTreeSessionController.OpenOrCreate(treePath);
+            tree.SyncFromRunner(runner);
+
+            var router = new CodingAgentCommandRouter(
+                runner,
+                treeSessionController: tree,
+                sessionSwitchHook: (_, _) => Task.FromResult<CodingAgentSessionSwitchHookResult?>(CodingAgentSessionSwitchHookResult.Cancel()));
+
+            var result = await router.TryHandleAsync("/new");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Equal("new session cancelled", result.Message);
+            Assert.Equal(0, runner.ResetSessionCalls);
+            Assert.Equal("current session", runner.SessionName);
+            Assert.Equal(2, runner.Messages.Count);
+            Assert.DoesNotContain("\"type\":\"branch_summary\"", File.ReadAllText(treePath), StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
     }
 
     [Fact]
@@ -3088,6 +3489,94 @@ public class CodingAgentCommandRouterTests
             Assert.Contains("content types: text", result.Message, StringComparison.Ordinal);
             Assert.Contains("preview: inspect this metadata", result.Message, StringComparison.Ordinal);
             Assert.Empty(runner.Inputs);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public void GetMetadataSnapshot_FocusedEntryIncludesRelationsAndSections()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-coding-agent-entry-metadata-snapshot-" + Guid.NewGuid().ToString("N"));
+        var treePath = Path.Combine(directory, "session.jsonl");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.MutableMessages.Add(new UserMessage("inspect structured metadata"));
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+            var tree = CodingAgentTreeSessionController.OpenOrCreate(treePath);
+            tree.SyncFromRunner(runner);
+            var userEntryId = ReadMessageEntryId(treePath, "user", "inspect structured metadata");
+
+            var snapshot = tree.GetMetadataSnapshot(userEntryId);
+
+            Assert.Equal(userEntryId, snapshot.FocusEntryId);
+            Assert.Contains(userEntryId, snapshot.VisibleEntryIds);
+            Assert.All(snapshot.VisibleEntryIds, id => Assert.True(snapshot.EntriesById.ContainsKey(id)));
+            var entry = snapshot.EntriesById[userEntryId];
+            Assert.Contains(entry.OverviewLines, line => line.StartsWith("parent:", StringComparison.Ordinal));
+            Assert.Contains(entry.Relations, relation => relation.Label == "parent");
+            Assert.Contains(entry.Sections, section => section.Title == "Message");
+            Assert.Contains(entry.Sections.SelectMany(section => section.Lines), line =>
+                line.Contains("preview: inspect structured metadata", StringComparison.Ordinal));
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_MetadataCommand_WithViewer_InvokesViewerWithoutTranscriptMessage()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-coding-agent-metadata-viewer-" + Guid.NewGuid().ToString("N"));
+        var treePath = Path.Combine(directory, "session.jsonl");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>())
+        {
+            SessionName = "viewer metadata"
+        };
+        runner.MutableMessages.Add(new UserMessage("inspect session metadata"));
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+            var tree = new CodingAgentTreeSessionController(
+                new CodingAgentTreeSessionStore(treePath, cwd: directory));
+            CodingAgentTreeMetadataSnapshot? capturedSnapshot = null;
+            var router = new CodingAgentCommandRouter(
+                runner,
+                treeSessionController: tree,
+                metadataViewer: (snapshot, _) =>
+                {
+                    capturedSnapshot = snapshot;
+                    return Task.CompletedTask;
+                });
+
+            var result = await router.TryHandleAsync("/metadata");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Null(result.Message);
+            Assert.NotNull(capturedSnapshot);
+            Assert.Equal(treePath, capturedSnapshot!.FilePath);
+            Assert.Equal(directory, capturedSnapshot.Cwd);
+            Assert.Null(capturedSnapshot.FocusEntryId);
+            Assert.Contains(capturedSnapshot.VisibleEntryIds, entryId =>
+            {
+                var entry = capturedSnapshot.EntriesById[entryId];
+                return entry.SummaryLine.Contains("session name viewer metadata", StringComparison.Ordinal) ||
+                       entry.OverviewLines.Any(line => line.Contains("viewer metadata", StringComparison.Ordinal)) ||
+                       entry.Sections.Any(section => section.Lines.Any(line => line.Contains("viewer metadata", StringComparison.Ordinal)));
+            });
         }
         finally
         {
@@ -3289,9 +3778,10 @@ public class CodingAgentCommandRouterTests
             new TextContent("abandoned branch progress"),
             new ToolCallContent("call-1", "edit_file", """{"path":"src/Branch.cs"}""")
         ]));
-        runner.BranchSummaryHandler = (messages, instructions, _) =>
+        runner.BranchSummaryHandler = (messages, instructions, replaceInstructions, _) =>
         {
             Assert.Equal("focus decisions", instructions);
+            Assert.False(replaceInstructions);
             Assert.Equal(3, messages.Count);
             Assert.Equal("root answer", ReadText(messages[0]));
             Assert.Equal("abandoned branch request", ReadText(messages[1]));
@@ -3433,6 +3923,376 @@ public class CodingAgentCommandRouterTests
             Assert.Equal(treePath, tree.Path);
             Assert.False(Directory.Exists(Path.Combine(directory, "coding-agent-sessions")));
             Assert.Empty(runner.Inputs);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_ResumeCommandWithoutArgs_UsesSelectorAndSyncsCurrentSessionBeforeSwitching()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-coding-agent-resume-selector-" + Guid.NewGuid().ToString("N"));
+        var currentPath = Path.Combine(directory, "current.jsonl");
+        var otherPath = Path.Combine(directory, "coding-agent-sessions", "other.jsonl");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.SessionName = "current session";
+        runner.MutableMessages.Add(new UserMessage("current task"));
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+            Directory.CreateDirectory(Path.GetDirectoryName(otherPath)!);
+
+            var currentTree = CodingAgentTreeSessionController.OpenOrCreate(currentPath);
+            currentTree.SyncFromRunner(runner);
+
+            var otherRunner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+            otherRunner.SessionName = "other session";
+            otherRunner.MutableMessages.Add(new UserMessage("other task"));
+            otherRunner.MutableMessages.Add(new AssistantMessage([new TextContent("other answer")]));
+            var otherTree = CodingAgentTreeSessionController.OpenOrCreate(otherPath);
+            otherTree.SyncFromRunner(otherRunner);
+
+            runner.MutableMessages.Add(new AssistantMessage([new TextContent("unsaved current answer")]));
+
+            CodingAgentResumeSelectorState? capturedState = null;
+            var router = new CodingAgentCommandRouter(
+                runner,
+                treeSessionController: currentTree,
+                resumeSelector: (state, _) =>
+                {
+                    capturedState = state;
+                    return Task.FromResult(new CodingAgentResumeSelectionResult(otherPath));
+                });
+
+            var result = await router.TryHandleAsync("/resume");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Contains($"resumed session from {otherPath}:", result.Message, StringComparison.Ordinal);
+            Assert.Equal(otherPath, currentTree.Path);
+            Assert.Equal("other session", runner.SessionName);
+            Assert.Equal(2, runner.Messages.Count);
+            Assert.Equal("other task", ReadText(runner.Messages[0]));
+            Assert.Equal("other answer", ReadText(runner.Messages[1]));
+
+            Assert.NotNull(capturedState);
+            Assert.Equal(currentPath, capturedState!.CurrentSessionPath);
+            Assert.Contains(capturedState.Sessions, session => session.FilePath == currentPath && session.IsCurrent);
+            Assert.Contains(capturedState.Sessions, session => session.FilePath == otherPath);
+
+            var persistedCurrent = new CodingAgentTreeSessionController(new CodingAgentTreeSessionStore(currentPath));
+            var persistedSnapshot = persistedCurrent.LoadSnapshot();
+            Assert.Equal(2, persistedSnapshot.Messages.Count);
+            Assert.Equal("current task", ReadText(persistedSnapshot.Messages[0]));
+            Assert.Equal("unsaved current answer", ReadText(persistedSnapshot.Messages[1]));
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_ResumeCommandWithoutArgs_WhenSelectionCancelled_ReturnsCancelled()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-coding-agent-resume-selector-cancel-" + Guid.NewGuid().ToString("N"));
+        var currentPath = Path.Combine(directory, "current.jsonl");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.SessionName = "current session";
+        runner.MutableMessages.Add(new UserMessage("current task"));
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+            var currentTree = CodingAgentTreeSessionController.OpenOrCreate(currentPath);
+            currentTree.SyncFromRunner(runner);
+
+            var router = new CodingAgentCommandRouter(
+                runner,
+                treeSessionController: currentTree,
+                resumeSelector: (_, _) => Task.FromResult(new CodingAgentResumeSelectionResult(null)));
+
+            var result = await router.TryHandleAsync("/resume");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Equal("resume selection cancelled", result.Message);
+            Assert.Equal(currentPath, currentTree.Path);
+            Assert.Single(runner.Messages);
+            Assert.Equal("current session", runner.SessionName);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_ResumeCommandWithoutArgs_WhenCurrentSessionRenamedAndCancelled_UpdatesRunnerName()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-coding-agent-resume-selector-rename-current-" + Guid.NewGuid().ToString("N"));
+        var currentPath = Path.Combine(directory, "current.jsonl");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.SessionName = "current session";
+        runner.MutableMessages.Add(new UserMessage("current task"));
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+            var currentTree = CodingAgentTreeSessionController.OpenOrCreate(currentPath);
+            currentTree.SyncFromRunner(runner);
+
+            var router = new CodingAgentCommandRouter(
+                runner,
+                treeSessionController: currentTree,
+                resumeSelector: (_, _) => Task.FromResult(new CodingAgentResumeSelectionResult(
+                    SelectedPath: null,
+                    RenamedCurrentSessionName: "renamed session")));
+
+            var result = await router.TryHandleAsync("/resume");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Equal("resume selection cancelled", result.Message);
+            Assert.Equal("renamed session", runner.SessionName);
+            Assert.Equal(currentPath, currentTree.Path);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_ResumeCommandWithoutArgs_CanSummarizeCurrentBranchBeforeSwitching()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-coding-agent-resume-selector-summary-" + Guid.NewGuid().ToString("N"));
+        var currentPath = Path.Combine(directory, "current.jsonl");
+        var otherPath = Path.Combine(directory, "coding-agent-sessions", "other.jsonl");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>())
+        {
+            SessionName = "current session"
+        };
+        runner.MutableMessages.Add(new UserMessage("current task"));
+        runner.MutableMessages.Add(new AssistantMessage([new TextContent("current answer")]));
+        runner.MutableMessages.Add(new UserMessage("follow up task"));
+        runner.MutableMessages.Add(new AssistantMessage([new TextContent("follow up answer")]));
+        runner.BranchSummaryHandler = (messages, instructions, replaceInstructions, _) =>
+        {
+            Assert.Equal("focus resume switch", instructions);
+            Assert.False(replaceInstructions);
+            Assert.Equal(4, messages.Count);
+            Assert.Equal("current task", ReadText(messages[0]));
+            Assert.Equal("current answer", ReadText(messages[1]));
+            Assert.Equal("follow up task", ReadText(messages[2]));
+            Assert.Equal("follow up answer", ReadText(messages[3]));
+            return Task.FromResult(new CodingAgentBranchSummaryResult("resume summary body", messages.Count, 77));
+        };
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+            Directory.CreateDirectory(Path.GetDirectoryName(otherPath)!);
+
+            var currentTree = CodingAgentTreeSessionController.OpenOrCreate(currentPath);
+            currentTree.SyncFromRunner(runner);
+
+            var otherRunner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>())
+            {
+                SessionName = "other session"
+            };
+            otherRunner.MutableMessages.Add(new UserMessage("other task"));
+            otherRunner.MutableMessages.Add(new AssistantMessage([new TextContent("other answer")]));
+            CodingAgentTreeSessionController.OpenOrCreate(otherPath).SyncFromRunner(otherRunner);
+
+            CodingAgentSessionSwitchPromptState? capturedPromptState = null;
+            var router = new CodingAgentCommandRouter(
+                runner,
+                treeSessionController: currentTree,
+                resumeSelector: (_, _) => Task.FromResult(new CodingAgentResumeSelectionResult(otherPath)),
+                sessionSwitchPrompt: (state, _) =>
+                {
+                    capturedPromptState = state;
+                    return Task.FromResult(new CodingAgentTreeNavigationDecision(
+                        Cancelled: false,
+                        Summarize: true,
+                        CustomInstructions: "focus resume switch",
+                        ReplaceInstructions: false,
+                        Label: "parking-lot"));
+                });
+
+            var result = await router.TryHandleAsync("/resume");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Contains("previous branch summary 4 entries, tokens ~77", result.Message, StringComparison.Ordinal);
+            Assert.Equal(otherPath, currentTree.Path);
+            Assert.Equal("other session", runner.SessionName);
+            Assert.Equal(2, runner.Messages.Count);
+            Assert.Equal("other task", ReadText(runner.Messages[0]));
+            Assert.Equal("other answer", ReadText(runner.Messages[1]));
+            Assert.NotNull(capturedPromptState);
+            Assert.Equal(CodingAgentTreeNavigationReason.ResumeSession, capturedPromptState!.Reason);
+            Assert.Equal(Path.GetFullPath(otherPath), capturedPromptState.TargetSessionPath);
+            Assert.Equal(4, capturedPromptState.EntryCount);
+
+            var summarizedCurrent = new CodingAgentTreeSessionController(new CodingAgentTreeSessionStore(currentPath));
+            var summarizedSnapshot = summarizedCurrent.LoadSnapshot();
+            Assert.Single(summarizedSnapshot.Messages);
+            Assert.Contains("resume summary body", ReadText(summarizedSnapshot.Messages[0]), StringComparison.Ordinal);
+            Assert.Equal("current session", summarizedSnapshot.Name);
+            Assert.Equal("openai", summarizedSnapshot.Provider);
+            Assert.Equal("gpt-5.4", summarizedSnapshot.Model);
+            var branchSummary = ReadBranchSummaryEntry(currentPath);
+            var summaryEntryId = branchSummary.GetProperty("id").GetString();
+            Assert.Equal("parking-lot", summarizedCurrent.GetLabel(summaryEntryId!));
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_ResumeCommandWithoutArgs_CanUseSessionSwitchHookDecisionWithoutPrompt()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-coding-agent-resume-hook-summary-" + Guid.NewGuid().ToString("N"));
+        var currentPath = Path.Combine(directory, "current.jsonl");
+        var otherPath = Path.Combine(directory, "coding-agent-sessions", "other.jsonl");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>())
+        {
+            SessionName = "current session"
+        };
+        runner.MutableMessages.Add(new UserMessage("current task"));
+        runner.MutableMessages.Add(new AssistantMessage([new TextContent("current answer")]));
+        runner.BranchSummaryHandler = (messages, instructions, replaceInstructions, _) =>
+        {
+            Assert.Equal("hook summary", instructions);
+            Assert.True(replaceInstructions);
+            Assert.Equal(2, messages.Count);
+            return Task.FromResult(new CodingAgentBranchSummaryResult("hooked summary body", messages.Count, 19));
+        };
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+            Directory.CreateDirectory(Path.GetDirectoryName(otherPath)!);
+
+            var currentTree = CodingAgentTreeSessionController.OpenOrCreate(currentPath);
+            currentTree.SyncFromRunner(runner);
+
+            var otherRunner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>())
+            {
+                SessionName = "other session"
+            };
+            otherRunner.MutableMessages.Add(new UserMessage("other task"));
+            CodingAgentTreeSessionController.OpenOrCreate(otherPath).SyncFromRunner(otherRunner);
+
+            CodingAgentSessionSwitchHookState? capturedHookState = null;
+            var router = new CodingAgentCommandRouter(
+                runner,
+                treeSessionController: currentTree,
+                resumeSelector: (_, _) => Task.FromResult(new CodingAgentResumeSelectionResult(otherPath)),
+                sessionSwitchHook: (state, _) =>
+                {
+                    capturedHookState = state;
+                    return Task.FromResult<CodingAgentSessionSwitchHookResult?>(
+                        CodingAgentSessionSwitchHookResult.Continue(
+                            CodingAgentTreeNavigationDecision.SummarizeWith("hook summary", replaceInstructions: true)));
+                });
+
+            var result = await router.TryHandleAsync("/resume");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Contains("previous branch summary 2 entries, tokens ~19", result.Message, StringComparison.Ordinal);
+            Assert.NotNull(capturedHookState);
+            Assert.Equal(CodingAgentTreeNavigationReason.ResumeSession, capturedHookState!.Reason);
+            Assert.Equal(Path.GetFullPath(currentPath), capturedHookState.CurrentSessionPath);
+            Assert.Equal("current session", capturedHookState.CurrentSessionName);
+            Assert.Equal("openai", capturedHookState.CurrentProvider);
+            Assert.Equal("gpt-5.4", capturedHookState.CurrentModel);
+            Assert.Equal(Path.GetFullPath(otherPath), capturedHookState.TargetSessionPath);
+            Assert.NotNull(capturedHookState.TargetSession);
+            Assert.Equal("other session", capturedHookState.TargetSession!.Name);
+            Assert.Equal("openai", capturedHookState.TargetSession.Provider);
+            Assert.Equal("gpt-5.4", capturedHookState.TargetSession.Model);
+            Assert.Equal(1, capturedHookState.TargetSession.MessageCount);
+            Assert.Equal(2, capturedHookState.EntryCount);
+            Assert.Equal(otherPath, currentTree.Path);
+            Assert.Equal("other session", runner.SessionName);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_ResumeCommandWithoutArgs_WhenSwitchSummaryPromptCancelled_KeepsCurrentSession()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-coding-agent-resume-selector-summary-cancel-" + Guid.NewGuid().ToString("N"));
+        var currentPath = Path.Combine(directory, "current.jsonl");
+        var otherPath = Path.Combine(directory, "coding-agent-sessions", "other.jsonl");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>())
+        {
+            SessionName = "current session"
+        };
+        runner.MutableMessages.Add(new UserMessage("current task"));
+        runner.MutableMessages.Add(new AssistantMessage([new TextContent("current answer")]));
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+            Directory.CreateDirectory(Path.GetDirectoryName(otherPath)!);
+
+            var currentTree = CodingAgentTreeSessionController.OpenOrCreate(currentPath);
+            currentTree.SyncFromRunner(runner);
+
+            var otherRunner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>())
+            {
+                SessionName = "other session"
+            };
+            otherRunner.MutableMessages.Add(new UserMessage("other task"));
+            CodingAgentTreeSessionController.OpenOrCreate(otherPath).SyncFromRunner(otherRunner);
+
+            var router = new CodingAgentCommandRouter(
+                runner,
+                treeSessionController: currentTree,
+                resumeSelector: (_, _) => Task.FromResult(new CodingAgentResumeSelectionResult(otherPath)),
+                sessionSwitchPrompt: (_, _) => Task.FromResult(CodingAgentTreeNavigationDecision.CancelledDecision));
+
+            var result = await router.TryHandleAsync("/resume");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Equal("resume switch cancelled", result.Message);
+            Assert.Equal(currentPath, currentTree.Path);
+            Assert.Equal("current session", runner.SessionName);
+            Assert.Equal(2, runner.Messages.Count);
+            Assert.Equal("current task", ReadText(runner.Messages[0]));
+            Assert.Equal("current answer", ReadText(runner.Messages[1]));
         }
         finally
         {
@@ -5141,6 +6001,8 @@ public class CodingAgentCommandRouterTests
         var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
         runner.MutableMessages.Add(new UserMessage("first task"));
         runner.MutableMessages.Add(new AssistantMessage([new TextContent("ack")]));
+        runner.MutableMessages.Add(new UserMessage("follow up"));
+        runner.MutableMessages.Add(new AssistantMessage([new TextContent("done")]));
 
         try
         {
@@ -5149,11 +6011,12 @@ public class CodingAgentCommandRouterTests
             tree.SyncFromRunner(runner);
 
             IReadOnlyList<CodingAgentTreeViewItem>? capturedItems = null;
-            Func<IReadOnlyList<CodingAgentTreeViewItem>, CancellationToken, Task<CodingAgentTreeInteractiveNavigator.Result>> navigator =
-                (items, _) =>
+            Func<IReadOnlyList<CodingAgentTreeViewItem>, string?, CancellationToken, Task<CodingAgentTreeInteractiveNavigator.Result>> navigator =
+                (items, _, _) =>
                 {
                     capturedItems = items;
-                    return Task.FromResult(new CodingAgentTreeInteractiveNavigator.Result(items[0].EntryId, 0, 1));
+                    var selected = items.Single(item => item.DisplayLine.Contains("ack", StringComparison.Ordinal));
+                    return Task.FromResult(new CodingAgentTreeInteractiveNavigator.Result(selected.EntryId, 0, 1));
                 };
 
             var router = new CodingAgentCommandRouter(runner, treeSessionController: tree, treeNavigator: navigator);
@@ -5162,7 +6025,508 @@ public class CodingAgentCommandRouterTests
             Assert.True(result.Handled);
             Assert.False(result.IsError);
             Assert.NotNull(capturedItems);
-            Assert.Equal(capturedItems![0].EntryId, ExtractSelectedEntryId(result.Message));
+            Assert.Contains("navigated tree to", result.Message, StringComparison.Ordinal);
+            Assert.Equal("first task", ReadText(runner.Messages[0]));
+            Assert.Equal("ack", ReadText(runner.Messages[1]));
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_TreeInteractiveCommand_SelectingCurrentLeafIsNoOp()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-coding-agent-tree-interactive-current-leaf-" + Guid.NewGuid().ToString("N"));
+        var treePath = Path.Combine(directory, "session.jsonl");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.MutableMessages.Add(new UserMessage("current leaf request"));
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+            var tree = CodingAgentTreeSessionController.OpenOrCreate(treePath);
+            tree.SyncFromRunner(runner);
+            var before = tree.GetSummary();
+            string? loadedDraft = null;
+            var promptCalls = 0;
+
+            Func<IReadOnlyList<CodingAgentTreeViewItem>, string?, CancellationToken, Task<CodingAgentTreeInteractiveNavigator.Result>> navigator =
+                (items, _, _) =>
+                {
+                    var selected = Assert.Single(items);
+                    Assert.True(selected.IsCurrentLeaf);
+                    Assert.Equal("user", selected.MessageRole);
+                    return Task.FromResult(new CodingAgentTreeInteractiveNavigator.Result(selected.EntryId, 0, 1));
+                };
+
+            var router = new CodingAgentCommandRouter(
+                runner,
+                treeSessionController: tree,
+                treeNavigator: navigator,
+                inputDraftSetter: draft => loadedDraft = draft,
+                treeNavigationPrompt: (_, _) =>
+                {
+                    promptCalls++;
+                    return Task.FromResult(CodingAgentTreeNavigationDecision.NoSummary);
+                });
+            var result = await router.TryHandleAsync("/tree --interactive");
+            var after = tree.GetSummary();
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Equal("Already at this point", result.Message);
+            Assert.Equal(0, promptCalls);
+            Assert.Null(loadedDraft);
+            Assert.Equal(before.EntryCount, after.EntryCount);
+            Assert.Equal(before.LeafId, after.LeafId);
+            Assert.Equal("current leaf request", ReadText(Assert.Single(runner.Messages)));
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_TreeInteractiveCommand_UsesFullFilteredTreeInsteadOfDefaultWindow()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-coding-agent-tree-interactive-full-" + Guid.NewGuid().ToString("N"));
+        var treePath = Path.Combine(directory, "session.jsonl");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        for (var i = 1; i <= 30; i++)
+        {
+            runner.MutableMessages.Add(new UserMessage($"message {i:00}"));
+        }
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+            var tree = CodingAgentTreeSessionController.OpenOrCreate(treePath);
+            tree.SyncFromRunner(runner);
+
+            IReadOnlyList<CodingAgentTreeViewItem>? capturedItems = null;
+            Func<IReadOnlyList<CodingAgentTreeViewItem>, string?, CancellationToken, Task<CodingAgentTreeInteractiveNavigator.Result>> navigator =
+                (items, _, _) =>
+                {
+                    capturedItems = items;
+                    return Task.FromResult(new CodingAgentTreeInteractiveNavigator.Result(items[^1].EntryId, items.Count - 1, 1));
+                };
+
+            var router = new CodingAgentCommandRouter(runner, treeSessionController: tree, treeNavigator: navigator);
+            var result = await router.TryHandleAsync("/tree --interactive");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.NotNull(capturedItems);
+            Assert.Equal(30, capturedItems!.Count);
+            Assert.Equal("Already at this point", result.Message);
+            Assert.Equal(30, runner.Messages.Count);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_TreeInteractiveCommand_SelectingUserMessageRewindsAndLoadsDraft()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-coding-agent-tree-interactive-user-" + Guid.NewGuid().ToString("N"));
+        var treePath = Path.Combine(directory, "session.jsonl");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.MutableMessages.Add(new UserMessage("root request"));
+        runner.MutableMessages.Add(new AssistantMessage([new TextContent("root answer")]));
+        runner.MutableMessages.Add(new UserMessage("follow up request"));
+        runner.MutableMessages.Add(new AssistantMessage([new TextContent("follow up answer")]));
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+            var tree = CodingAgentTreeSessionController.OpenOrCreate(treePath);
+            tree.SyncFromRunner(runner);
+            string? loadedDraft = null;
+
+            Func<IReadOnlyList<CodingAgentTreeViewItem>, string?, CancellationToken, Task<CodingAgentTreeInteractiveNavigator.Result>> navigator =
+                (items, _, _) =>
+                {
+                    var selected = items.Single(item =>
+                        string.Equals(item.MessageRole, "user", StringComparison.OrdinalIgnoreCase) &&
+                        string.Equals(item.NavigationDraftText, "follow up request", StringComparison.Ordinal));
+                    return Task.FromResult(new CodingAgentTreeInteractiveNavigator.Result(selected.EntryId, 0, 1));
+                };
+
+            var router = new CodingAgentCommandRouter(
+                runner,
+                treeSessionController: tree,
+                treeNavigator: navigator,
+                inputDraftSetter: draft => loadedDraft = draft);
+            var result = await router.TryHandleAsync("/tree --interactive");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Contains("loaded draft", result.Message, StringComparison.Ordinal);
+            Assert.Equal("follow up request", loadedDraft);
+            Assert.Equal(2, runner.Messages.Count);
+            Assert.Equal("root request", ReadText(runner.Messages[0]));
+            Assert.Equal("root answer", ReadText(runner.Messages[1]));
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_TreeInteractiveCommand_CanSummarizeAbandonedBranchBeforeNavigation()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-coding-agent-tree-interactive-summary-" + Guid.NewGuid().ToString("N"));
+        var treePath = Path.Combine(directory, "session.jsonl");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.MutableMessages.Add(new UserMessage("root task"));
+        runner.MutableMessages.Add(new AssistantMessage([new TextContent("root answer")]));
+        runner.MutableMessages.Add(new UserMessage("abandoned branch request"));
+        runner.MutableMessages.Add(new AssistantMessage([new TextContent("abandoned branch progress")]));
+        runner.BranchSummaryHandler = (messages, instructions, replaceInstructions, _) =>
+        {
+            Assert.Equal("focus tree switch", instructions);
+            Assert.False(replaceInstructions);
+            Assert.Equal(2, messages.Count);
+            Assert.Equal("abandoned branch request", ReadText(messages[0]));
+            Assert.Equal("abandoned branch progress", ReadText(messages[1]));
+            return Task.FromResult(new CodingAgentBranchSummaryResult("tree summary body", messages.Count, 77));
+        };
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+            var tree = CodingAgentTreeSessionController.OpenOrCreate(treePath);
+            tree.SyncFromRunner(runner);
+
+            Func<IReadOnlyList<CodingAgentTreeViewItem>, string?, CancellationToken, Task<CodingAgentTreeInteractiveNavigator.Result>> navigator =
+                (items, _, _) =>
+                {
+                    var selected = items.Single(item => item.DisplayLine.Contains("root answer", StringComparison.Ordinal));
+                    return Task.FromResult(new CodingAgentTreeInteractiveNavigator.Result(selected.EntryId, 0, 1));
+                };
+
+            var router = new CodingAgentCommandRouter(
+                runner,
+                treeSessionController: tree,
+                treeNavigator: navigator,
+                treeNavigationPrompt: (_, _) => Task.FromResult(CodingAgentTreeNavigationDecision.SummarizeWith("focus tree switch")));
+            var result = await router.TryHandleAsync("/tree --interactive");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Contains("navigated tree to", result.Message, StringComparison.Ordinal);
+            Assert.Contains("branch summary 2 entries, tokens ~77", result.Message, StringComparison.Ordinal);
+            Assert.Equal("focus tree switch", runner.LastBranchSummaryInstructions);
+            Assert.Equal(3, runner.Messages.Count);
+            Assert.Equal("root task", ReadText(runner.Messages[0]));
+            Assert.Equal("root answer", ReadText(runner.Messages[1]));
+            Assert.Contains("tree summary body", ReadText(runner.Messages[2]), StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_TreeInteractiveCommand_CanAttachLabelToBranchSummaryEntry()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-coding-agent-tree-interactive-summary-label-" + Guid.NewGuid().ToString("N"));
+        var treePath = Path.Combine(directory, "session.jsonl");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.MutableMessages.Add(new UserMessage("root task"));
+        runner.MutableMessages.Add(new AssistantMessage([new TextContent("root answer")]));
+        runner.MutableMessages.Add(new UserMessage("abandoned branch request"));
+        runner.MutableMessages.Add(new AssistantMessage([new TextContent("abandoned branch progress")]));
+        runner.BranchSummaryHandler = (messages, instructions, replaceInstructions, _) =>
+        {
+            Assert.Equal("focus tree switch", instructions);
+            Assert.False(replaceInstructions);
+            return Task.FromResult(new CodingAgentBranchSummaryResult("tree summary body", messages.Count, 77));
+        };
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+            var tree = CodingAgentTreeSessionController.OpenOrCreate(treePath);
+            tree.SyncFromRunner(runner);
+
+            Func<IReadOnlyList<CodingAgentTreeViewItem>, string?, CancellationToken, Task<CodingAgentTreeInteractiveNavigator.Result>> navigator =
+                (items, _, _) =>
+                {
+                    var selected = items.Single(item => item.DisplayLine.Contains("root answer", StringComparison.Ordinal));
+                    return Task.FromResult(new CodingAgentTreeInteractiveNavigator.Result(selected.EntryId, 0, 1));
+                };
+
+            var router = new CodingAgentCommandRouter(
+                runner,
+                treeSessionController: tree,
+                treeNavigator: navigator,
+                treeNavigationPrompt: (_, _) => Task.FromResult(new CodingAgentTreeNavigationDecision(
+                    Cancelled: false,
+                    Summarize: true,
+                    CustomInstructions: "focus tree switch",
+                    Label: "review-checkpoint")));
+            var result = await router.TryHandleAsync("/tree --interactive");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Contains("branch summary 2 entries, tokens ~77", result.Message, StringComparison.Ordinal);
+            var branchSummary = ReadBranchSummaryEntry(treePath);
+            var summaryEntryId = branchSummary.GetProperty("id").GetString();
+            Assert.Equal("review-checkpoint", tree.GetLabel(summaryEntryId!));
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_TreeInteractiveCommand_WithoutSummaryLabelTargetsSelectedEntry()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-coding-agent-tree-interactive-target-label-" + Guid.NewGuid().ToString("N"));
+        var treePath = Path.Combine(directory, "session.jsonl");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.MutableMessages.Add(new UserMessage("root task"));
+        runner.MutableMessages.Add(new AssistantMessage([new TextContent("root answer")]));
+        runner.MutableMessages.Add(new UserMessage("abandoned branch request"));
+        runner.MutableMessages.Add(new AssistantMessage([new TextContent("abandoned branch progress")]));
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+            var tree = CodingAgentTreeSessionController.OpenOrCreate(treePath);
+            tree.SyncFromRunner(runner);
+            string selectedEntryId = string.Empty;
+
+            Func<IReadOnlyList<CodingAgentTreeViewItem>, string?, CancellationToken, Task<CodingAgentTreeInteractiveNavigator.Result>> navigator =
+                (items, _, _) =>
+                {
+                    var selected = items.Single(item => item.DisplayLine.Contains("root answer", StringComparison.Ordinal));
+                    selectedEntryId = selected.EntryId;
+                    return Task.FromResult(new CodingAgentTreeInteractiveNavigator.Result(selected.EntryId, 0, 1));
+                };
+
+            var promptCalls = 0;
+            var router = new CodingAgentCommandRouter(
+                runner,
+                treeSessionController: tree,
+                treeNavigator: navigator,
+                treeNavigationPrompt: (_, _) =>
+                {
+                    promptCalls++;
+                    return Task.FromResult(new CodingAgentTreeNavigationDecision(
+                        Cancelled: false,
+                        Summarize: false,
+                        Label: "return-point"));
+                });
+            var result = await router.TryHandleAsync("/tree --interactive");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Contains("navigated tree to", result.Message, StringComparison.Ordinal);
+            Assert.Equal(1, promptCalls);
+            Assert.Equal("return-point", tree.GetLabel(selectedEntryId));
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_TreeInteractiveCommand_PassesReplaceInstructionsToBranchSummarizer()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-coding-agent-tree-interactive-replace-instructions-" + Guid.NewGuid().ToString("N"));
+        var treePath = Path.Combine(directory, "session.jsonl");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.MutableMessages.Add(new UserMessage("root task"));
+        runner.MutableMessages.Add(new AssistantMessage([new TextContent("root answer")]));
+        runner.MutableMessages.Add(new UserMessage("abandoned branch request"));
+        runner.MutableMessages.Add(new AssistantMessage([new TextContent("abandoned branch progress")]));
+        runner.BranchSummaryHandler = (messages, instructions, replaceInstructions, _) =>
+        {
+            Assert.Equal("summarize only blockers", instructions);
+            Assert.True(replaceInstructions);
+            return Task.FromResult(new CodingAgentBranchSummaryResult("tree summary body", messages.Count, 77));
+        };
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+            var tree = CodingAgentTreeSessionController.OpenOrCreate(treePath);
+            tree.SyncFromRunner(runner);
+
+            Func<IReadOnlyList<CodingAgentTreeViewItem>, string?, CancellationToken, Task<CodingAgentTreeInteractiveNavigator.Result>> navigator =
+                (items, _, _) =>
+                {
+                    var selected = items.Single(item => item.DisplayLine.Contains("root answer", StringComparison.Ordinal));
+                    return Task.FromResult(new CodingAgentTreeInteractiveNavigator.Result(selected.EntryId, 0, 1));
+                };
+
+            var router = new CodingAgentCommandRouter(
+                runner,
+                treeSessionController: tree,
+                treeNavigator: navigator,
+                treeNavigationPrompt: (_, _) => Task.FromResult(new CodingAgentTreeNavigationDecision(
+                    Cancelled: false,
+                    Summarize: true,
+                    CustomInstructions: "summarize only blockers",
+                    ReplaceInstructions: true)));
+
+            var result = await router.TryHandleAsync("/tree --interactive");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.True(runner.LastBranchSummaryReplaceInstructions);
+            Assert.Contains("branch summary 2 entries, tokens ~77", result.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_TreeInteractiveCommand_CancelledSummaryPromptReopensTreeAtSameSelection()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-coding-agent-tree-interactive-summary-cancel-" + Guid.NewGuid().ToString("N"));
+        var treePath = Path.Combine(directory, "session.jsonl");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.MutableMessages.Add(new UserMessage("root task"));
+        runner.MutableMessages.Add(new AssistantMessage([new TextContent("root answer")]));
+        runner.MutableMessages.Add(new UserMessage("abandoned branch request"));
+        runner.MutableMessages.Add(new AssistantMessage([new TextContent("abandoned branch progress")]));
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+            var tree = CodingAgentTreeSessionController.OpenOrCreate(treePath);
+            tree.SyncFromRunner(runner);
+
+            var preferredEntryIds = new List<string?>();
+            var selectedEntryId = string.Empty;
+            var callCount = 0;
+            Func<IReadOnlyList<CodingAgentTreeViewItem>, string?, CancellationToken, Task<CodingAgentTreeInteractiveNavigator.Result>> navigator =
+                (items, preferredEntryId, _) =>
+                {
+                    preferredEntryIds.Add(preferredEntryId);
+                    var selected = items.Single(item => item.DisplayLine.Contains("root answer", StringComparison.Ordinal));
+                    selectedEntryId = selected.EntryId;
+                    callCount++;
+                    return Task.FromResult(callCount == 1
+                        ? new CodingAgentTreeInteractiveNavigator.Result(selected.EntryId, 0, 1)
+                        : new CodingAgentTreeInteractiveNavigator.Result(null, 0, 1));
+                };
+
+            var promptCalls = 0;
+            var router = new CodingAgentCommandRouter(
+                runner,
+                treeSessionController: tree,
+                treeNavigator: navigator,
+                treeNavigationPrompt: (_, _) =>
+                {
+                    promptCalls++;
+                    return Task.FromResult(CodingAgentTreeNavigationDecision.CancelledDecision);
+                });
+            var result = await router.TryHandleAsync("/tree --interactive");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Equal("tree navigator cancelled", result.Message);
+            Assert.Equal(1, promptCalls);
+            Assert.Equal([null, selectedEntryId], preferredEntryIds);
+            Assert.Equal(4, runner.Messages.Count);
+            Assert.Equal("abandoned branch request", ReadText(runner.Messages[2]));
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_TreeInteractiveCommand_LabelEditReopensTreeAtSameEntryAndPersistsLabel()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-coding-agent-tree-interactive-label-" + Guid.NewGuid().ToString("N"));
+        var treePath = Path.Combine(directory, "session.jsonl");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.MutableMessages.Add(new UserMessage("root task"));
+        runner.MutableMessages.Add(new AssistantMessage([new TextContent("root answer")]));
+        runner.MutableMessages.Add(new UserMessage("follow up request"));
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+            var tree = CodingAgentTreeSessionController.OpenOrCreate(treePath);
+            tree.SyncFromRunner(runner);
+
+            var preferredEntryIds = new List<string?>();
+            var seenDisplayLines = new List<string[]>();
+            var callCount = 0;
+            string? labelTargetEntryId = null;
+            Func<IReadOnlyList<CodingAgentTreeViewItem>, string?, CancellationToken, Task<CodingAgentTreeInteractiveNavigator.Result>> navigator =
+                (items, preferredEntryId, _) =>
+                {
+                    preferredEntryIds.Add(preferredEntryId);
+                    seenDisplayLines.Add(items.Select(item => item.DisplayLine).ToArray());
+                    callCount++;
+                    labelTargetEntryId ??= items.Single(item =>
+                        item.DisplayLine.Contains("root answer", StringComparison.Ordinal)).EntryId;
+                    return Task.FromResult(callCount == 1
+                        ? new CodingAgentTreeInteractiveNavigator.Result(null, 0, 1, LabelEditEntryId: labelTargetEntryId)
+                        : new CodingAgentTreeInteractiveNavigator.Result(null, 0, 1));
+                };
+
+            var router = new CodingAgentCommandRouter(
+                runner,
+                treeSessionController: tree,
+                treeNavigator: navigator,
+                treeLabelPrompt: (_, _) => Task.FromResult(CodingAgentTreeLabelPromptResult.Saved("checkpoint")));
+            var result = await router.TryHandleAsync("/tree --interactive");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Equal("tree navigator cancelled", result.Message);
+            Assert.Equal([null, labelTargetEntryId], preferredEntryIds);
+            Assert.Equal("checkpoint", tree.GetLabel(labelTargetEntryId!));
+            Assert.DoesNotContain(seenDisplayLines[0], line => line.Contains("[checkpoint]", StringComparison.Ordinal));
+            Assert.Contains(seenDisplayLines[1], line => line.Contains("[checkpoint]", StringComparison.Ordinal));
+            Assert.Equal(3, runner.Messages.Count);
         }
         finally
         {
@@ -5190,7 +6554,7 @@ public class CodingAgentCommandRouterTests
             var router = new CodingAgentCommandRouter(
                 runner,
                 treeSessionController: tree,
-                treeNavigator: (_, _) => Task.FromResult(new CodingAgentTreeInteractiveNavigator.Result(null, 0, 1)));
+                treeNavigator: (_, _, _) => Task.FromResult(new CodingAgentTreeInteractiveNavigator.Result(null, 0, 1)));
 
             var result = await router.TryHandleAsync("/tree -i");
 
@@ -5233,18 +6597,6 @@ public class CodingAgentCommandRouterTests
                 Directory.Delete(directory, recursive: true);
             }
         }
-    }
-
-    private static string? ExtractSelectedEntryId(string? message)
-    {
-        if (string.IsNullOrEmpty(message))
-        {
-            return null;
-        }
-
-        const string prefix = "selected entry ";
-        var index = message.IndexOf(prefix, StringComparison.Ordinal);
-        return index < 0 ? null : message[(index + prefix.Length)..].Trim();
     }
 
     private static bool MessageContains(JsonElement message, string text)

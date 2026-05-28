@@ -56,6 +56,42 @@ public sealed class SlackSocketModeTransport : IMomChannelTransport
 
     public IMomChannelResponder Responder { get; }
 
+    public async Task<MomSlackValidationResult> ValidateAsync(CancellationToken cancellationToken = default)
+    {
+        string? botUserId = null;
+        string? socketHost = null;
+
+        try
+        {
+            EnsureConfigured();
+            botUserId = await ResolveBotUserIdAsync(cancellationToken).ConfigureAwait(false);
+            var socketUrl = await OpenSocketModeConnectionAsync(cancellationToken).ConfigureAwait(false);
+            socketHost = socketUrl.IsAbsoluteUri ? socketUrl.Host : "<unknown>";
+            var message = $"{BuildValidationMessagePrefix("passed")} botUserId={botUserId ?? "<unknown>"} socketHost={socketHost}";
+            return BuildValidationResult(true, message, botUserId, socketHost, error: null);
+        }
+        catch (TaskCanceledException ex) when (!cancellationToken.IsCancellationRequested)
+        {
+            var error = $"Slack Web API request timed out or was cancelled before completion: {DescribeException(ex)}";
+            return BuildValidationResult(
+                false,
+                $"{BuildValidationMessagePrefix("failed")}: {error}",
+                botUserId,
+                socketHost,
+                error);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or HttpRequestException or JsonException)
+        {
+            var error = DescribeException(ex);
+            return BuildValidationResult(
+                false,
+                $"{BuildValidationMessagePrefix("failed")}: {error}",
+                botUserId,
+                socketHost,
+                error);
+        }
+    }
+
     public async IAsyncEnumerable<MomChannelMessage> ReadMessagesAsync(
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
@@ -209,6 +245,36 @@ public sealed class SlackSocketModeTransport : IMomChannelTransport
     {
         var trimmed = string.IsNullOrWhiteSpace(value) ? "https://slack.com/api/" : value.Trim();
         return trimmed.EndsWith("/", StringComparison.Ordinal) ? trimmed : trimmed + "/";
+    }
+
+    private string BuildValidationMessagePrefix(string outcome)
+    {
+        var enabledState = _options.SlackSocketModeEnabled
+            ? "SlackSocketModeEnabled=true (worker will attempt to connect when Tau.Mom runs)."
+            : "SlackSocketModeEnabled=false (worker disabled; no runtime Slack connection will be opened).";
+        return $"Slack Socket Mode preflight {outcome}. {enabledState}";
+    }
+
+    private MomSlackValidationResult BuildValidationResult(
+        bool succeeded,
+        string message,
+        string? botUserId,
+        string? socketHost,
+        string? error)
+    {
+        return new MomSlackValidationResult(
+            succeeded,
+            message,
+            _options.SlackSocketModeEnabled,
+            botUserId,
+            socketHost,
+            error);
+    }
+
+    private static string DescribeException(Exception ex)
+    {
+        var message = ex.Message.Trim();
+        return string.IsNullOrWhiteSpace(message) ? ex.GetType().Name : message;
     }
 }
 

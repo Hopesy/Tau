@@ -20,6 +20,8 @@ public enum EditorAction
     HistoryPrev,
     HistoryNext,
     ReverseSearch,
+    Complete,
+    CompletePrevious,
     CycleModelForward,
     CycleModelBackward,
     SelectModel,

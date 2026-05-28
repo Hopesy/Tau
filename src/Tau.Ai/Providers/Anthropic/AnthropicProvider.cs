@@ -132,7 +132,7 @@ public sealed class AnthropicProvider : IStreamProvider
         };
 
         if (!string.IsNullOrEmpty(context.SystemPrompt))
-            body["system"] = context.SystemPrompt!;
+            body["system"] = UnicodeTextSanitizer.RemoveUnpairedSurrogates(context.SystemPrompt!);
 
         body["messages"] = AnthropicMessageConverter.ConvertMessages(context.Messages);
 

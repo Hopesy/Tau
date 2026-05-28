@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Text;
 using System.Net.Http;
 using System.Text.Json;
+using Tau.Ai.Observability;
 using Tau.Pods.Models;
 
 namespace Tau.Pods.Services;
@@ -9,81 +10,125 @@ namespace Tau.Pods.Services;
 public sealed class PodLifecycleService
 {
     private readonly PodExecService _execService;
+    private readonly ITauLogSink _logSink;
 
-    public PodLifecycleService(PodExecService? execService = null)
+    public PodLifecycleService(PodExecService? execService = null, ITauLogSink? logSink = null)
     {
         _execService = execService ?? new PodExecService();
+        _logSink = logSink ?? NullTauLogSink.Instance;
     }
 
     public async Task<PodHealthResult> HealthAsync(PodDefinition pod, CancellationToken cancellationToken = default)
     {
+        LogLifecycleStart("health", pod.Id, transport: GetLifecycleTransport(pod));
+        PodHealthResult result;
         if (!string.IsNullOrWhiteSpace(pod.Endpoint))
         {
-            return await HttpHealthCheckAsync(pod, cancellationToken).ConfigureAwait(false);
+            result = await HttpHealthCheckAsync(pod, cancellationToken).ConfigureAwait(false);
+            LogHealthEnd(result);
+            return result;
         }
 
         if (!string.IsNullOrWhiteSpace(pod.SshHost))
         {
-            return await SshHealthCheckAsync(pod, cancellationToken).ConfigureAwait(false);
+            result = await SshHealthCheckAsync(pod, cancellationToken).ConfigureAwait(false);
+            LogHealthEnd(result);
+            return result;
         }
 
-        return new PodHealthResult(pod.Id, false, "none", "No endpoint or SSH host configured.");
+        result = new PodHealthResult(pod.Id, false, "none", "No endpoint or SSH host configured.");
+        LogHealthEnd(result);
+        return result;
     }
 
     public async Task<PodDeployResult> DeployAsync(
         PodDefinition pod, string modelId, string? name = null, CancellationToken cancellationToken = default)
     {
+        var deployName = NormalizeDeploymentName(name ?? modelId);
+        LogLifecycleStart("deploy", pod.Id, deployName, modelId, GetLifecycleTransport(pod));
         if (string.IsNullOrWhiteSpace(pod.SshHost))
         {
-            return new PodDeployResult(pod.Id, false, "Deploy requires SSH-based pod.");
+            var unsupportedResult = new PodDeployResult(
+                pod.Id,
+                false,
+                "Deploy requires SSH-based pod.",
+                DeploymentName: deployName,
+                ModelId: modelId);
+            LogDeployEnd(unsupportedResult, "unsupported-transport");
+            return unsupportedResult;
         }
 
-        var deployName = NormalizeDeploymentName(name ?? modelId);
         var metadata = BuildDeploymentMetadata(modelId, deployName);
         var command = $"mkdir -p ~/.tau_pods && printf %s {ShellSingleQuote(metadata)} > ~/.tau_pods/{deployName}.json && echo {ShellSingleQuote($"deployed {deployName}")}";
 
-        var result = await _execService.ExecuteAsync(pod, command, cancellationToken).ConfigureAwait(false);
-        return new PodDeployResult(
+        var execResult = await _execService.ExecuteAsync(pod, command, cancellationToken).ConfigureAwait(false);
+        var finalResult = new PodDeployResult(
             pod.Id,
-            result.Success,
-            result.Success ? $"Deployed '{deployName}' on {pod.Id}." : $"Deploy failed: {result.Summary}",
-            deployName);
+            execResult.Success,
+            execResult.Success ? $"Deployed '{deployName}' on {pod.Id}." : $"Deploy failed: {execResult.Summary}",
+            DeploymentName: deployName,
+            ModelId: modelId,
+            Execution: execResult);
+        LogDeployEnd(finalResult);
+        return finalResult;
     }
 
     public async Task<PodStopResult> StopAsync(
         PodDefinition pod, string deploymentName, CancellationToken cancellationToken = default)
     {
+        var deployName = NormalizeDeploymentName(deploymentName);
+        LogLifecycleStart("stop", pod.Id, deployName, transport: GetLifecycleTransport(pod));
         if (string.IsNullOrWhiteSpace(pod.SshHost))
         {
-            return new PodStopResult(pod.Id, false, "Stop requires SSH-based pod.");
+            var unsupportedResult = new PodStopResult(
+                pod.Id,
+                false,
+                "Stop requires SSH-based pod.",
+                DeploymentName: deployName);
+            LogStopEnd("stop", unsupportedResult, "unsupported-transport");
+            return unsupportedResult;
         }
 
-        var deployName = NormalizeDeploymentName(deploymentName);
         var command = $"rm -f ~/.tau_pods/{deployName}.json && echo {ShellSingleQuote($"stopped {deployName}")}";
-        var result = await _execService.ExecuteAsync(pod, command, cancellationToken).ConfigureAwait(false);
-        return new PodStopResult(
+        var execResult = await _execService.ExecuteAsync(pod, command, cancellationToken).ConfigureAwait(false);
+        var finalResult = new PodStopResult(
             pod.Id,
-            result.Success,
-            result.Success ? $"Stopped '{deployName}' on {pod.Id}." : $"Stop failed: {result.Summary}");
+            execResult.Success,
+            execResult.Success ? $"Stopped '{deployName}' on {pod.Id}." : $"Stop failed: {execResult.Summary}",
+            DeploymentName: deployName,
+            Execution: execResult);
+        LogStopEnd("stop", finalResult);
+        return finalResult;
     }
 
     public async Task<PodStopResult> RestartAsync(
         PodDefinition pod, string deploymentName, CancellationToken cancellationToken = default)
     {
+        var deployName = NormalizeDeploymentName(deploymentName);
+        LogLifecycleStart("restart", pod.Id, deployName, transport: GetLifecycleTransport(pod));
         if (string.IsNullOrWhiteSpace(pod.SshHost))
         {
-            return new PodStopResult(pod.Id, false, "Restart requires SSH-based pod.");
+            var unsupportedResult = new PodStopResult(
+                pod.Id,
+                false,
+                "Restart requires SSH-based pod.",
+                DeploymentName: deployName);
+            LogStopEnd("restart", unsupportedResult, "unsupported-transport");
+            return unsupportedResult;
         }
 
-        var deployName = NormalizeDeploymentName(deploymentName);
         var command = $"test -f ~/.tau_pods/{deployName}.json && echo {ShellSingleQuote($"restarted {deployName}")} || echo 'not found'";
-        var result = await _execService.ExecuteAsync(pod, command, cancellationToken).ConfigureAwait(false);
-        var success = result.Success && result.StdOut.Contains("restarted");
-        var failureSummary = result.Success ? "deployment not found" : result.Summary;
-        return new PodStopResult(
+        var execResult = await _execService.ExecuteAsync(pod, command, cancellationToken).ConfigureAwait(false);
+        var success = execResult.Success && execResult.StdOut.Contains("restarted");
+        var failureSummary = execResult.Success ? "deployment not found" : execResult.Summary;
+        var finalResult = new PodStopResult(
             pod.Id,
             success,
-            success ? $"Restarted '{deployName}' on {pod.Id}." : $"Restart failed: {failureSummary}.");
+            success ? $"Restarted '{deployName}' on {pod.Id}." : $"Restart failed: {failureSummary}.",
+            DeploymentName: deployName,
+            Execution: execResult);
+        LogStopEnd("restart", finalResult, success ? null : execResult.Success ? "deployment-not-found" : null);
+        return finalResult;
     }
 
     public async Task<PodLogsResult> LogsAsync(
@@ -92,17 +137,34 @@ public sealed class PodLifecycleService
         int tail = 100,
         CancellationToken cancellationToken = default)
     {
-        if (string.IsNullOrWhiteSpace(pod.SshHost))
-        {
-            return new PodLogsResult(pod.Id, false, "Logs require SSH-based pod.");
-        }
-
+        var deployName = NormalizeDeploymentName(deploymentName);
+        LogLifecycleStart(
+            "logs",
+            pod.Id,
+            deployName,
+            transport: GetLifecycleTransport(pod),
+            extraFields: new Dictionary<string, string?>
+            {
+                ["tail"] = tail <= 0 ? "100" : tail.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            });
         if (tail <= 0)
         {
             tail = 100;
         }
 
-        var deployName = NormalizeDeploymentName(deploymentName);
+        if (string.IsNullOrWhiteSpace(pod.SshHost))
+        {
+            var unsupportedResult = new PodLogsResult(
+                pod.Id,
+                false,
+                "Logs require SSH-based pod.",
+                DeploymentName: deployName,
+                Tail: tail,
+                FailureKind: PodExecFailureKinds.UnsupportedTransport);
+            LogLogsEnd(unsupportedResult, PodExecFailureKinds.UnsupportedTransport);
+            return unsupportedResult;
+        }
+
         var unitName = $"tau-pod-{deployName}";
         var command =
             $"if command -v journalctl >/dev/null 2>&1; then " +
@@ -111,51 +173,237 @@ public sealed class PodLifecycleService
             $"tail -n {tail.ToString(System.Globalization.CultureInfo.InvariantCulture)} ~/.tau_pods/{deployName}.log; " +
             "else echo 'no logs available' && exit 1; fi";
 
-        var result = await _execService.ExecuteAsync(pod, command, cancellationToken).ConfigureAwait(false);
-        if (!result.Success)
+        var execResult = await _execService.ExecuteAsync(pod, command, cancellationToken).ConfigureAwait(false);
+        if (!execResult.Success)
         {
-            return new PodLogsResult(
+            var failureResult = new PodLogsResult(
                 pod.Id,
                 false,
-                $"Logs failed: {result.Summary}",
-                string.IsNullOrEmpty(result.StdOut) ? null : result.StdOut);
+                $"Logs failed: {execResult.Summary}",
+                string.IsNullOrEmpty(execResult.StdOut) ? null : execResult.StdOut,
+                deployName,
+                tail,
+                command,
+                execResult.ExitCode,
+                string.IsNullOrEmpty(execResult.StdErr) ? null : execResult.StdErr,
+                GetExecutionFailureKind(execResult));
+            LogLogsEnd(failureResult, GetExecutionFailureKind(execResult));
+            return failureResult;
         }
 
-        var output = result.StdOut ?? string.Empty;
-        return new PodLogsResult(
+        var output = execResult.StdOut ?? string.Empty;
+        var finalResult = new PodLogsResult(
             pod.Id,
             true,
             $"Fetched {LineCount(output)} log line(s) for '{deployName}' on {pod.Id}.",
-            output);
+            output,
+            deployName,
+            tail,
+            command,
+            execResult.ExitCode,
+            string.IsNullOrEmpty(execResult.StdErr) ? null : execResult.StdErr,
+            PodExecFailureKinds.None);
+        LogLogsEnd(finalResult);
+        return finalResult;
     }
 
     public async Task<PodDeploymentsResult> ListDeploymentsAsync(
         PodDefinition pod, CancellationToken cancellationToken = default)
     {
+        LogLifecycleStart("deployments", pod.Id, transport: GetLifecycleTransport(pod));
         if (string.IsNullOrWhiteSpace(pod.SshHost))
         {
-            return new PodDeploymentsResult(pod.Id, false, "Deployments require SSH-based pod.", Array.Empty<PodDeploymentInfo>());
+            var unsupportedResult = new PodDeploymentsResult(pod.Id, false, "Deployments require SSH-based pod.", Array.Empty<PodDeploymentInfo>());
+            LogDeploymentsEnd(unsupportedResult, "unsupported-transport");
+            return unsupportedResult;
         }
 
         const string command =
             "for f in ~/.tau_pods/*.json; do [ -f \"$f\" ] && cat \"$f\" && echo; done";
 
-        var result = await _execService.ExecuteAsync(pod, command, cancellationToken).ConfigureAwait(false);
-        if (!result.Success)
+        var execResult = await _execService.ExecuteAsync(pod, command, cancellationToken).ConfigureAwait(false);
+        if (!execResult.Success)
         {
-            return new PodDeploymentsResult(
+            var failureResult = new PodDeploymentsResult(
                 pod.Id,
                 false,
-                $"Deployments failed: {result.Summary}",
+                $"Deployments failed: {execResult.Summary}",
                 Array.Empty<PodDeploymentInfo>());
+            LogDeploymentsEnd(failureResult, GetExecutionFailureKind(execResult));
+            return failureResult;
         }
 
-        var deployments = ParseDeployments(result.StdOut);
+        var deployments = ParseDeployments(execResult.StdOut);
         var summary = deployments.Count == 0
             ? $"No deployments on {pod.Id}."
             : $"Found {deployments.Count} deployment(s) on {pod.Id}.";
 
-        return new PodDeploymentsResult(pod.Id, true, summary, deployments);
+        var finalResult = new PodDeploymentsResult(pod.Id, true, summary, deployments);
+        LogDeploymentsEnd(finalResult);
+        return finalResult;
+    }
+
+    private void LogHealthEnd(PodHealthResult result)
+    {
+        LogLifecycleEnd(
+            "health",
+            result.PodId,
+            result.Healthy,
+            result.Summary,
+            extraFields: new Dictionary<string, string?>
+            {
+                ["transport"] = result.Transport,
+                ["latencyMs"] = result.Latency?.TotalMilliseconds.ToString("F0", System.Globalization.CultureInfo.InvariantCulture),
+                ["failureKind"] = result.Healthy ? "none" : result.Transport.Equals("none", StringComparison.OrdinalIgnoreCase) ? "not-configured" : $"{result.Transport}-unhealthy"
+            });
+    }
+
+    private void LogDeployEnd(PodDeployResult result, string? failureKind = null)
+    {
+        LogLifecycleEnd(
+            "deploy",
+            result.PodId,
+            result.Success,
+            result.Summary,
+            result.DeploymentName,
+            result.ModelId,
+            new Dictionary<string, string?>
+            {
+                ["exitCode"] = result.Execution?.ExitCode.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                ["failureKind"] = failureKind ?? GetExecutionFailureKind(result.Execution)
+            });
+    }
+
+    private void LogStopEnd(string operation, PodStopResult result, string? failureKind = null)
+    {
+        LogLifecycleEnd(
+            operation,
+            result.PodId,
+            result.Success,
+            result.Summary,
+            result.DeploymentName,
+            extraFields: new Dictionary<string, string?>
+            {
+                ["exitCode"] = result.Execution?.ExitCode.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                ["failureKind"] = failureKind ?? GetExecutionFailureKind(result.Execution)
+            });
+    }
+
+    private void LogLogsEnd(PodLogsResult result, string? failureKind = null)
+    {
+        LogLifecycleEnd(
+            "logs",
+            result.PodId,
+            result.Success,
+            result.Summary,
+            result.DeploymentName,
+            extraFields: new Dictionary<string, string?>
+            {
+                ["tail"] = result.Tail?.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                ["lineCount"] = result.Output is null ? null : LineCount(result.Output).ToString(System.Globalization.CultureInfo.InvariantCulture),
+                ["exitCode"] = result.ExitCode?.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                ["failureKind"] = failureKind ?? result.FailureKind
+            });
+    }
+
+    private void LogDeploymentsEnd(PodDeploymentsResult result, string? failureKind = null)
+    {
+        LogLifecycleEnd(
+            "deployments",
+            result.PodId,
+            result.Success,
+            result.Summary,
+            extraFields: new Dictionary<string, string?>
+            {
+                ["deploymentCount"] = result.Deployments.Count.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                ["failureKind"] = failureKind ?? (result.Success ? "none" : "exec-failed")
+            });
+    }
+
+    private void LogLifecycleStart(
+        string operation,
+        string podId,
+        string? deploymentName = null,
+        string? modelId = null,
+        string? transport = null,
+        IReadOnlyDictionary<string, string?>? extraFields = null)
+    {
+        var fields = BuildLifecycleFields(operation, podId, deploymentName, modelId, transport, extraFields);
+        _logSink.Log(new TauLogEvent("pod", $"lifecycle.{operation}.start", DateTimeOffset.UtcNow, fields));
+    }
+
+    private void LogLifecycleEnd(
+        string operation,
+        string podId,
+        bool success,
+        string summary,
+        string? deploymentName = null,
+        string? modelId = null,
+        IReadOnlyDictionary<string, string?>? extraFields = null)
+    {
+        var fields = BuildLifecycleFields(operation, podId, deploymentName, modelId, null, extraFields);
+        fields["success"] = success ? "true" : "false";
+        fields["summary"] = summary;
+        _logSink.Log(new TauLogEvent("pod", $"lifecycle.{operation}.end", DateTimeOffset.UtcNow, fields));
+    }
+
+    private static Dictionary<string, string?> BuildLifecycleFields(
+        string operation,
+        string podId,
+        string? deploymentName,
+        string? modelId,
+        string? transport,
+        IReadOnlyDictionary<string, string?>? extraFields)
+    {
+        var fields = new Dictionary<string, string?>
+        {
+            ["podId"] = podId,
+            ["operation"] = operation
+        };
+        if (!string.IsNullOrWhiteSpace(deploymentName))
+        {
+            fields["deploymentName"] = deploymentName;
+        }
+
+        if (!string.IsNullOrWhiteSpace(modelId))
+        {
+            fields["modelId"] = modelId;
+        }
+
+        if (!string.IsNullOrWhiteSpace(transport))
+        {
+            fields["transport"] = transport;
+        }
+
+        if (extraFields is not null)
+        {
+            foreach (var item in extraFields)
+            {
+                fields[item.Key] = item.Value;
+            }
+        }
+
+        return fields;
+    }
+
+    private static string GetLifecycleTransport(PodDefinition pod)
+    {
+        if (!string.IsNullOrWhiteSpace(pod.Endpoint))
+        {
+            return "http";
+        }
+
+        if (!string.IsNullOrWhiteSpace(pod.SshHost))
+        {
+            return "ssh";
+        }
+
+        return "none";
+    }
+
+    private static string GetExecutionFailureKind(PodExecResult? result)
+    {
+        return PodExecFailureKinds.FromResult(result);
     }
 
     private static IReadOnlyList<PodDeploymentInfo> ParseDeployments(string output)

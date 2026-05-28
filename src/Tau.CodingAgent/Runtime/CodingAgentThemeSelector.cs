@@ -21,6 +21,25 @@ public static class CodingAgentThemeSelector
             cancellationToken);
     }
 
+    public static Func<CodingAgentThemeStatus, string?, CancellationToken, Task<string?>> CreateCompositionSelector(
+        TuiCompositionSession session)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+
+        return async (status, currentTheme, cancellationToken) =>
+        {
+            var selector = CreateSelectList(status, currentTheme);
+            if (selector.FilteredItems.Count == 0)
+            {
+                return null;
+            }
+
+            var result = await TuiCompositionOverlaySessions.RunAsync(selector, session, cancellationToken)
+                .ConfigureAwait(false);
+            return result.HasSelection ? result.SelectedItem?.Value : null;
+        };
+    }
+
     public static TuiSelectList CreateSelectList(
         CodingAgentThemeStatus status,
         string? currentTheme,

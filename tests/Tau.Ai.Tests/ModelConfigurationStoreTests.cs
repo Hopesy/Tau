@@ -88,7 +88,7 @@ public sealed class ModelConfigurationStoreTests
         }
         finally
         {
-            Directory.Delete(tempDir, recursive: true);
+            DeleteDirectoryWithRetry(tempDir);
         }
     }
 
@@ -123,7 +123,7 @@ public sealed class ModelConfigurationStoreTests
         }
         finally
         {
-            Directory.Delete(tempDir, recursive: true);
+            DeleteDirectoryWithRetry(tempDir);
         }
     }
 
@@ -202,7 +202,7 @@ public sealed class ModelConfigurationStoreTests
         }
         finally
         {
-            Directory.Delete(tempDir, recursive: true);
+            DeleteDirectoryWithRetry(tempDir);
         }
     }
 
@@ -262,7 +262,31 @@ public sealed class ModelConfigurationStoreTests
         }
         finally
         {
-            Directory.Delete(tempDir, recursive: true);
+            DeleteDirectoryWithRetry(tempDir);
+        }
+    }
+
+    private static void DeleteDirectoryWithRetry(string path)
+    {
+        for (var attempt = 1; attempt <= 5; attempt++)
+        {
+            try
+            {
+                if (Directory.Exists(path))
+                {
+                    Directory.Delete(path, recursive: true);
+                }
+
+                return;
+            }
+            catch (IOException) when (attempt < 5)
+            {
+                Thread.Sleep(50 * attempt);
+            }
+            catch (UnauthorizedAccessException) when (attempt < 5)
+            {
+                Thread.Sleep(50 * attempt);
+            }
         }
     }
 

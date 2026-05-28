@@ -15,6 +15,7 @@ public record AgentLoopConfig
     public required IReadOnlyList<IAgentTool> Tools { get; init; }
     public IReadOnlyList<IToolInterceptor> Interceptors { get; init; } = [];
     public ITauLogSink LogSink { get; init; } = NullTauLogSink.Instance;
+    public TauRuntimeLogContext? LogContext { get; init; }
     public string? SystemPrompt { get; init; }
     public SimpleStreamOptions? StreamOptions { get; init; }
     public ToolExecutionMode DefaultExecutionMode { get; init; } = ToolExecutionMode.Parallel;

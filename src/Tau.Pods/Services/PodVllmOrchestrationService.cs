@@ -1,4 +1,6 @@
 using System.Text;
+using System.Text.Json;
+using Tau.Ai.Observability;
 using Tau.Pods.Models;
 
 namespace Tau.Pods.Services;
@@ -10,16 +12,22 @@ public sealed class PodVllmOrchestrationService
 
     private readonly PodExecService _execService;
     private readonly PodVllmCommandPlanner _planner;
+    private readonly PodModelService _modelService;
     private readonly Func<TimeSpan, CancellationToken, Task> _delayAsync;
+    private readonly ITauLogSink _logSink;
 
     public PodVllmOrchestrationService(
         PodExecService? execService = null,
         PodVllmCommandPlanner? planner = null,
-        Func<TimeSpan, CancellationToken, Task>? delayAsync = null)
+        Func<TimeSpan, CancellationToken, Task>? delayAsync = null,
+        ITauLogSink? logSink = null,
+        PodModelService? modelService = null)
     {
         _execService = execService ?? new PodExecService();
         _planner = planner ?? new PodVllmCommandPlanner();
         _delayAsync = delayAsync ?? Task.Delay;
+        _logSink = logSink ?? NullTauLogSink.Instance;
+        _modelService = modelService ?? new PodModelService(_execService, _logSink);
     }
 
     public async Task<PodVllmOperationResult> DeployAsync(
@@ -30,35 +38,136 @@ public sealed class PodVllmOrchestrationService
         ArgumentNullException.ThrowIfNull(pod);
         ArgumentNullException.ThrowIfNull(options);
 
+        var deploymentName = NormalizeDeploymentName(options.DeploymentName ?? options.ModelId);
+        var modelId = options.ModelId.Trim();
+        var revision = NormalizeRevision(options.Revision);
+        LogVllmStart(
+            "deploy",
+            pod.Id,
+            deploymentName,
+            modelId,
+            new Dictionary<string, string?>
+            {
+                ["waitForHealth"] = BoolString(options.WaitForHealth),
+                ["healthAttempts"] = Invariant(NormalizeHealthAttempts(options.HealthAttempts)),
+                ["healthBackoffMs"] = Invariant(NormalizeHealthBackoff(options.HealthBackoffMilliseconds)),
+                ["requestedRevision"] = revision,
+                ["prefetchRequested"] = BoolString(options.Prefetch)
+            });
+
         if (string.IsNullOrWhiteSpace(pod.SshHost))
         {
-            var name = NormalizeDeploymentName(options.DeploymentName ?? options.ModelId);
-            return new PodVllmOperationResult(
+            var result = new PodVllmOperationResult(
                 pod.Id,
                 false,
                 "deploy",
-                name,
+                deploymentName,
                 "vLLM deploy requires SSH-based pod.",
                 string.Empty,
                 -1,
                 string.Empty,
                 string.Empty);
+            LogVllmEnd(
+                "deploy",
+                result.PodId,
+                result.DeploymentName,
+                result.Success,
+                result.ExitCode,
+                result.Summary,
+                modelId,
+                new Dictionary<string, string?>
+                {
+                    ["failureKind"] = "unsupported-transport",
+                    ["hasRollback"] = "false"
+                });
+            return result;
         }
 
         var preflight = await PreflightAsync(pod, options, cancellationToken).ConfigureAwait(false);
+        PodModelOperationResult? prefetch = null;
+        string? prefetchTriggerFailureKind = null;
         if (!preflight.Success)
         {
-            return new PodVllmOperationResult(
-                pod.Id,
-                false,
-                "deploy",
-                preflight.DeploymentName,
-                $"vLLM deploy preflight failed ({preflight.FailureKind}): {preflight.Summary}",
-                preflight.Command,
-                preflight.ExitCode,
-                preflight.StdOut,
-                preflight.StdErr,
-                Preflight: preflight);
+            if (options.Prefetch && IsPrefetchableFailureKind(preflight.FailureKind))
+            {
+                prefetchTriggerFailureKind = preflight.FailureKind;
+                prefetch = await _modelService.PullAsync(pod, modelId, revision, cancellationToken).ConfigureAwait(false);
+                if (prefetch.Success)
+                {
+                    preflight = await PreflightAsync(pod, options, cancellationToken).ConfigureAwait(false);
+                }
+                else
+                {
+                    var result = new PodVllmOperationResult(
+                        pod.Id,
+                        false,
+                        "deploy",
+                        preflight.DeploymentName,
+                        $"vLLM deploy prefetch failed ({preflight.FailureKind}): {preflight.Summary}; {prefetch.Summary}",
+                        preflight.Command,
+                        preflight.ExitCode,
+                        preflight.StdOut,
+                        preflight.StdErr,
+                        Preflight: preflight,
+                        Prefetch: prefetch,
+                        PrefetchTriggerFailureKind: prefetchTriggerFailureKind);
+                    LogVllmEnd(
+                        "deploy",
+                        result.PodId,
+                        result.DeploymentName,
+                        result.Success,
+                        result.ExitCode,
+                        result.Summary,
+                        modelId,
+                        new Dictionary<string, string?>
+                        {
+                            ["failureKind"] = preflight.FailureKind,
+                            ["hasRollback"] = "false",
+                            ["prefetchRequested"] = BoolString(options.Prefetch),
+                            ["prefetchAttempted"] = "true",
+                            ["prefetchSuccess"] = "false",
+                            ["preflightSuccess"] = "false"
+                        });
+                    return result;
+                }
+            }
+
+            if (!preflight.Success)
+            {
+                var result = new PodVllmOperationResult(
+                    pod.Id,
+                    false,
+                    "deploy",
+                    preflight.DeploymentName,
+                    options.Prefetch && prefetch is not null
+                        ? $"vLLM deploy preflight failed after prefetch ({preflight.FailureKind}): {preflight.Summary}"
+                        : $"vLLM deploy preflight failed ({preflight.FailureKind}): {preflight.Summary}",
+                    preflight.Command,
+                    preflight.ExitCode,
+                    preflight.StdOut,
+                    preflight.StdErr,
+                    Preflight: preflight,
+                    Prefetch: prefetch,
+                    PrefetchTriggerFailureKind: prefetchTriggerFailureKind);
+                LogVllmEnd(
+                    "deploy",
+                    result.PodId,
+                    result.DeploymentName,
+                    result.Success,
+                    result.ExitCode,
+                    result.Summary,
+                    modelId,
+                    new Dictionary<string, string?>
+                    {
+                        ["failureKind"] = preflight.FailureKind,
+                        ["hasRollback"] = "false",
+                        ["prefetchRequested"] = BoolString(options.Prefetch),
+                        ["prefetchAttempted"] = BoolString(prefetch is not null),
+                        ["prefetchSuccess"] = prefetch is null ? null : BoolString(prefetch.Success),
+                        ["preflightSuccess"] = "false"
+                    });
+                return result;
+            }
         }
 
         var plan = _planner.PlanServe(pod, options with { ResolvedModelPath = preflight.ResolvedModelPath });
@@ -95,7 +204,7 @@ public sealed class PodVllmOrchestrationService
             rollback = await RollbackAsync(pod, plan.DeploymentName, cancellationToken).ConfigureAwait(false);
         }
 
-        return new PodVllmOperationResult(
+        var finalResult = new PodVllmOperationResult(
             pod.Id,
             success,
             "deploy",
@@ -108,7 +217,29 @@ public sealed class PodVllmOrchestrationService
             plan,
             health,
             rollback,
-            preflight);
+            preflight,
+            prefetch,
+            prefetchTriggerFailureKind);
+        LogVllmEnd(
+            "deploy",
+            finalResult.PodId,
+            finalResult.DeploymentName,
+            finalResult.Success,
+            finalResult.ExitCode,
+            finalResult.Summary,
+            modelId,
+            new Dictionary<string, string?>
+            {
+                ["failureKind"] = GetDeployFailureKind(finalResult, exec, health),
+                ["hasRollback"] = BoolString(rollback is not null),
+                ["prefetchRequested"] = BoolString(options.Prefetch),
+                ["prefetchAttempted"] = BoolString(finalResult.Prefetch is not null),
+                ["prefetchSuccess"] = finalResult.Prefetch is null ? null : BoolString(finalResult.Prefetch.Success),
+                ["healthReady"] = health is null ? null : BoolString(health.Ready),
+                ["healthAttempts"] = health is null ? null : Invariant(health.Attempts),
+                ["maxHealthAttempts"] = health is null ? null : Invariant(health.MaxAttempts)
+            });
+        return finalResult;
     }
 
     public async Task<PodVllmPreflightResult> PreflightAsync(
@@ -123,9 +254,19 @@ public sealed class PodVllmOrchestrationService
         var deploymentName = NormalizeDeploymentName(options.DeploymentName ?? options.ModelId);
         var modelId = options.ModelId.Trim();
         var modelCachePath = _planner.BuildModelCachePath(pod, modelId);
+        var revision = NormalizeRevision(options.Revision);
+        LogVllmStart(
+            "preflight",
+            pod.Id,
+            deploymentName,
+            modelId,
+            new Dictionary<string, string?>
+            {
+                ["requestedRevision"] = revision
+            });
         if (string.IsNullOrWhiteSpace(pod.SshHost))
         {
-            return new PodVllmPreflightResult(
+            var result = new PodVllmPreflightResult(
                 pod.Id,
                 false,
                 deploymentName,
@@ -140,10 +281,13 @@ public sealed class PodVllmOrchestrationService
                 string.Empty,
                 -1,
                 string.Empty,
-                string.Empty);
+                string.Empty,
+                revision);
+            LogPreflightEnd(result);
+            return result;
         }
 
-        var command = BuildPreflightCommand(modelCachePath);
+        var command = BuildPreflightCommand(modelCachePath, revision);
         var exec = await _execService.ExecuteAsync(pod, command, cancellationToken).ConfigureAwait(false);
         var values = ParseKeyValueOutput(exec.StdOut);
         var failureKind = GetValue(values, "failure_kind");
@@ -154,13 +298,7 @@ public sealed class PodVllmOrchestrationService
 
         if (!exec.Success && string.IsNullOrWhiteSpace(failureKind))
         {
-            failureKind = exec.Summary switch
-            {
-                "ssh process start failed" => "ssh-process-start-failed",
-                "ssh process runner failed" => "ssh-process-runner-failed",
-                "ssh exec cancelled" => "ssh-exec-cancelled",
-                _ => "ssh-exec-failed"
-            };
+            failureKind = PodExecFailureKinds.FromResult(exec);
         }
 
         var success = exec.Success &&
@@ -177,7 +315,7 @@ public sealed class PodVllmOrchestrationService
             failureKind = "invalid-preflight-output";
         }
 
-        return new PodVllmPreflightResult(
+        var finalResult = new PodVllmPreflightResult(
             pod.Id,
             success,
             deploymentName,
@@ -188,25 +326,37 @@ public sealed class PodVllmOrchestrationService
             snapshotCount,
             vllmAvailable,
             failureKind,
-            BuildPreflightSummary(pod.Id, deploymentName, modelId, resolvedModelPath, failureKind, snapshotCount),
+            BuildPreflightSummary(pod.Id, deploymentName, modelId, revision, resolvedModelPath, failureKind, snapshotCount),
             command,
             exec.ExitCode,
             exec.StdOut,
-            exec.StdErr);
+            exec.StdErr,
+            revision);
+        LogPreflightEnd(finalResult);
+        return finalResult;
     }
 
     public async Task<PodVllmStatusResult> StatusAsync(
         PodDefinition pod,
         string deploymentName,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        bool includeMetadata = false)
     {
         ArgumentNullException.ThrowIfNull(pod);
         ArgumentException.ThrowIfNullOrWhiteSpace(deploymentName);
 
         var name = NormalizeDeploymentName(deploymentName);
+        LogVllmStart(
+            "status",
+            pod.Id,
+            name,
+            extraFields: new Dictionary<string, string?>
+            {
+                ["includeMetadata"] = BoolString(includeMetadata)
+            });
         if (string.IsNullOrWhiteSpace(pod.SshHost))
         {
-            return new PodVllmStatusResult(
+            var result = new PodVllmStatusResult(
                 pod.Id,
                 false,
                 name,
@@ -215,12 +365,31 @@ public sealed class PodVllmOrchestrationService
                 -1,
                 string.Empty,
                 string.Empty);
+            LogVllmEnd(
+                "status",
+                result.PodId,
+                result.DeploymentName,
+                result.Success,
+                result.ExitCode,
+                result.Summary,
+                extraFields: new Dictionary<string, string?>
+                {
+                    ["failureKind"] = "unsupported-transport",
+                    ["state"] = result.State,
+                    ["ready"] = BoolString(result.Ready),
+                    ["unhealthy"] = BoolString(result.Unhealthy)
+                });
+            return result;
         }
 
         var command = BuildStatusCommand(name);
         var exec = await _execService.ExecuteAsync(pod, command, cancellationToken).ConfigureAwait(false);
         var state = ParseState(exec.StdOut, exec.StdErr);
-        return new PodVllmStatusResult(
+        var metadataJson = includeMetadata
+            ? await ReadMetadataJsonAsync(pod, name, cancellationToken).ConfigureAwait(false)
+            : null;
+
+        var finalResult = new PodVllmStatusResult(
             pod.Id,
             exec.Success,
             name,
@@ -233,7 +402,24 @@ public sealed class PodVllmOrchestrationService
             exec.StdErr,
             state.State,
             state.Ready,
-            state.Unhealthy);
+            state.Unhealthy,
+            metadataJson);
+        LogVllmEnd(
+            "status",
+            finalResult.PodId,
+            finalResult.DeploymentName,
+            finalResult.Success,
+            finalResult.ExitCode,
+            finalResult.Summary,
+            extraFields: new Dictionary<string, string?>
+            {
+                ["state"] = finalResult.State,
+                ["ready"] = BoolString(finalResult.Ready),
+                ["unhealthy"] = BoolString(finalResult.Unhealthy),
+                ["includeMetadata"] = BoolString(includeMetadata),
+                ["metadataFound"] = BoolString(metadataJson is not null)
+            });
+        return finalResult;
     }
 
     public async Task<PodVllmHealthResult> HealthAsync(
@@ -241,7 +427,8 @@ public sealed class PodVllmOrchestrationService
         string deploymentName,
         int maxAttempts = DefaultHealthAttempts,
         int backoffMilliseconds = DefaultHealthBackoffMilliseconds,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        bool includeMetadata = false)
     {
         ArgumentNullException.ThrowIfNull(pod);
         ArgumentException.ThrowIfNullOrWhiteSpace(deploymentName);
@@ -249,9 +436,19 @@ public sealed class PodVllmOrchestrationService
         var name = NormalizeDeploymentName(deploymentName);
         maxAttempts = NormalizeHealthAttempts(maxAttempts);
         backoffMilliseconds = NormalizeHealthBackoff(backoffMilliseconds);
+        LogVllmStart(
+            "health",
+            pod.Id,
+            name,
+            extraFields: new Dictionary<string, string?>
+            {
+                ["maxAttempts"] = Invariant(maxAttempts),
+                ["backoffMs"] = Invariant(backoffMilliseconds),
+                ["includeMetadata"] = BoolString(includeMetadata)
+            });
         if (string.IsNullOrWhiteSpace(pod.SshHost))
         {
-            return new PodVllmHealthResult(
+            var result = new PodVllmHealthResult(
                 pod.Id,
                 false,
                 name,
@@ -266,6 +463,8 @@ public sealed class PodVllmOrchestrationService
                 -1,
                 string.Empty,
                 string.Empty);
+            LogHealthEnd(result, includeMetadata, metadataFound: false);
+            return result;
         }
 
         var command = BuildHealthCommand(name);
@@ -298,10 +497,15 @@ public sealed class PodVllmOrchestrationService
             string.Empty,
             string.Empty,
             TimeSpan.Zero,
-            "ssh exec not attempted");
+            "ssh exec not attempted",
+            PodExecFailureKinds.SshExecNotAttempted);
 
-        var failureKind = state.Ready ? "none" : state.FailureKind;
-        return new PodVllmHealthResult(
+        var failureKind = GetHealthFailureKind(state, exec);
+        var metadataJson = includeMetadata
+            ? await ReadMetadataJsonAsync(pod, name, cancellationToken).ConfigureAwait(false)
+            : null;
+
+        var finalResult = new PodVllmHealthResult(
             pod.Id,
             exec.Success && state.Ready,
             name,
@@ -315,7 +519,10 @@ public sealed class PodVllmOrchestrationService
             command,
             exec.ExitCode,
             exec.StdOut,
-            exec.StdErr);
+            exec.StdErr,
+            metadataJson);
+        LogHealthEnd(finalResult, includeMetadata, metadataJson is not null);
+        return finalResult;
     }
 
     public async Task<PodVllmOperationResult> StopAsync(
@@ -327,9 +534,10 @@ public sealed class PodVllmOrchestrationService
         ArgumentException.ThrowIfNullOrWhiteSpace(deploymentName);
 
         var name = NormalizeDeploymentName(deploymentName);
+        LogVllmStart("stop", pod.Id, name);
         if (string.IsNullOrWhiteSpace(pod.SshHost))
         {
-            return new PodVllmOperationResult(
+            var result = new PodVllmOperationResult(
                 pod.Id,
                 false,
                 "stop",
@@ -339,11 +547,23 @@ public sealed class PodVllmOrchestrationService
                 -1,
                 string.Empty,
                 string.Empty);
+            LogVllmEnd(
+                "stop",
+                result.PodId,
+                result.DeploymentName,
+                result.Success,
+                result.ExitCode,
+                result.Summary,
+                extraFields: new Dictionary<string, string?>
+                {
+                    ["failureKind"] = "unsupported-transport"
+                });
+            return result;
         }
 
         var command = BuildStopCommand(name);
         var exec = await _execService.ExecuteAsync(pod, command, cancellationToken).ConfigureAwait(false);
-        return new PodVllmOperationResult(
+        var finalResult = new PodVllmOperationResult(
             pod.Id,
             exec.Success,
             "stop",
@@ -355,17 +575,53 @@ public sealed class PodVllmOrchestrationService
             exec.ExitCode,
             exec.StdOut,
             exec.StdErr);
+        LogVllmEnd(
+            "stop",
+            finalResult.PodId,
+            finalResult.DeploymentName,
+            finalResult.Success,
+            finalResult.ExitCode,
+            finalResult.Summary);
+        return finalResult;
     }
 
-    private async Task<PodVllmRollbackResult> RollbackAsync(
+    public async Task<PodVllmRollbackResult> RollbackAsync(
         PodDefinition pod,
         string deploymentName,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken = default)
     {
         var name = NormalizeDeploymentName(deploymentName);
+        LogVllmStart("rollback", pod.Id, name);
+        if (string.IsNullOrWhiteSpace(pod.SshHost))
+        {
+            var unsupportedResult = new PodVllmRollbackResult(
+                pod.Id,
+                false,
+                name,
+                "vLLM rollback requires SSH-based pod.",
+                string.Empty,
+                -1,
+                string.Empty,
+                string.Empty,
+                PodExecFailureKinds.UnsupportedTransport);
+            LogVllmEnd(
+                "rollback",
+                unsupportedResult.PodId,
+                unsupportedResult.DeploymentName,
+                unsupportedResult.Success,
+                unsupportedResult.ExitCode,
+                unsupportedResult.Summary,
+                extraFields: new Dictionary<string, string?>
+                {
+                    ["failureKind"] = unsupportedResult.FailureKind
+                });
+            return unsupportedResult;
+        }
+
         var command = BuildRollbackCommand(name);
         var exec = await _execService.ExecuteAsync(pod, command, cancellationToken).ConfigureAwait(false);
-        return new PodVllmRollbackResult(
+        var failureKind = exec.Success ? PodExecFailureKinds.None : PodExecFailureKinds.FromResult(exec);
+        var rollbackResult = new PodVllmRollbackResult(
             pod.Id,
             exec.Success,
             name,
@@ -375,7 +631,144 @@ public sealed class PodVllmOrchestrationService
             command,
             exec.ExitCode,
             exec.StdOut,
-            exec.StdErr);
+            exec.StdErr,
+            failureKind);
+        LogVllmEnd(
+            "rollback",
+            rollbackResult.PodId,
+            rollbackResult.DeploymentName,
+            rollbackResult.Success,
+            rollbackResult.ExitCode,
+            rollbackResult.Summary,
+            extraFields: new Dictionary<string, string?>
+            {
+                ["failureKind"] = rollbackResult.FailureKind
+            });
+        return rollbackResult;
+    }
+
+    private void LogPreflightEnd(PodVllmPreflightResult result)
+    {
+        LogVllmEnd(
+            "preflight",
+            result.PodId,
+            result.DeploymentName,
+            result.Success,
+            result.ExitCode,
+            result.Summary,
+            result.ModelId,
+            new Dictionary<string, string?>
+            {
+                ["failureKind"] = result.FailureKind,
+                ["modelCachePresent"] = BoolString(result.ModelCachePresent),
+                ["snapshotCount"] = Invariant(result.SnapshotCount),
+                ["vllmAvailable"] = BoolString(result.VllmAvailable),
+                ["resolvedModel"] = BoolString(!string.IsNullOrWhiteSpace(result.ResolvedModelPath)),
+                ["requestedRevision"] = result.RequestedRevision
+            });
+    }
+
+    private void LogHealthEnd(PodVllmHealthResult result, bool includeMetadata, bool metadataFound)
+    {
+        LogVllmEnd(
+            "health",
+            result.PodId,
+            result.DeploymentName,
+            result.Success,
+            result.ExitCode,
+            result.Summary,
+            extraFields: new Dictionary<string, string?>
+            {
+                ["ready"] = BoolString(result.Ready),
+                ["state"] = result.State,
+                ["unhealthy"] = BoolString(result.Unhealthy),
+                ["failureKind"] = result.FailureKind,
+                ["attempts"] = Invariant(result.Attempts),
+                ["maxAttempts"] = Invariant(result.MaxAttempts),
+                ["includeMetadata"] = BoolString(includeMetadata),
+                ["metadataFound"] = BoolString(metadataFound)
+            });
+    }
+
+    private void LogVllmStart(
+        string operation,
+        string podId,
+        string deploymentName,
+        string? modelId = null,
+        IReadOnlyDictionary<string, string?>? extraFields = null)
+    {
+        var fields = BuildVllmFields(operation, podId, deploymentName, modelId, extraFields);
+        _logSink.Log(new TauLogEvent("pod", $"vllm.{operation}.start", DateTimeOffset.UtcNow, fields));
+    }
+
+    private void LogVllmEnd(
+        string operation,
+        string podId,
+        string deploymentName,
+        bool success,
+        int exitCode,
+        string summary,
+        string? modelId = null,
+        IReadOnlyDictionary<string, string?>? extraFields = null)
+    {
+        var fields = BuildVllmFields(operation, podId, deploymentName, modelId, extraFields);
+        fields["success"] = BoolString(success);
+        fields["exitCode"] = Invariant(exitCode);
+        fields["summary"] = summary;
+        _logSink.Log(new TauLogEvent("pod", $"vllm.{operation}.end", DateTimeOffset.UtcNow, fields));
+    }
+
+    private static Dictionary<string, string?> BuildVllmFields(
+        string operation,
+        string podId,
+        string deploymentName,
+        string? modelId,
+        IReadOnlyDictionary<string, string?>? extraFields)
+    {
+        var fields = new Dictionary<string, string?>
+        {
+            ["podId"] = podId,
+            ["operation"] = operation,
+            ["deploymentName"] = deploymentName
+        };
+        if (!string.IsNullOrWhiteSpace(modelId))
+        {
+            fields["modelId"] = modelId;
+        }
+
+        if (extraFields is not null)
+        {
+            foreach (var item in extraFields)
+            {
+                fields[item.Key] = item.Value;
+            }
+        }
+
+        return fields;
+    }
+
+    private static string BoolString(bool value) => value ? "true" : "false";
+
+    private static string Invariant(int value) =>
+        value.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+    private static string GetDeployFailureKind(
+        PodVllmOperationResult result,
+        PodExecResult exec,
+        PodVllmHealthResult? health)
+    {
+        if (result.Success)
+        {
+            return PodExecFailureKinds.None;
+        }
+
+        if (health is not null)
+        {
+            return health.FailureKind;
+        }
+
+        var failureKind = PodExecFailureKinds.FromResult(exec);
+        return failureKind == PodExecFailureKinds.None ? "deploy-failed" : failureKind;
     }
 
     private static string BuildDeployCommand(PodVllmServePlan plan)
@@ -401,27 +794,62 @@ public sealed class PodVllmOrchestrationService
             $"else {fallbackCommand} && echo {ShellSingleQuote($"started {plan.DeploymentName}")}; fi";
     }
 
-    private static string BuildPreflightCommand(string modelCachePath)
+    private static string BuildPreflightCommand(string modelCachePath, string? revision)
     {
         var cachePath = ShellPath(modelCachePath.TrimEnd('/'));
-        return
-            $"cache={cachePath}; " +
-            "snapshots=\"$cache/snapshots\"; " +
-            "ref_file=\"$cache/refs/main\"; " +
-            "echo \"model_cache_path=$cache\"; " +
-            "if command -v vllm >/dev/null 2>&1; then echo vllm_available=true; else echo vllm_available=false; echo failure_kind=vllm-missing; exit 14; fi; " +
-            "if [ ! -d \"$cache\" ]; then echo model_cache_present=false; echo snapshot_count=0; echo failure_kind=model-cache-missing; exit 10; fi; " +
-            "echo model_cache_present=true; " +
-            "if [ ! -d \"$snapshots\" ]; then echo snapshot_count=0; echo failure_kind=model-snapshots-missing; exit 11; fi; " +
-            "snapshot_count=$(find \"$snapshots\" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' '); " +
-            "echo \"snapshot_count=$snapshot_count\"; " +
-            "if [ \"$snapshot_count\" -eq 0 ]; then echo failure_kind=model-snapshot-missing; exit 12; fi; " +
-            "if [ -f \"$ref_file\" ]; then " +
-            "ref=$(head -n 1 \"$ref_file\" | tr -d '\\r\\n'); " +
-            "if [ -n \"$ref\" ] && [ -d \"$snapshots/$ref\" ]; then echo \"resolved_model_path=$snapshots/$ref\"; echo failure_kind=none; exit 0; fi; " +
-            "echo failure_kind=model-snapshot-ref-missing; exit 13; fi; " +
-            "if [ \"$snapshot_count\" -eq 1 ]; then resolved=$(find \"$snapshots\" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -n 1); echo \"resolved_model_path=$resolved\"; echo failure_kind=none; exit 0; fi; " +
-            "echo failure_kind=model-snapshot-ambiguous; exit 15";
+        var builder = new StringBuilder()
+            .Append("cache=").Append(cachePath).Append("; ")
+            .Append("snapshots=\"$cache/snapshots\"; ");
+
+        var normalizedRevision = NormalizeRevision(revision);
+        if (normalizedRevision is null)
+        {
+            builder.Append("ref_file=\"$cache/refs/main\"; ");
+        }
+        else
+        {
+            builder.Append("requested_revision=").Append(ShellSingleQuote(normalizedRevision)).Append("; ");
+        }
+
+        builder
+            .Append("echo \"model_cache_path=$cache\"; ");
+
+        if (normalizedRevision is not null)
+        {
+            builder.Append("echo \"requested_revision=$requested_revision\"; ");
+        }
+
+        builder
+            .Append("if command -v vllm >/dev/null 2>&1; then echo vllm_available=true; else echo vllm_available=false; echo failure_kind=vllm-missing; exit 14; fi; ")
+            .Append("if [ ! -d \"$cache\" ]; then echo model_cache_present=false; echo snapshot_count=0; echo failure_kind=model-cache-missing; exit 10; fi; ")
+            .Append("echo model_cache_present=true; ")
+            .Append("if [ ! -d \"$snapshots\" ]; then echo snapshot_count=0; echo failure_kind=model-snapshots-missing; exit 11; fi; ")
+            .Append("snapshot_count=$(find \"$snapshots\" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' '); ")
+            .Append("echo \"snapshot_count=$snapshot_count\"; ")
+            .Append("if [ \"$snapshot_count\" -eq 0 ]; then echo failure_kind=model-snapshot-missing; exit 12; fi; ");
+
+        if (normalizedRevision is null)
+        {
+            builder
+                .Append("if [ -f \"$ref_file\" ]; then ")
+                .Append("ref=$(head -n 1 \"$ref_file\" | tr -d '\\r\\n'); ")
+                .Append("if [ -n \"$ref\" ] && [ -d \"$snapshots/$ref\" ]; then echo \"resolved_model_path=$snapshots/$ref\"; echo failure_kind=none; exit 0; fi; ")
+                .Append("echo failure_kind=model-snapshot-ref-missing; exit 13; fi; ")
+                .Append("if [ \"$snapshot_count\" -eq 1 ]; then resolved=$(find \"$snapshots\" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -n 1); echo \"resolved_model_path=$resolved\"; echo failure_kind=none; exit 0; fi; ")
+                .Append("echo failure_kind=model-snapshot-ambiguous; exit 15");
+        }
+        else
+        {
+            builder
+                .Append("ref_file=\"$cache/refs/$requested_revision\"; ")
+                .Append("if [ -f \"$ref_file\" ]; then ")
+                .Append("ref=$(head -n 1 \"$ref_file\" | tr -d '\\r\\n'); ")
+                .Append("if [ -n \"$ref\" ] && [ -d \"$snapshots/$ref\" ]; then echo \"resolved_model_path=$snapshots/$ref\"; echo failure_kind=none; exit 0; fi; fi; ")
+                .Append("if [ -d \"$snapshots/$requested_revision\" ]; then echo \"resolved_model_path=$snapshots/$requested_revision\"; echo failure_kind=none; exit 0; fi; ")
+                .Append("echo failure_kind=model-snapshot-revision-missing; exit 16");
+        }
+
+        return builder.ToString();
     }
 
     private static string BuildStatusCommand(string deploymentName)
@@ -462,6 +890,45 @@ public sealed class PodVllmOrchestrationService
             "if kill -0 \"$pid\" >/dev/null 2>&1; then echo starting; exit 3; else echo dead; exit 4; fi; fi; " +
             $"if test -f ~/.tau_pods/{deploymentName}.json; then echo starting; exit 3; " +
             $"else echo {ShellSingleQuote($"not found {unitBaseName}")}; exit 1; fi";
+    }
+
+    private async Task<string?> ReadMetadataJsonAsync(
+        PodDefinition pod,
+        string deploymentName,
+        CancellationToken cancellationToken)
+    {
+        var exec = await _execService
+            .ExecuteAsync(pod, BuildMetadataCommand(deploymentName), cancellationToken)
+            .ConfigureAwait(false);
+
+        if (!exec.Success || string.IsNullOrWhiteSpace(exec.StdOut))
+        {
+            return null;
+        }
+
+        return TryNormalizeMetadataJson(exec.StdOut);
+    }
+
+    private static string BuildMetadataCommand(string deploymentName) =>
+        $"if test -f ~/.tau_pods/{deploymentName}.json; then cat ~/.tau_pods/{deploymentName}.json 2>/dev/null || true; fi";
+
+    private static string? TryNormalizeMetadataJson(string value)
+    {
+        var trimmed = value.Trim();
+        if (trimmed.Length == 0)
+        {
+            return null;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(trimmed);
+            return document.RootElement.ValueKind == JsonValueKind.Object ? trimmed : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
     }
 
     private static string BuildStopCommand(string deploymentName)
@@ -513,12 +980,48 @@ public sealed class PodVllmOrchestrationService
         string podId,
         string deploymentName,
         string modelId,
+        string? requestedRevision,
         string? resolvedModelPath,
         string failureKind,
         int snapshotCount) =>
         failureKind == "none"
-            ? $"vLLM preflight ok for '{deploymentName}' on {podId}: model '{modelId}' resolved to '{resolvedModelPath}' ({snapshotCount} snapshot(s))."
-            : $"vLLM preflight failed for '{deploymentName}' on {podId}: {failureKind}.";
+            ? requestedRevision is null
+                ? $"vLLM preflight ok for '{deploymentName}' on {podId}: model '{modelId}' resolved to '{resolvedModelPath}' ({snapshotCount} snapshot(s))."
+                : $"vLLM preflight ok for '{deploymentName}' on {podId}: model '{modelId}' revision '{requestedRevision}' resolved to '{resolvedModelPath}' ({snapshotCount} snapshot(s))."
+            : $"vLLM preflight failed for '{deploymentName}' on {podId}: {failureKind}. {GetPreflightFailureHint(failureKind)}";
+
+    private static string GetPreflightFailureHint(string failureKind) =>
+        failureKind switch
+        {
+            "vllm-missing" => "Install or activate vLLM on the remote pod before deploying.",
+            "model-cache-missing" or "model-snapshots-missing" or "model-snapshot-missing" =>
+                "Pull the model first or point modelsPath at the Hugging Face hub cache root.",
+            "model-snapshot-ref-missing" =>
+                "The refs/main file points to a snapshot directory that does not exist.",
+            "model-snapshot-ambiguous" =>
+                "Multiple snapshots exist without a valid refs/main target; choose or repair the remote cache revision.",
+            "model-snapshot-revision-missing" =>
+                "The requested revision does not exist under refs/ or snapshots/ on the remote cache.",
+            "unsupported-transport" =>
+                "Configure an SSH pod for vLLM orchestration.",
+            "ssh-process-start-failed" or "ssh-process-runner-failed" or "ssh-exec-cancelled" or
+                "ssh-auth-failed" or "ssh-host-key-failed" or "ssh-host-unresolved" or
+                "ssh-connect-timeout" or "ssh-connection-failed" or "ssh-exec-failed" =>
+                "Check the SSH transport and remote command output.",
+            _ => "Inspect stdout, stderr, and remoteCommand for the remote preflight output."
+        };
+
+    private static bool IsPrefetchableFailureKind(string failureKind) =>
+        failureKind switch
+        {
+            "model-cache-missing" => true,
+            "model-snapshots-missing" => true,
+            "model-snapshot-missing" => true,
+            "model-snapshot-ref-missing" => true,
+            "model-snapshot-ambiguous" => true,
+            "model-snapshot-revision-missing" => true,
+            _ => false
+        };
 
     private static IReadOnlyDictionary<string, string> ParseKeyValueOutput(string stdout)
     {
@@ -594,11 +1097,42 @@ public sealed class PodVllmOrchestrationService
         return new VllmState("unknown", Ready: false, Unhealthy: false, FailureKind: "unknown");
     }
 
-    private static bool IsTerminalHealthFailure(VllmState state, PodExecResult exec) =>
-        state.Unhealthy ||
-        state.FailureKind is "not-found" ||
-        exec.ExitCode is 1 or 2 or 4 ||
-        exec.Summary is "ssh process start failed" or "ssh process runner failed" or "ssh exec cancelled";
+    private static string GetHealthFailureKind(VllmState state, PodExecResult exec)
+    {
+        if (state.Ready)
+        {
+            return PodExecFailureKinds.None;
+        }
+
+        var execFailureKind = PodExecFailureKinds.FromResult(exec);
+        if (state.FailureKind == "unknown" && execFailureKind != PodExecFailureKinds.None)
+        {
+            return execFailureKind;
+        }
+
+        return IsTerminalTransportFailure(execFailureKind) ? execFailureKind : state.FailureKind;
+    }
+
+    private static bool IsTerminalHealthFailure(VllmState state, PodExecResult exec)
+    {
+        var execFailureKind = PodExecFailureKinds.FromResult(exec);
+        return state.Unhealthy ||
+            state.FailureKind is "not-found" ||
+            exec.ExitCode is 1 or 2 or 4 ||
+            (state.FailureKind == "unknown" && exec.ExitCode != 0) ||
+            IsTerminalTransportFailure(execFailureKind);
+    }
+
+    private static bool IsTerminalTransportFailure(string failureKind) =>
+        failureKind is PodExecFailureKinds.SshProcessStartFailed or
+            PodExecFailureKinds.SshProcessRunnerFailed or
+            PodExecFailureKinds.SshExecCancelled or
+            PodExecFailureKinds.SshAuthFailed or
+            PodExecFailureKinds.SshHostKeyFailed or
+            PodExecFailureKinds.SshHostUnresolved or
+            PodExecFailureKinds.SshConnectTimeout or
+            PodExecFailureKinds.SshConnectionFailed or
+            PodExecFailureKinds.SshExecNotAttempted;
 
     private static int NormalizeHealthAttempts(int attempts) =>
         Math.Clamp(attempts, 1, 120);
@@ -650,11 +1184,33 @@ public sealed class PodVllmOrchestrationService
         return string.IsNullOrWhiteSpace(normalized) ? "deployment" : normalized;
     }
 
+    private static string? NormalizeRevision(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        return value.Trim();
+    }
+
     private static string ShellSingleQuote(string value) =>
         "'" + value.Replace("'", "'\"'\"'", StringComparison.Ordinal) + "'";
 
-    private static string ShellPath(string path) =>
-        path.StartsWith("$HOME/", StringComparison.Ordinal) ? path : ShellSingleQuote(path);
+    private static string ShellPath(string path)
+    {
+        const string homePrefix = "$HOME/";
+        return path.StartsWith(homePrefix, StringComparison.Ordinal)
+            ? "\"$HOME/" + ShellDoubleQuoteContent(path[homePrefix.Length..]) + "\""
+            : ShellSingleQuote(path);
+    }
+
+    private static string ShellDoubleQuoteContent(string value) =>
+        value
+            .Replace("\\", "\\\\", StringComparison.Ordinal)
+            .Replace("\"", "\\\"", StringComparison.Ordinal)
+            .Replace("$", "\\$", StringComparison.Ordinal)
+            .Replace("`", "\\`", StringComparison.Ordinal);
 
     private sealed record VllmState(string State, bool Ready, bool Unhealthy, string FailureKind);
 }

@@ -59,7 +59,9 @@ public sealed class TuiSelectList : ITuiInputComponent
     {
         _filter = filter ?? string.Empty;
         _filteredItems.Clear();
-        _filteredItems.AddRange(_items.Where(MatchesFilter));
+        _filteredItems.AddRange(_filter.Length == 0
+            ? _items
+            : TuiFuzzyMatcher.Filter(_items, _filter, SearchText));
         _selectedIndex = 0;
         NotifySelectionChanged();
     }
@@ -181,17 +183,6 @@ public sealed class TuiSelectList : ITuiInputComponent
         return TuiInputResult.Ignored;
     }
 
-    private bool MatchesFilter(TuiSelectItem item)
-    {
-        if (_filter.Length == 0)
-        {
-            return true;
-        }
-
-        return item.Value.StartsWith(_filter, StringComparison.OrdinalIgnoreCase)
-            || item.Label.StartsWith(_filter, StringComparison.OrdinalIgnoreCase);
-    }
-
     private void MoveBy(int delta, bool wrap)
     {
         if (_filteredItems.Count == 0)
@@ -276,6 +267,9 @@ public sealed class TuiSelectList : ITuiInputComponent
 
     private static string DisplayValue(TuiSelectItem item) =>
         string.IsNullOrEmpty(item.Label) ? item.Value : item.Label;
+
+    private static string SearchText(TuiSelectItem item) =>
+        string.Join(' ', item.Value, item.Label, item.Description ?? string.Empty);
 
     private static bool IsMoveUp(ConsoleKeyInfo key) =>
         key.Key == ConsoleKey.UpArrow || key.KeyChar is 'k' or 'K';

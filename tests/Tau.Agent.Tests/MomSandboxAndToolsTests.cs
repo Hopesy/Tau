@@ -30,6 +30,29 @@ public sealed class MomSandboxAndToolsTests
     }
 
     [Fact]
+    public void CommandLine_ParseStripsDownloadModeAndChannelFromHostArgs()
+    {
+        var parsed = MomCommandLine.Parse([
+            "--download",
+            "C123OPS",
+            "--urls",
+            "http://127.0.0.1:5005"
+        ]);
+
+        Assert.True(parsed.HasDownload);
+        Assert.Equal("C123OPS", parsed.DownloadChannelId);
+        Assert.Equal([
+            "--urls",
+            "http://127.0.0.1:5005"
+        ], parsed.HostArgs);
+
+        var equalsForm = MomCommandLine.Parse(["--download=C999DEV"]);
+        Assert.True(equalsForm.HasDownload);
+        Assert.Equal("C999DEV", equalsForm.DownloadChannelId);
+        Assert.Empty(equalsForm.HostArgs);
+    }
+
+    [Fact]
     public void Parse_MapsHostAndDockerWorkspacePaths()
     {
         var root = Path.Combine(Path.GetTempPath(), $"tau-mom-sandbox-{Guid.NewGuid():N}");
@@ -246,9 +269,88 @@ public sealed class MomSandboxAndToolsTests
             {"label":"attach note","path":"scratch/note.txt","title":"note"}
             """);
             Assert.False(attachResult.IsError);
+            Assert.Contains("Attached file: note", Text(attachResult), StringComparison.Ordinal);
+            var attachDetails = Assert.IsType<MomAttachToolDetails>(attachResult.Details);
+            Assert.Equal("scratch/note.txt", attachDetails.Path);
+            Assert.Equal(Path.Combine(root, "scratch", "note.txt"), attachDetails.WorkspacePath);
+            Assert.Equal("note.txt", attachDetails.FileName);
+            Assert.Equal("note", attachDetails.Title);
+            Assert.Equal("gamma beta".Length, attachDetails.SizeBytes);
             var uploaded = Assert.Single(attached);
             Assert.Equal(Path.Combine(root, "scratch", "note.txt"), uploaded.Path);
             Assert.Equal("note", uploaded.Title);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task MomBashTool_TruncatedOutputWritesFullOutputPath()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"tau-mom-bash-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        string? fullOutputPath = null;
+        try
+        {
+            var fullOutput = string.Join("\n", Enumerable.Range(1, 3_000).Select(static i => $"line-{i:D4}-xxxxxxxxxxxxxxxxxxxxxxxx"));
+            var runner = new RecordingMomProcessRunner(new MomSandboxExecResult(fullOutput, string.Empty, 0));
+            var executor = MomSandboxExecutorFactory.Create(MomSandboxConfig.Parse("host"), root, runner);
+            var bash = new MomBashTool(executor);
+
+            var result = await ExecuteAsync(bash, """
+            {"label":"large output","command":"ignored"}
+            """);
+
+            Assert.False(result.IsError);
+            var text = Text(result);
+            Assert.Contains("Full output:", text, StringComparison.Ordinal);
+            Assert.Contains("line-3000-", text, StringComparison.Ordinal);
+
+            var details = Assert.IsType<MomBashToolDetails>(result.Details);
+            Assert.NotNull(details.Truncation);
+            Assert.True(details.Truncation.Truncated);
+            Assert.False(string.IsNullOrWhiteSpace(details.FullOutputPath));
+            fullOutputPath = details.FullOutputPath;
+            Assert.True(File.Exists(fullOutputPath));
+            Assert.Equal(fullOutput, await File.ReadAllTextAsync(fullOutputPath));
+        }
+        finally
+        {
+            if (!string.IsNullOrWhiteSpace(fullOutputPath))
+            {
+                File.Delete(fullOutputPath);
+            }
+
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task MomEditTool_ReturnsChangedCharacterCountAndDiffDetails()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"tau-mom-edit-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(Path.Combine(root, "scratch"));
+        try
+        {
+            var path = Path.Combine(root, "scratch", "note.txt");
+            await File.WriteAllTextAsync(path, "line one\nold value\nline three\n");
+            var executor = MomSandboxExecutorFactory.Create(MomSandboxConfig.Parse("host"), root);
+            var edit = new MomEditTool(executor);
+
+            var result = await ExecuteAsync(edit, """
+            {"label":"edit note","path":"scratch/note.txt","oldText":"old value","newText":"new value plus"}
+            """);
+
+            Assert.False(result.IsError);
+            Assert.Contains("Changed 9 characters to 14 characters", Text(result), StringComparison.Ordinal);
+            Assert.Equal("line one\nnew value plus\nline three\n", await File.ReadAllTextAsync(path));
+
+            var details = Assert.IsType<MomEditToolDetails>(result.Details);
+            Assert.Contains("-2 old value", details.Diff, StringComparison.Ordinal);
+            Assert.Contains("+2 new value plus", details.Diff, StringComparison.Ordinal);
+            Assert.Contains(" 1 line one", details.Diff, StringComparison.Ordinal);
         }
         finally
         {

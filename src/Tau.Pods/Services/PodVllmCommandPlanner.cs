@@ -18,13 +18,17 @@ public sealed class PodVllmCommandPlanner
         var servedModelName = string.IsNullOrWhiteSpace(options.ServedModelName)
             ? deploymentName
             : options.ServedModelName.Trim();
-        var modelPath = string.IsNullOrWhiteSpace(options.ResolvedModelPath)
-            ? BuildModelCachePath(pod, options.ModelId)
-            : options.ResolvedModelPath.Trim();
+        var revision = NormalizeRevision(options.Revision);
+        var modelCachePath = BuildModelCachePath(pod, options.ModelId);
+        var hasResolvedModelPath = !string.IsNullOrWhiteSpace(options.ResolvedModelPath);
+        var usesSnapshotDiscovery = !hasResolvedModelPath;
+        var modelPath = hasResolvedModelPath ? options.ResolvedModelPath!.Trim() : modelCachePath;
         var unitName = $"tau-pod-{deploymentName}.service";
-        var serveCommand = BuildServeCommand(modelPath, port, servedModelName, options.Environment, options.ExtraArgs);
+        var serveCommand = hasResolvedModelPath
+            ? BuildServeCommand(modelPath, port, servedModelName, options.Environment, options.ExtraArgs)
+            : BuildSnapshotDiscoveryServeCommand(modelCachePath, port, servedModelName, options.Environment, options.ExtraArgs, revision);
         var unit = BuildSystemdUnit(unitName, serveCommand);
-        var metadata = BuildMetadataJson(options.ModelId.Trim(), deploymentName, modelPath, port, servedModelName, unitName);
+        var metadata = BuildMetadataJson(options.ModelId.Trim(), deploymentName, modelPath, usesSnapshotDiscovery, port, servedModelName, unitName, revision);
         var remoteCommand =
             $"mkdir -p ~/.tau_pods && " +
             $"cat > ~/.tau_pods/{deploymentName}.service <<'EOF'\n{unit}\nEOF\n" +
@@ -41,7 +45,9 @@ public sealed class PodVllmCommandPlanner
             serveCommand,
             unit,
             metadata,
-            remoteCommand);
+            remoteCommand,
+            UsesSnapshotDiscovery: usesSnapshotDiscovery,
+            Revision: revision);
     }
 
     public string BuildModelCachePath(PodDefinition pod, string modelId)
@@ -58,6 +64,25 @@ public sealed class PodVllmCommandPlanner
         string servedModelName,
         IReadOnlyDictionary<string, string>? environment,
         IReadOnlyList<string>? extraArgs)
+    {
+        return BuildEnvironmentPrefix(environment) +
+            BuildVllmServeCommand(ShellSingleQuote(modelPath), port, servedModelName, extraArgs);
+    }
+
+    private static string BuildSnapshotDiscoveryServeCommand(
+        string modelCachePath,
+        int port,
+        string servedModelName,
+        IReadOnlyDictionary<string, string>? environment,
+        IReadOnlyList<string>? extraArgs,
+        string? revision)
+    {
+        return BuildSnapshotDiscoveryCommand(modelCachePath, revision) + " " +
+            BuildEnvironmentPrefix(environment) +
+            BuildVllmServeCommand("\"$resolved_model_path\"", port, servedModelName, extraArgs);
+    }
+
+    private static string BuildEnvironmentPrefix(IReadOnlyDictionary<string, string>? environment)
     {
         var builder = new StringBuilder();
         if (environment is not null)
@@ -77,9 +102,19 @@ public sealed class PodVllmCommandPlanner
             }
         }
 
+        return builder.ToString();
+    }
+
+    private static string BuildVllmServeCommand(
+        string modelArgument,
+        int port,
+        string servedModelName,
+        IReadOnlyList<string>? extraArgs)
+    {
+        var builder = new StringBuilder();
         builder
             .Append("vllm serve ")
-            .Append(ShellSingleQuote(modelPath))
+            .Append(modelArgument)
             .Append(" --host 0.0.0.0 --port ")
             .Append(port.ToString(System.Globalization.CultureInfo.InvariantCulture))
             .Append(" --served-model-name ")
@@ -101,6 +136,50 @@ public sealed class PodVllmCommandPlanner
         return builder.ToString();
     }
 
+    private static string BuildSnapshotDiscoveryCommand(string modelCachePath, string? revision)
+    {
+        var builder = new StringBuilder()
+            .Append("model_cache_path=").Append(ShellPathValue(modelCachePath.TrimEnd('/'))).Append("; ")
+            .Append("resolved_model_path=\"$model_cache_path\"; ")
+            .Append("snapshots=\"$model_cache_path/snapshots\"; ");
+
+        if (!string.IsNullOrWhiteSpace(revision))
+        {
+            var normalizedRevision = NormalizeRevision(revision);
+            builder
+                .Append("requested_revision=")
+                .Append(ShellSingleQuote(normalizedRevision!))
+                .Append("; ")
+                .Append("if [ -d \"$snapshots\" ]; then ")
+                .Append("ref_file=\"$model_cache_path/refs/$requested_revision\"; ")
+                .Append("if [ -f \"$ref_file\" ]; then ")
+                .Append("ref=$(head -n 1 \"$ref_file\" | tr -d '\\r\\n'); ")
+                .Append("if [ -n \"$ref\" ] && [ -d \"$snapshots/$ref\" ]; then resolved_model_path=\"$snapshots/$ref\"; fi; ")
+                .Append("fi; ")
+                .Append("if [ \"$resolved_model_path\" = \"$model_cache_path\" ] && [ -d \"$snapshots/$requested_revision\" ]; then resolved_model_path=\"$snapshots/$requested_revision\"; fi; ")
+                .Append("fi; ")
+                .Append("if [ \"$resolved_model_path\" = \"$model_cache_path\" ]; then echo \"Tau Pods vLLM requested_revision=$requested_revision not found\" >&2; exit 16; fi; ");
+        }
+        else
+        {
+            builder
+                .Append("ref_file=\"$model_cache_path/refs/main\"; ")
+                .Append("if [ -d \"$snapshots\" ]; then ")
+                .Append("if [ -f \"$ref_file\" ]; then ")
+                .Append("ref=$(head -n 1 \"$ref_file\" | tr -d '\\r\\n'); ")
+                .Append("if [ -n \"$ref\" ] && [ -d \"$snapshots/$ref\" ]; then resolved_model_path=\"$snapshots/$ref\"; fi; ")
+                .Append("fi; ")
+                .Append("if [ \"$resolved_model_path\" = \"$model_cache_path\" ]; then ")
+                .Append("snapshot_count=$(find \"$snapshots\" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' '); ")
+                .Append("if [ \"$snapshot_count\" = \"1\" ]; then resolved_model_path=$(find \"$snapshots\" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -n 1); fi; ")
+                .Append("fi; ")
+                .Append("fi; ");
+        }
+
+        builder.Append("echo \"Tau Pods vLLM resolved_model_path=$resolved_model_path\" >&2;");
+        return builder.ToString();
+    }
+
     private static string BuildSystemdUnit(string unitName, string serveCommand) =>
         "[Unit]\n" +
         $"Description=Tau Pods vLLM runner {unitName}\n" +
@@ -117,17 +196,24 @@ public sealed class PodVllmCommandPlanner
         string modelId,
         string deploymentName,
         string modelPath,
+        bool usesSnapshotDiscovery,
         int port,
         string servedModelName,
-        string unitName) =>
-        "{\"model\":\"" + EscapeJsonString(modelId) +
-        "\",\"name\":\"" + EscapeJsonString(deploymentName) +
-        "\",\"status\":\"planned-vllm\"" +
-        ",\"modelPath\":\"" + EscapeJsonString(modelPath) +
-        "\",\"port\":" + port.ToString(System.Globalization.CultureInfo.InvariantCulture) +
-        ",\"servedModelName\":\"" + EscapeJsonString(servedModelName) +
-        "\",\"unit\":\"" + EscapeJsonString(unitName) +
-        "\",\"ts\":\"" + EscapeJsonString(DateTimeOffset.UtcNow.ToString("O")) + "\"}";
+        string unitName,
+        string? revision) =>
+        new StringBuilder()
+            .Append("{\"model\":\"").Append(EscapeJsonString(modelId))
+            .Append("\",\"name\":\"").Append(EscapeJsonString(deploymentName))
+            .Append("\",\"status\":\"planned-vllm\"")
+            .Append(",\"modelPath\":\"").Append(EscapeJsonString(modelPath))
+            .Append("\",\"usesSnapshotDiscovery\":").Append(usesSnapshotDiscovery ? "true" : "false")
+            .Append(",\"port\":").Append(port.ToString(System.Globalization.CultureInfo.InvariantCulture))
+            .Append(",\"servedModelName\":\"").Append(EscapeJsonString(servedModelName))
+            .Append("\",\"unit\":\"").Append(EscapeJsonString(unitName))
+            .Append("\"")
+            .Append(revision is null ? string.Empty : ",\"revision\":\"" + EscapeJsonString(revision) + "\"")
+            .Append(",\"ts\":\"").Append(EscapeJsonString(DateTimeOffset.UtcNow.ToString("O"))).Append("\"}")
+            .ToString();
 
     private static string GetModelsPath(PodDefinition pod) =>
         string.IsNullOrWhiteSpace(pod.ModelsPath) ? DefaultModelsPath : pod.ModelsPath.Trim();
@@ -170,6 +256,16 @@ public sealed class PodVllmCommandPlanner
 
         var normalized = builder.ToString().Trim('-', '.', '_');
         return string.IsNullOrWhiteSpace(normalized) ? "deployment" : normalized;
+    }
+
+    private static string? NormalizeRevision(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        return value.Trim();
     }
 
     private static string NormalizeEnvironmentKey(string value)
@@ -225,4 +321,22 @@ public sealed class PodVllmCommandPlanner
 
     private static string ShellSingleQuote(string value) =>
         "'" + value.Replace("'", "'\"'\"'", StringComparison.Ordinal) + "'";
+
+    private static string ShellPathValue(string path)
+    {
+        const string homePrefix = "$HOME/";
+        if (!path.StartsWith(homePrefix, StringComparison.Ordinal))
+        {
+            return ShellSingleQuote(path);
+        }
+
+        return "\"$HOME/" + ShellDoubleQuoteContent(path[homePrefix.Length..]) + "\"";
+    }
+
+    private static string ShellDoubleQuoteContent(string value) =>
+        value
+            .Replace("\\", "\\\\", StringComparison.Ordinal)
+            .Replace("\"", "\\\"", StringComparison.Ordinal)
+            .Replace("$", "\\$", StringComparison.Ordinal)
+            .Replace("`", "\\`", StringComparison.Ordinal);
 }

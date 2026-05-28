@@ -66,7 +66,22 @@ public sealed record WebChatSessionDto(
     DateTimeOffset CreatedAt,
     DateTimeOffset UpdatedAt,
     bool Persisted,
-    IReadOnlyList<WebChatMessageDto> Messages);
+    IReadOnlyList<WebChatMessageDto> Messages,
+    WebChatSessionSourceMetadataDto? SourceMetadata = null);
+
+public sealed record WebChatSessionSourceMetadataDto(
+    string Kind,
+    string SessionId,
+    int Version,
+    DateTimeOffset Timestamp,
+    string Cwd,
+    string? ParentSession,
+    string? FilePath,
+    int EntryCount,
+    int MessageCount,
+    CodingAgentJsonlTreeMetadataDto? Tree = null,
+    CodingAgentJsonlImportAuditDto? Audit = null,
+    CodingAgentJsonlImportStrategyDto? ImportStrategy = null);
 
 public sealed record CodingAgentJsonlSessionPreviewDto(
     string SessionId,
@@ -80,6 +95,7 @@ public sealed record CodingAgentJsonlSessionPreviewDto(
     CodingAgentJsonlPreviewFilterDto Filter,
     CodingAgentJsonlTreeMetadataDto Tree,
     CodingAgentJsonlImportAuditDto Audit,
+    CodingAgentJsonlImportStrategyDto ImportStrategy,
     IReadOnlyList<CodingAgentJsonlTimelineMessageDto> Messages);
 
 public sealed record CodingAgentJsonlPreviewFilterDto(
@@ -159,10 +175,29 @@ public sealed record CodingAgentJsonlAuditWarningDto(
     string Message,
     string? EntryId = null);
 
+public sealed record CodingAgentJsonlImportStrategyDto(
+    string Strategy,
+    string? SourceLeafEntryId,
+    bool CurrentBranchOnly,
+    bool ImportsTimelineMessagesOnly,
+    bool PersistsBranchTree,
+    IReadOnlyList<string> WarningCodes);
+
+public sealed record CodingAgentJsonlImportResultSummaryDto(
+    int ImportedMessageCount,
+    int SourceEntryCount,
+    int SourceMessageCount,
+    int WarningCount,
+    bool CurrentBranchOnly);
+
 public sealed record CodingAgentJsonlImportResultDto(
     WebChatSessionDto Session,
     CodingAgentJsonlTreeMetadataDto SourceTree,
-    CodingAgentJsonlImportAuditDto SourceAudit);
+    CodingAgentJsonlImportAuditDto SourceAudit,
+    CodingAgentJsonlImportStrategyDto SourceStrategy,
+    WebChatSessionSourceMetadataDto SourceMetadata,
+    IReadOnlyList<CodingAgentJsonlAuditWarningDto> Warnings,
+    CodingAgentJsonlImportResultSummaryDto Summary);
 
 public sealed record WebUiModelOptionDto(
     string Id,

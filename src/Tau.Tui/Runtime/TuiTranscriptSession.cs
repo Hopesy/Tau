@@ -29,6 +29,51 @@ public readonly record struct TuiTranscriptInputResult(
         new(true, action, renderResult);
 }
 
+public static class TuiTranscriptInput
+{
+    public static TuiTranscriptInputAction ResolveAction(ConsoleKeyInfo key) =>
+        key.Key switch
+        {
+            ConsoleKey.UpArrow => TuiTranscriptInputAction.ScrollLineUp,
+            ConsoleKey.DownArrow => TuiTranscriptInputAction.ScrollLineDown,
+            ConsoleKey.PageUp => TuiTranscriptInputAction.ScrollPageUp,
+            ConsoleKey.PageDown => TuiTranscriptInputAction.ScrollPageDown,
+            ConsoleKey.Home => TuiTranscriptInputAction.ScrollTop,
+            ConsoleKey.End => TuiTranscriptInputAction.ScrollBottom,
+            _ => TuiTranscriptInputAction.None,
+        };
+
+    public static void ApplyAction(TuiTranscriptViewportHost host, TuiTranscriptInputAction action)
+    {
+        ArgumentNullException.ThrowIfNull(host);
+
+        switch (action)
+        {
+            case TuiTranscriptInputAction.ScrollLineUp:
+                host.ScrollLine(delta: 1);
+                break;
+            case TuiTranscriptInputAction.ScrollLineDown:
+                host.ScrollLine(delta: -1);
+                break;
+            case TuiTranscriptInputAction.ScrollPageUp:
+                host.ScrollPage(delta: 1);
+                break;
+            case TuiTranscriptInputAction.ScrollPageDown:
+                host.ScrollPage(delta: -1);
+                break;
+            case TuiTranscriptInputAction.ScrollTop:
+                host.ScrollTop();
+                break;
+            case TuiTranscriptInputAction.ScrollBottom:
+                host.ScrollBottom();
+                break;
+            case TuiTranscriptInputAction.None:
+            default:
+                break;
+        }
+    }
+}
+
 public sealed class TuiTranscriptSession
 {
     private readonly IConsoleKeyReader? _keyReader;
@@ -133,13 +178,13 @@ public sealed class TuiTranscriptSession
 
     public TuiTranscriptInputResult HandleInput(ConsoleKeyInfo key)
     {
-        var action = ResolveAction(key);
+        var action = TuiTranscriptInput.ResolveAction(key);
         if (action == TuiTranscriptInputAction.None)
         {
             return TuiTranscriptInputResult.Ignored;
         }
 
-        ApplyAction(action);
+        TuiTranscriptInput.ApplyAction(Host, action);
         return TuiTranscriptInputResult.From(action, RenderAfterStateChange());
     }
 
@@ -157,43 +202,4 @@ public sealed class TuiTranscriptSession
     private TuiTranscriptRenderResult? RenderAfterStateChange() =>
         IsStarted && AutoRender ? Render() : null;
 
-    private void ApplyAction(TuiTranscriptInputAction action)
-    {
-        switch (action)
-        {
-            case TuiTranscriptInputAction.ScrollLineUp:
-                Host.ScrollLine(delta: 1);
-                break;
-            case TuiTranscriptInputAction.ScrollLineDown:
-                Host.ScrollLine(delta: -1);
-                break;
-            case TuiTranscriptInputAction.ScrollPageUp:
-                Host.ScrollPage(delta: 1);
-                break;
-            case TuiTranscriptInputAction.ScrollPageDown:
-                Host.ScrollPage(delta: -1);
-                break;
-            case TuiTranscriptInputAction.ScrollTop:
-                Host.ScrollTop();
-                break;
-            case TuiTranscriptInputAction.ScrollBottom:
-                Host.ScrollBottom();
-                break;
-            case TuiTranscriptInputAction.None:
-            default:
-                break;
-        }
-    }
-
-    private static TuiTranscriptInputAction ResolveAction(ConsoleKeyInfo key) =>
-        key.Key switch
-        {
-            ConsoleKey.UpArrow => TuiTranscriptInputAction.ScrollLineUp,
-            ConsoleKey.DownArrow => TuiTranscriptInputAction.ScrollLineDown,
-            ConsoleKey.PageUp => TuiTranscriptInputAction.ScrollPageUp,
-            ConsoleKey.PageDown => TuiTranscriptInputAction.ScrollPageDown,
-            ConsoleKey.Home => TuiTranscriptInputAction.ScrollTop,
-            ConsoleKey.End => TuiTranscriptInputAction.ScrollBottom,
-            _ => TuiTranscriptInputAction.None,
-        };
 }

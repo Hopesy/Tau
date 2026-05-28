@@ -246,11 +246,12 @@ tests/
 - `stop [path] <id> <name>`
 - `restart [path] <id> <name>`
 - `model list [path] <id>`
-- `model pull [path] <id> <model>`
+- `model pull [--json] [--config path] [--pod id] [--revision rev] [--snapshot rev] <model>`
 - `model remove [path] <id> <model>`
 - `model status [path] <id> <model>`
-- `vllm plan [--json] [path] <id> <model> [name]`
-- `vllm deploy [--json] [--no-health] [--health-attempts n] [--health-backoff-ms n] [path] <id> <model> [name]`
+- `vllm plan [--json] [--config path] [--pod id] <model> [--name name] [--revision rev] [--snapshot rev] [--vllm <args...>]`
+- `vllm preflight [--json] [--config path] [--pod id] <model> [--name name] [--revision rev] [--snapshot rev]`
+- `vllm deploy [--json] [--no-health] [--prefetch] [--health-attempts n] [--health-backoff-ms n] [--config path] [--pod id] <model> [--name name] [--revision rev] [--snapshot rev] [--vllm <args...>]`
 - `vllm status [--json] [path] <id> <name>`
 - `vllm health [--json] [--health-attempts n] [--health-backoff-ms n] [path] <id> <name>`
 - `vllm stop [--json] [path] <id> <name>`
@@ -360,6 +361,6 @@ dotnet run --project src/Tau.Pods/Tau.Pods.csproj --no-build -- probe tau.pods.j
 - `Tau.Mom --once` 已可真实处理结构化请求并写出带 `provider/model/workingDirectory/title/metadata/attachments` 的 outbox；file request、due `events/*.json` 与 Slack event JSON 会先映射为 `MomChannelMessage`，再生成统一 `DelegationRequest`；本地存在的 attachment 会 staging 到 `workingDirectory/attachments/` 并保留 original/local 元数据；runner 执行前会创建 `scratch/`、workspace/channel `skills/`、`attachments/` 和 `events/`，输入会合并 request context、workspace memory、`SYSTEM.md`、Agent Skills prompt inventory 与最近 channel history，并通过 `context.json` 恢复/保存同一 workdir 的 runtime messages；调用 runner 前会写 `workingDirectory/last_prompt.jsonl` 作为 prompt/debug 快照；默认 `log.jsonl` / `last_prompt.jsonl` 会按 `TAU_MOM_REDACT_SECRETS` 做常见 secret pattern 脱敏；默认 runner 工具集已切到 Mom 的 `bash/read/write/edit/attach`，host sandbox 可本地执行，docker sandbox 当前固定配置和路径/命令构造 seam；runner 事件会进入 Tau runtime log sink，覆盖 response/tool/usage baseline；处理完成后会把本地请求/结果追加到 `workingDirectory/log.jsonl`，并把当前或最近一次运行状态写到 `workingDirectory/status.json`；同一 workdir 内已有新鲜 `running` 状态时会保留 inbox 请求并跳过处理
 - `Tau.Pods probe` 已可对本地 HTTP endpoint 返回真实健康结果
 - `Tau.Pods exec` 已可对 SSH pod 通过系统 `ssh` 客户端执行远程命令，且本地进程 argv 通过 `ArgumentList` 构造
-- `Tau.Pods vllm deploy/status/health/stop` 已可生成并执行远端 SSH command baseline，并具备可配置 health retry/backoff 窗口与 failure classification，但尚未证明真实 vLLM 进程、GPU 环境、systemd user session 或 fallback pid path 的端到端 smoke
+- `Tau.Pods vllm preflight/deploy/status/health/stop` 已可生成并执行远端 SSH command baseline，preflight/deploy 支持 revision-aware snapshot 解析，deploy 可用 `--prefetch` 在模型 cache/snapshot 缺口时复用 `model pull` 后重新 preflight，并具备可配置 health retry/backoff 窗口与 failure classification；当前仍未证明真实 vLLM 进程、GPU 环境、HF download、systemd user session 或 fallback pid path 的端到端 smoke
 - `Tau.slnx` 当前已可 build；如果本机 `bash` 入口不可用，可按 `scripts/verify-dotnet.sh` 中的项目顺序直接执行等价 `dotnet build/test` 命令
 - `scripts/verify-dotnet.ps1` 当前提供 Windows PowerShell 等价验证入口，覆盖与 `verify-dotnet.sh` 相同的 restore/build/test 项目顺序，并支持可选 `-RunSmoke` 执行 `WebUi` 和 `Mom --once` 的最小运行态 smoke

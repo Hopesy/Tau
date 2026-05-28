@@ -1,6 +1,7 @@
 using Tau.Ai.Observability;
 using Tau.CodingAgent.Runtime;
 using Tau.Tui.Abstractions;
+using Tau.Tui.Rendering;
 using Tau.Tui.Runtime;
 
 var printPrompt = TryExtractPrintPrompt(args);
@@ -8,10 +9,23 @@ var rpcMode = HasRpcMode(args);
 var noContextFiles = HasNoContextFiles(args);
 var noThemes = HasNoThemes(args);
 var explicitThemePaths = GetThemePaths(args);
-var terminal = new SystemConsoleTerminal();
 var keyReader = new SystemConsoleKeyReader();
-var editor = printPrompt is null && !rpcMode ? CreateInteractiveEditorIfAttached(keyReader) : null;
-var ui = new InteractiveConsoleSession(terminal, editor);
+var useCompositionUi = ShouldUseCompositionUi(printPrompt, rpcMode);
+var compositionSession = useCompositionUi
+    ? new TuiCompositionSession(TuiAnsiRenderSurface.ForConsole(), keyReader)
+    : null;
+ITerminal terminal = compositionSession is null ? new SystemConsoleTerminal() : new TuiPassiveTerminal();
+var editor = printPrompt is null && !rpcMode ? CreateInteractiveEditorIfAttached(keyReader, compositionSession, useCompositionUi) : null;
+var ui = new InteractiveConsoleSession(
+    terminal,
+    editor,
+    clearScreenAction: compositionSession is null
+        ? null
+        : () =>
+        {
+            compositionSession.TranscriptHost.ResetFrame();
+            compositionSession.Render(force: true);
+        });
 
 static bool HasRpcMode(string[] cliArgs)
 {
@@ -121,14 +135,19 @@ catch
     logSink = null;
 }
 
-static InteractiveInputEditor? CreateInteractiveEditorIfAttached(IConsoleKeyReader keyReader)
-{
-    if (Console.IsInputRedirected || Console.IsOutputRedirected)
-    {
-        return null;
-    }
+static bool ShouldUseCompositionUi(string? printPrompt, bool rpcMode) =>
+    printPrompt is null &&
+    !rpcMode &&
+    !Console.IsInputRedirected &&
+    !Console.IsOutputRedirected &&
+    !string.Equals(Environment.GetEnvironmentVariable("TAU_CODING_AGENT_DISABLE_INPUT_EDITOR"), "1", StringComparison.Ordinal);
 
-    if (string.Equals(Environment.GetEnvironmentVariable("TAU_CODING_AGENT_DISABLE_INPUT_EDITOR"), "1", StringComparison.Ordinal))
+static InteractiveInputEditor? CreateInteractiveEditorIfAttached(
+    IConsoleKeyReader keyReader,
+    TuiCompositionSession? compositionSession,
+    bool useCompositionUi)
+{
+    if (!useCompositionUi)
     {
         return null;
     }
@@ -142,7 +161,9 @@ static InteractiveInputEditor? CreateInteractiveEditorIfAttached(IConsoleKeyRead
 
     return new InteractiveInputEditor(
         keyReader,
-        new SystemConsoleInteractiveRenderer(),
+        compositionSession is null
+            ? new SystemConsoleInteractiveRenderer()
+            : new TuiCompositionInteractiveRenderer(compositionSession),
         history: history,
         bindings: bindings);
 }
@@ -171,29 +192,51 @@ static string? ResolveKeyBindingsPath()
     return string.IsNullOrWhiteSpace(home) ? null : Path.Combine(home, ".tau", "coding-agent-keybindings.json");
 }
 
-static Func<IReadOnlyList<CodingAgentTreeViewItem>, CancellationToken, Task<CodingAgentTreeInteractiveNavigator.Result>> CreateTreeNavigator(
+static Func<IReadOnlyList<CodingAgentTreeViewItem>, string?, CancellationToken, Task<CodingAgentTreeInteractiveNavigator.Result>> CreateTreeNavigator(
     IConsoleKeyReader keyReader,
     CodingAgentSettingsStore settingsStore,
-    CodingAgentTreeSessionController treeSessionController)
+    CodingAgentTreeSessionController treeSessionController,
+    TuiCompositionSession? compositionSession)
 {
     var navigator = new CodingAgentTreeInteractiveNavigator();
-    return (items, cancellationToken) => navigator.NavigateAsync(
-        items,
-        keyReader,
-        Console.Out,
-        clearScreen: () => Console.Write("[2J[H"),
-        initialFoldedEntryIds: treeSessionController.LoadTreeFoldState()?.CollapsedEntryIds ?? settingsStore.Load().TreeCollapsedEntryIds,
-        foldedEntryIdsChanged: foldedEntryIds =>
+    Action<IReadOnlySet<string>> saveFoldedEntryIds = foldedEntryIds =>
+    {
+        var normalized = foldedEntryIds
+            .Where(static id => !string.IsNullOrWhiteSpace(id))
+            .Select(static id => id.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        var current = settingsStore.Load();
+        settingsStore.Save(current with { TreeCollapsedEntryIds = normalized.Length == 0 ? null : normalized });
+    };
+
+    return async (items, initialSelectedEntryId, cancellationToken) =>
+    {
+        var initialFoldedEntryIds =
+            treeSessionController.LoadTreeFoldState()?.CollapsedEntryIds ?? settingsStore.Load().TreeCollapsedEntryIds;
+
+        if (compositionSession is not null)
         {
-            var normalized = foldedEntryIds
-                .Where(static id => !string.IsNullOrWhiteSpace(id))
-                .Select(static id => id.Trim())
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToArray();
-            var current = settingsStore.Load();
-            settingsStore.Save(current with { TreeCollapsedEntryIds = normalized.Length == 0 ? null : normalized });
-        },
-        cancellationToken);
+            return await CodingAgentTreeCompositionNavigator.RunAsync(
+                items,
+                compositionSession,
+                initialFoldedEntryIds,
+                saveFoldedEntryIds,
+                entryId => treeSessionController.GetMetadataSnapshot(entryId),
+                initialSelectedEntryId,
+                cancellationToken).ConfigureAwait(false);
+        }
+
+        return await navigator.NavigateAsync(
+            items,
+            keyReader,
+            Console.Out,
+            clearScreen: () => Console.Write("[2J[H"),
+            initialFoldedEntryIds: initialFoldedEntryIds,
+            initialSelectedEntryId: initialSelectedEntryId,
+            foldedEntryIdsChanged: saveFoldedEntryIds,
+            cancellationToken).ConfigureAwait(false);
+    };
 }
 var sessionFile = Environment.GetEnvironmentVariable("TAU_CODING_AGENT_SESSION_FILE");
 var sessionStore = CodingAgentTreeSessionStore.IsJsonlPath(sessionFile)
@@ -210,6 +253,10 @@ var themeStore = new CodingAgentThemeStore(
     explicitPaths: explicitThemePaths.Count == 0 ? null : explicitThemePaths,
     additionalPathsProvider: () => extensionResourceState.ThemePaths,
     includeDefaults: !noThemes);
+editor?.SetAutocompleteProvider(CodingAgentAutocompleteProviderFactory.Create(
+    promptTemplateStore,
+    skillStore,
+    extensionCommandStore));
 var flatSession = sessionStore?.Load() ?? new CodingAgentSessionSnapshot([], null, null, null);
 var treeSession = treeSessionController.LoadSnapshot();
 var session = CodingAgentTreeSessionStore.HasExplicitTreeSessionPath || treeSession.Messages.Count > 0
@@ -257,11 +304,14 @@ if (rpcMode)
         runner,
         Console.In,
         Console.Out,
-        sessionStore,
-        settingsStore,
-        treeSessionController,
-        autoCompaction,
-        CodingAgentRetryOptions.FromSettingsOrEnvironment(settings));
+        sessionStore: sessionStore,
+        settingsStore: settingsStore,
+        treeSessionController: treeSessionController,
+        autoCompaction: autoCompaction,
+        retryOptions: CodingAgentRetryOptions.FromSettingsOrEnvironment(settings),
+        promptTemplateStore: promptTemplateStore,
+        skillStore: skillStore,
+        extensionCommandStore: extensionCommandStore);
     return await rpcHost.RunAsync(cts.Token).ConfigureAwait(false);
 }
 
@@ -279,23 +329,66 @@ var host = new CodingAgentHost(
     autoCompaction: autoCompaction,
     autoCompactionEnabled: settings.AutoCompactionEnabled,
     retryOptions: CodingAgentRetryOptions.FromSettingsOrEnvironment(settings),
-    turnInputSource: editor is null ? null : new SystemConsoleCodingAgentTurnInputSource(),
+    turnInputSource: editor is null
+        ? null
+        : compositionSession is null
+            ? new SystemConsoleCodingAgentTurnInputSource()
+            : new CompositionCodingAgentTurnInputSource(keyReader, compositionSession, editor.KeyBindings),
     historySnapshotProvider: editor is null ? null : limit => editor.History.Snapshot(limit),
-    treeNavigator: editor is null ? null : CreateTreeNavigator(keyReader, settingsStore, treeSessionController),
-    themeSelector: editor is null ? null : CodingAgentThemeSelector.CreateConsoleSelector(keyReader),
-    settingsSelector: editor is null ? null : CodingAgentSettingsSelector.CreateConsoleSelector(keyReader),
-    scopedModelsSelector: editor is null ? null : CodingAgentScopedModelsSelector.CreateConsoleSelector(keyReader),
-    authSelector: editor is null ? null : CodingAgentAuthSelector.CreateConsoleSelector(keyReader),
-    thinkingSelector: editor is null ? null : CodingAgentThinkingSelector.CreateConsoleSelector(keyReader),
-    modelSelector: editor is null ? null : CodingAgentModelSelector.CreateConsoleSelector(keyReader),
+    treeNavigator: editor is null ? null : CreateTreeNavigator(keyReader, settingsStore, treeSessionController, compositionSession),
+    themeSelector: editor is null
+        ? null
+        : compositionSession is null
+            ? CodingAgentThemeSelector.CreateConsoleSelector(keyReader)
+            : CodingAgentThemeSelector.CreateCompositionSelector(compositionSession),
+    settingsSelector: editor is null
+        ? null
+        : compositionSession is null
+            ? CodingAgentSettingsSelector.CreateConsoleSelector(keyReader)
+            : CodingAgentSettingsSelector.CreateCompositionSelector(compositionSession),
+    scopedModelsSelector: editor is null
+        ? null
+        : compositionSession is null
+            ? CodingAgentScopedModelsSelector.CreateConsoleSelector(keyReader)
+            : CodingAgentScopedModelsSelector.CreateCompositionSelector(compositionSession),
+    authSelector: editor is null
+        ? null
+        : compositionSession is null
+            ? CodingAgentAuthSelector.CreateConsoleSelector(keyReader)
+            : CodingAgentAuthSelector.CreateCompositionSelector(compositionSession),
+    thinkingSelector: editor is null
+        ? null
+        : compositionSession is null
+            ? CodingAgentThinkingSelector.CreateConsoleSelector(keyReader)
+            : CodingAgentThinkingSelector.CreateCompositionSelector(compositionSession),
+    modelSelector: editor is null
+        ? null
+        : compositionSession is null
+            ? CodingAgentModelSelector.CreateConsoleSelector(keyReader)
+            : CodingAgentModelSelector.CreateCompositionSelector(compositionSession),
+    resumeSelector: editor is null
+        ? null
+        : compositionSession is null
+            ? CodingAgentResumeSelector.CreateConsoleSelector(keyReader)
+            : CodingAgentResumeSelector.CreateCompositionSelector(compositionSession),
+    metadataViewer: compositionSession is null
+        ? null
+        : (snapshot, cancellationToken) =>
+            CodingAgentCompositionMetadataViewer.RunAsync(snapshot, compositionSession, cancellationToken),
+    oauthLoginCallbacksFactory: () => new InteractiveOAuthLoginCallbacks(ui),
     keyBindings: editor?.KeyBindings,
     extensionResourceState: extensionResourceState,
+    compositionSession: compositionSession,
     reloadKeyBindings: editor is null
         ? null
         : () =>
         {
             var bindings = KeyBindingFileStore.LoadOrDefault(ResolveKeyBindingsPath());
             editor.SetKeyBindings(bindings);
+            editor.SetAutocompleteProvider(CodingAgentAutocompleteProviderFactory.Create(
+                promptTemplateStore,
+                skillStore,
+                extensionCommandStore));
             return editor.KeyBindings;
         });
 

@@ -194,6 +194,32 @@ public class RuntimeCodingAgentRunnerTests
     }
 
     [Fact]
+    public async Task SummarizeBranchAsync_WithReplaceInstructions_UsesCustomPromptInsteadOfDefaultTemplate()
+    {
+        LlmContext? capturedContext = null;
+        var runner = RuntimeCodingAgentRunner.Create(
+            "test-provider",
+            "test-model",
+            toolsOverride: [],
+            providerRegistryOverride: CreatePromptCapturingRegistry(context => capturedContext = context),
+            modelCatalogOverride: CreatePromptCapturingModelCatalog());
+
+        var result = await runner.SummarizeBranchAsync(
+            [new UserMessage("investigate branch"), new AssistantMessage([new TextContent("found issue")])],
+            "Summarize only blockers and next commands.",
+            replaceInstructions: true);
+
+        Assert.Contains("summary result", result.Summary, StringComparison.Ordinal);
+        Assert.NotNull(capturedContext);
+        var context = capturedContext!.Value;
+        var promptMessage = Assert.IsType<UserMessage>(Assert.Single(context.Messages));
+        var prompt = Assert.IsType<TextContent>(Assert.Single(promptMessage.Content)).Text;
+        Assert.Contains("Summarize only blockers and next commands.", prompt, StringComparison.Ordinal);
+        Assert.DoesNotContain(CodingAgentCompactionMessages.BranchSummaryPrompt, prompt, StringComparison.Ordinal);
+        Assert.DoesNotContain("Additional focus:", prompt, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task RunAsync_EmitsRunStartAndRunEndOnHappyPath()
     {
         var sink = new RecordingLogSink();
@@ -202,7 +228,7 @@ public class RuntimeCodingAgentRunnerTests
             var stream = new AssistantMessageStream();
             stream.Push(new DoneEvent(new AssistantMessage([new TextContent("ok")])));
             return stream;
-        });
+        }, new TauRuntimeLogContext(SessionId: "session-1", MessageId: "message-1"));
 
         var events = new List<AgentEvent>();
         await foreach (var evt in runner.RunAsync("hello"))
@@ -215,12 +241,49 @@ public class RuntimeCodingAgentRunnerTests
         Assert.Equal("test-provider", startEvent.Fields["provider"]);
         Assert.Equal("test-model", startEvent.Fields["model"]);
         Assert.Equal("5", startEvent.Fields["inputBytes"]);
+        Assert.False(string.IsNullOrWhiteSpace(startEvent.Fields["correlationId"]));
+        Assert.Equal("session-1", startEvent.Fields["sessionId"]);
+        Assert.Equal("message-1", startEvent.Fields["messageId"]);
 
         var endEvent = Assert.Single(sink.Events, e => e.Event == "run.end");
         Assert.Equal("agent", endEvent.Category);
         Assert.True(int.Parse(endEvent.Fields["elapsedMs"]!, System.Globalization.CultureInfo.InvariantCulture) >= 0);
+        Assert.Equal(startEvent.Fields["correlationId"], endEvent.Fields["correlationId"]);
+        Assert.Equal("session-1", endEvent.Fields["sessionId"]);
+        Assert.Equal("message-1", endEvent.Fields["messageId"]);
 
         Assert.DoesNotContain(sink.Events, e => e.Event == "run.error" || e.Event == "run.cancel");
+    }
+
+    [Fact]
+    public async Task RunAsync_PerRunLogContextOverridesConfiguredContext()
+    {
+        var sink = new RecordingLogSink();
+        var runner = CreateInstrumentedRunner(sink, () =>
+        {
+            var stream = new AssistantMessageStream();
+            stream.Push(new DoneEvent(new AssistantMessage([new TextContent("ok")])));
+            return stream;
+        }, new TauRuntimeLogContext(
+            CorrelationId: "configured-correlation",
+            SessionId: "configured-session",
+            MessageId: "configured-message"));
+        var runContext = new TauRuntimeLogContext(
+            CorrelationId: "run-correlation",
+            SessionId: "run-session",
+            MessageId: "run-message");
+
+        await foreach (var _ in runner.RunAsync("hello", runContext)) { }
+
+        var startEvent = Assert.Single(sink.Events, e => e.Event == "run.start");
+        Assert.Equal("run-correlation", startEvent.Fields["correlationId"]);
+        Assert.Equal("run-session", startEvent.Fields["sessionId"]);
+        Assert.Equal("run-message", startEvent.Fields["messageId"]);
+
+        var endEvent = Assert.Single(sink.Events, e => e.Event == "run.end");
+        Assert.Equal("run-correlation", endEvent.Fields["correlationId"]);
+        Assert.Equal("run-session", endEvent.Fields["sessionId"]);
+        Assert.Equal("run-message", endEvent.Fields["messageId"]);
     }
 
     [Fact]
@@ -238,6 +301,9 @@ public class RuntimeCodingAgentRunnerTests
         var errorEvent = Assert.Single(sink.Events, e => e.Event == "run.error");
         Assert.Equal("InvalidOperationException", errorEvent.Fields["error"]);
         Assert.Equal("boom", errorEvent.Fields["message"]);
+        var startEvent = Assert.Single(sink.Events, e => e.Event == "run.start");
+        Assert.False(string.IsNullOrWhiteSpace(startEvent.Fields["correlationId"]));
+        Assert.Equal(startEvent.Fields["correlationId"], errorEvent.Fields["correlationId"]);
         Assert.DoesNotContain(sink.Events, e => e.Event == "run.end");
     }
 
@@ -309,7 +375,8 @@ public class RuntimeCodingAgentRunnerTests
 
     private static RuntimeCodingAgentRunner CreateInstrumentedRunner(
         ITauLogSink sink,
-        Func<AssistantMessageStream> streamFactory)
+        Func<AssistantMessageStream> streamFactory,
+        TauRuntimeLogContext? logContext = null)
     {
         var model = new Model
         {
@@ -328,11 +395,13 @@ public class RuntimeCodingAgentRunnerTests
                 Model = model,
                 ProviderRegistry = registry,
                 Tools = [],
+                LogContext = logContext,
                 SystemPrompt = "test",
                 StreamOptions = new SimpleStreamOptions { MaxTokens = 256 }
             },
             new Tau.Ai.Registry.ModelCatalog(),
-            logSink: sink);
+            logSink: sink,
+            logContext: logContext);
     }
 
     private static RuntimeCodingAgentRunner CreatePromptCapturingRunner(
@@ -399,7 +468,7 @@ file sealed class PromptCapturingProvider : IStreamProvider
     {
         _capture(context);
         var stream = new AssistantMessageStream();
-        stream.Push(new DoneEvent(new AssistantMessage([new TextContent("ok")])));
+        stream.Push(new DoneEvent(new AssistantMessage([new TextContent("summary result")])));
         return stream;
     }
 }

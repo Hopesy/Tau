@@ -137,7 +137,7 @@ public sealed class GoogleProvider : IStreamProvider
                 ["role"] = "system",
                 ["parts"] = new List<object>
                 {
-                    new Dictionary<string, object> { ["text"] = context.SystemPrompt! }
+                    new Dictionary<string, object> { ["text"] = UnicodeTextSanitizer.RemoveUnpairedSurrogates(context.SystemPrompt!) }
                 }
             };
         }

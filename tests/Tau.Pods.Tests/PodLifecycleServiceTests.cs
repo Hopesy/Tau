@@ -1,3 +1,4 @@
+using Tau.Ai.Observability;
 using Tau.Pods.Models;
 using Tau.Pods.Services;
 
@@ -115,6 +116,35 @@ public class PodLifecycleServiceTests
     }
 
     [Fact]
+    public async Task DeployAsync_LogsLifecycleRuntimeEvents()
+    {
+        var sink = new CapturingLogSink();
+        var exec = CreateFakeExecService(0, "deployed test-model\n");
+        var service = new PodLifecycleService(exec, logSink: sink);
+        var pod = new PodDefinition { Id = "gpu-1", SshHost = "host.example.com" };
+
+        var result = await service.DeployAsync(pod, "meta/llama-3.1-70b", "llama70b");
+
+        Assert.True(result.Success);
+        var start = Assert.Single(sink.Events, evt => evt.Event == "lifecycle.deploy.start");
+        Assert.Equal("pod", start.Category);
+        Assert.Equal("gpu-1", start.Fields["podId"]);
+        Assert.Equal("deploy", start.Fields["operation"]);
+        Assert.Equal("llama70b", start.Fields["deploymentName"]);
+        Assert.Equal("meta/llama-3.1-70b", start.Fields["modelId"]);
+        Assert.Equal("ssh", start.Fields["transport"]);
+
+        var end = Assert.Single(sink.Events, evt => evt.Event == "lifecycle.deploy.end");
+        Assert.Equal("true", end.Fields["success"]);
+        Assert.Equal("0", end.Fields["exitCode"]);
+        Assert.Equal("none", end.Fields["failureKind"]);
+        Assert.Equal("Deployed 'llama70b' on gpu-1.", end.Fields["summary"]);
+        Assert.False(end.Fields.ContainsKey("command"));
+        Assert.False(end.Fields.ContainsKey("stdout"));
+        Assert.False(end.Fields.ContainsKey("stderr"));
+    }
+
+    [Fact]
     public async Task DeployAsync_SshPod_SurfacesExecStartFailure()
     {
         var service = new PodLifecycleService(CreateStartFailureExecService());
@@ -138,6 +168,41 @@ public class PodLifecycleServiceTests
 
         Assert.False(result.Success);
         Assert.Contains("requires SSH", result.Summary);
+    }
+
+    [Fact]
+    public async Task DeployAsync_LogsUnsupportedTransportFailureKind()
+    {
+        var sink = new CapturingLogSink();
+        var exec = CreateFakeExecService();
+        var service = new PodLifecycleService(exec, logSink: sink);
+        var pod = new PodDefinition { Id = "http-pod", Endpoint = "http://localhost:8000" };
+
+        var result = await service.DeployAsync(pod, "model-id");
+
+        Assert.False(result.Success);
+        var start = Assert.Single(sink.Events, evt => evt.Event == "lifecycle.deploy.start");
+        Assert.Equal("http", start.Fields["transport"]);
+        var end = Assert.Single(sink.Events, evt => evt.Event == "lifecycle.deploy.end");
+        Assert.Equal("false", end.Fields["success"]);
+        Assert.Equal("unsupported-transport", end.Fields["failureKind"]);
+        Assert.Equal("model-id", end.Fields["modelId"]);
+    }
+
+    [Fact]
+    public async Task DeployAsync_LogsStableAuthFailureKind()
+    {
+        var sink = new CapturingLogSink();
+        var exec = CreateFakeExecService(255, "", "Permission denied (publickey).\n");
+        var service = new PodLifecycleService(exec, logSink: sink);
+        var pod = new PodDefinition { Id = "gpu-1", SshHost = "host.example.com" };
+
+        var result = await service.DeployAsync(pod, "model-id", "demo");
+
+        Assert.False(result.Success);
+        var end = Assert.Single(sink.Events, evt => evt.Event == "lifecycle.deploy.end");
+        Assert.Equal("ssh-auth-failed", end.Fields["failureKind"]);
+        Assert.Equal("255", end.Fields["exitCode"]);
     }
 
     [Fact]
@@ -383,5 +448,12 @@ public class PodLifecycleServiceTests
         Assert.False(result.Success);
         Assert.Empty(result.Deployments);
         Assert.Contains("Deployments failed: ssh process start failed", result.Summary, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private sealed class CapturingLogSink : ITauLogSink
+    {
+        public List<TauLogEvent> Events { get; } = new();
+
+        public void Log(TauLogEvent evt) => Events.Add(evt);
     }
 }

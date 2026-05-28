@@ -213,6 +213,55 @@ public sealed class OpenAiProviderSerializationTests
         Assert.Equal("novita", gateway.GetProperty("order")[1].GetString());
     }
 
+    [Fact]
+    public async Task Stream_RemovesUnpairedSurrogatesFromChatCompletionsRequestText()
+    {
+        const char high = (char)0xD83D;
+        const char low = (char)0xDE48;
+        const string emoji = "🙈";
+        using var handler = new StubHandler();
+        using var client = new HttpClient(handler);
+        var provider = new OpenAiProvider(client);
+        var model = new Model
+        {
+            Id = "gpt-5.4",
+            Name = "GPT-5.4",
+            Api = "openai-chat-completions",
+            Provider = "openai",
+            BaseUrl = "https://example.invalid/v1",
+            Compat = new ModelCompatibility
+            {
+                RequiresThinkingAsText = true
+            }
+        };
+        var context = new LlmContext
+        {
+            SystemPrompt = $"system {high} {emoji}",
+            Messages =
+            [
+                new UserMessage($"user {high} {emoji}"),
+                new AssistantMessage(
+                [
+                    new ThinkingContent($"thinking {low} {emoji}"),
+                    new TextContent($"assistant {high} {emoji}"),
+                    new ToolCallContent("call_1", "read_file", "{}")
+                ]),
+                new ToolResultMessage("call_1", [new TextContent($"tool {low} {emoji}")])
+            ]
+        };
+
+        await DrainAsync(provider.Stream(model, context, new StreamOptions { ApiKey = "test-key" }));
+
+        using var doc = JsonDocument.Parse(handler.CapturedBody!);
+        var allText = CollectJsonStrings(doc.RootElement);
+        Assert.False(ContainsUnpairedSurrogate(allText));
+        Assert.Contains("system  🙈", allText, StringComparison.Ordinal);
+        Assert.Contains("user  🙈", allText, StringComparison.Ordinal);
+        Assert.Contains("thinking  🙈", allText, StringComparison.Ordinal);
+        Assert.Contains("assistant  🙈", allText, StringComparison.Ordinal);
+        Assert.Contains("tool  🙈", allText, StringComparison.Ordinal);
+    }
+
     private sealed class StubHandler : HttpMessageHandler
     {
         public string? CapturedBody { get; private set; }
@@ -235,5 +284,61 @@ public sealed class OpenAiProviderSerializationTests
         await foreach (var _ in stream)
         {
         }
+    }
+
+    private static string CollectJsonStrings(JsonElement element)
+    {
+        var builder = new StringBuilder();
+        AppendJsonStrings(element, builder);
+        return builder.ToString();
+    }
+
+    private static void AppendJsonStrings(JsonElement element, StringBuilder builder)
+    {
+        switch (element.ValueKind)
+        {
+            case JsonValueKind.String:
+                builder.AppendLine(element.GetString());
+                break;
+            case JsonValueKind.Object:
+                foreach (var property in element.EnumerateObject())
+                {
+                    AppendJsonStrings(property.Value, builder);
+                }
+
+                break;
+            case JsonValueKind.Array:
+                foreach (var item in element.EnumerateArray())
+                {
+                    AppendJsonStrings(item, builder);
+                }
+
+                break;
+        }
+    }
+
+    private static bool ContainsUnpairedSurrogate(string text)
+    {
+        for (var i = 0; i < text.Length; i++)
+        {
+            var current = text[i];
+            if (char.IsHighSurrogate(current))
+            {
+                if (i + 1 < text.Length && char.IsLowSurrogate(text[i + 1]))
+                {
+                    i++;
+                    continue;
+                }
+
+                return true;
+            }
+
+            if (char.IsLowSurrogate(current))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 }

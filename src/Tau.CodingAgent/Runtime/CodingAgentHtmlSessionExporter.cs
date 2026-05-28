@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using Tau.Ai;
+using Tau.CodingAgent.Tools;
 
 namespace Tau.CodingAgent.Runtime;
 
@@ -277,6 +278,7 @@ public static class CodingAgentHtmlSessionExporter
         string? sessionName,
         CodingAgentTreeSessionSummary? treeSummary = null,
         string? sessionJsonl = null,
+        IReadOnlyDictionary<string, object?>? toolResultDetailsByToolCallId = null,
         CodingAgentSecretRedactor? redactor = null)
     {
         var exportPath = Path.GetFullPath(path);
@@ -294,7 +296,15 @@ public static class CodingAgentHtmlSessionExporter
             ? effectiveRedactor.Redact(sessionJsonl)
             : sessionJsonl;
 
-        var html = Render(redactedMessages, provider, model, sessionName, treeSummary, redactedJsonl);
+        var html = Render(
+            redactedMessages,
+            provider,
+            model,
+            sessionName,
+            treeSummary,
+            redactedJsonl,
+            toolResultDetailsByToolCallId,
+            effectiveRedactor);
         File.WriteAllText(exportPath, html, Encoding.UTF8);
         return exportPath;
     }
@@ -368,7 +378,9 @@ public static class CodingAgentHtmlSessionExporter
         string? model,
         string? sessionName,
         CodingAgentTreeSessionSummary? treeSummary,
-        string? sessionJsonl)
+        string? sessionJsonl,
+        IReadOnlyDictionary<string, object?>? toolResultDetailsByToolCallId,
+        CodingAgentSecretRedactor redactor)
     {
         var stats = SessionStats.FromMessages(messages);
         var title = string.IsNullOrWhiteSpace(sessionName) ? "Tau Coding Agent Session" : sessionName.Trim();
@@ -459,7 +471,16 @@ public static class CodingAgentHtmlSessionExporter
                 if (item.Message is { } message)
                 {
                     messageIndex++;
-                    RenderMessage(builder, message, messageIndex, item.Id, item.ResolvedLabel, item.Timestamp, toolCalls);
+                    RenderMessage(
+                        builder,
+                        message,
+                        messageIndex,
+                        item.Id,
+                        item.ResolvedLabel,
+                        item.Timestamp,
+                        toolCalls,
+                        toolResultDetailsByToolCallId,
+                        redactor);
                     RegisterToolCalls(message, toolCalls);
                     continue;
                 }
@@ -490,7 +511,9 @@ public static class CodingAgentHtmlSessionExporter
         string? entryId,
         string? label,
         DateTimeOffset? timestamp,
-        IReadOnlyDictionary<string, ToolCallRenderContext> toolCalls)
+        IReadOnlyDictionary<string, ToolCallRenderContext> toolCalls,
+        IReadOnlyDictionary<string, object?>? toolResultDetailsByToolCallId,
+        CodingAgentSecretRedactor redactor)
     {
         switch (message)
         {
@@ -529,7 +552,12 @@ public static class CodingAgentHtmlSessionExporter
                     toolCalls.TryGetValue(toolResult.ToolCallId, out var context)
                         ? context
                         : null;
-                RenderToolResultContent(builder, toolResult, toolContext);
+                var toolResultDetails = !string.IsNullOrWhiteSpace(toolResult.ToolCallId) &&
+                    toolResultDetailsByToolCallId is not null &&
+                    toolResultDetailsByToolCallId.TryGetValue(toolResult.ToolCallId, out var details)
+                        ? details
+                        : null;
+                RenderToolResultContent(builder, toolResult, toolContext, toolResultDetails, redactor);
                 builder.AppendLine("</article>");
                 break;
 
@@ -686,25 +714,208 @@ public static class CodingAgentHtmlSessionExporter
     private static void RenderToolResultContent(
         StringBuilder builder,
         ToolResultMessage toolResult,
-        ToolCallRenderContext? toolContext)
+        ToolCallRenderContext? toolContext,
+        object? toolResultDetails,
+        CodingAgentSecretRedactor redactor)
     {
         if (toolContext is not null &&
             toolResult.Content.Count == 1 &&
             toolResult.Content[0] is TextContent text &&
             !string.IsNullOrWhiteSpace(text.Text) &&
-            TryRenderCustomToolResult(builder, text.Text, toolResult.IsError, toolContext))
+            TryRenderCustomToolResult(builder, text.Text, toolResult.IsError, toolContext, toolResultDetails, redactor))
         {
             return;
         }
 
         RenderContentBlocks(builder, toolResult.Content, foldLongText: true);
+        if (TryGetReadFileToolDetails(toolResultDetails, out var readFileDetails))
+        {
+            AppendReadFileToolResultMetadata(builder, readFileDetails, redactor);
+        }
     }
+
+    private static bool TryGetReadFileToolDetails(
+        object? toolResultDetails,
+        out ReadFileToolDetails readFileDetails)
+    {
+        if (toolResultDetails is ReadFileToolDetails details)
+        {
+            readFileDetails = details;
+            return true;
+        }
+
+        readFileDetails = default!;
+        return false;
+    }
+
+    private static bool TryGetListDirectoryToolDetails(
+        object? toolResultDetails,
+        out ListDirectoryToolDetails listDirectoryDetails)
+    {
+        if (toolResultDetails is ListDirectoryToolDetails details)
+        {
+            listDirectoryDetails = details;
+            return true;
+        }
+
+        listDirectoryDetails = default!;
+        return false;
+    }
+
+    private static void AppendReadFileToolResultMetadata(
+        StringBuilder builder,
+        ReadFileToolDetails details,
+        CodingAgentSecretRedactor redactor)
+    {
+        builder.AppendLine("<div class=\"tool-result-section tool-result-metadata\">");
+        builder.AppendLine("<div class=\"tool-result-label\">file metadata</div>");
+        builder.AppendLine("<dl class=\"tool-result-metadata-list\">");
+        AppendToolResultMetadataEntry(builder, "path", redactor.Redact(details.Path));
+        AppendToolResultMetadataEntry(builder, "kind", details.Kind);
+
+        if (!string.IsNullOrWhiteSpace(details.Language))
+        {
+            AppendToolResultMetadataEntry(builder, "language", details.Language);
+        }
+
+        if (details.StartLine is not null || details.EndLine is not null)
+        {
+            AppendToolResultMetadataEntry(
+                builder,
+                "lines",
+                FormatReadFileLineRange(details.StartLine, details.EndLine));
+        }
+
+        if (details.TotalLines is not null)
+        {
+            AppendToolResultMetadataEntry(
+                builder,
+                "total lines",
+                details.TotalLines.Value.ToString(CultureInfo.InvariantCulture));
+        }
+
+        if (details.HasMore)
+        {
+            AppendToolResultMetadataEntry(builder, "has more", "true");
+        }
+
+        if (details.Truncation is not null)
+        {
+            AppendToolResultMetadataEntry(
+                builder,
+                "truncation",
+                FormatToolOutputTruncationSummary(details.Truncation));
+        }
+
+        if (!string.IsNullOrWhiteSpace(details.MimeType))
+        {
+            AppendToolResultMetadataEntry(builder, "mime", details.MimeType);
+        }
+
+        if (details.ImageBytes is not null)
+        {
+            AppendToolResultMetadataEntry(
+                builder,
+                "image bytes",
+                FormatByteSize(details.ImageBytes.Value));
+        }
+
+        if (details.EstimatedBase64Bytes is not null)
+        {
+            AppendToolResultMetadataEntry(
+                builder,
+                "base64 bytes",
+                FormatByteSize(details.EstimatedBase64Bytes.Value));
+        }
+
+        if (details.ImageOmitted)
+        {
+            AppendToolResultMetadataEntry(builder, "image omitted", "true");
+        }
+
+        builder.AppendLine("</dl>");
+        builder.AppendLine("</div>");
+    }
+
+    private static void AppendListDirectoryToolResultMetadata(
+        StringBuilder builder,
+        ListDirectoryToolDetails details)
+    {
+        if (details.EntryLimitReached is null && details.Truncation is null)
+        {
+            return;
+        }
+
+        builder.AppendLine("<div class=\"tool-result-section tool-result-metadata\">");
+        builder.AppendLine("<div class=\"tool-result-label\">directory metadata</div>");
+        builder.AppendLine("<dl class=\"tool-result-metadata-list\">");
+
+        if (details.EntryLimitReached is not null)
+        {
+            AppendToolResultMetadataEntry(
+                builder,
+                "entry limit reached",
+                $"{details.EntryLimitReached.Value.ToString(CultureInfo.InvariantCulture)} entries");
+        }
+
+        if (details.Truncation is not null)
+        {
+            AppendToolResultMetadataEntry(
+                builder,
+                "truncation",
+                FormatToolOutputTruncationSummary(details.Truncation));
+        }
+
+        builder.AppendLine("</dl>");
+        builder.AppendLine("</div>");
+    }
+
+    private static void AppendToolResultMetadataEntry(
+        StringBuilder builder,
+        string label,
+        string value)
+    {
+        builder.Append("<dt>")
+            .Append(Html(label))
+            .AppendLine("</dt>");
+        builder.Append("<dd>")
+            .Append(Html(value))
+            .AppendLine("</dd>");
+    }
+
+    private static string FormatReadFileLineRange(int? startLine, int? endLine) =>
+        startLine is null && endLine is null
+            ? string.Empty
+            : startLine is not null && endLine is not null
+                ? startLine.Value == endLine.Value
+                    ? startLine.Value.ToString(CultureInfo.InvariantCulture)
+                    : $"{startLine.Value.ToString(CultureInfo.InvariantCulture)}-{endLine.Value.ToString(CultureInfo.InvariantCulture)}"
+                : startLine?.ToString(CultureInfo.InvariantCulture) ?? endLine!.Value.ToString(CultureInfo.InvariantCulture);
+
+    private static string FormatToolOutputTruncationSummary(ToolOutputTruncationResult truncation)
+    {
+        var truncatedBy = string.IsNullOrWhiteSpace(truncation.TruncatedBy)
+            ? "unknown"
+            : truncation.TruncatedBy;
+        return
+            $"{truncatedBy}, output {truncation.OutputLines.ToString(CultureInfo.InvariantCulture)} lines / {ToolOutputTruncator.FormatSize(truncation.OutputBytes)}, " +
+            $"total {truncation.TotalLines.ToString(CultureInfo.InvariantCulture)} lines / {ToolOutputTruncator.FormatSize(truncation.TotalBytes)}";
+    }
+
+    private static string FormatByteSize(long bytes) => bytes switch
+    {
+        < 1024 => $"{bytes.ToString(CultureInfo.InvariantCulture)}B",
+        < 1024 * 1024 => $"{(bytes / 1024.0).ToString("F1", CultureInfo.InvariantCulture)}KB",
+        _ => $"{(bytes / (1024.0 * 1024.0)).ToString("F1", CultureInfo.InvariantCulture)}MB"
+    };
 
     private static bool TryRenderCustomToolResult(
         StringBuilder builder,
         string text,
         bool isError,
-        ToolCallRenderContext toolContext)
+        ToolCallRenderContext toolContext,
+        object? toolResultDetails,
+        CodingAgentSecretRedactor redactor)
     {
         var knownTool = NormalizeKnownToolName(toolContext.Name);
         if (knownTool is null)
@@ -720,12 +931,12 @@ public static class CodingAgentHtmlSessionExporter
                 .Append(" output, ")
                 .Append(Html(text.Length.ToString("N0", CultureInfo.InvariantCulture)))
                 .AppendLine(" characters</summary>");
-            AppendCustomToolResultBody(builder, text, isError, toolContext, knownTool);
+            AppendCustomToolResultBody(builder, text, isError, toolContext, knownTool, toolResultDetails, redactor);
             builder.AppendLine("</details>");
             return true;
         }
 
-        AppendCustomToolResultBody(builder, text, isError, toolContext, knownTool);
+        AppendCustomToolResultBody(builder, text, isError, toolContext, knownTool, toolResultDetails, redactor);
         return true;
     }
 
@@ -734,11 +945,28 @@ public static class CodingAgentHtmlSessionExporter
         string text,
         bool isError,
         ToolCallRenderContext toolContext,
-        string knownTool)
+        string knownTool,
+        object? toolResultDetails,
+        CodingAgentSecretRedactor redactor)
     {
         builder.Append("<div class=\"tool-result-render tool-result-")
             .Append(HtmlAttribute(toolContext.Name.Replace('_', '-')))
             .AppendLine("\">");
+
+        ReadFileToolDetails? readFileDetails = null;
+        if (knownTool == "read_file" &&
+            TryGetReadFileToolDetails(toolResultDetails, out var resolvedReadFileDetails))
+        {
+            readFileDetails = resolvedReadFileDetails;
+            AppendReadFileToolResultMetadata(builder, readFileDetails, redactor);
+        }
+
+        ListDirectoryToolDetails? listDirectoryDetails = null;
+        if (knownTool == "ls" &&
+            TryGetListDirectoryToolDetails(toolResultDetails, out var resolvedListDirectoryDetails))
+        {
+            listDirectoryDetails = resolvedListDirectoryDetails;
+        }
 
         switch (knownTool)
         {
@@ -747,7 +975,11 @@ public static class CodingAgentHtmlSessionExporter
                 break;
 
             case "read_file":
-                AppendToolResultCode(builder, "file content", text, toolContext.Language);
+                AppendToolResultCode(
+                    builder,
+                    "file content",
+                    text,
+                    readFileDetails?.Language ?? toolContext.Language);
                 break;
 
             case "write_file":
@@ -762,6 +994,11 @@ public static class CodingAgentHtmlSessionExporter
             case "glob":
             case "ls":
                 AppendListToolResult(builder, text, isError, knownTool == "ls");
+                if (knownTool == "ls" && listDirectoryDetails is not null)
+                {
+                    AppendListDirectoryToolResultMetadata(builder, listDirectoryDetails);
+                }
+
                 break;
         }
 
@@ -875,7 +1112,7 @@ public static class CodingAgentHtmlSessionExporter
         builder.AppendLine("<ul class=\"tool-result-list\">");
         foreach (var line in lines)
         {
-            var itemClass = markDirectories && line.TrimStart().StartsWith("[DIR]", StringComparison.Ordinal)
+            var itemClass = markDirectories && IsListDirectoryEntry(line)
                 ? " class=\"tool-result-directory\""
                 : string.Empty;
             builder.Append("<li")
@@ -887,6 +1124,22 @@ public static class CodingAgentHtmlSessionExporter
 
         builder.AppendLine("</ul>");
     }
+
+    private static bool IsListDirectoryEntry(string line)
+    {
+        var trimmed = line.Trim();
+        if (trimmed.StartsWith("[DIR]", StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        return trimmed.EndsWith("/", StringComparison.Ordinal) && !IsBracketedToolNoticeLine(trimmed);
+    }
+
+    private static bool IsBracketedToolNoticeLine(string trimmed) =>
+        trimmed.Length >= 2 &&
+        trimmed[0] == '[' &&
+        trimmed[^1] == ']';
 
     private static bool IsNoResultText(string text)
     {
@@ -2072,6 +2325,7 @@ public static class CodingAgentHtmlSessionExporter
 
                 case "ls":
                     AppendToolSummaryField(builder, "path", GetDisplayProperty(root, "path"));
+                    AppendToolSummaryField(builder, "limit", GetDisplayProperty(root, "limit"));
                     break;
 
                 default:
@@ -4482,6 +4736,28 @@ public static class CodingAgentHtmlSessionExporter
           margin-bottom: 4px;
           color: var(--muted);
           font-size: 12px;
+        }
+
+        .tool-result-metadata-list {
+          display: grid;
+          grid-template-columns: max-content minmax(0, 1fr);
+          gap: 4px 12px;
+          margin: 0;
+          padding: 8px 10px;
+          border: 1px solid var(--line);
+          border-radius: 5px;
+          background: #101417;
+          font: 12px/1.5 ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+        }
+
+        .tool-result-metadata-list dt {
+          color: var(--muted);
+        }
+
+        .tool-result-metadata-list dd {
+          margin: 0;
+          min-width: 0;
+          overflow-wrap: anywhere;
         }
 
         .tool-result-section pre {

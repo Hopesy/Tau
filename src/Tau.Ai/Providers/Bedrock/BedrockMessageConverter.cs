@@ -72,7 +72,7 @@ internal static class BedrockMessageConverter
             return result;
         }
 
-        result.Add(new Dictionary<string, object> { ["text"] = systemPrompt! });
+        result.Add(new Dictionary<string, object> { ["text"] = SanitizeText(systemPrompt!) });
         AddCachePointIfNeeded(result, model, cacheRetention);
         return result;
     }
@@ -147,7 +147,7 @@ internal static class BedrockMessageConverter
             switch (block)
             {
                 case TextContent text:
-                    result.Add(new Dictionary<string, object> { ["text"] = text.Text });
+                    result.Add(new Dictionary<string, object> { ["text"] = SanitizeText(text.Text) });
                     break;
                 case ImageContent image:
                     result.Add(new Dictionary<string, object> { ["image"] = CreateImageBlock(image) });
@@ -169,7 +169,7 @@ internal static class BedrockMessageConverter
             switch (block)
             {
                 case TextContent text when !string.IsNullOrWhiteSpace(text.Text):
-                    result.Add(new Dictionary<string, object> { ["text"] = text.Text });
+                    result.Add(new Dictionary<string, object> { ["text"] = SanitizeText(text.Text) });
                     break;
 
                 case ThinkingContent thinking when !thinking.Redacted && !string.IsNullOrWhiteSpace(thinking.Thinking):
@@ -199,7 +199,7 @@ internal static class BedrockMessageConverter
     {
         var reasoningText = new Dictionary<string, object>
         {
-            ["text"] = thinking.Thinking
+            ["text"] = SanitizeText(thinking.Thinking)
         };
         if (SupportsThinkingSignature(model) && !string.IsNullOrWhiteSpace(thinking.ThinkingSignature))
         {
@@ -242,7 +242,7 @@ internal static class BedrockMessageConverter
             switch (block)
             {
                 case TextContent text:
-                    result.Add(new Dictionary<string, object> { ["text"] = text.Text });
+                    result.Add(new Dictionary<string, object> { ["text"] = SanitizeText(text.Text) });
                     break;
                 case ImageContent image:
                     result.Add(new Dictionary<string, object> { ["image"] = CreateImageBlock(image) });
@@ -257,6 +257,9 @@ internal static class BedrockMessageConverter
 
         return result;
     }
+
+    private static string SanitizeText(string text) =>
+        UnicodeTextSanitizer.RemoveUnpairedSurrogates(text);
 
     private static Dictionary<string, object> CreateImageBlock(ImageContent image) => new()
     {

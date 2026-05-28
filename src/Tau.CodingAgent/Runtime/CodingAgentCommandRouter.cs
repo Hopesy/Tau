@@ -23,13 +23,20 @@ public sealed class CodingAgentCommandRouter
     private readonly Action<bool?>? _autoCompactionChanged;
     private readonly Func<int, IReadOnlyList<string>>? _historySnapshotProvider;
     private readonly Action? _clearScreenAction;
-    private readonly Func<IReadOnlyList<CodingAgentTreeViewItem>, CancellationToken, Task<CodingAgentTreeInteractiveNavigator.Result>>? _treeNavigator;
+    private readonly Action<string?>? _inputDraftSetter;
+    private readonly Func<CodingAgentTreeNavigationPromptState, CancellationToken, Task<CodingAgentTreeNavigationDecision>>? _treeNavigationPrompt;
+    private readonly CodingAgentSessionSwitchCoordinator _sessionSwitchCoordinator;
+    private readonly Func<CodingAgentTreeLabelPromptState, CancellationToken, Task<CodingAgentTreeLabelPromptResult>>? _treeLabelPrompt;
+    private readonly Func<IReadOnlyList<CodingAgentTreeViewItem>, string?, CancellationToken, Task<CodingAgentTreeInteractiveNavigator.Result>>? _treeNavigator;
     private readonly Func<CodingAgentThemeStatus, string?, CancellationToken, Task<string?>>? _themeSelector;
     private readonly Func<CodingAgentSettingsSelectorState, CancellationToken, Task<string?>>? _settingsSelector;
     private readonly Func<CodingAgentScopedModelsSelectorState, CancellationToken, Task<CodingAgentScopedModelsSelection>>? _scopedModelsSelector;
     private readonly Func<CodingAgentAuthSelectorState, CancellationToken, Task<string?>>? _authSelector;
     private readonly Func<CodingAgentThinkingSelectorState, CancellationToken, Task<string?>>? _thinkingSelector;
     private readonly Func<CodingAgentModelSelectorState, CancellationToken, Task<string?>>? _modelSelector;
+    private readonly Func<CodingAgentResumeSelectorState, CancellationToken, Task<CodingAgentResumeSelectionResult>>? _resumeSelector;
+    private readonly Func<CodingAgentTreeMetadataSnapshot, CancellationToken, Task>? _metadataViewer;
+    private readonly Func<Tau.Ai.Auth.OAuth.IOAuthLoginCallbacks> _oauthLoginCallbacksFactory;
     private readonly CodingAgentExtensionResourceState? _extensionResourceState;
     private readonly Func<IKeyBindingMap?>? _reloadKeyBindings;
     private readonly string? _sessionFile;
@@ -55,13 +62,21 @@ public sealed class CodingAgentCommandRouter
         Action<bool?>? autoCompactionChanged = null,
         Func<int, IReadOnlyList<string>>? historySnapshotProvider = null,
         Action? clearScreenAction = null,
-        Func<IReadOnlyList<CodingAgentTreeViewItem>, CancellationToken, Task<CodingAgentTreeInteractiveNavigator.Result>>? treeNavigator = null,
+        Action<string?>? inputDraftSetter = null,
+        Func<CodingAgentTreeNavigationPromptState, CancellationToken, Task<CodingAgentTreeNavigationDecision>>? treeNavigationPrompt = null,
+        Func<CodingAgentSessionSwitchPromptState, CancellationToken, Task<CodingAgentTreeNavigationDecision>>? sessionSwitchPrompt = null,
+        Func<CodingAgentSessionSwitchHookState, CancellationToken, Task<CodingAgentSessionSwitchHookResult?>>? sessionSwitchHook = null,
+        Func<CodingAgentTreeLabelPromptState, CancellationToken, Task<CodingAgentTreeLabelPromptResult>>? treeLabelPrompt = null,
+        Func<IReadOnlyList<CodingAgentTreeViewItem>, string?, CancellationToken, Task<CodingAgentTreeInteractiveNavigator.Result>>? treeNavigator = null,
         Func<CodingAgentThemeStatus, string?, CancellationToken, Task<string?>>? themeSelector = null,
         Func<CodingAgentSettingsSelectorState, CancellationToken, Task<string?>>? settingsSelector = null,
         Func<CodingAgentScopedModelsSelectorState, CancellationToken, Task<CodingAgentScopedModelsSelection>>? scopedModelsSelector = null,
         Func<CodingAgentAuthSelectorState, CancellationToken, Task<string?>>? authSelector = null,
         Func<CodingAgentThinkingSelectorState, CancellationToken, Task<string?>>? thinkingSelector = null,
         Func<CodingAgentModelSelectorState, CancellationToken, Task<string?>>? modelSelector = null,
+        Func<CodingAgentResumeSelectorState, CancellationToken, Task<CodingAgentResumeSelectionResult>>? resumeSelector = null,
+        Func<CodingAgentTreeMetadataSnapshot, CancellationToken, Task>? metadataViewer = null,
+        Func<Tau.Ai.Auth.OAuth.IOAuthLoginCallbacks>? oauthLoginCallbacksFactory = null,
         IKeyBindingMap? keyBindings = null,
         CodingAgentExtensionResourceState? extensionResourceState = null,
         Func<IKeyBindingMap?>? reloadKeyBindings = null)
@@ -83,6 +98,14 @@ public sealed class CodingAgentCommandRouter
         _autoCompactionChanged = autoCompactionChanged;
         _historySnapshotProvider = historySnapshotProvider;
         _clearScreenAction = clearScreenAction;
+        _inputDraftSetter = inputDraftSetter;
+        _treeNavigationPrompt = treeNavigationPrompt;
+        _sessionSwitchCoordinator = new CodingAgentSessionSwitchCoordinator(
+            runner,
+            treeSessionController,
+            sessionSwitchPrompt,
+            sessionSwitchHook);
+        _treeLabelPrompt = treeLabelPrompt;
         _treeNavigator = treeNavigator;
         _themeSelector = themeSelector;
         _settingsSelector = settingsSelector;
@@ -90,6 +113,9 @@ public sealed class CodingAgentCommandRouter
         _authSelector = authSelector;
         _thinkingSelector = thinkingSelector;
         _modelSelector = modelSelector;
+        _resumeSelector = resumeSelector;
+        _metadataViewer = metadataViewer;
+        _oauthLoginCallbacksFactory = oauthLoginCallbacksFactory ?? (() => new ConsoleOAuthLoginCallbacks());
         _keyBindings = keyBindings;
         _extensionResourceState = extensionResourceState;
         _reloadKeyBindings = reloadKeyBindings;
@@ -126,16 +152,16 @@ public sealed class CodingAgentCommandRouter
                 "/files" => HandleFilesCommand(parts),
                 "/export" => HandleExportCommand(input, parts),
                 "/share" => await HandleShareCommandAsync(parts, cancellationToken).ConfigureAwait(false),
-                "/import" => HandleImportCommand(input, parts),
-                "/new" => HandleNewCommand(parts),
+                "/import" => await HandleImportCommandAsync(input, parts, cancellationToken).ConfigureAwait(false),
+                "/new" => await HandleNewCommandAsync(parts, cancellationToken).ConfigureAwait(false),
                 "/quit" => HandleQuitCommand(parts),
                 "/session" => HandleSessionCommand(parts),
-                "/metadata" => HandleMetadataCommand(parts),
-                "/tree" => HandleTreeCommand(parts),
+                "/metadata" => await HandleMetadataCommandAsync(parts, cancellationToken).ConfigureAwait(false),
+                "/tree" => await HandleTreeCommandAsync(parts, cancellationToken).ConfigureAwait(false),
                 "/label" => HandleLabelCommand(input, parts),
                 "/fork" => await HandleForkCommandAsync(input, parts, cancellationToken).ConfigureAwait(false),
                 "/clone" => HandleCloneCommand(parts),
-                "/resume" => HandleResumeCommand(input, parts),
+                "/resume" => await HandleResumeCommandAsync(input, parts, cancellationToken).ConfigureAwait(false),
                 "/model" => await HandleModelCommandAsync(input, parts, cancellationToken).ConfigureAwait(false),
                 "/provider" => HandleProviderCommand(parts),
                 "/models" => HandleModelsCommand(parts),
@@ -706,7 +732,8 @@ public sealed class CodingAgentCommandRouter
             snapshot.Model ?? _runner.Model.Id,
             snapshot.Name ?? _runner.SessionName,
             treeSummary,
-            sessionJsonl);
+            sessionJsonl,
+            (_runner as ICodingAgentToolResultDetailsProvider)?.ToolResultDetailsByToolCallId);
     }
 
     private static void TryDeleteFile(string path)
@@ -726,7 +753,10 @@ public sealed class CodingAgentCommandRouter
         }
     }
 
-    private CodingAgentCommandResult HandleImportCommand(string input, IReadOnlyList<string> parts)
+    private async Task<CodingAgentCommandResult> HandleImportCommandAsync(
+        string input,
+        IReadOnlyList<string> parts,
+        CancellationToken cancellationToken)
     {
         if (parts.Count < 2)
         {
@@ -746,6 +776,26 @@ public sealed class CodingAgentCommandRouter
                 return CodingAgentCommandResult.Error("JSONL import requires an active tree session");
             }
 
+            var currentPath = System.IO.Path.GetFullPath(_treeSessionController.Path);
+            var importTreePath = System.IO.Path.GetFullPath(importPath);
+            if (!importTreePath.Equals(currentPath, StringComparison.OrdinalIgnoreCase))
+            {
+                var switchSummary = await _sessionSwitchCoordinator.TrySummarizeBeforeSwitchAsync(
+                        CodingAgentTreeNavigationReason.ImportSession,
+                        importTreePath,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                if (switchSummary.Cancelled)
+                {
+                    return CodingAgentCommandResult.Status("import cancelled");
+                }
+
+                var importedTreeSnapshot = _treeSessionController.Resume(importPath);
+                _runner.RestoreSession(importedTreeSnapshot.ToFlatSnapshot());
+                return CodingAgentCommandResult.Status(
+                    $"resumed session from {importedTreeSnapshot.FilePath}: {importedTreeSnapshot.Messages.Count} messages, model {_runner.Model.Provider}/{_runner.Model.Id}, name {FormatSessionName(_runner.SessionName)}, leaf {FormatTreeId(importedTreeSnapshot.LeafId)}{FormatSessionSwitchSummarySuffix(switchSummary)}");
+            }
+
             var treeSnapshot = _treeSessionController.Resume(importPath);
             _runner.RestoreSession(treeSnapshot.ToFlatSnapshot());
             return CodingAgentCommandResult.Status(
@@ -760,16 +810,29 @@ public sealed class CodingAgentCommandRouter
             $"imported session from {store.Path}: {snapshot.Messages.Count} messages, model {_runner.Model.Provider}/{_runner.Model.Id}, name {FormatSessionName(_runner.SessionName)}");
     }
 
-    private CodingAgentCommandResult HandleNewCommand(IReadOnlyList<string> parts)
+    private async Task<CodingAgentCommandResult> HandleNewCommandAsync(
+        IReadOnlyList<string> parts,
+        CancellationToken cancellationToken)
     {
         if (parts.Count != 1)
         {
             return CodingAgentCommandResult.Error(CodingAgentCommandCatalog.Usage("/new"));
         }
 
+        var switchSummary = await _sessionSwitchCoordinator.TrySummarizeBeforeSwitchAsync(
+                CodingAgentTreeNavigationReason.NewSession,
+                targetSessionPath: null,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (switchSummary.Cancelled)
+        {
+            return CodingAgentCommandResult.Status("new session cancelled");
+        }
+
         _runner.ResetSession();
         _treeSessionController?.StartNewFromRunner(_runner);
-        return CodingAgentCommandResult.Status($"started new session with model {_runner.Model.Provider}/{_runner.Model.Id}");
+        return CodingAgentCommandResult.Status(
+            $"started new session with model {_runner.Model.Provider}/{_runner.Model.Id}{FormatSessionSwitchSummarySuffix(switchSummary)}");
     }
 
     private static CodingAgentCommandResult HandleQuitCommand(IReadOnlyList<string> parts)
@@ -804,7 +867,9 @@ public sealed class CodingAgentCommandRouter
             $"session: name {FormatSessionName(stats.SessionName)}, model {stats.Provider}/{stats.Model}, messages {stats.TotalMessages} (user {stats.UserMessages}, assistant {stats.AssistantMessages}, tool {stats.ToolResultMessages}, toolCalls {stats.ToolCalls}), tokens {tokenBudget}, retry {FormatRetryPolicy(_retryOptions)}, file {file}");
     }
 
-    private CodingAgentCommandResult HandleMetadataCommand(IReadOnlyList<string> parts)
+    private async Task<CodingAgentCommandResult> HandleMetadataCommandAsync(
+        IReadOnlyList<string> parts,
+        CancellationToken cancellationToken)
     {
         if (parts.Count > 2)
         {
@@ -818,10 +883,19 @@ public sealed class CodingAgentCommandRouter
 
         _treeSessionController.SyncFromRunner(_runner);
         var entryId = parts.Count == 2 ? parts[1] : null;
+        var snapshot = _treeSessionController.GetMetadataSnapshot(entryId);
+        if (_metadataViewer is not null)
+        {
+            await _metadataViewer(snapshot, cancellationToken).ConfigureAwait(false);
+            return new CodingAgentCommandResult(true, false, null);
+        }
+
         return CodingAgentCommandResult.Status(_treeSessionController.FormatMetadata(entryId));
     }
 
-    private CodingAgentCommandResult HandleTreeCommand(IReadOnlyList<string> parts)
+    private async Task<CodingAgentCommandResult> HandleTreeCommandAsync(
+        IReadOnlyList<string> parts,
+        CancellationToken cancellationToken)
     {
         if (_treeSessionController is null)
         {
@@ -842,21 +916,128 @@ public sealed class CodingAgentCommandRouter
                 return CodingAgentCommandResult.Error("interactive tree navigator is not available in this mode");
             }
 
-            var items = _treeSessionController.EnumerateView(options);
+            var items = _treeSessionController.EnumerateView(options with { MaxEntries = int.MaxValue });
             if (items.Count == 0)
             {
                 return CodingAgentCommandResult.Status("tree has no entries matching filter");
             }
 
-            var result = _treeNavigator(items, CancellationToken.None).GetAwaiter().GetResult();
-            if (result.FoldedEntryIds is not null)
+            string? preferredEntryId = null;
+            while (true)
             {
-                _treeSessionController.AppendTreeFoldState(result.FoldedEntryIds);
-            }
+                var result = await _treeNavigator(items, preferredEntryId, cancellationToken).ConfigureAwait(false);
+                if (result.FoldedEntryIds is not null)
+                {
+                    _treeSessionController.AppendTreeFoldState(result.FoldedEntryIds);
+                }
 
-            return result.SelectedEntryId is null
-                ? CodingAgentCommandResult.Status("tree navigator cancelled")
-                : CodingAgentCommandResult.Status($"selected entry {result.SelectedEntryId}");
+                preferredEntryId = result.LabelEditEntryId ?? result.SelectedEntryId ?? preferredEntryId;
+
+                if (!string.IsNullOrWhiteSpace(result.LabelEditEntryId))
+                {
+                    if (_treeLabelPrompt is null)
+                    {
+                        return CodingAgentCommandResult.Error("interactive tree label editor is not available in this mode");
+                    }
+
+                    var entryId = result.LabelEditEntryId;
+                    var promptResult = await _treeLabelPrompt(
+                            new CodingAgentTreeLabelPromptState(entryId, _treeSessionController.GetLabel(entryId)),
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                    if (!promptResult.Cancelled)
+                    {
+                        _treeSessionController.AppendLabelChange(entryId, NormalizeTreeLabel(promptResult.Label));
+                    }
+
+                    items = _treeSessionController.EnumerateView(options with { MaxEntries = int.MaxValue });
+                    if (items.Count == 0)
+                    {
+                        return CodingAgentCommandResult.Status("tree has no entries matching filter");
+                    }
+
+                    continue;
+                }
+
+                if (result.SelectedEntryId is null)
+                {
+                    return CodingAgentCommandResult.Status("tree navigator cancelled");
+                }
+
+                var selectedItem = items.FirstOrDefault(item =>
+                    item.EntryId.Equals(result.SelectedEntryId, StringComparison.OrdinalIgnoreCase));
+                if (selectedItem is null)
+                {
+                    return CodingAgentCommandResult.Error($"selected tree entry '{result.SelectedEntryId}' is no longer available");
+                }
+
+                if (selectedItem.IsCurrentLeaf)
+                {
+                    return CodingAgentCommandResult.Status("Already at this point");
+                }
+
+                var navigationTargetId = ShouldUseUserEntryNavigation(selectedItem)
+                    ? selectedItem.ParentEntryId
+                    : selectedItem.EntryId;
+                var navigationDecision = await ResolveTreeNavigationDecisionAsync(navigationTargetId, cancellationToken)
+                    .ConfigureAwait(false);
+                if (navigationDecision.Cancelled)
+                {
+                    preferredEntryId = selectedItem.EntryId;
+                    items = _treeSessionController.EnumerateView(options with { MaxEntries = int.MaxValue });
+                    if (items.Count == 0)
+                    {
+                        return CodingAgentCommandResult.Status("tree has no entries matching filter");
+                    }
+
+                    continue;
+                }
+
+                var originalSessionName = _runner.SessionName;
+                var navigationLabel = NormalizeTreeLabel(navigationDecision.Label);
+                CodingAgentTreeSessionSnapshot snapshot;
+                CodingAgentBranchSummaryResult? summary = null;
+                if (navigationDecision.Summarize)
+                {
+                    var summaryMessages = _treeSessionController.CollectBranchSummaryMessages(navigationTargetId);
+                    if (summaryMessages.Count > 0)
+                    {
+                        summary = await _runner
+                            .SummarizeBranchAsync(
+                                summaryMessages,
+                                navigationDecision.CustomInstructions,
+                                navigationDecision.ReplaceInstructions,
+                                cancellationToken)
+                            .ConfigureAwait(false);
+                        snapshot = _treeSessionController.BranchWithSummary(navigationTargetId, summary, navigationLabel);
+                    }
+                    else
+                    {
+                        snapshot = _treeSessionController.BranchTo(navigationTargetId, navigationLabel);
+                    }
+                }
+                else
+                {
+                    snapshot = _treeSessionController.BranchTo(navigationTargetId, navigationLabel);
+                }
+
+                _runner.RestoreSession(snapshot.ToFlatSnapshot());
+                if (snapshot.Name is null && !string.IsNullOrWhiteSpace(originalSessionName))
+                {
+                    _runner.SessionName = originalSessionName;
+                }
+
+                if (ShouldUseUserEntryNavigation(selectedItem))
+                {
+                    _inputDraftSetter?.Invoke(selectedItem.NavigationDraftText);
+                    return CodingAgentCommandResult.Status(
+                        $"tree rewound to {FormatTreeId(navigationTargetId)} from user entry {selectedItem.EntryId}: loaded draft, messages {snapshot.Messages.Count}{FormatTreeSummarySuffix(summary)}");
+                }
+
+                _inputDraftSetter?.Invoke(null);
+                return CodingAgentCommandResult.Status(
+                    $"navigated tree to {selectedItem.EntryId}: messages {snapshot.Messages.Count}{FormatTreeSummarySuffix(summary)}");
+            }
         }
 
         return CodingAgentCommandResult.Status(_treeSessionController.FormatTree(options));
@@ -917,6 +1098,7 @@ public sealed class CodingAgentCommandRouter
                     .SummarizeBranchAsync(
                         messages,
                         ExtractBranchSummaryInstructions(parts),
+                        replaceInstructions: false,
                         cancellationToken)
                     .ConfigureAwait(false);
                 snapshot = _treeSessionController.BranchWithSummary(entryId, summary);
@@ -963,7 +1145,10 @@ public sealed class CodingAgentCommandRouter
             $"cloned session to {snapshot.FilePath}: leaf {FormatTreeId(snapshot.LeafId)}, messages {snapshot.Messages.Count}, model {_runner.Model.Provider}/{_runner.Model.Id}");
     }
 
-    private CodingAgentCommandResult HandleResumeCommand(string input, IReadOnlyList<string> parts)
+    private async Task<CodingAgentCommandResult> HandleResumeCommandAsync(
+        string input,
+        IReadOnlyList<string> parts,
+        CancellationToken cancellationToken)
     {
         if (parts.Count > 2)
         {
@@ -975,21 +1160,101 @@ public sealed class CodingAgentCommandRouter
             return CodingAgentCommandResult.Error("tree sessions are not enabled");
         }
 
+        _treeSessionController.SyncFromRunner(_runner);
+
+        if (parts.Count == 1 && _resumeSelector is not null)
+        {
+            return await HandleInteractiveResumeSelectionAsync(cancellationToken).ConfigureAwait(false);
+        }
+
         var resumeTarget = parts.Count == 1
             ? "latest"
             : input[(input.IndexOf(' ') + 1)..].Trim();
         var path = resumeTarget.Equals("latest", StringComparison.OrdinalIgnoreCase)
-            ? CodingAgentTreeSessionStore.FindMostRecentSession()
+            ? CodingAgentTreeSessionStore.FindMostRecentSession(_treeSessionController.Path)
             : resumeTarget;
         if (string.IsNullOrWhiteSpace(path))
         {
             return CodingAgentCommandResult.Error("no JSONL session found to resume");
         }
 
+        var currentPath = System.IO.Path.GetFullPath(_treeSessionController.Path);
+        var selectedPath = System.IO.Path.GetFullPath(path);
+        if (selectedPath.Equals(currentPath, StringComparison.OrdinalIgnoreCase))
+        {
+            return CodingAgentCommandResult.Status("Already in this session");
+        }
+
+        var switchSummary = await _sessionSwitchCoordinator.TrySummarizeBeforeSwitchAsync(
+                CodingAgentTreeNavigationReason.ResumeSession,
+                selectedPath,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (switchSummary.Cancelled)
+        {
+            return CodingAgentCommandResult.Status("resume switch cancelled");
+        }
+
         var snapshot = _treeSessionController.Resume(path);
         _runner.RestoreSession(snapshot.ToFlatSnapshot());
         return CodingAgentCommandResult.Status(
-            $"resumed session from {snapshot.FilePath}: {snapshot.Messages.Count} messages, model {_runner.Model.Provider}/{_runner.Model.Id}, name {FormatSessionName(_runner.SessionName)}, leaf {FormatTreeId(snapshot.LeafId)}");
+            $"resumed session from {snapshot.FilePath}: {snapshot.Messages.Count} messages, model {_runner.Model.Provider}/{_runner.Model.Id}, name {FormatSessionName(_runner.SessionName)}, leaf {FormatTreeId(snapshot.LeafId)}{FormatSessionSwitchSummarySuffix(switchSummary)}");
+    }
+
+    private async Task<CodingAgentCommandResult> HandleInteractiveResumeSelectionAsync(CancellationToken cancellationToken)
+    {
+        if (_treeSessionController is null)
+        {
+            return CodingAgentCommandResult.Error("tree sessions are not enabled");
+        }
+
+        if (_resumeSelector is null)
+        {
+            return CodingAgentCommandResult.Error("resume selector is not available in this session");
+        }
+
+        var state = new CodingAgentResumeSelectorState(
+            _treeSessionController.Path,
+            Environment.CurrentDirectory,
+            CodingAgentTreeSessionStore.ListAvailableSessions(_treeSessionController.Path));
+        if (state.Sessions.Count == 0)
+        {
+            return CodingAgentCommandResult.Error("no JSONL session found to resume");
+        }
+
+        var selection = await _resumeSelector(state, cancellationToken).ConfigureAwait(false);
+        if (!string.IsNullOrWhiteSpace(selection.RenamedCurrentSessionName))
+        {
+            _runner.SessionName = selection.RenamedCurrentSessionName;
+        }
+
+        var selectedPath = selection.SelectedPath;
+        if (string.IsNullOrWhiteSpace(selectedPath))
+        {
+            return CodingAgentCommandResult.Status("resume selection cancelled");
+        }
+
+        var currentPath = System.IO.Path.GetFullPath(_treeSessionController.Path);
+        var normalizedSelectedPath = System.IO.Path.GetFullPath(selectedPath);
+        if (normalizedSelectedPath.Equals(currentPath, StringComparison.OrdinalIgnoreCase))
+        {
+            return CodingAgentCommandResult.Status("Already in this session");
+        }
+
+        var switchSummary = await _sessionSwitchCoordinator.TrySummarizeBeforeSwitchAsync(
+                CodingAgentTreeNavigationReason.ResumeSession,
+                normalizedSelectedPath,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (switchSummary.Cancelled)
+        {
+            return CodingAgentCommandResult.Status("resume switch cancelled");
+        }
+
+        var snapshot = _treeSessionController.Resume(normalizedSelectedPath);
+        _runner.RestoreSession(snapshot.ToFlatSnapshot());
+        return CodingAgentCommandResult.Status(
+            $"resumed session from {snapshot.FilePath}: {snapshot.Messages.Count} messages, model {_runner.Model.Provider}/{_runner.Model.Id}, name {FormatSessionName(_runner.SessionName)}, leaf {FormatTreeId(snapshot.LeafId)}{FormatSessionSwitchSummarySuffix(switchSummary)}");
     }
 
     public CodingAgentCommandResult CycleModel(string direction = "forward")
@@ -1896,7 +2161,7 @@ public sealed class CodingAgentCommandRouter
             return CodingAgentCommandResult.Error($"login {status.Provider}: OAuth provider not found.");
         }
 
-        var callbacks = new ConsoleOAuthLoginCallbacks();
+        var callbacks = _oauthLoginCallbacksFactory();
         var credentials = await provider.LoginAsync(callbacks, cancellationToken).ConfigureAwait(false);
         _runner.SaveOAuthCredentials(status.Provider, credentials);
         return CodingAgentCommandResult.Status($"login {status.Provider}: authenticated successfully. Credentials saved to auth.json.");
@@ -2516,8 +2781,52 @@ public sealed class CodingAgentCommandRouter
     private static string FormatTreeId(string? id) =>
         string.IsNullOrWhiteSpace(id) ? "root" : id.Length <= 8 ? id : id[..8];
 
+    private static bool ShouldUseUserEntryNavigation(CodingAgentTreeViewItem item) =>
+        string.Equals(item.EntryType, "message", StringComparison.OrdinalIgnoreCase) &&
+        string.Equals(item.MessageRole, "user", StringComparison.OrdinalIgnoreCase);
+
+    private async Task<CodingAgentTreeNavigationDecision> ResolveTreeNavigationDecisionAsync(
+        string? navigationTargetId,
+        CancellationToken cancellationToken,
+        CodingAgentTreeNavigationReason reason = CodingAgentTreeNavigationReason.TreeNavigation,
+        string? targetSessionPath = null)
+    {
+        var summaryMessages = _treeSessionController?.CollectBranchSummaryMessages(navigationTargetId);
+        if (summaryMessages is null || summaryMessages.Count == 0)
+        {
+            return CodingAgentTreeNavigationDecision.NoSummary;
+        }
+
+        if (_treeNavigationPrompt is null)
+        {
+            return CodingAgentTreeNavigationDecision.NoSummary;
+        }
+
+        var estimate = CodingAgentTokenEstimator.Estimate(summaryMessages);
+        return await _treeNavigationPrompt(
+                new CodingAgentTreeNavigationPromptState(
+                    navigationTargetId,
+                    summaryMessages.Count,
+                    estimate,
+                    reason,
+                    targetSessionPath),
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private static string FormatTreeSummarySuffix(CodingAgentBranchSummaryResult? summary) =>
+        summary is null ? string.Empty : $", branch summary {summary.EntryCount} entries, tokens ~{summary.TokensBefore}";
+
+    private static string FormatSessionSwitchSummarySuffix(CodingAgentSessionSwitchSummaryResult result) =>
+        result.SummarizedCurrentBranch
+            ? $", previous branch summary {result.SummaryEntryCount} entries, tokens ~{result.TokensBeforeSummary}"
+            : string.Empty;
+
     private static string FormatParentSession(string? parentSession) =>
         string.IsNullOrWhiteSpace(parentSession) ? string.Empty : $", parent {parentSession}";
+
+    private static string? NormalizeTreeLabel(string? label) =>
+        string.IsNullOrWhiteSpace(label) ? null : label.Trim();
 
     private static bool TryParseTreeOptions(
         IReadOnlyList<string> parts,
@@ -2666,4 +2975,47 @@ public sealed class CodingAgentCommandRouter
         return string.IsNullOrWhiteSpace(text) ? null : text;
     }
 
+}
+
+public sealed record CodingAgentTreeNavigationPromptState(
+    string? TargetEntryId,
+    int EntryCount,
+    int TokensBefore,
+    CodingAgentTreeNavigationReason Reason,
+    string? TargetSessionPath);
+
+public sealed record CodingAgentTreeLabelPromptState(
+    string EntryId,
+    string? CurrentLabel);
+
+public sealed record CodingAgentTreeNavigationDecision(
+    bool Cancelled,
+    bool Summarize,
+    string? CustomInstructions = null,
+    bool ReplaceInstructions = false,
+    string? Label = null)
+{
+    public static CodingAgentTreeNavigationDecision NoSummary { get; } = new(false, false);
+    public static CodingAgentTreeNavigationDecision CancelledDecision { get; } = new(true, false);
+
+    public static CodingAgentTreeNavigationDecision SummarizeWith(
+        string? customInstructions = null,
+        bool replaceInstructions = false,
+        string? label = null) =>
+        new(
+            false,
+            true,
+            string.IsNullOrWhiteSpace(customInstructions) ? null : customInstructions.Trim(),
+            replaceInstructions,
+            string.IsNullOrWhiteSpace(label) ? null : label.Trim());
+}
+
+public sealed record CodingAgentTreeLabelPromptResult(
+    bool Cancelled,
+    string? Label)
+{
+    public static CodingAgentTreeLabelPromptResult CancelledResult { get; } = new(true, null);
+
+    public static CodingAgentTreeLabelPromptResult Saved(string? label) =>
+        new(false, string.IsNullOrWhiteSpace(label) ? null : label.Trim());
 }

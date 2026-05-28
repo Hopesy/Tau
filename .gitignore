@@ -26,6 +26,8 @@ temp/
 .tau/auth.json.*.tmp
 .tau/models.json
 .tau/models.json.*.tmp
+**/.tau/log.jsonl
+**/.tau/log.jsonl.tmp
 .tau/coding-agent-session.json
 .tau/coding-agent-session.json.tmp
 .tau/coding-agent-session.jsonl

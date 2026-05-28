@@ -73,12 +73,17 @@ internal sealed class FakeWebUiRunner : ICodingAgentRunner
     public Task<CodingAgentBranchSummaryResult> SummarizeBranchAsync(
         IReadOnlyList<ChatMessage> messages,
         string? customInstructions = null,
+        bool replaceInstructions = false,
         CancellationToken cancellationToken = default) =>
         throw new InvalidOperationException("Branch summarization is not configured for browser tests.");
 
     public void Steer(string input) { }
 
+    public void Steer(IReadOnlyList<ContentBlock> input) { }
+
     public void FollowUp(string input) { }
+
+    public void FollowUp(IReadOnlyList<ContentBlock> input) { }
 
     public void ResetSession()
     {

@@ -75,6 +75,75 @@ public class CodingAgentSettingsStoreTests
     }
 
     [Fact]
+    public void SaveAndLoad_RoundTripsUpstreamShellTerminalImageAndMarkdownSettings()
+    {
+        var path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"tau-coding-agent-settings-upstream-{Guid.NewGuid():N}.json");
+        var store = new CodingAgentSettingsStore(path);
+        var model = new Model
+        {
+            Provider = "anthropic",
+            Id = "claude-sonnet-4.5",
+            Name = "Claude Sonnet 4.5",
+            Api = "anthropic"
+        };
+
+        try
+        {
+            store.Save(new CodingAgentSettingsSnapshot(
+                null,
+                null,
+                ShellPath: " C:\\tools\\bash.exe ",
+                ShellCommandPrefix: " source ~/.bashrc ",
+                NpmCommand: ["mise", "exec", "node@20", "--", " npm ", "npm"],
+                QuietStartup: true,
+                CollapseChangelog: true,
+                EnableInstallTelemetry: false,
+                TerminalShowImages: false,
+                TerminalClearOnShrink: true,
+                ImagesAutoResize: false,
+                ImagesBlockImages: true,
+                ShowHardwareCursor: true,
+                EditorPaddingX: 99,
+                AutocompleteMaxVisible: 1,
+                MarkdownCodeBlockIndent: "    "));
+
+            AssertUpstreamSettings(store.Load());
+
+            store.SaveDefaultModel(model);
+
+            var loaded = store.Load();
+            Assert.Equal("anthropic", loaded.DefaultProvider);
+            Assert.Equal("claude-sonnet-4.5", loaded.DefaultModel);
+            AssertUpstreamSettings(loaded);
+        }
+        finally
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+        }
+
+        static void AssertUpstreamSettings(CodingAgentSettingsSnapshot loaded)
+        {
+            Assert.Equal("C:\\tools\\bash.exe", loaded.ShellPath);
+            Assert.Equal("source ~/.bashrc", loaded.ShellCommandPrefix);
+            Assert.Equal(["mise", "exec", "node@20", "--", "npm", "npm"], loaded.NpmCommand);
+            Assert.True(loaded.QuietStartup);
+            Assert.True(loaded.CollapseChangelog);
+            Assert.False(loaded.EnableInstallTelemetry);
+            Assert.False(loaded.TerminalShowImages);
+            Assert.True(loaded.TerminalClearOnShrink);
+            Assert.False(loaded.ImagesAutoResize);
+            Assert.True(loaded.ImagesBlockImages);
+            Assert.True(loaded.ShowHardwareCursor);
+            Assert.Equal(3, loaded.EditorPaddingX);
+            Assert.Equal(3, loaded.AutocompleteMaxVisible);
+            Assert.Equal("    ", loaded.MarkdownCodeBlockIndent);
+        }
+    }
+
+    [Fact]
     public void Load_InvalidJson_ReturnsEmptySnapshot()
     {
         var path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"tau-coding-agent-settings-invalid-{Guid.NewGuid():N}.json");
@@ -97,6 +166,20 @@ public class CodingAgentSettingsStoreTests
             Assert.Null(loaded.AutoCompactionEnabled);
             Assert.Null(loaded.Theme);
             Assert.Null(loaded.TreeCollapsedEntryIds);
+            Assert.Null(loaded.ShellPath);
+            Assert.Null(loaded.ShellCommandPrefix);
+            Assert.Null(loaded.NpmCommand);
+            Assert.Null(loaded.QuietStartup);
+            Assert.Null(loaded.CollapseChangelog);
+            Assert.Null(loaded.EnableInstallTelemetry);
+            Assert.Null(loaded.TerminalShowImages);
+            Assert.Null(loaded.TerminalClearOnShrink);
+            Assert.Null(loaded.ImagesAutoResize);
+            Assert.Null(loaded.ImagesBlockImages);
+            Assert.Null(loaded.ShowHardwareCursor);
+            Assert.Null(loaded.EditorPaddingX);
+            Assert.Null(loaded.AutocompleteMaxVisible);
+            Assert.Null(loaded.MarkdownCodeBlockIndent);
         }
         finally
         {

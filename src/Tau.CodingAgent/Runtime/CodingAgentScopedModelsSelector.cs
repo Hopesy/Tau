@@ -38,6 +38,27 @@ public static class CodingAgentScopedModelsSelector
             cancellationToken);
     }
 
+    public static Func<CodingAgentScopedModelsSelectorState, CancellationToken, Task<CodingAgentScopedModelsSelection>> CreateCompositionSelector(
+        TuiCompositionSession session)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+
+        return async (state, cancellationToken) =>
+        {
+            if (state.AvailableModels.Count == 0)
+            {
+                return CodingAgentScopedModelsSelection.Cancelled;
+            }
+
+            var selector = CreateSelectList(state);
+            var result = await TuiCompositionOverlaySessions.RunAsync(selector, session, cancellationToken)
+                .ConfigureAwait(false);
+            return result.IsCancelled
+                ? CodingAgentScopedModelsSelection.Cancelled
+                : CodingAgentScopedModelsSelection.Saved(result.SelectedValues);
+        };
+    }
+
     public static TuiMultiSelectList CreateSelectList(
         CodingAgentScopedModelsSelectorState state,
         int maxVisible = 12)

@@ -1,3 +1,4 @@
+using Tau.Ai.Observability;
 using Tau.Pods.Models;
 using Tau.Pods.Services;
 
@@ -7,8 +8,8 @@ public sealed class PodVllmOrchestrationServiceTests
 {
     private static string RemoteCommand(System.Diagnostics.ProcessStartInfo psi)
     {
-        Assert.Equal(8, psi.ArgumentList.Count);
-        return psi.ArgumentList[7];
+        Assert.True(psi.ArgumentList.Count >= 8);
+        return psi.ArgumentList[^1];
     }
 
     [Fact]
@@ -208,6 +209,96 @@ public sealed class PodVllmOrchestrationServiceTests
     }
 
     [Fact]
+    public async Task DeployAsync_LogsRuntimeEventsForPreflightDeployAndHealth()
+    {
+        var sink = new CapturingLogSink();
+        var exec = new PodExecService((psi, _) =>
+        {
+            var command = RemoteCommand(psi);
+            if (IsPreflightCommand(command))
+            {
+                return Task.FromResult(new PodExecService.ProcessExecutionResult(0, PreflightOk("/models/models--org--model"), ""));
+            }
+
+            return command.Contains("/health", StringComparison.Ordinal)
+                ? Task.FromResult(new PodExecService.ProcessExecutionResult(0, "ready\n", ""))
+                : Task.FromResult(new PodExecService.ProcessExecutionResult(0, "started tau-pod-served\n", ""));
+        });
+        var service = new PodVllmOrchestrationService(exec, logSink: sink);
+        var pod = new PodDefinition { Id = "gpu-1", SshHost = "host.example.com", ModelsPath = "/models" };
+
+        var result = await service.DeployAsync(pod, new PodVllmServeOptions("org/model", DeploymentName: "served"));
+
+        Assert.True(result.Success);
+        Assert.Contains(sink.Events, evt => evt.Category == "pod" && evt.Event == "vllm.deploy.start");
+        Assert.Contains(sink.Events, evt => evt.Event == "vllm.preflight.end" && evt.Fields["success"] == "true");
+        Assert.Contains(sink.Events, evt => evt.Event == "vllm.health.end" && evt.Fields["ready"] == "true");
+        var deployEnd = Assert.Single(sink.Events, evt => evt.Event == "vllm.deploy.end");
+        Assert.Equal("gpu-1", deployEnd.Fields["podId"]);
+        Assert.Equal("deploy", deployEnd.Fields["operation"]);
+        Assert.Equal("served", deployEnd.Fields["deploymentName"]);
+        Assert.Equal("org/model", deployEnd.Fields["modelId"]);
+        Assert.Equal("true", deployEnd.Fields["success"]);
+        Assert.Equal("false", deployEnd.Fields["hasRollback"]);
+        Assert.Equal("true", deployEnd.Fields["healthReady"]);
+        Assert.False(deployEnd.Fields.ContainsKey("command"));
+        Assert.False(deployEnd.Fields.ContainsKey("stdout"));
+        Assert.False(deployEnd.Fields.ContainsKey("stderr"));
+    }
+
+    [Fact]
+    public async Task DeployAsync_LogsRollbackWhenHealthFails()
+    {
+        var sink = new CapturingLogSink();
+        var exec = new PodExecService((psi, _) =>
+        {
+            var command = RemoteCommand(psi);
+            if (IsPreflightCommand(command))
+            {
+                return Task.FromResult(new PodExecService.ProcessExecutionResult(0, PreflightOk("$HOME/.cache/huggingface/hub/models--org--model"), ""));
+            }
+
+            if (command.Contains("/health", StringComparison.Ordinal))
+            {
+                return Task.FromResult(new PodExecService.ProcessExecutionResult(2, "unhealthy\n", ""));
+            }
+
+            return command.Contains("rolled back", StringComparison.Ordinal)
+                ? Task.FromResult(new PodExecService.ProcessExecutionResult(0, "rolled back tau-pod-broken\n", ""))
+                : Task.FromResult(new PodExecService.ProcessExecutionResult(0, "started tau-pod-broken\n", ""));
+        });
+        var service = new PodVllmOrchestrationService(exec, logSink: sink);
+        var pod = new PodDefinition { Id = "gpu-1", SshHost = "host.example.com" };
+
+        var result = await service.DeployAsync(pod, new PodVllmServeOptions("org/model", DeploymentName: "broken"));
+
+        Assert.False(result.Success);
+        Assert.NotNull(result.Rollback);
+        Assert.Contains(sink.Events, evt => evt.Event == "vllm.rollback.start");
+        Assert.Contains(sink.Events, evt => evt.Event == "vllm.rollback.end" && evt.Fields["success"] == "true");
+        var deployEnd = Assert.Single(sink.Events, evt => evt.Event == "vllm.deploy.end");
+        Assert.Equal("false", deployEnd.Fields["success"]);
+        Assert.Equal("true", deployEnd.Fields["hasRollback"]);
+        Assert.Equal("startup-failed", deployEnd.Fields["failureKind"]);
+        Assert.Equal("1", deployEnd.Fields["healthAttempts"]);
+    }
+
+    [Fact]
+    public async Task HealthAsync_UsesStableFailureKindWhenRemoteOutputIsMissing()
+    {
+        var exec = new PodExecService((_, _) =>
+            Task.FromResult(new PodExecService.ProcessExecutionResult(42, string.Empty, "transport disconnected")));
+        var service = new PodVllmOrchestrationService(exec);
+        var pod = new PodDefinition { Id = "gpu-1", SshHost = "host.example.com" };
+
+        var result = await service.HealthAsync(pod, "served-model");
+
+        Assert.False(result.Success);
+        Assert.Equal("ssh-exec-failed", result.FailureKind);
+        Assert.Equal(1, result.Attempts);
+    }
+
+    [Fact]
     public async Task PreflightAsync_ResolvesRemoteSnapshotPath()
     {
         System.Diagnostics.ProcessStartInfo? captured = null;
@@ -244,6 +335,77 @@ public sealed class PodVllmOrchestrationServiceTests
     }
 
     [Fact]
+    public async Task PreflightAsync_WithRevision_ResolvesRequestedSnapshot()
+    {
+        string? capturedCommand = null;
+        var exec = new PodExecService((psi, _) =>
+        {
+            capturedCommand = RemoteCommand(psi);
+            return Task.FromResult(new PodExecService.ProcessExecutionResult(
+                0,
+                "model_cache_path=/models/hf/models--org--model\n" +
+                "requested_revision=rev-b\n" +
+                "vllm_available=true\n" +
+                "model_cache_present=true\n" +
+                "snapshot_count=2\n" +
+                "resolved_model_path=/models/hf/models--org--model/snapshots/rev-b\n" +
+                "failure_kind=none\n",
+                ""));
+        });
+        var service = new PodVllmOrchestrationService(exec);
+        var pod = new PodDefinition
+        {
+            Id = "gpu-1",
+            SshHost = "host.example.com",
+            ModelsPath = "/models/hf"
+        };
+
+        var result = await service.PreflightAsync(pod, new PodVllmServeOptions("org/model", Revision: "rev-b"));
+
+        Assert.True(result.Success);
+        Assert.Equal("rev-b", result.RequestedRevision);
+        Assert.Equal(2, result.SnapshotCount);
+        Assert.Equal("/models/hf/models--org--model/snapshots/rev-b", result.ResolvedModelPath);
+        Assert.Contains("revision 'rev-b' resolved", result.Summary, StringComparison.Ordinal);
+        Assert.NotNull(capturedCommand);
+        Assert.Contains("requested_revision='rev-b'", capturedCommand!, StringComparison.Ordinal);
+        Assert.Contains("ref_file=\"$cache/refs/$requested_revision\"", capturedCommand!, StringComparison.Ordinal);
+        Assert.Contains("snapshots/$requested_revision", capturedCommand!, StringComparison.Ordinal);
+        Assert.DoesNotContain("model-snapshot-ambiguous", capturedCommand!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task PreflightAsync_WithMissingRevision_ClassifiesFailure()
+    {
+        var exec = new PodExecService((_, _) =>
+            Task.FromResult(new PodExecService.ProcessExecutionResult(
+                16,
+                "model_cache_path=/models/hf/models--org--model\n" +
+                "requested_revision=rev-missing\n" +
+                "vllm_available=true\n" +
+                "model_cache_present=true\n" +
+                "snapshot_count=2\n" +
+                "failure_kind=model-snapshot-revision-missing\n",
+                "")));
+        var service = new PodVllmOrchestrationService(exec);
+        var pod = new PodDefinition
+        {
+            Id = "gpu-1",
+            SshHost = "host.example.com",
+            ModelsPath = "/models/hf"
+        };
+
+        var result = await service.PreflightAsync(pod, new PodVllmServeOptions("org/model", Revision: "rev-missing"));
+
+        Assert.False(result.Success);
+        Assert.Equal("rev-missing", result.RequestedRevision);
+        Assert.Null(result.ResolvedModelPath);
+        Assert.Equal(2, result.SnapshotCount);
+        Assert.Equal("model-snapshot-revision-missing", result.FailureKind);
+        Assert.Contains("requested revision", result.Summary, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task PreflightAsync_ClassifiesMissingSnapshotWithoutStartingVllm()
     {
         var exec = new PodExecService((_, _) =>
@@ -267,6 +429,143 @@ public sealed class PodVllmOrchestrationServiceTests
         Assert.Equal(0, result.SnapshotCount);
         Assert.True(result.VllmAvailable);
         Assert.Equal("model-snapshot-missing", result.FailureKind);
+    }
+
+    [Theory]
+    [InlineData(
+        10,
+        "model_cache_path=/models/hf/models--org--model\nvllm_available=true\nmodel_cache_present=false\nsnapshot_count=0\nfailure_kind=model-cache-missing\n",
+        "model-cache-missing",
+        false,
+        0,
+        "Pull the model first")]
+    [InlineData(
+        11,
+        "model_cache_path=/models/hf/models--org--model\nvllm_available=true\nmodel_cache_present=true\nsnapshot_count=0\nfailure_kind=model-snapshots-missing\n",
+        "model-snapshots-missing",
+        true,
+        0,
+        "Pull the model first")]
+    [InlineData(
+        13,
+        "model_cache_path=/models/hf/models--org--model\nvllm_available=true\nmodel_cache_present=true\nsnapshot_count=2\nfailure_kind=model-snapshot-ref-missing\n",
+        "model-snapshot-ref-missing",
+        true,
+        2,
+        "refs/main file points to a snapshot directory that does not exist")]
+    [InlineData(
+        14,
+        "model_cache_path=/models/hf/models--org--model\nvllm_available=false\nfailure_kind=vllm-missing\n",
+        "vllm-missing",
+        false,
+        0,
+        "Install or activate vLLM")]
+    [InlineData(
+        15,
+        "model_cache_path=/models/hf/models--org--model\nvllm_available=true\nmodel_cache_present=true\nsnapshot_count=2\nfailure_kind=model-snapshot-ambiguous\n",
+        "model-snapshot-ambiguous",
+        true,
+        2,
+        "Multiple snapshots exist without a valid refs/main target")]
+    public async Task PreflightAsync_ClassifiesRemoteSnapshotFailures(
+        int exitCode,
+        string stdout,
+        string expectedFailureKind,
+        bool expectedCachePresent,
+        int expectedSnapshotCount,
+        string expectedHint)
+    {
+        var exec = new PodExecService((_, _) =>
+            Task.FromResult(new PodExecService.ProcessExecutionResult(exitCode, stdout, "")));
+        var service = new PodVllmOrchestrationService(exec);
+        var pod = new PodDefinition
+        {
+            Id = "gpu-1",
+            SshHost = "host.example.com",
+            ModelsPath = "/models/hf"
+        };
+
+        var result = await service.PreflightAsync(pod, new PodVllmServeOptions("org/model"));
+
+        Assert.False(result.Success);
+        Assert.Null(result.ResolvedModelPath);
+        Assert.Equal(expectedCachePresent, result.ModelCachePresent);
+        Assert.Equal(expectedSnapshotCount, result.SnapshotCount);
+        Assert.Equal(expectedFailureKind, result.FailureKind);
+        Assert.Contains(expectedHint, result.Summary, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task PreflightAsync_MapsSshRunnerFailureWithoutPreflightOutput()
+    {
+        var exec = new PodExecService((_, _) => throw new ApplicationException("runner unavailable"));
+        var service = new PodVllmOrchestrationService(exec);
+        var pod = new PodDefinition
+        {
+            Id = "gpu-1",
+            SshHost = "host.example.com",
+            ModelsPath = "/models/hf"
+        };
+
+        var result = await service.PreflightAsync(pod, new PodVllmServeOptions("org/model"));
+
+        Assert.False(result.Success);
+        Assert.Equal("ssh-process-runner-failed", result.FailureKind);
+        Assert.Equal(-1, result.ExitCode);
+        Assert.Contains("Check the SSH transport", result.Summary, StringComparison.Ordinal);
+        Assert.Contains("runner unavailable", result.StdErr, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task PreflightAsync_UsesStableSshFailureKindWhenRemoteOutputIsMissing()
+    {
+        var exec = new PodExecService((_, _) =>
+            Task.FromResult(new PodExecService.ProcessExecutionResult(
+                255,
+                string.Empty,
+                "Permission denied (publickey).\n")));
+        var service = new PodVllmOrchestrationService(exec);
+        var pod = new PodDefinition
+        {
+            Id = "gpu-1",
+            SshHost = "host.example.com",
+            ModelsPath = "/models/hf"
+        };
+
+        var result = await service.PreflightAsync(pod, new PodVllmServeOptions("org/model"));
+
+        Assert.False(result.Success);
+        Assert.Equal("ssh-auth-failed", result.FailureKind);
+        Assert.Equal(255, result.ExitCode);
+        Assert.Contains("Check the SSH transport", result.Summary, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task PreflightAsync_QuotesHomeBasedCachePathWithSpaces()
+    {
+        string? capturedCommand = null;
+        var exec = new PodExecService((psi, _) =>
+        {
+            capturedCommand = RemoteCommand(psi);
+            return Task.FromResult(new PodExecService.ProcessExecutionResult(
+                0,
+                PreflightOk("$HOME/hf cache/models--org--model", "rev-abc"),
+                ""));
+        });
+        var service = new PodVllmOrchestrationService(exec);
+        var pod = new PodDefinition
+        {
+            Id = "gpu-1",
+            SshHost = "host.example.com",
+            ModelsPath = "$HOME/hf cache"
+        };
+
+        var result = await service.PreflightAsync(pod, new PodVllmServeOptions("org/model"));
+
+        Assert.True(result.Success);
+        Assert.NotNull(capturedCommand);
+        Assert.Contains("cache=\"$HOME/hf cache/models--org--model\";", capturedCommand!, StringComparison.Ordinal);
+        Assert.DoesNotContain("cache=$HOME/hf cache/models--org--model", capturedCommand!, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -302,6 +601,129 @@ public sealed class PodVllmOrchestrationServiceTests
         Assert.Single(commands);
         Assert.DoesNotContain("systemctl --user enable", commands[0], StringComparison.Ordinal);
         Assert.DoesNotContain("nohup /usr/bin/env bash -lc", commands[0], StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task DeployAsync_WithPrefetchAndRevisionMissing_PullsBeforeSecondPreflightAndDeploys()
+    {
+        var commands = new List<string>();
+        var preflightAttempts = 0;
+        var exec = new PodExecService((psi, _) =>
+        {
+            var command = RemoteCommand(psi);
+            commands.Add(command);
+            if (command.Contains("vllm_available", StringComparison.Ordinal))
+            {
+                preflightAttempts++;
+                if (preflightAttempts == 1)
+                {
+                    return Task.FromResult(new PodExecService.ProcessExecutionResult(
+                        16,
+                        "model_cache_path=/models/hf/models--org--model\nvllm_available=true\nmodel_cache_present=true\nsnapshot_count=1\nfailure_kind=model-snapshot-revision-missing\n",
+                        ""));
+                }
+
+                return Task.FromResult(new PodExecService.ProcessExecutionResult(0, PreflightOk("/models/hf/models--org--model", "rev-b"), ""));
+            }
+
+            if (command.Contains("huggingface-cli download", StringComparison.Ordinal))
+            {
+                return Task.FromResult(new PodExecService.ProcessExecutionResult(0, "downloaded\n", ""));
+            }
+
+            return Task.FromResult(new PodExecService.ProcessExecutionResult(0, "started tau-pod-served-model\n", ""));
+        });
+        var service = new PodVllmOrchestrationService(exec);
+        var pod = new PodDefinition
+        {
+            Id = "gpu-1",
+            SshHost = "host.example.com",
+            ModelsPath = "/models/hf"
+        };
+
+        var result = await service.DeployAsync(
+            pod,
+            new PodVllmServeOptions(
+                "org/model",
+                DeploymentName: "served model",
+                Revision: "rev-b",
+                WaitForHealth: false,
+                Prefetch: true));
+
+        Assert.True(result.Success);
+        Assert.NotNull(result.Prefetch);
+        Assert.True(result.Prefetch.Success);
+        Assert.Equal("rev-b", result.Prefetch.RequestedRevision);
+        Assert.Equal("downloaded\n", result.Prefetch.Output);
+        Assert.Equal("model-snapshot-revision-missing", result.PrefetchTriggerFailureKind);
+        Assert.NotNull(result.Preflight);
+        Assert.True(result.Preflight.Success);
+        Assert.Equal("rev-b", result.Preflight.RequestedRevision);
+        Assert.NotNull(result.Plan);
+        Assert.Equal("/models/hf/models--org--model/snapshots/rev-b", result.Plan.ModelPath);
+        Assert.Null(result.Health);
+        Assert.Null(result.Rollback);
+        Assert.Equal(4, commands.Count);
+        Assert.Contains("requested_revision='rev-b'", commands[0], StringComparison.Ordinal);
+        Assert.Contains("huggingface-cli download 'org/model' --revision 'rev-b' --cache-dir '/models/hf'", commands[1], StringComparison.Ordinal);
+        Assert.Equal("/models/hf/models--org--model/snapshots/rev-b", result.Preflight.ResolvedModelPath);
+        Assert.Contains("vllm serve '/models/hf/models--org--model/snapshots/rev-b'", result.Plan.ServeCommand, StringComparison.Ordinal);
+        Assert.Contains("started on", result.Summary, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task DeployAsync_WithPrefetchAndPullFailure_DoesNotExecuteDeployCommand()
+    {
+        var commands = new List<string>();
+        var exec = new PodExecService((psi, _) =>
+        {
+            var command = RemoteCommand(psi);
+            commands.Add(command);
+            if (command.Contains("vllm_available", StringComparison.Ordinal))
+            {
+                return Task.FromResult(new PodExecService.ProcessExecutionResult(
+                    14,
+                    "model_cache_path=/models/hf/models--org--model\nvllm_available=true\nmodel_cache_present=true\nsnapshot_count=1\nfailure_kind=model-cache-missing\n",
+                    ""));
+            }
+
+            if (command.Contains("huggingface-cli download", StringComparison.Ordinal))
+            {
+                return Task.FromResult(new PodExecService.ProcessExecutionResult(1, "", "download denied"));
+            }
+
+            return Task.FromResult(new PodExecService.ProcessExecutionResult(0, "started tau-pod-broken\n", ""));
+        });
+        var service = new PodVllmOrchestrationService(exec);
+        var pod = new PodDefinition
+        {
+            Id = "gpu-1",
+            SshHost = "host.example.com",
+            ModelsPath = "/models/hf"
+        };
+
+        var result = await service.DeployAsync(
+            pod,
+            new PodVllmServeOptions(
+                "org/model",
+                DeploymentName: "broken",
+                Revision: "rev-b",
+                WaitForHealth: false,
+                Prefetch: true));
+
+        Assert.False(result.Success);
+        Assert.NotNull(result.Preflight);
+        Assert.False(result.Preflight.Success);
+        Assert.NotNull(result.Prefetch);
+        Assert.False(result.Prefetch.Success);
+        Assert.Equal("rev-b", result.Prefetch.RequestedRevision);
+        Assert.Equal("model-cache-missing", result.PrefetchTriggerFailureKind);
+        Assert.Null(result.Plan);
+        Assert.Null(result.Health);
+        Assert.Null(result.Rollback);
+        Assert.Equal(2, commands.Count);
+        Assert.DoesNotContain("vllm serve", string.Join('\n', commands), StringComparison.Ordinal);
+        Assert.Contains("prefetch failed", result.Summary, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -433,6 +855,27 @@ public sealed class PodVllmOrchestrationServiceTests
         Assert.Contains("stopped tau-pod-llama-8b", command, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task RollbackAsync_RejectsHttpOnlyPodWithStableFailureKind()
+    {
+        var executed = false;
+        var exec = new PodExecService((_, _) =>
+        {
+            executed = true;
+            return Task.FromResult(new PodExecService.ProcessExecutionResult(0, string.Empty, string.Empty));
+        });
+        var service = new PodVllmOrchestrationService(exec);
+        var pod = new PodDefinition { Id = "http-pod", Endpoint = "http://localhost:8000" };
+
+        var result = await service.RollbackAsync(pod, "llama 8b", CancellationToken.None);
+
+        Assert.False(result.Success);
+        Assert.False(executed);
+        Assert.Equal("llama-8b", result.DeploymentName);
+        Assert.Equal("unsupported-transport", result.FailureKind);
+        Assert.Contains("requires SSH-based pod", result.Summary, StringComparison.Ordinal);
+    }
+
     private static bool IsPreflightCommand(string command) =>
         command.Contains("vllm_available", StringComparison.Ordinal) &&
         command.Contains("resolved_model_path", StringComparison.Ordinal);
@@ -444,4 +887,11 @@ public sealed class PodVllmOrchestrationServiceTests
         "snapshot_count=1\n" +
         $"resolved_model_path={modelCachePath}/snapshots/{snapshot}\n" +
         "failure_kind=none\n";
+
+    private sealed class CapturingLogSink : ITauLogSink
+    {
+        public List<TauLogEvent> Events { get; } = new();
+
+        public void Log(TauLogEvent evt) => Events.Add(evt);
+    }
 }

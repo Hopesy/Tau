@@ -191,7 +191,11 @@ public static class WebUiApplication
                     ex.LineNumber);
             }
         });
-        app.MapPost("/api/sessions/import.coding-agent-jsonl", async Task<IResult> (HttpRequest request, WebChatService chat, CancellationToken cancellationToken) =>
+        app.MapPost("/api/sessions/import.coding-agent-jsonl", async Task<IResult> (
+            HttpRequest request,
+            bool? currentBranchOnly,
+            WebChatService chat,
+            CancellationToken cancellationToken) =>
         {
             if (!IsSupportedJsonlImportContentType(request.ContentType))
             {
@@ -207,7 +211,8 @@ public static class WebUiApplication
                 using var reader = new StreamReader(request.Body, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
                 var jsonl = await reader.ReadToEndAsync(cancellationToken).ConfigureAwait(false);
                 var redactor = TauSecretRedactor.ForEnvironmentVariable(TauSecretRedactor.WebUiEnvironmentVariable);
-                return Results.Ok(chat.ImportCodingAgentJsonlSession(jsonl, redactor: redactor));
+                var options = new CodingAgentJsonlPreviewOptions(Search: null, CurrentBranchOnly: currentBranchOnly ?? false);
+                return Results.Ok(chat.ImportCodingAgentJsonlSession(jsonl, options: options, redactor: redactor));
             }
             catch (CodingAgentJsonlPreviewException ex)
             {

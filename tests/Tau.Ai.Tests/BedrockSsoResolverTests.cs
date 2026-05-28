@@ -565,6 +565,114 @@ public sealed class BedrockSsoResolverTests
     }
 
     [Fact]
+    public async Task ResolveAsync_RegistersClientWhenRegistrationExpiryMissingButMetadataCanRenew()
+    {
+        var tempDir = Directory.CreateTempSubdirectory("tau-bedrock-sso-registration-expiry-missing-");
+        try
+        {
+            var startUrl = "https://example.awsapps.com/start";
+            WriteTokenCache(
+                tempDir.FullName,
+                startUrl,
+                """
+                {
+                  "startUrl": "https://example.awsapps.com/start",
+                  "region": "us-east-2",
+                  "accessToken": "expired-token",
+                  "expiresAt": "2020-01-01T00:00:00Z",
+                  "clientId": "old-client-id",
+                  "clientSecret": "old-client-secret",
+                  "refreshToken": "refresh-token"
+                }
+                """);
+
+            var paths = new List<string>();
+            string? tokenBody = null;
+            using var handler = new OpenAiResponsesProviderTests.StubHandler(request =>
+            {
+                paths.Add(request.RequestUri!.AbsolutePath);
+                if (request.RequestUri.AbsolutePath == "/client/register")
+                {
+                    return new HttpResponseMessage(HttpStatusCode.OK)
+                    {
+                        Content = new StringContent(
+                            $$"""
+                            {
+                              "clientId": "renewed-client-id",
+                              "clientSecret": "renewed-client-secret",
+                              "clientSecretExpiresAt": {{DateTimeOffset.Parse("2099-01-01T00:00:00Z").ToUnixTimeSeconds()}}
+                            }
+                            """,
+                            Encoding.UTF8,
+                            "application/json")
+                    };
+                }
+
+                if (request.RequestUri.AbsolutePath == "/token")
+                {
+                    tokenBody = request.Content!.ReadAsStringAsync().GetAwaiter().GetResult();
+                    return new HttpResponseMessage(HttpStatusCode.OK)
+                    {
+                        Content = new StringContent(
+                            """{ "accessToken": "renewed-token", "expiresIn": 1800, "tokenType": "Bearer" }""",
+                            Encoding.UTF8,
+                            "application/json")
+                    };
+                }
+
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(
+                        $$"""
+                        {
+                          "roleCredentials": {
+                            "accessKeyId": "ASIARENEWED",
+                            "secretAccessKey": "renewed-secret",
+                            "expiration": {{DateTimeOffset.Parse("2099-01-01T00:00:00Z").ToUnixTimeMilliseconds()}}
+                          }
+                        }
+                        """,
+                        Encoding.UTF8,
+                        "application/json")
+                };
+            });
+            using var client = new HttpClient(handler);
+
+            var outcome = await BedrockSsoResolver.ResolveAsync(
+                new BedrockOptions
+                {
+                    SsoTokenCacheDirectory = tempDir.FullName,
+                    SsoOidcEndpoint = "https://oidc.us-east-2.amazonaws.test",
+                    SsoPortalEndpoint = "https://portal.sso.us-east-2.amazonaws.test"
+                },
+                new BedrockProfileSnapshot
+                {
+                    Name = "dev",
+                    SsoAccountId = "123456789012",
+                    SsoRoleName = "Admin",
+                    SsoStartUrl = startUrl,
+                    SsoRegion = "us-east-2"
+                },
+                client,
+                () => new DateTimeOffset(2030, 1, 1, 0, 0, 0, TimeSpan.Zero));
+
+            Assert.True(outcome.HasCredentials);
+            Assert.Equal("ASIARENEWED", outcome.Credentials!.AccessKeyId);
+            Assert.Equal(["/client/register", "/token", "/federation/credentials"], paths);
+
+            using var tokenDoc = JsonDocument.Parse(tokenBody!);
+            var tokenRoot = tokenDoc.RootElement;
+            Assert.Equal("renewed-client-id", tokenRoot.GetProperty("clientId").GetString());
+            Assert.Equal("renewed-client-secret", tokenRoot.GetProperty("clientSecret").GetString());
+            Assert.Equal("refresh-token", tokenRoot.GetProperty("refreshToken").GetString());
+        }
+        finally
+        {
+            tempDir.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task ResolveAsync_SurfacesRegisterClientErrorWithoutCallingCreateToken()
     {
         var tempDir = Directory.CreateTempSubdirectory("tau-bedrock-sso-register-error-");

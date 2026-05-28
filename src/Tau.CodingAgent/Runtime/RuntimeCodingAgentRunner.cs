@@ -11,12 +11,13 @@ using Tau.CodingAgent.Tools;
 
 namespace Tau.CodingAgent.Runtime;
 
-public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner
+public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner, ICodingAgentToolResultDetailsProvider
 {
     private readonly AgentRuntime _runtime;
     private readonly ModelCatalog _modelCatalog;
     private readonly ProviderAuthResolver _authResolver;
     private readonly ITauLogSink _logSink;
+    private readonly Dictionary<string, object?> _toolResultDetailsByToolCallId = new(StringComparer.OrdinalIgnoreCase);
     private readonly bool _refreshesGeneratedSystemPrompt;
     private AgentLoopConfig _config;
     private IReadOnlyList<CodingAgentContextFile> _contextFiles;
@@ -27,14 +28,20 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner
         ModelCatalog modelCatalog,
         ProviderAuthResolver? authResolver = null,
         ITauLogSink? logSink = null,
+        TauRuntimeLogContext? logContext = null,
         bool refreshesGeneratedSystemPrompt = false,
         IReadOnlyList<CodingAgentContextFile>? contextFiles = null)
     {
         _runtime = runtime;
-        _config = config;
+        var effectiveLogSink = logSink ?? config.LogSink;
+        _config = config with
+        {
+            LogSink = effectiveLogSink,
+            LogContext = logContext ?? config.LogContext
+        };
         _modelCatalog = modelCatalog;
-        _authResolver = authResolver ?? new ProviderAuthResolver(logSink: logSink);
-        _logSink = logSink ?? NullTauLogSink.Instance;
+        _authResolver = authResolver ?? new ProviderAuthResolver(logSink: effectiveLogSink);
+        _logSink = effectiveLogSink;
         _refreshesGeneratedSystemPrompt = refreshesGeneratedSystemPrompt;
         _contextFiles = contextFiles ?? [];
     }
@@ -42,6 +49,8 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner
     public IReadOnlyList<ChatMessage> Messages => _runtime.State.Messages;
     public Model Model => _config.Model;
     public string? SessionName { get; set; }
+    public IReadOnlyDictionary<string, object?> ToolResultDetailsByToolCallId => _toolResultDetailsByToolCallId;
+
     public AgentQueueMode SteeringMode
     {
         get => _runtime.SteeringMode;
@@ -179,6 +188,7 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner
     public async Task<CodingAgentBranchSummaryResult> SummarizeBranchAsync(
         IReadOnlyList<ChatMessage> messages,
         string? customInstructions = null,
+        bool replaceInstructions = false,
         CancellationToken cancellationToken = default)
     {
         if (messages.Count == 0)
@@ -189,7 +199,7 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner
         cancellationToken.ThrowIfCancellationRequested();
 
         var tokensBefore = CodingAgentTokenEstimator.Estimate(messages);
-        var branchSummaryPrompt = BuildBranchSummaryPrompt(customInstructions, messages);
+        var branchSummaryPrompt = BuildBranchSummaryPrompt(customInstructions, replaceInstructions, messages);
         var summaryContext = new LlmContext(
             CodingAgentCompactionMessages.SystemPrompt,
             [new UserMessage(branchSummaryPrompt)],
@@ -277,7 +287,10 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner
         return builder.ToString();
     }
 
-    private static string BuildBranchSummaryPrompt(string? customInstructions, IReadOnlyList<ChatMessage> messages)
+    private static string BuildBranchSummaryPrompt(
+        string? customInstructions,
+        bool replaceInstructions,
+        IReadOnlyList<ChatMessage> messages)
     {
         var builder = new StringBuilder();
         builder.AppendLine("<conversation>");
@@ -285,7 +298,13 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner
         builder.AppendLine();
         builder.AppendLine("</conversation>");
         builder.AppendLine();
-        builder.Append(CodingAgentCompactionMessages.BranchSummaryPrompt);
+
+        var trimmedInstructions = string.IsNullOrWhiteSpace(customInstructions)
+            ? null
+            : customInstructions.Trim();
+        builder.Append(replaceInstructions && trimmedInstructions is not null
+            ? trimmedInstructions
+            : CodingAgentCompactionMessages.BranchSummaryPrompt);
 
         var fileOperations = CodingAgentFileOperationTracker.FormatForCompaction(messages);
         if (!string.IsNullOrWhiteSpace(fileOperations))
@@ -296,12 +315,12 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner
             builder.Append(fileOperations);
         }
 
-        if (!string.IsNullOrWhiteSpace(customInstructions))
+        if (trimmedInstructions is not null && !replaceInstructions)
         {
             builder.AppendLine();
             builder.AppendLine();
             builder.AppendLine("Additional focus:");
-            builder.Append(customInstructions.Trim());
+            builder.Append(trimmedInstructions);
         }
 
         return builder.ToString();
@@ -392,12 +411,23 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner
     public void ResetSession()
     {
         _runtime.Reset();
+        _toolResultDetailsByToolCallId.Clear();
         SessionName = null;
     }
 
     public void Steer(string input)
     {
         if (string.IsNullOrWhiteSpace(input))
+        {
+            return;
+        }
+
+        _runtime.Steer(new UserMessage(input));
+    }
+
+    public void Steer(IReadOnlyList<ContentBlock> input)
+    {
+        if (input.Count == 0)
         {
             return;
         }
@@ -415,6 +445,16 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner
         _runtime.FollowUp(new UserMessage(input));
     }
 
+    public void FollowUp(IReadOnlyList<ContentBlock> input)
+    {
+        if (input.Count == 0)
+        {
+            return;
+        }
+
+        _runtime.FollowUp(new UserMessage(input));
+    }
+
     public void RestoreSession(CodingAgentSessionSnapshot snapshot)
     {
         if (!string.IsNullOrWhiteSpace(snapshot.Provider) || !string.IsNullOrWhiteSpace(snapshot.Model))
@@ -423,6 +463,7 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner
         }
 
         _runtime.Reset();
+        _toolResultDetailsByToolCallId.Clear();
         foreach (var message in snapshot.Messages)
         {
             _runtime.AddMessage(message);
@@ -431,13 +472,31 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner
         SessionName = snapshot.Name;
     }
 
-    public IAsyncEnumerable<AgentEvent> RunAsync(string input, CancellationToken cancellationToken = default)
+    public IAsyncEnumerable<AgentEvent> RunAsync(string input, CancellationToken cancellationToken = default) =>
+        RunAsync(input, logContext: null, cancellationToken);
+
+    public IAsyncEnumerable<AgentEvent> RunAsync(
+        string input,
+        TauRuntimeLogContext? logContext,
+        CancellationToken cancellationToken = default)
     {
         _runtime.AddMessage(new UserMessage(input));
-        return InstrumentRun(_runtime.RunAsync(_config, cancellationToken), inputBytes: input?.Length ?? 0);
+        var runLogContext = CreateRunLogContext(logContext);
+        return InstrumentRun(
+            _runtime.RunAsync(_config with { LogContext = runLogContext }, cancellationToken),
+            inputBytes: input?.Length ?? 0,
+            runLogContext);
     }
 
-    public IAsyncEnumerable<AgentEvent> RunAsync(IReadOnlyList<ContentBlock> input, CancellationToken cancellationToken = default)
+    public IAsyncEnumerable<AgentEvent> RunAsync(
+        IReadOnlyList<ContentBlock> input,
+        CancellationToken cancellationToken = default) =>
+        RunAsync(input, logContext: null, cancellationToken);
+
+    public IAsyncEnumerable<AgentEvent> RunAsync(
+        IReadOnlyList<ContentBlock> input,
+        TauRuntimeLogContext? logContext,
+        CancellationToken cancellationToken = default)
     {
         if (input.Count == 0)
         {
@@ -446,12 +505,32 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner
 
         _runtime.AddMessage(new UserMessage(input));
         var sizeHint = input.OfType<TextContent>().Sum(static block => block.Text.Length);
-        return InstrumentRun(_runtime.RunAsync(_config, cancellationToken), inputBytes: sizeHint);
+        var runLogContext = CreateRunLogContext(logContext);
+        return InstrumentRun(
+            _runtime.RunAsync(_config with { LogContext = runLogContext }, cancellationToken),
+            inputBytes: sizeHint,
+            runLogContext);
     }
+
+    private TauRuntimeLogContext CreateRunLogContext(TauRuntimeLogContext? logContext = null)
+    {
+        var baseContext = _config.LogContext;
+        var effectiveContext = logContext is null || baseContext is null
+            ? logContext ?? baseContext
+            : new TauRuntimeLogContext(
+                FirstNonWhiteSpace(logContext.CorrelationId, baseContext.CorrelationId),
+                FirstNonWhiteSpace(logContext.SessionId, baseContext.SessionId),
+                FirstNonWhiteSpace(logContext.MessageId, baseContext.MessageId));
+        return (effectiveContext ?? new TauRuntimeLogContext()).EnsureCorrelationId();
+    }
+
+    private static string? FirstNonWhiteSpace(string? primary, string? fallback) =>
+        string.IsNullOrWhiteSpace(primary) ? fallback : primary;
 
     private async IAsyncEnumerable<AgentEvent> InstrumentRun(
         IAsyncEnumerable<AgentEvent> inner,
-        int inputBytes)
+        int inputBytes,
+        TauRuntimeLogContext logContext)
     {
         var startedAt = DateTimeOffset.UtcNow;
         _logSink.Log(new TauLogEvent(
@@ -463,7 +542,7 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner
                 ["provider"] = _config.Model.Provider,
                 ["model"] = _config.Model.Id,
                 ["inputBytes"] = inputBytes.ToString(System.Globalization.CultureInfo.InvariantCulture)
-            }));
+            }.WithLogContext(logContext)));
 
         var hadError = false;
         var hadCancel = false;
@@ -495,11 +574,16 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner
                             ["model"] = _config.Model.Id,
                             ["error"] = ex.GetType().Name,
                             ["message"] = ex.Message
-                        }));
+                        }.WithLogContext(logContext)));
                     throw;
                 }
 
                 if (!hasNext) break;
+                if (enumerator.Current is ToolExecutionEndEvent toolEnd)
+                {
+                    CaptureToolResultDetails(toolEnd);
+                }
+
                 yield return enumerator.Current;
             }
         }
@@ -517,9 +601,25 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner
                         ["provider"] = _config.Model.Provider,
                         ["model"] = _config.Model.Id,
                         ["elapsedMs"] = ((long)(endedAt - startedAt).TotalMilliseconds).ToString(System.Globalization.CultureInfo.InvariantCulture)
-                    }));
+                    }.WithLogContext(logContext)));
             }
         }
+    }
+
+    private void CaptureToolResultDetails(ToolExecutionEndEvent toolEnd)
+    {
+        if (string.IsNullOrWhiteSpace(toolEnd.ToolCallId))
+        {
+            return;
+        }
+
+        if (toolEnd.Result.Details is null)
+        {
+            _toolResultDetailsByToolCallId.Remove(toolEnd.ToolCallId);
+            return;
+        }
+
+        _toolResultDetailsByToolCallId[toolEnd.ToolCallId] = toolEnd.Result.Details;
     }
 
     public static RuntimeCodingAgentRunner CreateDefault()
@@ -536,6 +636,7 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner
         IReadOnlyList<CodingAgentSkill>? skills = null,
         IReadOnlyList<CodingAgentContextFile>? contextFiles = null,
         ITauLogSink? logSink = null,
+        TauRuntimeLogContext? logContext = null,
         ProviderRegistry? providerRegistryOverride = null,
         ModelCatalog? modelCatalogOverride = null)
     {
@@ -559,6 +660,7 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner
             ProviderRegistry = registry,
             Tools = tools,
             LogSink = logSink ?? NullTauLogSink.Instance,
+            LogContext = logContext,
             SystemPrompt = string.IsNullOrWhiteSpace(systemPromptOverride)
                 ? BuildSystemPrompt(tools, skills ?? [], contextFiles ?? [])
                 : systemPromptOverride,
@@ -579,6 +681,7 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner
             config,
             modelCatalog,
             logSink: logSink,
+            logContext: logContext,
             refreshesGeneratedSystemPrompt: string.IsNullOrWhiteSpace(systemPromptOverride),
             contextFiles: contextFiles ?? []);
     }
@@ -648,5 +751,16 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner
     private static bool IsCompactionSummaryMessage(ChatMessage message)
     {
         return CodingAgentCompactionMessages.IsSummaryMessage(message);
+    }
+}
+
+file static class RuntimeLogFieldExtensions
+{
+    public static Dictionary<string, string?> WithLogContext(
+        this Dictionary<string, string?> fields,
+        TauRuntimeLogContext logContext)
+    {
+        logContext.AddTo(fields);
+        return fields;
     }
 }

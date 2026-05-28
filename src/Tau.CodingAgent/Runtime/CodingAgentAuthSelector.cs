@@ -25,6 +25,25 @@ public static class CodingAgentAuthSelector
             cancellationToken);
     }
 
+    public static Func<CodingAgentAuthSelectorState, CancellationToken, Task<string?>> CreateCompositionSelector(
+        TuiCompositionSession session)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+
+        return async (state, cancellationToken) =>
+        {
+            var selector = CreateSelectList(state);
+            if (selector.FilteredItems.Count == 0)
+            {
+                return null;
+            }
+
+            var result = await TuiCompositionOverlaySessions.RunAsync(selector, session, cancellationToken)
+                .ConfigureAwait(false);
+            return result.HasSelection ? result.SelectedItem?.Value : null;
+        };
+    }
+
     public static TuiSelectList CreateSelectList(
         CodingAgentAuthSelectorState state,
         int maxVisible = 10)

@@ -21,12 +21,12 @@ public sealed class RuntimeDelegationAgentRunner : IDelegationAgentRunner
     }
 
     public RuntimeDelegationAgentRunner(MomOptions options)
-        : this(options, CreateDefaultRunnerFactory(options), logSink: null)
+        : this(options, CreateDefaultRunnerFactory(options, logSink: null), logSink: null)
     {
     }
 
     public RuntimeDelegationAgentRunner(MomOptions options, ITauLogSink logSink)
-        : this(options, CreateDefaultRunnerFactory(options), logSink)
+        : this(options, CreateDefaultRunnerFactory(options, logSink), logSink)
     {
     }
 
@@ -75,18 +75,18 @@ public sealed class RuntimeDelegationAgentRunner : IDelegationAgentRunner
         var selection = _selectionResolver.Resolve(request.Provider, request.Model, workingDirectory);
         var provider = selection.Provider;
         var model = selection.ModelId;
+        var logContext = CreateDelegationLogContext(request).EnsureCorrelationId();
 
-        _logSink.Log(new TauLogEvent(
-            "mom",
+        LogMomEvent(
             "delegation.start",
-            DateTimeOffset.UtcNow,
             new Dictionary<string, string?>
             {
                 ["provider"] = provider,
                 ["model"] = model,
                 ["workingDirectory"] = workingDirectory,
                 ["title"] = request.Title
-            }));
+            },
+            logContext);
 
         try
         {
@@ -116,7 +116,7 @@ public sealed class RuntimeDelegationAgentRunner : IDelegationAgentRunner
                     model,
                     runner.SessionName);
 
-                await foreach (var evt in runner.RunAsync(promptParts.RunnerInput, cancellationToken).ConfigureAwait(false))
+                await foreach (var evt in runner.RunAsync(promptParts.RunnerInput, logContext, cancellationToken).ConfigureAwait(false))
                 {
                     switch (evt)
                     {
@@ -124,12 +124,12 @@ public sealed class RuntimeDelegationAgentRunner : IDelegationAgentRunner
                             responseBuilder.Append(delta.Delta);
                             break;
                         case MessageStartEvent:
-                            LogResponseStart(provider, model, workingDirectory);
+                            LogResponseStart(provider, model, workingDirectory, logContext);
                             break;
                         case ToolExecutionStartEvent toolStart:
                             pendingTools[toolStart.ToolCallId] = new PendingToolCall(toolStart.ToolName, stopwatch.ElapsedMilliseconds);
                             toolEvents.Add(new DelegationToolEvent("start", toolStart.ToolName, toolStart.ToolCallId));
-                            LogToolStart(provider, model, workingDirectory, toolStart.ToolCallId, toolStart.ToolName);
+                            LogToolStart(provider, model, workingDirectory, toolStart.ToolCallId, toolStart.ToolName, logContext);
                             break;
                         case ToolExecutionEndEvent toolEnd:
                             var endMs = stopwatch.ElapsedMilliseconds;
@@ -152,14 +152,14 @@ public sealed class RuntimeDelegationAgentRunner : IDelegationAgentRunner
                                 toolEnd.ToolCallId,
                                 IsError: toolEnd.Result.IsError,
                                 DurationMs: duration));
-                            LogToolEnd(provider, model, workingDirectory, toolEnd.ToolCallId, toolName, toolEnd.Result, duration);
+                            LogToolEnd(provider, model, workingDirectory, toolEnd.ToolCallId, toolName, toolEnd.Result, duration, logContext);
                             break;
                         case MessageEndEvent messageEnd:
                             ApplyAssistantMessage(messageEnd.Message, runner.Model, aggregatedUsage, ref stopReason);
-                            LogResponseEnd(provider, model, workingDirectory, messageEnd.Message, stopReason);
+                            LogResponseEnd(provider, model, workingDirectory, messageEnd.Message, stopReason, logContext);
                             if (messageEnd.Message.Usage is { } usage)
                             {
-                                LogUsage(provider, model, workingDirectory, runner.Model, usage);
+                                LogUsage(provider, model, workingDirectory, runner.Model, usage, logContext);
                             }
                             break;
                         case AgentEndEvent end when end.ErrorMessage is not null:
@@ -179,7 +179,7 @@ public sealed class RuntimeDelegationAgentRunner : IDelegationAgentRunner
         catch (OperationCanceledException)
         {
             stopReason = "cancelled";
-            LogDelegationEnd(provider, model, workingDirectory, stopReason, error, stopwatch.ElapsedMilliseconds, toolEvents);
+            LogDelegationEnd(provider, model, workingDirectory, stopReason, error, stopwatch.ElapsedMilliseconds, toolEvents, logContext);
             throw;
         }
         catch (Exception ex)
@@ -188,7 +188,7 @@ public sealed class RuntimeDelegationAgentRunner : IDelegationAgentRunner
             stopReason ??= "error";
         }
 
-        LogDelegationEnd(provider, model, workingDirectory, stopReason, error, stopwatch.ElapsedMilliseconds, toolEvents);
+        LogDelegationEnd(provider, model, workingDirectory, stopReason, error, stopwatch.ElapsedMilliseconds, toolEvents, logContext);
 
         return new DelegationExecution(
             responseBuilder.ToString(),
@@ -203,14 +203,71 @@ public sealed class RuntimeDelegationAgentRunner : IDelegationAgentRunner
             attachedFiles.Count == 0 ? null : attachedFiles);
     }
 
-    private static Func<string, string, string, Action<string, string?>, ICodingAgentRunner> CreateDefaultRunnerFactory(MomOptions options)
+    private static Func<string, string, string, Action<string, string?>, ICodingAgentRunner> CreateDefaultRunnerFactory(MomOptions options, ITauLogSink? logSink)
     {
         return (provider, model, workingDirectory, attachFile) =>
         {
             var executor = MomSandboxExecutorFactory.Create(options, workingDirectory);
             var tools = MomToolSet.Create(executor, attachFile);
-            return RuntimeCodingAgentRunner.Create(provider, model, toolsOverride: tools);
+            return RuntimeCodingAgentRunner.Create(provider, model, toolsOverride: tools, logSink: logSink);
         };
+    }
+
+    private static TauRuntimeLogContext CreateDelegationLogContext(DelegationRequest request)
+    {
+        var requestId = GetMetadataValue(request.Metadata, "requestId", "request_id", "id", "eventId", "event_id");
+        var messageId = requestId
+            ?? GetMetadataValue(request.Metadata, "ts", "slackTs", "slack_ts", "messageTs", "message_ts");
+        var correlationId = requestId ?? messageId ?? Guid.NewGuid().ToString("N");
+        var sessionId = BuildSessionId(
+            GetMetadataValue(request.Metadata, "channel", "channelId", "channel_id"),
+            GetMetadataValue(request.Metadata, "threadTs", "thread_ts")
+                ?? GetMetadataValue(request.Metadata, "ts", "slackTs", "slack_ts", "messageTs", "message_ts"));
+
+        return new TauRuntimeLogContext(correlationId, sessionId, messageId ?? correlationId);
+    }
+
+    private static string? BuildSessionId(string? channel, string? threadOrMessage)
+    {
+        if (string.IsNullOrWhiteSpace(channel))
+        {
+            return null;
+        }
+
+        var normalizedChannel = channel.Trim();
+        return string.IsNullOrWhiteSpace(threadOrMessage)
+            ? normalizedChannel
+            : $"{normalizedChannel}:{threadOrMessage.Trim()}";
+    }
+
+    private static string? GetMetadataValue(IReadOnlyDictionary<string, string>? metadata, params string[] keys)
+    {
+        if (metadata is null || metadata.Count == 0)
+        {
+            return null;
+        }
+
+        foreach (var key in keys)
+        {
+            if (metadata.TryGetValue(key, out var exactValue) && !string.IsNullOrWhiteSpace(exactValue))
+            {
+                return exactValue.Trim();
+            }
+        }
+
+        foreach (var key in keys)
+        {
+            foreach (var pair in metadata)
+            {
+                if (string.Equals(pair.Key, key, StringComparison.OrdinalIgnoreCase) &&
+                    !string.IsNullOrWhiteSpace(pair.Value))
+                {
+                    return pair.Value.Trim();
+                }
+            }
+        }
+
+        return null;
     }
 
     private void LogDelegationEnd(
@@ -220,12 +277,11 @@ public sealed class RuntimeDelegationAgentRunner : IDelegationAgentRunner
         string? stopReason,
         string? error,
         long elapsedMs,
-        IReadOnlyList<DelegationToolEvent> toolEvents)
+        IReadOnlyList<DelegationToolEvent> toolEvents,
+        TauRuntimeLogContext logContext)
     {
-        _logSink.Log(new TauLogEvent(
-            "mom",
+        LogMomEvent(
             "delegation.end",
-            DateTimeOffset.UtcNow,
             new Dictionary<string, string?>
             {
                 ["provider"] = provider,
@@ -235,7 +291,8 @@ public sealed class RuntimeDelegationAgentRunner : IDelegationAgentRunner
                 ["error"] = error,
                 ["elapsedMs"] = elapsedMs.ToString(System.Globalization.CultureInfo.InvariantCulture),
                 ["toolCalls"] = toolEvents.Count(e => e.Phase == "start").ToString(System.Globalization.CultureInfo.InvariantCulture)
-            }));
+            },
+            logContext);
     }
 
     private DelegationPromptParts BuildDelegationPromptParts(DelegationRequest request, string workingDirectory)
@@ -398,12 +455,11 @@ public sealed class RuntimeDelegationAgentRunner : IDelegationAgentRunner
         string model,
         string workingDirectory,
         string toolCallId,
-        string toolName)
+        string toolName,
+        TauRuntimeLogContext logContext)
     {
-        _logSink.Log(new TauLogEvent(
-            "mom",
+        LogMomEvent(
             "tool.start",
-            DateTimeOffset.UtcNow,
             new Dictionary<string, string?>
             {
                 ["provider"] = provider,
@@ -411,7 +467,8 @@ public sealed class RuntimeDelegationAgentRunner : IDelegationAgentRunner
                 ["workingDirectory"] = workingDirectory,
                 ["toolCallId"] = toolCallId,
                 ["toolName"] = toolName
-            }));
+            },
+            logContext);
     }
 
     private void LogToolEnd(
@@ -421,12 +478,11 @@ public sealed class RuntimeDelegationAgentRunner : IDelegationAgentRunner
         string toolCallId,
         string toolName,
         ToolResult result,
-        long? durationMs)
+        long? durationMs,
+        TauRuntimeLogContext logContext)
     {
-        _logSink.Log(new TauLogEvent(
-            "mom",
+        LogMomEvent(
             "tool.end",
-            DateTimeOffset.UtcNow,
             new Dictionary<string, string?>
             {
                 ["provider"] = provider,
@@ -437,21 +493,21 @@ public sealed class RuntimeDelegationAgentRunner : IDelegationAgentRunner
                 ["isError"] = result.IsError ? "true" : "false",
                 ["durationMs"] = FormatInvariant(durationMs),
                 ["preview"] = PreviewToolResult(result)
-            }));
+            },
+            logContext);
     }
 
-    private void LogResponseStart(string provider, string model, string workingDirectory)
+    private void LogResponseStart(string provider, string model, string workingDirectory, TauRuntimeLogContext logContext)
     {
-        _logSink.Log(new TauLogEvent(
-            "mom",
+        LogMomEvent(
             "response.start",
-            DateTimeOffset.UtcNow,
             new Dictionary<string, string?>
             {
                 ["provider"] = provider,
                 ["model"] = model,
                 ["workingDirectory"] = workingDirectory
-            }));
+            },
+            logContext);
     }
 
     private void LogResponseEnd(
@@ -459,13 +515,12 @@ public sealed class RuntimeDelegationAgentRunner : IDelegationAgentRunner
         string model,
         string workingDirectory,
         AssistantMessage message,
-        string? stopReason)
+        string? stopReason,
+        TauRuntimeLogContext logContext)
     {
         var text = ExtractText(message.Content);
-        _logSink.Log(new TauLogEvent(
-            "mom",
+        LogMomEvent(
             "response.end",
-            DateTimeOffset.UtcNow,
             new Dictionary<string, string?>
             {
                 ["provider"] = provider,
@@ -474,7 +529,8 @@ public sealed class RuntimeDelegationAgentRunner : IDelegationAgentRunner
                 ["stopReason"] = stopReason,
                 ["characters"] = FormatInvariant(text.Length),
                 ["preview"] = Preview(text)
-            }));
+            },
+            logContext);
     }
 
     private void LogUsage(
@@ -482,7 +538,8 @@ public sealed class RuntimeDelegationAgentRunner : IDelegationAgentRunner
         string model,
         string workingDirectory,
         Model resolvedModel,
-        Usage usage)
+        Usage usage,
+        TauRuntimeLogContext logContext)
     {
         var fields = new Dictionary<string, string?>
         {
@@ -503,7 +560,13 @@ public sealed class RuntimeDelegationAgentRunner : IDelegationAgentRunner
                 .ToString(System.Globalization.CultureInfo.InvariantCulture);
         }
 
-        _logSink.Log(new TauLogEvent("mom", "usage", DateTimeOffset.UtcNow, fields));
+        LogMomEvent("usage", fields, logContext);
+    }
+
+    private void LogMomEvent(string eventName, Dictionary<string, string?> fields, TauRuntimeLogContext logContext)
+    {
+        logContext.AddTo(fields);
+        _logSink.Log(new TauLogEvent("mom", eventName, DateTimeOffset.UtcNow, fields));
     }
 
     private static string PreviewToolResult(ToolResult result)

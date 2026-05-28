@@ -36,7 +36,8 @@ public sealed class PodVllmCommandPlannerTests
         Assert.Equal("tau-pod-llama-8b--rm.service", plan.UnitName);
         Assert.Contains("CUDA_VISIBLE_DEVICES='0'", plan.ServeCommand, StringComparison.Ordinal);
         Assert.Contains("bad_key='value with spaces'", plan.ServeCommand, StringComparison.Ordinal);
-        Assert.Contains("vllm serve '/srv/hf cache/models--meta-llama--Llama-3.1-8B-Instruct'", plan.ServeCommand, StringComparison.Ordinal);
+        Assert.Contains("model_cache_path='/srv/hf cache/models--meta-llama--Llama-3.1-8B-Instruct'", plan.ServeCommand, StringComparison.Ordinal);
+        Assert.Contains("vllm serve \"$resolved_model_path\"", plan.ServeCommand, StringComparison.Ordinal);
         Assert.Contains("--port 8081", plan.ServeCommand, StringComparison.Ordinal);
         Assert.Contains("--served-model-name 'llama-8b'", plan.ServeCommand, StringComparison.Ordinal);
         Assert.Contains("'--tensor-parallel-size' '2'", plan.ServeCommand, StringComparison.Ordinal);
@@ -78,6 +79,24 @@ public sealed class PodVllmCommandPlannerTests
                 ExtraArgs: ["--chat-template", "it's fine"]));
 
         Assert.Contains("'it'\"'\"'s fine'", plan.ServeCommand, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void PlanServe_WithRevision_BuildsRevisionAwareDiscoveryCommand()
+    {
+        var planner = new PodVllmCommandPlanner();
+        var pod = new PodDefinition { Id = "gpu-1", SshHost = "host.example.com", ModelsPath = "/models/hf" };
+
+        var plan = planner.PlanServe(pod, new PodVllmServeOptions("org/model", Revision: "rev-b"));
+
+        Assert.Equal("rev-b", plan.Revision);
+        Assert.True(plan.UsesSnapshotDiscovery);
+        Assert.Contains("requested_revision='rev-b'", plan.ServeCommand, StringComparison.Ordinal);
+        Assert.Contains("ref_file=\"$model_cache_path/refs/$requested_revision\"", plan.ServeCommand, StringComparison.Ordinal);
+        Assert.Contains("snapshots/$requested_revision", plan.ServeCommand, StringComparison.Ordinal);
+        Assert.Contains("exit 16", plan.ServeCommand, StringComparison.Ordinal);
+        using var metadata = JsonDocument.Parse(plan.MetadataJson);
+        Assert.Equal("rev-b", metadata.RootElement.GetProperty("revision").GetString());
     }
 
     [Fact]

@@ -63,6 +63,8 @@ public sealed class KeyBindingMap : IKeyBindingMap
         yield return Pair(ConsoleKey.K, ConsoleModifiers.Control, EditorAction.KillToLineEnd);
         yield return Pair(ConsoleKey.U, ConsoleModifiers.Control, EditorAction.KillToLineStart);
         yield return Pair(ConsoleKey.R, ConsoleModifiers.Control, EditorAction.ReverseSearch);
+        yield return Pair(ConsoleKey.Tab, default, EditorAction.Complete);
+        yield return Pair(ConsoleKey.Tab, ConsoleModifiers.Shift, EditorAction.CompletePrevious);
         yield return Pair(ConsoleKey.P, ConsoleModifiers.Control, EditorAction.CycleModelForward);
         yield return Pair(ConsoleKey.P, ConsoleModifiers.Control | ConsoleModifiers.Shift, EditorAction.CycleModelBackward);
         yield return Pair(ConsoleKey.L, ConsoleModifiers.Control, EditorAction.SelectModel);

@@ -7,6 +7,7 @@ public enum TuiMessageRole
 {
     User,
     Assistant,
+    Thinking,
     System,
     Tool,
     Error,
@@ -100,6 +101,7 @@ public sealed class TuiMessageArea : ITuiComponent
         {
             TuiMessageRole.User => "you> ",
             TuiMessageRole.Assistant => "tau> ",
+            TuiMessageRole.Thinking => "thinking> ",
             TuiMessageRole.System => "system> ",
             TuiMessageRole.Tool => "tool> ",
             TuiMessageRole.Error => "error> ",

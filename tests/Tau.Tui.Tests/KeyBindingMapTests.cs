@@ -45,6 +45,22 @@ public class KeyBindingMapTests
     }
 
     [Fact]
+    public void Default_MapsTabToComplete()
+    {
+        var complete = new ConsoleKeyInfo('\t', ConsoleKey.Tab, shift: false, alt: false, control: false);
+
+        Assert.Equal(EditorAction.Complete, KeyBindingMap.Default.Resolve(complete));
+    }
+
+    [Fact]
+    public void Default_MapsShiftTabToCompletePrevious()
+    {
+        var completePrevious = new ConsoleKeyInfo('\t', ConsoleKey.Tab, shift: true, alt: false, control: false);
+
+        Assert.Equal(EditorAction.CompletePrevious, KeyBindingMap.Default.Resolve(completePrevious));
+    }
+
+    [Fact]
     public void Default_ReturnsNoneForUnboundKey()
     {
         var info = new ConsoleKeyInfo('a', ConsoleKey.A, shift: false, alt: false, control: false);

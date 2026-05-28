@@ -7,8 +7,19 @@ public interface ICodingAgentShellRunner
 {
     Task<CodingAgentShellResult> ExecuteAsync(string command, CancellationToken cancellationToken = default);
 
+    Task<CodingAgentShellResult> ExecuteAsync(
+        string command,
+        IProgress<CodingAgentShellEvent>? progress,
+        CancellationToken cancellationToken = default) =>
+        ExecuteAsync(command, cancellationToken);
+
     void Abort();
 }
+
+public sealed record CodingAgentShellEvent(
+    string Stream,
+    string Text,
+    DateTimeOffset Timestamp);
 
 public sealed record CodingAgentShellResult(
     string Output,
@@ -25,7 +36,13 @@ public sealed class SystemCodingAgentShellRunner : ICodingAgentShellRunner
     private CancellationTokenSource? _activeCts;
     private Process? _activeProcess;
 
-    public async Task<CodingAgentShellResult> ExecuteAsync(string command, CancellationToken cancellationToken = default)
+    public Task<CodingAgentShellResult> ExecuteAsync(string command, CancellationToken cancellationToken = default) =>
+        ExecuteAsync(command, progress: null, cancellationToken);
+
+    public async Task<CodingAgentShellResult> ExecuteAsync(
+        string command,
+        IProgress<CodingAgentShellEvent>? progress,
+        CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(command))
         {
@@ -52,8 +69,8 @@ public sealed class SystemCodingAgentShellRunner : ICodingAgentShellRunner
                 throw new InvalidOperationException("Failed to start shell process.");
             }
 
-            var stdoutTask = process.StandardOutput.ReadToEndAsync(cts.Token);
-            var stderrTask = process.StandardError.ReadToEndAsync(cts.Token);
+            var stdoutTask = ReadStreamAsync(process.StandardOutput, "stdout", progress, cts.Token);
+            var stderrTask = ReadStreamAsync(process.StandardError, "stderr", progress, cts.Token);
             try
             {
                 await process.WaitForExitAsync(cts.Token).ConfigureAwait(false);
@@ -128,6 +145,53 @@ public sealed class SystemCodingAgentShellRunner : ICodingAgentShellRunner
         }
 
         return new Process { StartInfo = startInfo };
+    }
+
+    private static async Task<string> ReadStreamAsync(
+        StreamReader reader,
+        string stream,
+        IProgress<CodingAgentShellEvent>? progress,
+        CancellationToken cancellationToken)
+    {
+        var buffer = new char[4096];
+        var builder = new StringBuilder();
+        while (true)
+        {
+            int read;
+            try
+            {
+                read = await reader.ReadAsync(buffer.AsMemory(0, buffer.Length), cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+            catch (ObjectDisposedException)
+            {
+                break;
+            }
+            catch (InvalidOperationException)
+            {
+                break;
+            }
+
+            if (read == 0)
+            {
+                break;
+            }
+
+            var text = NormalizeOutput(new string(buffer, 0, read));
+            if (text.Length == 0)
+            {
+                continue;
+            }
+
+            builder.Append(text);
+            progress?.Report(new CodingAgentShellEvent(stream, text, DateTimeOffset.UtcNow));
+        }
+
+        return builder.ToString();
     }
 
     private static async Task<string> ReadCompletedOrEmptyAsync(Task<string> task)

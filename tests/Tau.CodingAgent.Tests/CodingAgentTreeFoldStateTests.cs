@@ -95,7 +95,7 @@ public sealed class CodingAgentTreeFoldStateTests
             var router = new CodingAgentCommandRouter(
                 runner,
                 treeSessionController: tree,
-                treeNavigator: (_, _) => Task.FromResult(new CodingAgentTreeInteractiveNavigator.Result(
+                treeNavigator: (_, _, _) => Task.FromResult(new CodingAgentTreeInteractiveNavigator.Result(
                     null,
                     0,
                     1,

@@ -3,7 +3,14 @@ namespace Tau.Mom;
 public sealed record MomCommandLineOptions(
     bool RunOnce,
     bool ValidateSandbox,
-    string[] HostArgs);
+    bool ValidateSlack,
+    bool DownloadRequested,
+    string? DownloadChannelId,
+    bool JsonOutput,
+    string[] HostArgs)
+{
+    public bool HasDownload => DownloadRequested;
+}
 
 public static class MomCommandLine
 {
@@ -13,10 +20,16 @@ public static class MomCommandLine
 
         var runOnce = false;
         var validateSandbox = false;
+        var validateSlack = false;
+        var downloadRequested = false;
+        string? downloadChannelId = null;
+        var jsonOutput = false;
         var hostArgs = new List<string>();
+        var sourceArgs = args.ToArray();
 
-        foreach (var arg in args)
+        for (var index = 0; index < sourceArgs.Length; index++)
         {
+            var arg = sourceArgs[index];
             if (string.Equals(arg, "--once", StringComparison.OrdinalIgnoreCase))
             {
                 runOnce = true;
@@ -29,9 +42,42 @@ public static class MomCommandLine
                 continue;
             }
 
+            if (string.Equals(arg, "--validate-slack", StringComparison.OrdinalIgnoreCase))
+            {
+                validateSlack = true;
+                continue;
+            }
+
+            if (arg.StartsWith("--download=", StringComparison.OrdinalIgnoreCase))
+            {
+                downloadRequested = true;
+                downloadChannelId = arg["--download=".Length..];
+                continue;
+            }
+
+            if (string.Equals(arg, "--download", StringComparison.OrdinalIgnoreCase))
+            {
+                downloadRequested = true;
+                downloadChannelId = index + 1 < sourceArgs.Length ? sourceArgs[++index] : null;
+                continue;
+            }
+
+            if (string.Equals(arg, "--json", StringComparison.OrdinalIgnoreCase))
+            {
+                jsonOutput = true;
+                continue;
+            }
+
             hostArgs.Add(arg);
         }
 
-        return new MomCommandLineOptions(runOnce, validateSandbox, [.. hostArgs]);
+        return new MomCommandLineOptions(
+            runOnce,
+            validateSandbox,
+            validateSlack,
+            downloadRequested,
+            string.IsNullOrWhiteSpace(downloadChannelId) ? null : downloadChannelId.Trim(),
+            jsonOutput,
+            [.. hostArgs]);
     }
 }

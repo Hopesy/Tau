@@ -42,6 +42,30 @@ public sealed class CodingAgentRpcHostTests
     }
 
     [Fact]
+    public async Task RunAsync_PromptPassesCommandAndTreeSessionLogContextToRunner()
+    {
+        using var temp = TempDirectory.Create();
+        var treePath = Path.Combine(temp.Path, "session.jsonl");
+        var treeController = CodingAgentTreeSessionController.OpenOrCreate(treePath);
+        var sessionId = treeController.GetSummary().SessionId;
+        var runner = new FakeCodingAgentRunner((_, _) => EmptyRun());
+        var output = new StringWriter();
+        var host = new CodingAgentRpcHost(
+            runner,
+            new StringReader("{\"id\":\"p1\",\"type\":\"prompt\",\"message\":\"hello\"}\n"),
+            output,
+            treeSessionController: treeController);
+
+        await host.RunAsync();
+
+        var context = Assert.Single(runner.RunLogContexts);
+        Assert.NotNull(context);
+        Assert.Equal("p1", context!.CorrelationId);
+        Assert.Equal("p1", context.MessageId);
+        Assert.Equal(sessionId, context.SessionId);
+    }
+
+    [Fact]
     public async Task RunAsync_UsesStrictLfJsonlAndDoesNotSplitUnicodeLineSeparators()
     {
         var prompt = "first\u2028second";
@@ -87,6 +111,44 @@ public sealed class CodingAgentRpcHostTests
         Assert.Contains(lines, line =>
             line.GetProperty("type").GetString() == "agent_end" &&
             line.GetProperty("errorMessage").GetString() == "Cancelled");
+    }
+
+    [Fact]
+    public async Task RunAsync_SteerFollowUpAndActivePromptStreamingBehaviorAcceptImages()
+    {
+        var runner = new FakeCodingAgentRunner((_, ct) => BlockingRun(ct));
+        var output = new StringWriter();
+        var imageJson = "{\"data\":\"aGVsbG8=\",\"mimeType\":\"image/png\"}";
+        var input = string.Join(
+            "\n",
+            "{\"id\":\"p1\",\"type\":\"prompt\",\"message\":\"work\"}",
+            $"{{\"id\":\"s1\",\"type\":\"steer\",\"message\":\"adjust image\",\"images\":[{imageJson}]}}",
+            $"{{\"id\":\"f1\",\"type\":\"follow_up\",\"message\":\"afterwards image\",\"images\":[{imageJson}]}}",
+            $"{{\"id\":\"ps1\",\"type\":\"prompt\",\"message\":\"stream steer image\",\"streamingBehavior\":\"steer\",\"images\":[{imageJson}]}}",
+            $"{{\"id\":\"pf1\",\"type\":\"prompt\",\"message\":\"stream follow image\",\"streamingBehavior\":\"followUp\",\"images\":[{imageJson}]}}",
+            "{\"id\":\"a1\",\"type\":\"abort\"}",
+            string.Empty);
+        var host = new CodingAgentRpcHost(runner, new StringReader(input), output);
+
+        await host.RunAsync();
+
+        Assert.Equal(["adjust image", "stream steer image"], runner.SteeringInputs);
+        Assert.Equal(["afterwards image", "stream follow image"], runner.FollowUpInputs);
+        Assert.Collection(
+            runner.SteeringContentInputs,
+            blocks => AssertTextAndImage(blocks, "adjust image"),
+            blocks => AssertTextAndImage(blocks, "stream steer image"));
+        Assert.Collection(
+            runner.FollowUpContentInputs,
+            blocks => AssertTextAndImage(blocks, "afterwards image"),
+            blocks => AssertTextAndImage(blocks, "stream follow image"));
+
+        var lines = ReadJsonLines(output);
+        Assert.True(FindResponseById(lines, "s1").GetProperty("success").GetBoolean());
+        Assert.True(FindResponseById(lines, "f1").GetProperty("success").GetBoolean());
+        Assert.True(FindResponseById(lines, "ps1").GetProperty("success").GetBoolean());
+        Assert.True(FindResponseById(lines, "pf1").GetProperty("success").GetBoolean());
+        Assert.True(FindResponseById(lines, "a1").GetProperty("success").GetBoolean());
     }
 
     [Fact]
@@ -142,8 +204,94 @@ public sealed class CodingAgentRpcHostTests
             .EnumerateArray()
             .Select(command => command.GetProperty("name").GetString())
             .ToArray();
-        Assert.Contains("compact", commands);
-        Assert.Contains("fork", commands);
+        Assert.DoesNotContain("compact", commands);
+        Assert.DoesNotContain("fork", commands);
+    }
+
+    [Fact]
+    public async Task RunAsync_GetCommandsIncludesPromptSkillAndExtensionCommands()
+    {
+        using var temp = TempDirectory.Create();
+        var prompts = Path.Combine(temp.Path, ".tau", "prompts");
+        var skills = Path.Combine(temp.Path, ".tau", "skills", "reviewer");
+        var extensions = Path.Combine(temp.Path, ".tau", "extensions");
+        Directory.CreateDirectory(prompts);
+        Directory.CreateDirectory(skills);
+        Directory.CreateDirectory(extensions);
+
+        var promptFile = Path.Combine(prompts, "review.md");
+        await File.WriteAllTextAsync(
+            promptFile,
+            """
+            ---
+            description: Review prompt
+            argument-hint: <file>
+            ---
+            Review $1.
+            """);
+        var skillFile = Path.Combine(skills, "SKILL.md");
+        await File.WriteAllTextAsync(
+            skillFile,
+            """
+            ---
+            name: reviewer
+            description: Review skill
+            ---
+            Check the diff.
+            """);
+        var extensionFile = Path.Combine(extensions, "commands.json");
+        await File.WriteAllTextAsync(
+            extensionFile,
+            """
+            {
+              "commands": [
+                {
+                  "name": "hello",
+                  "description": "Say hello",
+                  "argumentHint": "<name>",
+                  "response": "Hello $ARGUMENTS"
+                }
+              ]
+            }
+            """);
+
+        var runner = new FakeCodingAgentRunner((_, _) => EmptyRun());
+        var output = new StringWriter();
+        var host = new CodingAgentRpcHost(
+            runner,
+            new StringReader("{\"id\":\"commands1\",\"type\":\"get_commands\"}\n"),
+            output,
+            promptTemplateStore: new CodingAgentPromptTemplateStore(cwd: temp.Path),
+            skillStore: new CodingAgentSkillStore(cwd: temp.Path),
+            extensionCommandStore: new CodingAgentExtensionCommandStore(cwd: temp.Path));
+
+        await host.RunAsync();
+
+        var commands = FindResponse(ReadJsonLines(output), "get_commands")
+            .GetProperty("data")
+            .GetProperty("commands")
+            .EnumerateArray()
+            .ToArray();
+
+        var extension = commands.Single(command => command.GetProperty("name").GetString() == "hello");
+        Assert.Equal("Say hello", extension.GetProperty("description").GetString());
+        Assert.Equal("extension", extension.GetProperty("source").GetString());
+        Assert.False(extension.TryGetProperty("usage", out _));
+        Assert.Equal(extensionFile, extension.GetProperty("sourceInfo").GetProperty("path").GetString());
+        Assert.Equal("project", extension.GetProperty("sourceInfo").GetProperty("scope").GetString());
+
+        var prompt = commands.Single(command => command.GetProperty("name").GetString() == "review");
+        Assert.Equal("Review prompt", prompt.GetProperty("description").GetString());
+        Assert.Equal("prompt", prompt.GetProperty("source").GetString());
+        Assert.False(prompt.TryGetProperty("usage", out _));
+        Assert.Equal(promptFile, prompt.GetProperty("sourceInfo").GetProperty("path").GetString());
+
+        var skill = commands.Single(command => command.GetProperty("name").GetString() == "skill:reviewer");
+        Assert.Equal("Review skill", skill.GetProperty("description").GetString());
+        Assert.Equal("skill", skill.GetProperty("source").GetString());
+        Assert.False(skill.TryGetProperty("usage", out _));
+        Assert.Equal(skillFile, skill.GetProperty("sourceInfo").GetProperty("path").GetString());
+        Assert.Equal(skills, skill.GetProperty("sourceInfo").GetProperty("baseDir").GetString());
     }
 
     [Fact]
@@ -221,6 +369,117 @@ public sealed class CodingAgentRpcHostTests
         Assert.Equal(parentSession, summary.ParentSession);
         Assert.Contains("\"parentSession\"", File.ReadAllText(treePath), StringComparison.Ordinal);
         Assert.Contains("\"action\":\"new\"", File.ReadAllText(treePath), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RunAsync_NewSessionCanSummarizeCurrentBranchBeforeResetting()
+    {
+        using var temp = TempDirectory.Create();
+        var treePath = Path.Combine(temp.Path, "session.jsonl");
+        var parentSession = Path.Combine(temp.Path, "parent.jsonl");
+        var treeController = CodingAgentTreeSessionController.OpenOrCreate(treePath);
+        var runner = new FakeCodingAgentRunner((_, _) => EmptyRun())
+        {
+            SessionName = "Current Session"
+        };
+        runner.MutableMessages.Add(new UserMessage("current prompt"));
+        runner.MutableMessages.Add(new AssistantMessage([new TextContent("current answer")]));
+        runner.BranchSummaryHandler = (messages, instructions, replaceInstructions, _) =>
+        {
+            Assert.Equal("summarize blockers only", instructions);
+            Assert.True(replaceInstructions);
+            Assert.Equal(2, messages.Count);
+            Assert.Equal("current prompt", ReadText(messages[0]));
+            Assert.Equal("current answer", ReadText(messages[1]));
+            return Task.FromResult(new CodingAgentBranchSummaryResult("new-session summary", messages.Count, 31));
+        };
+        treeController.SyncFromRunner(runner);
+
+        var output = new StringWriter();
+        var input = string.Join(
+            "\n",
+            $"{{\"id\":\"n1\",\"type\":\"new_session\",\"parentSession\":\"{JsonEscaped(parentSession)}\",\"summarizeCurrentBranch\":true,\"customInstructions\":\"summarize blockers only\",\"replaceInstructions\":true}}",
+            "{\"id\":\"s1\",\"type\":\"get_state\"}",
+            string.Empty);
+        var host = new CodingAgentRpcHost(
+            runner,
+            new StringReader(input),
+            output,
+            treeSessionController: treeController);
+
+        await host.RunAsync();
+
+        Assert.Equal(1, runner.ResetSessionCalls);
+        Assert.Empty(runner.Messages);
+        Assert.Null(runner.SessionName);
+
+        var lines = ReadJsonLines(output);
+        var newSession = FindResponse(lines, "new_session");
+        Assert.True(newSession.GetProperty("success").GetBoolean());
+        var data = newSession.GetProperty("data");
+        Assert.False(data.GetProperty("cancelled").GetBoolean());
+        Assert.True(data.GetProperty("summarizedCurrentBranch").GetBoolean());
+        var branchSummary = data.GetProperty("branchSummary");
+        Assert.Equal(2, branchSummary.GetProperty("entryCount").GetInt32());
+        Assert.Equal(31, branchSummary.GetProperty("tokensBefore").GetInt32());
+
+        var state = FindResponse(lines, "get_state").GetProperty("data");
+        Assert.Equal(treePath, state.GetProperty("sessionFile").GetString());
+        Assert.Equal(0, state.GetProperty("messageCount").GetInt32());
+
+        var summary = treeController.GetSummary();
+        Assert.Equal(parentSession, summary.ParentSession);
+        var persisted = File.ReadAllText(treePath);
+        Assert.Contains("\"type\":\"branch_summary\"", persisted, StringComparison.Ordinal);
+        Assert.Contains("new-session summary", persisted, StringComparison.Ordinal);
+        Assert.Contains("\"action\":\"new\"", persisted, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RunAsync_NewSessionReturnsCancelledWhenSessionSwitchHookCancels()
+    {
+        using var temp = TempDirectory.Create();
+        var treePath = Path.Combine(temp.Path, "session.jsonl");
+        var treeController = CodingAgentTreeSessionController.OpenOrCreate(treePath);
+        var runner = new FakeCodingAgentRunner((_, _) => EmptyRun())
+        {
+            SessionName = "Current Session"
+        };
+        runner.MutableMessages.Add(new UserMessage("current prompt"));
+        treeController.SyncFromRunner(runner);
+
+        CodingAgentSessionSwitchHookState? capturedHookState = null;
+        var output = new StringWriter();
+        var host = new CodingAgentRpcHost(
+            runner,
+            new StringReader("{\"id\":\"n1\",\"type\":\"new_session\"}\n"),
+            output,
+            treeSessionController: treeController,
+            sessionSwitchHook: (state, _) =>
+            {
+                capturedHookState = state;
+                return Task.FromResult<CodingAgentSessionSwitchHookResult?>(CodingAgentSessionSwitchHookResult.Cancel());
+            });
+
+        await host.RunAsync();
+
+        var response = FindResponse(ReadJsonLines(output), "new_session");
+        Assert.True(response.GetProperty("success").GetBoolean());
+        var data = response.GetProperty("data");
+        Assert.True(data.GetProperty("cancelled").GetBoolean());
+        Assert.False(data.GetProperty("summarizedCurrentBranch").GetBoolean());
+        Assert.NotNull(capturedHookState);
+        Assert.Equal(CodingAgentTreeNavigationReason.NewSession, capturedHookState!.Reason);
+        Assert.Equal(Path.GetFullPath(treePath), capturedHookState.CurrentSessionPath);
+        Assert.Equal("Current Session", capturedHookState.CurrentSessionName);
+        Assert.Equal("openai", capturedHookState.CurrentProvider);
+        Assert.Equal("gpt-5.4", capturedHookState.CurrentModel);
+        Assert.Null(capturedHookState.TargetSessionPath);
+        Assert.Null(capturedHookState.TargetSession);
+        Assert.Equal(1, capturedHookState.EntryCount);
+        Assert.Equal(0, runner.ResetSessionCalls);
+        Assert.Equal("Current Session", runner.SessionName);
+        Assert.Single(runner.Messages);
     }
 
     [Fact]
@@ -815,7 +1074,21 @@ public sealed class CodingAgentRpcHostTests
             SteeringMode: "all",
             FollowUpMode: "one-at-a-time",
             AutoCompactionEnabled: true,
-            Theme: "reload-theme"));
+            Theme: "reload-theme",
+            ShellPath: "C:\\tools\\bash.exe",
+            ShellCommandPrefix: "source ~/.bashrc",
+            NpmCommand: ["mise", "exec", "node@20", "--", "npm"],
+            QuietStartup: true,
+            CollapseChangelog: true,
+            EnableInstallTelemetry: false,
+            TerminalShowImages: false,
+            TerminalClearOnShrink: true,
+            ImagesAutoResize: false,
+            ImagesBlockImages: true,
+            ShowHardwareCursor: true,
+            EditorPaddingX: 2,
+            AutocompleteMaxVisible: 12,
+            MarkdownCodeBlockIndent: "    "));
         var output = new StringWriter();
         var host = new CodingAgentRpcHost(
             new FakeCodingAgentRunner((_, _) => EmptyRun()),
@@ -841,6 +1114,24 @@ public sealed class CodingAgentRpcHostTests
         Assert.Equal("one-at-a-time", data.GetProperty("followUpMode").GetString());
         Assert.True(data.GetProperty("autoCompactionEnabled").GetBoolean());
         Assert.Equal("reload-theme", data.GetProperty("theme").GetString());
+        Assert.Equal("C:\\tools\\bash.exe", data.GetProperty("shellPath").GetString());
+        Assert.Equal("source ~/.bashrc", data.GetProperty("shellCommandPrefix").GetString());
+        Assert.Equal(
+            ["mise", "exec", "node@20", "--", "npm"],
+            data.GetProperty("npmCommand").EnumerateArray().Select(part => part.GetString()!).ToArray());
+        Assert.True(data.GetProperty("quietStartup").GetBoolean());
+        Assert.True(data.GetProperty("collapseChangelog").GetBoolean());
+        Assert.False(data.GetProperty("enableInstallTelemetry").GetBoolean());
+        var terminal = data.GetProperty("terminal");
+        Assert.False(terminal.GetProperty("showImages").GetBoolean());
+        Assert.True(terminal.GetProperty("clearOnShrink").GetBoolean());
+        var images = data.GetProperty("images");
+        Assert.False(images.GetProperty("autoResize").GetBoolean());
+        Assert.True(images.GetProperty("blockImages").GetBoolean());
+        Assert.Equal("    ", data.GetProperty("markdown").GetProperty("codeBlockIndent").GetString());
+        Assert.True(data.GetProperty("showHardwareCursor").GetBoolean());
+        Assert.Equal(2, data.GetProperty("editorPaddingX").GetInt32());
+        Assert.Equal(12, data.GetProperty("autocompleteMaxVisible").GetInt32());
     }
 
     [Fact]
@@ -866,7 +1157,7 @@ public sealed class CodingAgentRpcHostTests
         var output = new StringWriter();
         var updateJson = string.Join(
             "\n",
-            "{\"id\":\"us1\",\"type\":\"update_settings\",\"settings\":{\"model\":{\"provider\":\"google\",\"modelId\":\"gemini-2.5-pro\"},\"treeFilterMode\":\"labeled-only\",\"retry\":{\"enabled\":true,\"maxAttempts\":5,\"baseDelayMilliseconds\":250},\"defaultThinkingLevel\":\"xhigh\",\"enabledModels\":[\"google/gemini-2.5-pro\",\"openai/gpt-5.4\",\"google/gemini-2.5-pro\"],\"steeringMode\":\"all\",\"followUpMode\":\"all\",\"autoCompactionEnabled\":true,\"theme\":\"light\"}}",
+            "{\"id\":\"us1\",\"type\":\"update_settings\",\"settings\":{\"model\":{\"provider\":\"google\",\"modelId\":\"gemini-2.5-pro\"},\"treeFilterMode\":\"labeled-only\",\"retry\":{\"enabled\":true,\"maxAttempts\":5,\"baseDelayMilliseconds\":250},\"defaultThinkingLevel\":\"xhigh\",\"enabledModels\":[\"google/gemini-2.5-pro\",\"openai/gpt-5.4\",\"google/gemini-2.5-pro\"],\"steeringMode\":\"all\",\"followUpMode\":\"all\",\"autoCompactionEnabled\":true,\"theme\":\"light\",\"shellPath\":\"C:\\\\tools\\\\bash.exe\",\"shellCommandPrefix\":\"source ~/.bashrc\",\"npmCommand\":[\"mise\",\"exec\",\"node@22\",\"--\",\"npm\",\"npm\"],\"quietStartup\":true,\"collapseChangelog\":true,\"enableInstallTelemetry\":false,\"terminal\":{\"showImages\":false,\"clearOnShrink\":true},\"images\":{\"autoResize\":false,\"blockImages\":true},\"markdown\":{\"codeBlockIndent\":\"    \"},\"showHardwareCursor\":true,\"editorPaddingX\":8,\"autocompleteMaxVisible\":1}}",
             "{\"id\":\"state1\",\"type\":\"get_state\"}",
             string.Empty);
         var host = new CodingAgentRpcHost(
@@ -905,6 +1196,20 @@ public sealed class CodingAgentRpcHostTests
         Assert.Equal("all", saved.FollowUpMode);
         Assert.True(saved.AutoCompactionEnabled);
         Assert.Equal("light", saved.Theme);
+        Assert.Equal("C:\\tools\\bash.exe", saved.ShellPath);
+        Assert.Equal("source ~/.bashrc", saved.ShellCommandPrefix);
+        Assert.Equal(["mise", "exec", "node@22", "--", "npm", "npm"], saved.NpmCommand);
+        Assert.True(saved.QuietStartup);
+        Assert.True(saved.CollapseChangelog);
+        Assert.False(saved.EnableInstallTelemetry);
+        Assert.False(saved.TerminalShowImages);
+        Assert.True(saved.TerminalClearOnShrink);
+        Assert.False(saved.ImagesAutoResize);
+        Assert.True(saved.ImagesBlockImages);
+        Assert.Equal("    ", saved.MarkdownCodeBlockIndent);
+        Assert.True(saved.ShowHardwareCursor);
+        Assert.Equal(3, saved.EditorPaddingX);
+        Assert.Equal(3, saved.AutocompleteMaxVisible);
     }
 
     [Fact]
@@ -919,6 +1224,8 @@ public sealed class CodingAgentRpcHostTests
         var input = string.Join(
             "\n",
             "{\"id\":\"bad1\",\"type\":\"update_settings\",\"settings\":{\"treeFilterMode\":\"invalid\"}}",
+            "{\"id\":\"badTerminal\",\"type\":\"update_settings\",\"settings\":{\"terminal\":false}}",
+            "{\"id\":\"badPadding\",\"type\":\"update_settings\",\"settings\":{\"editorPaddingX\":\"wide\"}}",
             "{\"id\":\"p1\",\"type\":\"prompt\",\"message\":\"work\"}",
             "{\"id\":\"us1\",\"type\":\"update_settings\",\"settings\":{\"steeringMode\":\"all\"}}",
             "{\"id\":\"a1\",\"type\":\"abort\"}",
@@ -932,10 +1239,21 @@ public sealed class CodingAgentRpcHostTests
         Assert.False(invalid.GetProperty("success").GetBoolean());
         Assert.Contains("Unsupported tree filter mode", invalid.GetProperty("error").GetString(), StringComparison.Ordinal);
 
+        var badTerminal = FindResponseById(lines, "badTerminal");
+        Assert.False(badTerminal.GetProperty("success").GetBoolean());
+        Assert.Contains("settings.terminal", badTerminal.GetProperty("error").GetString(), StringComparison.Ordinal);
+
+        var badPadding = FindResponseById(lines, "badPadding");
+        Assert.False(badPadding.GetProperty("success").GetBoolean());
+        Assert.Contains("settings.editorPaddingX", badPadding.GetProperty("error").GetString(), StringComparison.Ordinal);
+
         var active = FindResponseById(lines, "us1");
         Assert.False(active.GetProperty("success").GetBoolean());
         Assert.Contains("agent is running", active.GetProperty("error").GetString(), StringComparison.OrdinalIgnoreCase);
-        Assert.Null(settingsStore.Load().SteeringMode);
+        var saved = settingsStore.Load();
+        Assert.Null(saved.SteeringMode);
+        Assert.Null(saved.TerminalShowImages);
+        Assert.Null(saved.EditorPaddingX);
     }
 
     [Fact]
@@ -963,6 +1281,66 @@ public sealed class CodingAgentRpcHostTests
         Assert.Equal(0, data.GetProperty("exitCode").GetInt32());
         Assert.False(data.GetProperty("cancelled").GetBoolean());
         Assert.False(data.GetProperty("truncated").GetBoolean());
+    }
+
+    [Fact]
+    public async Task RunAsync_BashStreamsOutputChunksAndTruncationMetadata()
+    {
+        using var temp = TempDirectory.Create();
+        var fullOutputPath = Path.Combine(temp.Path, "full-output.log");
+        await File.WriteAllTextAsync(fullOutputPath, "full shell output", CancellationToken.None);
+
+        var shell = new FakeShellRunner
+        {
+            ProgressHandler = (_, progress, _) =>
+            {
+                progress?.Report(new CodingAgentShellEvent("stdout", "stdout chunk\n", DateTimeOffset.UtcNow));
+                progress?.Report(new CodingAgentShellEvent("stderr", "stderr chunk\n", DateTimeOffset.UtcNow));
+                return Task.FromResult(new CodingAgentShellResult("tail chunk\n", 0, Cancelled: false, Truncated: true, fullOutputPath));
+            }
+        };
+        var runner = new FakeCodingAgentRunner((_, _) => EmptyRun());
+        var output = new StringWriter();
+        var host = new CodingAgentRpcHost(
+            runner,
+            new StringReader("{\"id\":\"b1\",\"type\":\"bash\",\"command\":\"echo hello\"}\n"),
+            output,
+            shellRunner: shell);
+
+        await host.RunAsync();
+
+        var lines = ReadJsonLines(output);
+        var bashOutputs = lines.Where(line => line.GetProperty("type").GetString() == "bash_output").ToArray();
+        Assert.Equal(3, bashOutputs.Length);
+        Assert.Equal("b1", bashOutputs[0].GetProperty("id").GetString());
+        Assert.Equal("b1", bashOutputs[0].GetProperty("requestId").GetString());
+        Assert.Equal("stdout", bashOutputs[0].GetProperty("stream").GetString());
+        Assert.Equal("stdout chunk\n", bashOutputs[0].GetProperty("text").GetString());
+        Assert.Equal("stderr", bashOutputs[1].GetProperty("stream").GetString());
+        Assert.Equal("stderr chunk\n", bashOutputs[1].GetProperty("text").GetString());
+
+        var summary = bashOutputs[2];
+        Assert.Equal("b1", summary.GetProperty("id").GetString());
+        Assert.Equal("b1", summary.GetProperty("requestId").GetString());
+        Assert.True(summary.GetProperty("truncated").GetBoolean());
+        Assert.Equal(fullOutputPath, summary.GetProperty("fullOutputPath").GetString());
+        Assert.False(summary.TryGetProperty("stream", out _));
+        Assert.False(summary.TryGetProperty("text", out _));
+
+        Assert.Contains(
+            lines,
+            line =>
+                line.GetProperty("type").GetString() == "bash_event" &&
+                line.GetProperty("event").GetString() == "completed");
+
+        var response = FindResponse(lines, "bash");
+        Assert.True(response.GetProperty("success").GetBoolean());
+        var data = response.GetProperty("data");
+        Assert.Equal("tail chunk\n", data.GetProperty("output").GetString());
+        Assert.Equal(0, data.GetProperty("exitCode").GetInt32());
+        Assert.False(data.GetProperty("cancelled").GetBoolean());
+        Assert.True(data.GetProperty("truncated").GetBoolean());
+        Assert.Equal(fullOutputPath, data.GetProperty("fullOutputPath").GetString());
     }
 
     [Fact]
@@ -1355,6 +1733,231 @@ public sealed class CodingAgentRpcHostTests
     }
 
     [Fact]
+    public async Task RunAsync_SwitchSessionCanSummarizeCurrentBranchBeforeSwitching()
+    {
+        using var temp = TempDirectory.Create();
+        var targetTreePath = Path.Combine(temp.Path, "target.jsonl");
+        var currentTreePath = Path.Combine(temp.Path, "current.jsonl");
+        var targetRunner = new FakeCodingAgentRunner((_, _) => EmptyRun())
+        {
+            SessionName = "Target Session"
+        };
+        targetRunner.MutableMessages.Add(new UserMessage("target prompt"));
+        targetRunner.MutableMessages.Add(new AssistantMessage([new TextContent("target answer")]));
+        CodingAgentTreeSessionController.OpenOrCreate(targetTreePath).SyncFromRunner(targetRunner);
+
+        var runner = new FakeCodingAgentRunner((_, _) => EmptyRun())
+        {
+            SessionName = "Current Session"
+        };
+        runner.MutableMessages.Add(new UserMessage("current prompt"));
+        runner.MutableMessages.Add(new AssistantMessage([new TextContent("current answer")]));
+        runner.BranchSummaryHandler = (messages, instructions, replaceInstructions, _) =>
+        {
+            Assert.Equal("focus blockers", instructions);
+            Assert.True(replaceInstructions);
+            Assert.Equal(2, messages.Count);
+            Assert.Equal("current prompt", ReadText(messages[0]));
+            Assert.Equal("current answer", ReadText(messages[1]));
+            return Task.FromResult(new CodingAgentBranchSummaryResult("rpc switch summary", messages.Count, 33));
+        };
+
+        var currentTree = CodingAgentTreeSessionController.OpenOrCreate(currentTreePath);
+        currentTree.SyncFromRunner(runner);
+        var output = new StringWriter();
+        var input = string.Join(
+            "\n",
+            $"{{\"id\":\"sw1\",\"type\":\"switch_session\",\"sessionPath\":\"{JsonEscaped(targetTreePath)}\",\"summarizeCurrentBranch\":true,\"customInstructions\":\"focus blockers\",\"replaceInstructions\":true}}",
+            string.Empty);
+        var host = new CodingAgentRpcHost(
+            runner,
+            new StringReader(input),
+            output,
+            treeSessionController: currentTree);
+
+        await host.RunAsync();
+
+        var switchResponse = FindResponse(ReadJsonLines(output), "switch_session");
+        Assert.True(switchResponse.GetProperty("success").GetBoolean());
+        var data = switchResponse.GetProperty("data");
+        Assert.False(data.GetProperty("cancelled").GetBoolean());
+        Assert.True(data.GetProperty("summarizedCurrentBranch").GetBoolean());
+        var branchSummary = data.GetProperty("branchSummary");
+        Assert.Equal(2, branchSummary.GetProperty("entryCount").GetInt32());
+        Assert.Equal(33, branchSummary.GetProperty("tokensBefore").GetInt32());
+
+        Assert.Equal(targetTreePath, currentTree.Path);
+        Assert.Equal("Target Session", runner.SessionName);
+        Assert.Equal(2, runner.Messages.Count);
+        Assert.Equal("target prompt", ReadText(runner.Messages[0]));
+        Assert.Equal("target answer", ReadText(runner.Messages[1]));
+
+        var summarizedCurrent = CodingAgentTreeSessionController.OpenOrCreate(currentTreePath);
+        var summarizedSnapshot = summarizedCurrent.LoadSnapshot();
+        Assert.Single(summarizedSnapshot.Messages);
+        Assert.Contains("rpc switch summary", ReadText(summarizedSnapshot.Messages[0]), StringComparison.Ordinal);
+        Assert.Equal("Current Session", summarizedSnapshot.Name);
+        Assert.Equal("openai", summarizedSnapshot.Provider);
+        Assert.Equal("gpt-5.4", summarizedSnapshot.Model);
+    }
+
+    [Fact]
+    public async Task RunAsync_SwitchSessionCanUseHookDecisionWithoutCommandFlag()
+    {
+        using var temp = TempDirectory.Create();
+        var targetTreePath = Path.Combine(temp.Path, "target.jsonl");
+        var currentTreePath = Path.Combine(temp.Path, "current.jsonl");
+        var targetRunner = new FakeCodingAgentRunner((_, _) => EmptyRun())
+        {
+            SessionName = "Target Session"
+        };
+        targetRunner.MutableMessages.Add(new UserMessage("target prompt"));
+        CodingAgentTreeSessionController.OpenOrCreate(targetTreePath).SyncFromRunner(targetRunner);
+
+        var runner = new FakeCodingAgentRunner((_, _) => EmptyRun())
+        {
+            SessionName = "Current Session"
+        };
+        runner.MutableMessages.Add(new UserMessage("current prompt"));
+        runner.MutableMessages.Add(new AssistantMessage([new TextContent("current answer")]));
+        runner.BranchSummaryHandler = (messages, instructions, replaceInstructions, _) =>
+        {
+            Assert.Equal("hook-only focus", instructions);
+            Assert.True(replaceInstructions);
+            Assert.Equal(2, messages.Count);
+            return Task.FromResult(new CodingAgentBranchSummaryResult("hook switch summary", messages.Count, 29));
+        };
+
+        var currentTree = CodingAgentTreeSessionController.OpenOrCreate(currentTreePath);
+        currentTree.SyncFromRunner(runner);
+        var output = new StringWriter();
+        var input = $"{{\"id\":\"sw1\",\"type\":\"switch_session\",\"sessionPath\":\"{JsonEscaped(targetTreePath)}\"}}\n";
+        var host = new CodingAgentRpcHost(
+            runner,
+            new StringReader(input),
+            output,
+            treeSessionController: currentTree,
+            sessionSwitchHook: (_, _) => Task.FromResult<CodingAgentSessionSwitchHookResult?>(
+                CodingAgentSessionSwitchHookResult.Continue(
+                    CodingAgentTreeNavigationDecision.SummarizeWith(
+                        "hook-only focus",
+                        replaceInstructions: true,
+                        label: "hook label"))));
+
+        await host.RunAsync();
+
+        var switchResponse = FindResponse(ReadJsonLines(output), "switch_session");
+        Assert.True(switchResponse.GetProperty("success").GetBoolean());
+        var data = switchResponse.GetProperty("data");
+        Assert.False(data.GetProperty("cancelled").GetBoolean());
+        Assert.True(data.GetProperty("summarizedCurrentBranch").GetBoolean());
+        Assert.Equal(2, data.GetProperty("branchSummary").GetProperty("entryCount").GetInt32());
+        Assert.Equal(29, data.GetProperty("branchSummary").GetProperty("tokensBefore").GetInt32());
+        Assert.Equal(targetTreePath, currentTree.Path);
+        Assert.Equal("Target Session", runner.SessionName);
+
+        var summarizedCurrentJsonl = File.ReadAllText(currentTreePath);
+        Assert.Contains("hook switch summary", summarizedCurrentJsonl, StringComparison.Ordinal);
+        Assert.Contains("hook label", summarizedCurrentJsonl, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RunAsync_SwitchSessionReturnsCancelledWhenSessionSwitchHookCancels()
+    {
+        using var temp = TempDirectory.Create();
+        var targetTreePath = Path.Combine(temp.Path, "target.jsonl");
+        var currentTreePath = Path.Combine(temp.Path, "current.jsonl");
+        CodingAgentTreeSessionController.OpenOrCreate(targetTreePath).SyncFromRunner(
+            new FakeCodingAgentRunner((_, _) => EmptyRun())
+            {
+                SessionName = "Target Session",
+                MutableMessages = { new UserMessage("target prompt") }
+            });
+
+        var runner = new FakeCodingAgentRunner((_, _) => EmptyRun())
+        {
+            SessionName = "Current Session"
+        };
+        runner.MutableMessages.Add(new UserMessage("current prompt"));
+        var currentTree = CodingAgentTreeSessionController.OpenOrCreate(currentTreePath);
+        currentTree.SyncFromRunner(runner);
+
+        CodingAgentSessionSwitchHookState? capturedHookState = null;
+        var output = new StringWriter();
+        var input = $"{{\"id\":\"sw1\",\"type\":\"switch_session\",\"sessionPath\":\"{JsonEscaped(targetTreePath)}\"}}\n";
+        var host = new CodingAgentRpcHost(
+            runner,
+            new StringReader(input),
+            output,
+            treeSessionController: currentTree,
+            sessionSwitchHook: (state, _) =>
+            {
+                capturedHookState = state;
+                return Task.FromResult<CodingAgentSessionSwitchHookResult?>(CodingAgentSessionSwitchHookResult.Cancel());
+            });
+
+        await host.RunAsync();
+
+        var response = FindResponse(ReadJsonLines(output), "switch_session");
+        Assert.True(response.GetProperty("success").GetBoolean());
+        var data = response.GetProperty("data");
+        Assert.True(data.GetProperty("cancelled").GetBoolean());
+        Assert.False(data.GetProperty("summarizedCurrentBranch").GetBoolean());
+        Assert.NotNull(capturedHookState);
+        Assert.Equal(CodingAgentTreeNavigationReason.ResumeSession, capturedHookState!.Reason);
+        Assert.Equal(Path.GetFullPath(currentTreePath), capturedHookState.CurrentSessionPath);
+        Assert.Equal("Current Session", capturedHookState.CurrentSessionName);
+        Assert.Equal("openai", capturedHookState.CurrentProvider);
+        Assert.Equal("gpt-5.4", capturedHookState.CurrentModel);
+        Assert.Equal(Path.GetFullPath(targetTreePath), capturedHookState.TargetSessionPath);
+        Assert.NotNull(capturedHookState.TargetSession);
+        Assert.Equal("Target Session", capturedHookState.TargetSession!.Name);
+        Assert.Equal("openai", capturedHookState.TargetSession.Provider);
+        Assert.Equal("gpt-5.4", capturedHookState.TargetSession.Model);
+        Assert.Equal(1, capturedHookState.TargetSession.MessageCount);
+        Assert.Equal(1, capturedHookState.EntryCount);
+        Assert.Equal(currentTreePath, currentTree.Path);
+        Assert.Equal("Current Session", runner.SessionName);
+        Assert.Single(runner.Messages);
+        Assert.Equal("current prompt", ReadText(runner.Messages[0]));
+    }
+
+    [Fact]
+    public async Task RunAsync_SwitchSessionReturnsAlreadyCurrentForCurrentPath()
+    {
+        using var temp = TempDirectory.Create();
+        var currentTreePath = Path.Combine(temp.Path, "current.jsonl");
+        var runner = new FakeCodingAgentRunner((_, _) => EmptyRun())
+        {
+            SessionName = "Current Session"
+        };
+        runner.MutableMessages.Add(new UserMessage("current prompt"));
+        var currentTree = CodingAgentTreeSessionController.OpenOrCreate(currentTreePath);
+        currentTree.SyncFromRunner(runner);
+
+        var output = new StringWriter();
+        var input = $"{{\"id\":\"sw1\",\"type\":\"switch_session\",\"sessionPath\":\"{JsonEscaped(currentTreePath)}\",\"summarizeCurrentBranch\":true}}\n";
+        var host = new CodingAgentRpcHost(
+            runner,
+            new StringReader(input),
+            output,
+            treeSessionController: currentTree);
+
+        await host.RunAsync();
+
+        var response = FindResponse(ReadJsonLines(output), "switch_session");
+        Assert.True(response.GetProperty("success").GetBoolean());
+        var data = response.GetProperty("data");
+        Assert.False(data.GetProperty("cancelled").GetBoolean());
+        Assert.False(data.GetProperty("summarizedCurrentBranch").GetBoolean());
+        Assert.True(data.GetProperty("alreadyCurrent").GetBoolean());
+        Assert.False(data.TryGetProperty("branchSummary", out _));
+        Assert.Equal(currentTreePath, currentTree.Path);
+        Assert.Equal("Current Session", runner.SessionName);
+        Assert.Single(runner.Messages);
+    }
+
+    [Fact]
     public async Task RunAsync_SwitchSessionRejectsActivePrompt()
     {
         using var temp = TempDirectory.Create();
@@ -1379,6 +1982,49 @@ public sealed class CodingAgentRpcHostTests
         var switchResponse = FindResponseById(ReadJsonLines(output), "sw1");
         Assert.False(switchResponse.GetProperty("success").GetBoolean());
         Assert.Contains("agent is running", switchResponse.GetProperty("error").GetString(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task RunAsync_ForkReturnsSelectedUserTextAndRestoresParentBranch()
+    {
+        using var temp = TempDirectory.Create();
+        var treePath = Path.Combine(temp.Path, "session.jsonl");
+        var treeController = CodingAgentTreeSessionController.OpenOrCreate(treePath);
+        var runner = new FakeCodingAgentRunner((_, _) => EmptyRun());
+        runner.MutableMessages.Add(new UserMessage("root prompt"));
+        runner.MutableMessages.Add(new AssistantMessage([new TextContent("root answer")]));
+        runner.MutableMessages.Add(new UserMessage(
+        [
+            new TextContent("fork "),
+            new ImageContent("aGVsbG8=", "image/png"),
+            new TextContent("request")
+        ]));
+        runner.MutableMessages.Add(new AssistantMessage([new TextContent("abandoned answer")]));
+        treeController.SyncFromRunner(runner);
+        var target = treeController
+            .GetUserMessagesForForking()
+            .Single(message => message.Text == "fork request");
+        var output = new StringWriter();
+        var host = new CodingAgentRpcHost(
+            runner,
+            new StringReader($"{{\"id\":\"f1\",\"type\":\"fork\",\"entryId\":\"{target.EntryId}\"}}\n"),
+            output,
+            treeSessionController: treeController);
+
+        await host.RunAsync();
+
+        var response = FindResponse(ReadJsonLines(output), "fork");
+        Assert.True(response.GetProperty("success").GetBoolean());
+        var data = response.GetProperty("data");
+        Assert.Equal("fork request", data.GetProperty("text").GetString());
+        Assert.False(data.GetProperty("cancelled").GetBoolean());
+        Assert.False(string.IsNullOrWhiteSpace(data.GetProperty("leafId").GetString()));
+        Assert.Equal(2, data.GetProperty("messageCount").GetInt32());
+        Assert.Equal(runner.Model.Provider, data.GetProperty("provider").GetString());
+        Assert.Equal(runner.Model.Id, data.GetProperty("model").GetString());
+        Assert.Equal(2, runner.Messages.Count);
+        Assert.Equal("root prompt", ReadText(runner.Messages[0]));
+        Assert.Equal("root answer", ReadText(runner.Messages[1]));
     }
 
     [Fact]
@@ -1546,6 +2192,16 @@ public sealed class CodingAgentRpcHostTests
     private static string JsonEscaped(string value) =>
         value.Replace("\\", "\\\\", StringComparison.Ordinal).Replace("\"", "\\\"", StringComparison.Ordinal);
 
+    private static void AssertTextAndImage(IReadOnlyList<ContentBlock> blocks, string expectedText)
+    {
+        Assert.Equal(2, blocks.Count);
+        var text = Assert.IsType<TextContent>(blocks[0]);
+        Assert.Equal(expectedText, text.Text);
+        var image = Assert.IsType<ImageContent>(blocks[1]);
+        Assert.Equal("aGVsbG8=", image.Data);
+        Assert.Equal("image/png", image.MimeType);
+    }
+
     private static string ReadText(ChatMessage message)
     {
         return message switch
@@ -1632,11 +2288,23 @@ public sealed class CodingAgentRpcHostTests
         public Task Started => _started.Task;
         public int AbortCalls { get; private set; }
         public Func<string, CancellationToken, Task<CodingAgentShellResult>>? Handler { get; set; }
+        public Func<string, IProgress<CodingAgentShellEvent>?, CancellationToken, Task<CodingAgentShellResult>>? ProgressHandler { get; set; }
 
         public Task<CodingAgentShellResult> ExecuteAsync(string command, CancellationToken cancellationToken = default)
+            => ExecuteAsync(command, progress: null, cancellationToken);
+
+        public Task<CodingAgentShellResult> ExecuteAsync(
+            string command,
+            IProgress<CodingAgentShellEvent>? progress,
+            CancellationToken cancellationToken = default)
         {
             Commands.Add(command);
             _started.TrySetResult();
+            if (ProgressHandler is not null)
+            {
+                return ProgressHandler(command, progress, cancellationToken);
+            }
+
             return Handler is null
                 ? Task.FromResult(new CodingAgentShellResult(string.Empty, 0, Cancelled: false, Truncated: false))
                 : Handler(command, cancellationToken);

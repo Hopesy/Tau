@@ -1,4 +1,6 @@
 using System.Runtime.CompilerServices;
+using Tau.Tui.Abstractions;
+using Tau.Tui.Runtime;
 
 namespace Tau.CodingAgent.Runtime;
 
@@ -93,6 +95,117 @@ public sealed class SystemConsoleCodingAgentTurnInputSource : ICodingAgentTurnIn
             {
                 buffer.Add(key.KeyChar);
             }
+        }
+    }
+}
+
+public sealed class CompositionCodingAgentTurnInputSource : ICodingAgentTurnInputSource
+{
+    private const string Prompt = "turn> ";
+
+    private readonly InteractiveInputEditor _editor;
+    private readonly TrackingSubmitKeyReader _keyReader;
+
+    public CompositionCodingAgentTurnInputSource(
+        IConsoleKeyReader keyReader,
+        TuiCompositionSession session,
+        IKeyBindingMap? keyBindings = null)
+    {
+        ArgumentNullException.ThrowIfNull(keyReader);
+        ArgumentNullException.ThrowIfNull(session);
+
+        _keyReader = new TrackingSubmitKeyReader(keyReader);
+        _editor = new InteractiveInputEditor(
+            _keyReader,
+            new TuiCompositionInteractiveRenderer(session),
+            history: new InputHistory(),
+            bindings: CreateTurnInputBindings(keyBindings));
+    }
+
+    public async IAsyncEnumerable<CodingAgentTurnInput> ReadInputsAsync(
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            InputResult result;
+            try
+            {
+                result = await _editor.ReadLineAsync(Prompt, ConsoleColor.DarkYellow, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                yield break;
+            }
+
+            if (result.Kind != InputResultKind.Submitted)
+            {
+                _editor.Buffer.SetDraft(string.Empty);
+                continue;
+            }
+
+            var text = result.Text?.Trim();
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                continue;
+            }
+
+            yield return new CodingAgentTurnInput(_keyReader.ConsumeSubmitKind(), text);
+        }
+    }
+
+    private static IKeyBindingMap CreateTurnInputBindings(IKeyBindingMap? keyBindings)
+    {
+        if (keyBindings is KeyBindingMap keyBindingMap)
+        {
+            return new KeyBindingMap(keyBindingMap.Bindings.Where(static pair =>
+                pair.Value is not EditorAction.CycleModelForward
+                    and not EditorAction.CycleModelBackward
+                    and not EditorAction.SelectModel));
+        }
+
+        return KeyBindingMap.WithOverrides(
+        [
+            new KeyValuePair<KeyBinding, EditorAction>(
+                new KeyBinding(ConsoleKey.P, ConsoleModifiers.Control),
+                EditorAction.None),
+            new KeyValuePair<KeyBinding, EditorAction>(
+                new KeyBinding(ConsoleKey.P, ConsoleModifiers.Control | ConsoleModifiers.Shift),
+                EditorAction.None),
+            new KeyValuePair<KeyBinding, EditorAction>(
+                new KeyBinding(ConsoleKey.L, ConsoleModifiers.Control),
+                EditorAction.None)
+        ]);
+    }
+
+    private sealed class TrackingSubmitKeyReader(IConsoleKeyReader inner) : IConsoleKeyReader
+    {
+        private CodingAgentTurnInputKind _pendingSubmitKind = CodingAgentTurnInputKind.Steering;
+
+        public async ValueTask<ConsoleKeyInfo> ReadKeyAsync(CancellationToken cancellationToken = default)
+        {
+            var key = await inner.ReadKeyAsync(cancellationToken).ConfigureAwait(false);
+            if (key.Key == ConsoleKey.Enter)
+            {
+                _pendingSubmitKind = (key.Modifiers & ConsoleModifiers.Alt) != 0
+                    ? CodingAgentTurnInputKind.FollowUp
+                    : CodingAgentTurnInputKind.Steering;
+                return new ConsoleKeyInfo('\r', ConsoleKey.Enter, shift: false, alt: false, control: false);
+            }
+
+            if (key.Key == ConsoleKey.Escape && key.Modifiers == ConsoleModifiers.None)
+            {
+                return new ConsoleKeyInfo('\x03', ConsoleKey.C, shift: false, alt: false, control: true);
+            }
+
+            return key;
+        }
+
+        public CodingAgentTurnInputKind ConsumeSubmitKind()
+        {
+            var kind = _pendingSubmitKind;
+            _pendingSubmitKind = CodingAgentTurnInputKind.Steering;
+            return kind;
         }
     }
 }

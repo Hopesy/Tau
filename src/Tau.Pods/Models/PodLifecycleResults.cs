@@ -11,18 +11,28 @@ public sealed record PodDeployResult(
     string PodId,
     bool Success,
     string Summary,
-    string? DeploymentName = null);
+    string? DeploymentName = null,
+    string? ModelId = null,
+    PodExecResult? Execution = null);
 
 public sealed record PodStopResult(
     string PodId,
     bool Success,
-    string Summary);
+    string Summary,
+    string? DeploymentName = null,
+    PodExecResult? Execution = null);
 
 public sealed record PodLogsResult(
     string PodId,
     bool Success,
     string Summary,
-    string? Output = null);
+    string? Output = null,
+    string? DeploymentName = null,
+    int? Tail = null,
+    string? Command = null,
+    int? ExitCode = null,
+    string? StdErr = null,
+    string FailureKind = PodExecFailureKinds.None);
 
 public sealed record PodDeploymentInfo(
     string Name,

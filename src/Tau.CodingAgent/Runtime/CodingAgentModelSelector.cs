@@ -199,6 +199,60 @@ public static class CodingAgentModelSelector
             cancellationToken);
     }
 
+    public static Func<CodingAgentModelSelectorState, CancellationToken, Task<string?>> CreateCompositionSelector(
+        TuiCompositionSession session)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+
+        return async (state, cancellationToken) =>
+        {
+            var selector = CreateComponent(state);
+            if (selector.FilteredItems.Count == 0 && !selector.HasScopedModels)
+            {
+                return null;
+            }
+
+            string? selected = null;
+            var cancelled = false;
+            void OnSelected(TuiSelectItem item) => selected = item.Value;
+            void OnCancelled() => cancelled = true;
+
+            selector.Selected += OnSelected;
+            selector.Cancelled += OnCancelled;
+            var width = Math.Max(1, Math.Min(96, session.Viewport.Width));
+            var handle = session.OpenOverlay(
+                selector,
+                new TuiTranscriptOverlayOptions(
+                    Width: width,
+                    Row: Math.Max(0, Math.Min(1, session.Viewport.MessageHeight - 1)),
+                    Column: Math.Max(0, (session.Viewport.Width - width) / 2)));
+            try
+            {
+                if (!session.IsStarted)
+                {
+                    session.Start();
+                }
+                else
+                {
+                    session.Render(force: true);
+                }
+
+                while (selected is null && !cancelled)
+                {
+                    await session.ReadInputAsync(cancellationToken).ConfigureAwait(false);
+                }
+
+                return cancelled ? null : selected;
+            }
+            finally
+            {
+                session.CloseOverlay(handle);
+                selector.Selected -= OnSelected;
+                selector.Cancelled -= OnCancelled;
+            }
+        };
+    }
+
     public static TuiSelectList CreateSelectList(
         CodingAgentModelSelectorState state,
         int maxVisible = 10) =>

@@ -136,6 +136,19 @@ public class InteractiveConsoleSessionTests
     }
 
     [Fact]
+    public async Task ReadInputAsync_CustomPromptUsesProvidedPromptAndColor()
+    {
+        var terminal = new FakeTerminal();
+        terminal.QueueInput("code");
+        var session = new InteractiveConsoleSession(terminal);
+
+        var input = await session.ReadInputAsync("oauth> ", ConsoleColor.Cyan);
+
+        Assert.Equal("code", input);
+        Assert.Contains(terminal.Writes, write => write.Text == "oauth> " && write.Color == ConsoleColor.Cyan && !write.IsLine);
+    }
+
+    [Fact]
     public void ThinkingAndAssistantText_AreSplitIntoSeparateTranscriptEntries()
     {
         var terminal = new FakeTerminal();

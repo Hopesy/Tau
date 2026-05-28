@@ -58,10 +58,36 @@ public sealed class PodProbeService
                 ["podId"] = pod.Id,
                 ["success"] = result.Success ? "true" : "false",
                 ["transport"] = result.Transport,
-                ["latencyMs"] = result.Latency?.TotalMilliseconds.ToString("F0", System.Globalization.CultureInfo.InvariantCulture)
+                ["latencyMs"] = result.Latency?.TotalMilliseconds.ToString("F0", System.Globalization.CultureInfo.InvariantCulture),
+                ["summary"] = result.Summary,
+                ["statusCode"] = result.StatusCode?.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                ["endpoint"] = result.Endpoint,
+                ["host"] = result.Host,
+                ["port"] = result.Port?.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                ["failureKind"] = GetProbeFailureKind(result)
             }));
 
         return result;
+    }
+
+    private static string GetProbeFailureKind(PodProbeResult result)
+    {
+        if (result.Success)
+        {
+            return "none";
+        }
+
+        if (result.Transport.Equals("http", StringComparison.OrdinalIgnoreCase))
+        {
+            return result.StatusCode.HasValue ? "http-status" : "http-error";
+        }
+
+        if (result.Transport.Equals("tcp", StringComparison.OrdinalIgnoreCase))
+        {
+            return "tcp-error";
+        }
+
+        return "unknown";
     }
 
     private async Task<PodProbeResult> ProbeEndpointAsync(PodDefinition pod, CancellationToken cancellationToken)

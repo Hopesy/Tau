@@ -3,11 +3,12 @@ using Tau.Agent.Runtime;
 using Tau.Ai;
 using Tau.Ai.Auth;
 using Tau.Ai.Auth.OAuth;
+using Tau.Ai.Observability;
 using Tau.CodingAgent.Runtime;
 
 namespace Tau.CodingAgent.Tests;
 
-public sealed class FakeCodingAgentRunner : ICodingAgentRunner
+public sealed class FakeCodingAgentRunner : ICodingAgentRunner, ICodingAgentToolResultDetailsProvider
 {
     private readonly Func<string, CancellationToken, IAsyncEnumerable<AgentEvent>> _run;
     private readonly Dictionary<string, List<Model>> _models = new(StringComparer.OrdinalIgnoreCase)
@@ -46,21 +47,27 @@ public sealed class FakeCodingAgentRunner : ICodingAgentRunner
 
     public List<string> Inputs { get; } = [];
     public List<IReadOnlyList<ContentBlock>> ContentInputs { get; } = [];
+    public List<TauRuntimeLogContext?> RunLogContexts { get; } = [];
     public List<string> SteeringInputs { get; } = [];
+    public List<IReadOnlyList<ContentBlock>> SteeringContentInputs { get; } = [];
     public List<string> FollowUpInputs { get; } = [];
+    public List<IReadOnlyList<ContentBlock>> FollowUpContentInputs { get; } = [];
     public List<ChatMessage> MutableMessages { get; } = [];
+    public Dictionary<string, object?> MutableToolResultDetailsByToolCallId { get; } = new(StringComparer.OrdinalIgnoreCase);
     public IReadOnlyList<ChatMessage> Messages => MutableMessages;
+    public IReadOnlyDictionary<string, object?> ToolResultDetailsByToolCallId => MutableToolResultDetailsByToolCallId;
     public Model Model { get; private set; }
     public string? SessionName { get; set; }
     public ThinkingLevel? ThinkingLevel { get; set; }
     public AgentQueueMode SteeringMode { get; set; } = AgentQueueMode.OneAtATime;
     public AgentQueueMode FollowUpMode { get; set; } = AgentQueueMode.OneAtATime;
     public Func<string?, CancellationToken, Task<CodingAgentCompactionResult>>? CompactHandler { get; set; }
-    public Func<IReadOnlyList<ChatMessage>, string?, CancellationToken, Task<CodingAgentBranchSummaryResult>>? BranchSummaryHandler { get; set; }
+    public Func<IReadOnlyList<ChatMessage>, string?, bool, CancellationToken, Task<CodingAgentBranchSummaryResult>>? BranchSummaryHandler { get; set; }
     public Action<string>? SteeringObserver { get; set; }
     public Action<string>? FollowUpObserver { get; set; }
     public string? LastCompactInstructions { get; private set; }
     public string? LastBranchSummaryInstructions { get; private set; }
+    public bool LastBranchSummaryReplaceInstructions { get; private set; }
     public IReadOnlyList<ChatMessage>? LastBranchSummaryMessages { get; private set; }
     public IReadOnlyList<CodingAgentSkill>? LastRefreshedSkills { get; private set; }
     public IReadOnlyList<CodingAgentContextFile>? LastRefreshedContextFiles { get; private set; }
@@ -204,13 +211,15 @@ public sealed class FakeCodingAgentRunner : ICodingAgentRunner
     public Task<CodingAgentBranchSummaryResult> SummarizeBranchAsync(
         IReadOnlyList<ChatMessage> messages,
         string? customInstructions = null,
+        bool replaceInstructions = false,
         CancellationToken cancellationToken = default)
     {
         LastBranchSummaryMessages = messages;
         LastBranchSummaryInstructions = customInstructions;
+        LastBranchSummaryReplaceInstructions = replaceInstructions;
         if (BranchSummaryHandler is not null)
         {
-            return BranchSummaryHandler(messages, customInstructions, cancellationToken);
+            return BranchSummaryHandler(messages, customInstructions, replaceInstructions, cancellationToken);
         }
 
         throw new InvalidOperationException("Branch summarization is not configured for this test runner.");
@@ -237,22 +246,56 @@ public sealed class FakeCodingAgentRunner : ICodingAgentRunner
         SteeringObserver?.Invoke(input);
     }
 
+    public void Steer(IReadOnlyList<ContentBlock> input)
+    {
+        SteeringContentInputs.Add(input);
+        var text = ContentText(input);
+        SteeringInputs.Add(text);
+        SteeringObserver?.Invoke(text);
+    }
+
     public void FollowUp(string input)
     {
         FollowUpInputs.Add(input);
         FollowUpObserver?.Invoke(input);
     }
 
-    public IAsyncEnumerable<AgentEvent> RunAsync(string input, CancellationToken cancellationToken = default)
+    public void FollowUp(IReadOnlyList<ContentBlock> input)
+    {
+        FollowUpContentInputs.Add(input);
+        var text = ContentText(input);
+        FollowUpInputs.Add(text);
+        FollowUpObserver?.Invoke(text);
+    }
+
+    public IAsyncEnumerable<AgentEvent> RunAsync(string input, CancellationToken cancellationToken = default) =>
+        RunAsync(input, logContext: null, cancellationToken);
+
+    public IAsyncEnumerable<AgentEvent> RunAsync(
+        string input,
+        TauRuntimeLogContext? logContext,
+        CancellationToken cancellationToken = default)
     {
         Inputs.Add(input);
+        RunLogContexts.Add(logContext);
         return _run(input, cancellationToken);
     }
 
-    public IAsyncEnumerable<AgentEvent> RunAsync(IReadOnlyList<ContentBlock> input, CancellationToken cancellationToken = default)
+    public IAsyncEnumerable<AgentEvent> RunAsync(
+        IReadOnlyList<ContentBlock> input,
+        CancellationToken cancellationToken = default) =>
+        RunAsync(input, logContext: null, cancellationToken);
+
+    public IAsyncEnumerable<AgentEvent> RunAsync(
+        IReadOnlyList<ContentBlock> input,
+        TauRuntimeLogContext? logContext,
+        CancellationToken cancellationToken = default)
     {
         ContentInputs.Add(input);
-        var text = string.Join(Environment.NewLine, input.OfType<TextContent>().Select(content => content.Text));
-        return _run(text, cancellationToken);
+        RunLogContexts.Add(logContext);
+        return _run(ContentText(input), cancellationToken);
     }
+
+    private static string ContentText(IReadOnlyList<ContentBlock> input) =>
+        string.Join(Environment.NewLine, input.OfType<TextContent>().Select(content => content.Text));
 }

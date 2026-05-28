@@ -1,13 +1,18 @@
+using System.Runtime.ExceptionServices;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Threading.Channels;
 using Tau.Agent;
 using Tau.Agent.Runtime;
 using Tau.Ai;
+using Tau.Ai.Observability;
 
 namespace Tau.CodingAgent.Runtime;
 
 public sealed class CodingAgentRpcHost
 {
+    private const int BashOutputQueueCapacity = 1024;
+
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
@@ -19,8 +24,12 @@ public sealed class CodingAgentRpcHost
     private readonly CodingAgentSessionStore? _sessionStore;
     private readonly CodingAgentSettingsStore? _settingsStore;
     private readonly CodingAgentTreeSessionController? _treeSessionController;
+    private readonly CodingAgentPromptTemplateStore? _promptTemplateStore;
+    private readonly CodingAgentSkillStore? _skillStore;
+    private readonly CodingAgentExtensionCommandStore? _extensionCommandStore;
     private readonly ICodingAgentShellRunner _shellRunner;
     private readonly CodingAgentAutoCompactionOptions _autoCompaction;
+    private readonly CodingAgentSessionSwitchCoordinator _sessionSwitchCoordinator;
     private CodingAgentRetryOptions _retryOptions;
     private bool? _autoCompactionEnabled;
     private readonly SemaphoreSlim _writeLock = new(1, 1);
@@ -30,6 +39,7 @@ public sealed class CodingAgentRpcHost
     private CancellationTokenSource? _activeRetryDelayCts;
     private Task? _activeBashTask;
     private CancellationTokenSource? _activeBashCts;
+    private BashOutputQueueState? _activeBashOutputQueue;
 
     public CodingAgentRpcHost(
         ICodingAgentRunner runner,
@@ -40,7 +50,11 @@ public sealed class CodingAgentRpcHost
         CodingAgentTreeSessionController? treeSessionController = null,
         CodingAgentAutoCompactionOptions? autoCompaction = null,
         CodingAgentRetryOptions? retryOptions = null,
-        ICodingAgentShellRunner? shellRunner = null)
+        ICodingAgentShellRunner? shellRunner = null,
+        Func<CodingAgentSessionSwitchHookState, CancellationToken, Task<CodingAgentSessionSwitchHookResult?>>? sessionSwitchHook = null,
+        CodingAgentPromptTemplateStore? promptTemplateStore = null,
+        CodingAgentSkillStore? skillStore = null,
+        CodingAgentExtensionCommandStore? extensionCommandStore = null)
     {
         ArgumentNullException.ThrowIfNull(runner);
         ArgumentNullException.ThrowIfNull(input);
@@ -52,8 +66,16 @@ public sealed class CodingAgentRpcHost
         _sessionStore = sessionStore;
         _settingsStore = settingsStore;
         _treeSessionController = treeSessionController;
+        _promptTemplateStore = promptTemplateStore;
+        _skillStore = skillStore;
+        _extensionCommandStore = extensionCommandStore;
         _shellRunner = shellRunner ?? new SystemCodingAgentShellRunner();
         _autoCompaction = autoCompaction ?? CodingAgentAutoCompactionOptions.Disabled;
+        _sessionSwitchCoordinator = new CodingAgentSessionSwitchCoordinator(
+            runner,
+            treeSessionController,
+            sessionSwitchPrompt: null,
+            sessionSwitchHook: sessionSwitchHook);
         _retryOptions = retryOptions ?? CodingAgentRetryOptions.Disabled;
         _autoCompactionEnabled = settingsStore?.Load().AutoCompactionEnabled;
     }
@@ -244,13 +266,7 @@ public sealed class CodingAgentRpcHost
                 case "get_commands":
                     await WriteSuccessAsync(id, "get_commands", new
                     {
-                        commands = CodingAgentCommandCatalog.SupportedCommands
-                            .Select(commandInfo => new RpcCommandInfo(
-                                commandInfo.Name.TrimStart('/'),
-                                commandInfo.Usage,
-                                commandInfo.Description,
-                                "local"))
-                            .ToArray()
+                        commands = CreateRpcCommandInfos()
                     }, cancellationToken).ConfigureAwait(false);
                     break;
                 default:
@@ -273,12 +289,21 @@ public sealed class CodingAgentRpcHost
     {
         var message = GetRequiredString(command, "message");
         var streamingBehavior = GetOptionalString(command, "streamingBehavior");
+        var content = TryReadPromptContent(command, message);
         if (IsPromptActive)
         {
             if (streamingBehavior is not null &&
                 streamingBehavior.Equals("steer", StringComparison.OrdinalIgnoreCase))
             {
-                _runner.Steer(message);
+                if (content is null)
+                {
+                    _runner.Steer(message);
+                }
+                else
+                {
+                    _runner.Steer(content);
+                }
+
                 await WriteSuccessAsync(id, "prompt", cancellationToken: cancellationToken).ConfigureAwait(false);
                 return;
             }
@@ -287,7 +312,15 @@ public sealed class CodingAgentRpcHost
                 (streamingBehavior.Equals("followUp", StringComparison.OrdinalIgnoreCase) ||
                  streamingBehavior.Equals("follow_up", StringComparison.OrdinalIgnoreCase)))
             {
-                _runner.FollowUp(message);
+                if (content is null)
+                {
+                    _runner.FollowUp(message);
+                }
+                else
+                {
+                    _runner.FollowUp(content);
+                }
+
                 await WriteSuccessAsync(id, "prompt", cancellationToken: cancellationToken).ConfigureAwait(false);
                 return;
             }
@@ -297,7 +330,6 @@ public sealed class CodingAgentRpcHost
             return;
         }
 
-        var content = TryReadPromptContent(command, message);
         var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         lock (_gate)
         {
@@ -306,7 +338,8 @@ public sealed class CodingAgentRpcHost
 
         await WriteSuccessAsync(id, "prompt", cancellationToken: cancellationToken).ConfigureAwait(false);
 
-        var task = Task.Run(() => RunPromptAsync(message, content, cts), CancellationToken.None);
+        var logContext = CreatePromptLogContext(id);
+        var task = Task.Run(() => RunPromptAsync(message, content, logContext, cts), CancellationToken.None);
         lock (_gate)
         {
             _activePromptTask = task;
@@ -321,7 +354,17 @@ public sealed class CodingAgentRpcHost
             return;
         }
 
-        _runner.Steer(GetRequiredString(command, "message"));
+        var message = GetRequiredString(command, "message");
+        var content = TryReadPromptContent(command, message);
+        if (content is null)
+        {
+            _runner.Steer(message);
+        }
+        else
+        {
+            _runner.Steer(content);
+        }
+
         await WriteSuccessAsync(id, "steer", cancellationToken: cancellationToken).ConfigureAwait(false);
     }
 
@@ -333,7 +376,17 @@ public sealed class CodingAgentRpcHost
             return;
         }
 
-        _runner.FollowUp(GetRequiredString(command, "message"));
+        var message = GetRequiredString(command, "message");
+        var content = TryReadPromptContent(command, message);
+        if (content is null)
+        {
+            _runner.FollowUp(message);
+        }
+        else
+        {
+            _runner.FollowUp(content);
+        }
+
         await WriteSuccessAsync(id, "follow_up", cancellationToken: cancellationToken).ConfigureAwait(false);
     }
 
@@ -346,10 +399,32 @@ public sealed class CodingAgentRpcHost
             return;
         }
 
+        var summary = await _sessionSwitchCoordinator.TrySummarizeBeforeRpcSwitchAsync(
+                command,
+                CodingAgentTreeNavigationReason.NewSession,
+                targetSessionPath: null,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (summary.Cancelled)
+        {
+            await WriteSuccessAsync(
+                    id,
+                    "new_session",
+                    CreateSessionSwitchRpcData(summary),
+                    cancellationToken)
+                .ConfigureAwait(false);
+            return;
+        }
+
         _runner.ResetSession();
         _treeSessionController?.StartNewFromRunner(_runner, GetOptionalString(command, "parentSession"));
         PersistSession();
-        await WriteSuccessAsync(id, "new_session", new { cancelled = false }, cancellationToken).ConfigureAwait(false);
+        await WriteSuccessAsync(
+                id,
+                "new_session",
+                CreateSessionSwitchRpcData(summary),
+                cancellationToken)
+            .ConfigureAwait(false);
     }
 
     private async Task HandleSetModelAsync(string? id, JsonElement command, CancellationToken cancellationToken)
@@ -593,6 +668,7 @@ public sealed class CodingAgentRpcHost
 
         var shellCommand = GetRequiredString(command, "command");
         var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var outputQueue = new BashOutputQueueState();
         var accepted = false;
         lock (_gate)
         {
@@ -603,7 +679,8 @@ public sealed class CodingAgentRpcHost
             else
             {
                 _activeBashCts = cts;
-                _activeBashTask = Task.Run(() => RunBashAsync(id, shellCommand, cts), CancellationToken.None);
+                _activeBashOutputQueue = outputQueue;
+                _activeBashTask = Task.Run(() => RunBashAsync(id, shellCommand, cts, outputQueue), CancellationToken.None);
                 accepted = true;
             }
         }
@@ -649,10 +726,50 @@ public sealed class CodingAgentRpcHost
         }
 
         var sessionPath = GetRequiredString(command, "sessionPath");
-        var snapshot = _treeSessionController.Resume(sessionPath);
+        var currentPath = Path.GetFullPath(_treeSessionController.Path);
+        var normalizedSessionPath = Path.GetFullPath(sessionPath);
+        if (normalizedSessionPath.Equals(currentPath, StringComparison.OrdinalIgnoreCase))
+        {
+            await WriteSuccessAsync(
+                    id,
+                    "switch_session",
+                    CreateSessionSwitchRpcData(
+                        CodingAgentSessionSwitchSummaryResult.None(
+                            CodingAgentTreeNavigationReason.ResumeSession,
+                            currentPath,
+                            normalizedSessionPath),
+                        alreadyCurrent: true),
+                    cancellationToken)
+                .ConfigureAwait(false);
+            return;
+        }
+
+        var summary = await _sessionSwitchCoordinator.TrySummarizeBeforeRpcSwitchAsync(
+                command,
+                CodingAgentTreeNavigationReason.ResumeSession,
+                normalizedSessionPath,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (summary.Cancelled)
+        {
+            await WriteSuccessAsync(
+                    id,
+                    "switch_session",
+                    CreateSessionSwitchRpcData(summary),
+                    cancellationToken)
+                .ConfigureAwait(false);
+            return;
+        }
+
+        var snapshot = _treeSessionController.Resume(normalizedSessionPath);
         _runner.RestoreSession(snapshot.ToFlatSnapshot());
         PersistSession();
-        await WriteSuccessAsync(id, "switch_session", new { cancelled = false }, cancellationToken).ConfigureAwait(false);
+        await WriteSuccessAsync(
+                id,
+                "switch_session",
+                CreateSessionSwitchRpcData(summary),
+                cancellationToken)
+            .ConfigureAwait(false);
     }
 
     private async Task HandleGetForkMessagesAsync(string? id, CancellationToken cancellationToken)
@@ -721,11 +838,14 @@ public sealed class CodingAgentRpcHost
 
         var entryId = GetRequiredString(command, "entryId");
         _treeSessionController.SyncFromRunner(_runner);
-        var snapshot = _treeSessionController.Branch(entryId);
+        var forkTarget = _treeSessionController.GetForkTarget(entryId)
+            ?? throw new InvalidOperationException("Invalid entry ID for forking");
+        var snapshot = _treeSessionController.BranchTo(forkTarget.ParentEntryId);
         _runner.RestoreSession(snapshot.ToFlatSnapshot());
         PersistSession();
         await WriteSuccessAsync(id, "fork", new
         {
+            text = forkTarget.Text,
             cancelled = false,
             leafId = snapshot.LeafId,
             messageCount = snapshot.Messages.Count,
@@ -775,6 +895,7 @@ public sealed class CodingAgentRpcHost
     private async Task RunPromptAsync(
         string message,
         IReadOnlyList<ContentBlock>? content,
+        TauRuntimeLogContext logContext,
         CancellationTokenSource cts)
     {
         var rollbackSnapshot = CreateRollbackSnapshot();
@@ -784,7 +905,7 @@ public sealed class CodingAgentRpcHost
         {
             while (true)
             {
-                var result = await RunSinglePromptAttemptAsync(message, content, cts.Token).ConfigureAwait(false);
+                var result = await RunSinglePromptAttemptAsync(message, content, logContext, cts.Token).ConfigureAwait(false);
                 if (result.IsSuccess)
                 {
                     if (retryAttempt > 0)
@@ -887,50 +1008,125 @@ public sealed class CodingAgentRpcHost
     private async Task RunBashAsync(
         string? id,
         string command,
-        CancellationTokenSource cts)
+        CancellationTokenSource cts,
+        BashOutputQueueState outputQueue)
     {
+        var outputChannel = CreateBashOutputChannel();
+        var outputDrainTask = DrainBashOutputAsync(id, outputChannel.Reader, CancellationToken.None);
+        var outputDrained = false;
+
         try
         {
-            var result = await _shellRunner.ExecuteAsync(command, cts.Token).ConfigureAwait(false);
-            await WriteSuccessAsync(id, "bash", result, CancellationToken.None).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException)
-        {
-            await WriteSuccessAsync(
-                id,
-                "bash",
-                new CodingAgentShellResult(string.Empty, null, Cancelled: true, Truncated: false),
-                CancellationToken.None).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            await WriteErrorAsync(id, "bash", ex.Message, CancellationToken.None).ConfigureAwait(false);
+            await WriteBashEventAsync(
+                    id,
+                    "started",
+                    new { running = true, outputQueueCapacity = BashOutputQueueCapacity },
+                    CancellationToken.None)
+                .ConfigureAwait(false);
+            var progress = new ImmediateProgress<CodingAgentShellEvent>(
+                evt => QueueBashOutput(outputChannel.Writer, evt, outputQueue));
+            CodingAgentShellResult? result = null;
+            Exception? failure = null;
+
+            try
+            {
+                result = await _shellRunner.ExecuteAsync(command, progress, cts.Token).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                failure = ex;
+            }
+
+            await CompleteBashOutputDrainAsync(outputChannel.Writer, outputDrainTask).ConfigureAwait(false);
+            outputDrained = true;
+
+            if (failure is null && result is not null && (result.Truncated || result.FullOutputPath is not null))
+            {
+                await WriteBashOutputSummaryAsync(
+                        id,
+                        result,
+                        outputQueue.DroppedOutputEvents,
+                        CancellationToken.None)
+                    .ConfigureAwait(false);
+            }
+
+            if (failure is OperationCanceledException)
+            {
+                await WriteBashEventAsync(
+                        id,
+                        "cancelled",
+                        new { cancelled = true, droppedOutputEvents = outputQueue.DroppedOutputEvents },
+                        CancellationToken.None)
+                    .ConfigureAwait(false);
+                await WriteSuccessAsync(
+                    id,
+                    "bash",
+                    new CodingAgentShellResult(string.Empty, null, Cancelled: true, Truncated: false),
+                    CancellationToken.None).ConfigureAwait(false);
+            }
+            else if (failure is not null)
+            {
+                await WriteBashEventAsync(
+                        id,
+                        "failed",
+                        new { error = failure.Message, droppedOutputEvents = outputQueue.DroppedOutputEvents },
+                        CancellationToken.None)
+                    .ConfigureAwait(false);
+                await WriteErrorAsync(id, "bash", failure.Message, CancellationToken.None).ConfigureAwait(false);
+            }
+            else
+            {
+                var eventName = result!.Cancelled ? "cancelled" : "completed";
+                await WriteBashEventAsync(id, eventName, CreateBashEventResult(result, outputQueue.DroppedOutputEvents), CancellationToken.None)
+                    .ConfigureAwait(false);
+                await WriteSuccessAsync(id, "bash", result, CancellationToken.None).ConfigureAwait(false);
+            }
         }
         finally
         {
+            Exception? outputDrainFailure = null;
+            if (!outputDrained)
+            {
+                outputChannel.Writer.TryComplete();
+                try
+                {
+                    await outputDrainTask.ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    outputDrainFailure = ex;
+                }
+            }
+
             lock (_gate)
             {
                 if (ReferenceEquals(_activeBashCts, cts))
                 {
                     _activeBashCts = null;
                     _activeBashTask = null;
+                    _activeBashOutputQueue = null;
                 }
             }
 
             cts.Dispose();
+            if (outputDrainFailure is not null)
+            {
+                ExceptionDispatchInfo.Capture(outputDrainFailure).Throw();
+            }
         }
     }
 
     private async Task<RpcPromptAttemptResult> RunSinglePromptAttemptAsync(
         string message,
         IReadOnlyList<ContentBlock>? content,
+        TauRuntimeLogContext logContext,
         CancellationToken cancellationToken)
     {
         try
         {
             var events = content is null
-                ? _runner.RunAsync(message, cancellationToken)
-                : _runner.RunAsync(content, cancellationToken);
+                ? _runner.RunAsync(message, logContext, cancellationToken)
+                : _runner.RunAsync(content, logContext, cancellationToken);
 
             await foreach (var evt in events.ConfigureAwait(false))
             {
@@ -996,6 +1192,9 @@ public sealed class CodingAgentRpcHost
             model = _runner.Model,
             thinkingLevel = FormatThinkingLevel(_runner.ThinkingLevel),
             isStreaming = IsPromptActive,
+            isBashRunning = IsBashActive,
+            bashOutputQueueCapacity = BashOutputQueueCapacity,
+            bashDroppedOutputEvents = GetActiveBashDroppedOutputEvents(),
             isCompacting = false,
             steeringMode = CodingAgentQueueModes.FromAgentQueueMode(_runner.SteeringMode),
             followUpMode = CodingAgentQueueModes.FromAgentQueueMode(_runner.FollowUpMode),
@@ -1007,6 +1206,34 @@ public sealed class CodingAgentRpcHost
             messageCount = _runner.Messages.Count,
             pendingMessageCount = 0
         };
+    }
+
+    private TauRuntimeLogContext CreatePromptLogContext(string? commandId)
+    {
+        var id = string.IsNullOrWhiteSpace(commandId)
+            ? Guid.NewGuid().ToString("N")
+            : commandId.Trim();
+        return new TauRuntimeLogContext(
+            CorrelationId: id,
+            SessionId: TryGetTreeSessionId(),
+            MessageId: id);
+    }
+
+    private string? TryGetTreeSessionId()
+    {
+        if (_treeSessionController is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            return _treeSessionController.GetSummary().SessionId;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException)
+        {
+            return null;
+        }
     }
 
     private object CreateSettingsData(CodingAgentSettingsSnapshot settings)
@@ -1031,7 +1258,30 @@ public sealed class CodingAgentRpcHost
             autoCompactionEnabled = settings.AutoCompactionEnabled ?? _autoCompaction.IsEnabled,
             theme = string.IsNullOrWhiteSpace(settings.Theme)
                 ? CodingAgentThemeStore.DefaultThemeName
-                : settings.Theme
+                : settings.Theme,
+            shellPath = settings.ShellPath,
+            shellCommandPrefix = settings.ShellCommandPrefix,
+            npmCommand = settings.NpmCommand?.ToArray(),
+            quietStartup = settings.QuietStartup ?? false,
+            collapseChangelog = settings.CollapseChangelog ?? false,
+            enableInstallTelemetry = settings.EnableInstallTelemetry ?? true,
+            terminal = new
+            {
+                showImages = settings.TerminalShowImages ?? true,
+                clearOnShrink = settings.TerminalClearOnShrink ?? false
+            },
+            images = new
+            {
+                autoResize = settings.ImagesAutoResize ?? true,
+                blockImages = settings.ImagesBlockImages ?? false
+            },
+            markdown = new
+            {
+                codeBlockIndent = settings.MarkdownCodeBlockIndent ?? "  "
+            },
+            showHardwareCursor = settings.ShowHardwareCursor ?? false,
+            editorPaddingX = settings.EditorPaddingX ?? 0,
+            autocompleteMaxVisible = settings.AutocompleteMaxVisible ?? 5
         };
     }
 
@@ -1108,7 +1358,174 @@ public sealed class CodingAgentRpcHost
             updated = updated with { Theme = ReadNullableString(theme) };
         }
 
+        if (settingsElement.TryGetProperty("shellPath", out var shellPath))
+        {
+            updated = updated with { ShellPath = ReadNullableString(shellPath) };
+        }
+
+        if (settingsElement.TryGetProperty("shellCommandPrefix", out var shellCommandPrefix))
+        {
+            updated = updated with { ShellCommandPrefix = ReadNullableString(shellCommandPrefix) };
+        }
+
+        if (settingsElement.TryGetProperty("npmCommand", out var npmCommand))
+        {
+            updated = updated with { NpmCommand = ReadNullableStringArrayPreserveOrder(npmCommand, "settings.npmCommand") };
+        }
+
+        if (settingsElement.TryGetProperty("quietStartup", out var quietStartup))
+        {
+            updated = updated with { QuietStartup = ReadNullableBoolean(quietStartup) };
+        }
+
+        if (settingsElement.TryGetProperty("collapseChangelog", out var collapseChangelog))
+        {
+            updated = updated with { CollapseChangelog = ReadNullableBoolean(collapseChangelog) };
+        }
+
+        if (settingsElement.TryGetProperty("enableInstallTelemetry", out var enableInstallTelemetry))
+        {
+            updated = updated with { EnableInstallTelemetry = ReadNullableBoolean(enableInstallTelemetry) };
+        }
+
+        if (settingsElement.TryGetProperty("terminal", out var terminal))
+        {
+            updated = ApplyTerminalSettings(updated, terminal);
+        }
+
+        if (settingsElement.TryGetProperty("images", out var images))
+        {
+            updated = ApplyImageSettings(updated, images);
+        }
+
+        if (settingsElement.TryGetProperty("markdown", out var markdown))
+        {
+            updated = ApplyMarkdownSettings(updated, markdown);
+        }
+
+        if (settingsElement.TryGetProperty("showHardwareCursor", out var showHardwareCursor))
+        {
+            updated = updated with { ShowHardwareCursor = ReadNullableBoolean(showHardwareCursor) };
+        }
+
+        if (settingsElement.TryGetProperty("editorPaddingX", out var editorPaddingX))
+        {
+            updated = updated with
+            {
+                EditorPaddingX = ReadNullableBoundedInt(editorPaddingX, "settings.editorPaddingX", 0, 3)
+            };
+        }
+
+        if (settingsElement.TryGetProperty("autocompleteMaxVisible", out var autocompleteMaxVisible))
+        {
+            updated = updated with
+            {
+                AutocompleteMaxVisible = ReadNullableBoundedInt(
+                    autocompleteMaxVisible,
+                    "settings.autocompleteMaxVisible",
+                    3,
+                    20)
+            };
+        }
+
         return updated;
+    }
+
+    private static CodingAgentSettingsSnapshot ApplyTerminalSettings(
+        CodingAgentSettingsSnapshot current,
+        JsonElement terminalElement)
+    {
+        if (terminalElement.ValueKind == JsonValueKind.Null)
+        {
+            return current with
+            {
+                TerminalShowImages = null,
+                TerminalClearOnShrink = null
+            };
+        }
+
+        if (terminalElement.ValueKind != JsonValueKind.Object)
+        {
+            throw new ArgumentException("settings.terminal must be an object or null.");
+        }
+
+        var showImages = current.TerminalShowImages;
+        var clearOnShrink = current.TerminalClearOnShrink;
+        if (terminalElement.TryGetProperty("showImages", out var showImagesElement))
+        {
+            showImages = ReadNullableBoolean(showImagesElement);
+        }
+
+        if (terminalElement.TryGetProperty("clearOnShrink", out var clearOnShrinkElement))
+        {
+            clearOnShrink = ReadNullableBoolean(clearOnShrinkElement);
+        }
+
+        return current with
+        {
+            TerminalShowImages = showImages,
+            TerminalClearOnShrink = clearOnShrink
+        };
+    }
+
+    private static CodingAgentSettingsSnapshot ApplyImageSettings(
+        CodingAgentSettingsSnapshot current,
+        JsonElement imagesElement)
+    {
+        if (imagesElement.ValueKind == JsonValueKind.Null)
+        {
+            return current with
+            {
+                ImagesAutoResize = null,
+                ImagesBlockImages = null
+            };
+        }
+
+        if (imagesElement.ValueKind != JsonValueKind.Object)
+        {
+            throw new ArgumentException("settings.images must be an object or null.");
+        }
+
+        var autoResize = current.ImagesAutoResize;
+        var blockImages = current.ImagesBlockImages;
+        if (imagesElement.TryGetProperty("autoResize", out var autoResizeElement))
+        {
+            autoResize = ReadNullableBoolean(autoResizeElement);
+        }
+
+        if (imagesElement.TryGetProperty("blockImages", out var blockImagesElement))
+        {
+            blockImages = ReadNullableBoolean(blockImagesElement);
+        }
+
+        return current with
+        {
+            ImagesAutoResize = autoResize,
+            ImagesBlockImages = blockImages
+        };
+    }
+
+    private static CodingAgentSettingsSnapshot ApplyMarkdownSettings(
+        CodingAgentSettingsSnapshot current,
+        JsonElement markdownElement)
+    {
+        if (markdownElement.ValueKind == JsonValueKind.Null)
+        {
+            return current with { MarkdownCodeBlockIndent = null };
+        }
+
+        if (markdownElement.ValueKind != JsonValueKind.Object)
+        {
+            throw new ArgumentException("settings.markdown must be an object or null.");
+        }
+
+        var codeBlockIndent = current.MarkdownCodeBlockIndent;
+        if (markdownElement.TryGetProperty("codeBlockIndent", out var codeBlockIndentElement))
+        {
+            codeBlockIndent = ReadNullableRawString(codeBlockIndentElement, "settings.markdown.codeBlockIndent");
+        }
+
+        return current with { MarkdownCodeBlockIndent = codeBlockIndent };
     }
 
     private static CodingAgentSettingsSnapshot ApplyRetrySettings(
@@ -1369,10 +1786,44 @@ public sealed class CodingAgentRpcHost
         }
     }
 
+    private long GetActiveBashDroppedOutputEvents()
+    {
+        lock (_gate)
+        {
+            return _activeBashOutputQueue?.DroppedOutputEvents ?? 0;
+        }
+    }
+
     private void PersistSession()
     {
         _sessionStore?.Save(_runner.Messages, _runner.Model, _runner.SessionName);
         _treeSessionController?.SyncFromRunner(_runner);
+    }
+
+    private static Dictionary<string, object?> CreateSessionSwitchRpcData(
+        CodingAgentSessionSwitchSummaryResult result,
+        bool alreadyCurrent = false)
+    {
+        var data = new Dictionary<string, object?>
+        {
+            ["cancelled"] = result.Cancelled,
+            ["summarizedCurrentBranch"] = result.SummarizedCurrentBranch
+        };
+        if (alreadyCurrent)
+        {
+            data["alreadyCurrent"] = true;
+        }
+
+        if (result.Summary is not null)
+        {
+            data["branchSummary"] = new
+            {
+                entryCount = result.SummaryEntryCount,
+                tokensBefore = result.TokensBeforeSummary
+            };
+        }
+
+        return data;
     }
 
     private CodingAgentSessionSnapshot CreateRollbackSnapshot() =>
@@ -1526,7 +1977,8 @@ public sealed class CodingAgentRpcHost
             snapshot.Model ?? _runner.Model.Id,
             snapshot.Name ?? _runner.SessionName,
             treeSummary,
-            sessionJsonl);
+            sessionJsonl,
+            (_runner as ICodingAgentToolResultDetailsProvider)?.ToolResultDetailsByToolCallId);
     }
 
     private string GetDefaultHtmlExportPath()
@@ -1610,6 +2062,130 @@ public sealed class CodingAgentRpcHost
         await WriteJsonLineAsync(new RpcResponse(id, "response", command, false, null, error), cancellationToken)
             .ConfigureAwait(false);
     }
+
+    private static Channel<CodingAgentShellEvent> CreateBashOutputChannel() =>
+        Channel.CreateBounded<CodingAgentShellEvent>(
+            new BoundedChannelOptions(BashOutputQueueCapacity)
+            {
+                SingleReader = true,
+                SingleWriter = false,
+                FullMode = BoundedChannelFullMode.Wait
+            });
+
+    private async Task WriteBashEventAsync(
+        string? id,
+        string eventName,
+        object? data,
+        CancellationToken cancellationToken)
+    {
+        var payload = new Dictionary<string, object?>
+        {
+            ["type"] = "bash_event",
+            ["command"] = "bash",
+            ["requestId"] = id,
+            ["event"] = eventName,
+            ["timestamp"] = DateTimeOffset.UtcNow
+        };
+        if (id is not null)
+        {
+            payload["id"] = id;
+        }
+
+        if (data is not null)
+        {
+            payload["data"] = data;
+        }
+
+        await WriteJsonLineAsync(payload, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task WriteBashOutputAsync(
+        string? id,
+        CodingAgentShellEvent evt,
+        CancellationToken cancellationToken)
+    {
+        var payload = new Dictionary<string, object?>
+        {
+            ["type"] = "bash_output",
+            ["command"] = "bash",
+            ["requestId"] = id,
+            ["stream"] = evt.Stream,
+            ["text"] = evt.Text,
+            ["timestamp"] = evt.Timestamp
+        };
+        if (id is not null)
+        {
+            payload["id"] = id;
+        }
+
+        await WriteJsonLineAsync(payload, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task WriteBashOutputSummaryAsync(
+        string? id,
+        CodingAgentShellResult result,
+        long droppedOutputEvents,
+        CancellationToken cancellationToken)
+    {
+        var payload = new Dictionary<string, object?>
+        {
+            ["type"] = "bash_output",
+            ["command"] = "bash",
+            ["requestId"] = id,
+            ["truncated"] = result.Truncated,
+            ["fullOutputPath"] = result.FullOutputPath,
+            ["exitCode"] = result.ExitCode,
+            ["cancelled"] = result.Cancelled,
+            ["droppedOutputEvents"] = droppedOutputEvents,
+            ["timestamp"] = DateTimeOffset.UtcNow
+        };
+        if (id is not null)
+        {
+            payload["id"] = id;
+        }
+
+        await WriteJsonLineAsync(payload, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task DrainBashOutputAsync(
+        string? id,
+        ChannelReader<CodingAgentShellEvent> reader,
+        CancellationToken cancellationToken)
+    {
+        await foreach (var evt in reader.ReadAllAsync(cancellationToken).ConfigureAwait(false))
+        {
+            await WriteBashOutputAsync(id, evt, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private static async Task CompleteBashOutputDrainAsync(
+        ChannelWriter<CodingAgentShellEvent> writer,
+        Task drainTask)
+    {
+        writer.TryComplete();
+        await drainTask.ConfigureAwait(false);
+    }
+
+    private static void QueueBashOutput(
+        ChannelWriter<CodingAgentShellEvent> writer,
+        CodingAgentShellEvent evt,
+        BashOutputQueueState outputQueue)
+    {
+        // FullMode.Wait + TryWrite means a full bounded buffer drops the newest event instead of growing unbounded.
+        if (!writer.TryWrite(evt))
+        {
+            outputQueue.IncrementDroppedOutputEvents();
+        }
+    }
+
+    private static object CreateBashEventResult(CodingAgentShellResult result, long droppedOutputEvents) => new
+    {
+        exitCode = result.ExitCode,
+        cancelled = result.Cancelled,
+        truncated = result.Truncated,
+        fullOutputPath = result.FullOutputPath,
+        droppedOutputEvents
+    };
 
     private async Task WriteJsonLineAsync(object payload, CancellationToken cancellationToken)
     {
@@ -1745,6 +2321,21 @@ public sealed class CodingAgentRpcHost
         return value.GetBoolean();
     }
 
+    private static bool? GetOptionalBoolean(JsonElement element, string name)
+    {
+        if (!element.TryGetProperty(name, out var value))
+        {
+            return null;
+        }
+
+        if (value.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+        {
+            throw new ArgumentException($"RPC command property '{name}' must be boolean when provided.");
+        }
+
+        return value.GetBoolean();
+    }
+
     private static string? ReadNullableString(JsonElement element)
     {
         return element.ValueKind switch
@@ -1754,6 +2345,16 @@ public sealed class CodingAgentRpcHost
                 ? null
                 : element.GetString()!.Trim(),
             _ => throw new ArgumentException("Expected string or null setting value.")
+        };
+    }
+
+    private static string? ReadNullableRawString(JsonElement element, string name)
+    {
+        return element.ValueKind switch
+        {
+            JsonValueKind.Null => null,
+            JsonValueKind.String => element.GetString(),
+            _ => throw new ArgumentException($"{name} must be a string or null.")
         };
     }
 
@@ -1791,6 +2392,42 @@ public sealed class CodingAgentRpcHost
         }
 
         return value;
+    }
+
+    private static int? ReadNullableBoundedInt(JsonElement element, string name, int min, int max)
+    {
+        if (element.ValueKind == JsonValueKind.Null)
+        {
+            return null;
+        }
+
+        if (element.ValueKind != JsonValueKind.Number || !element.TryGetInt32(out var value))
+        {
+            throw new ArgumentException($"{name} must be an integer or null.");
+        }
+
+        return Math.Clamp(value, min, max);
+    }
+
+    private static string[]? ReadNullableStringArrayPreserveOrder(JsonElement element, string name)
+    {
+        if (element.ValueKind == JsonValueKind.Null)
+        {
+            return null;
+        }
+
+        if (element.ValueKind != JsonValueKind.Array)
+        {
+            throw new ArgumentException($"{name} must be an array or null.");
+        }
+
+        var values = element
+            .EnumerateArray()
+            .Select(ReadNullableString)
+            .Where(static value => !string.IsNullOrWhiteSpace(value))
+            .Select(static value => value!)
+            .ToArray();
+        return values.Length == 0 ? null : values;
     }
 
     private static string[]? ReadEnabledModels(JsonElement element)
@@ -1914,6 +2551,48 @@ public sealed class CodingAgentRpcHost
         SetAndSaveThinkingLevel(level);
     }
 
+    private RpcCommandInfo[] CreateRpcCommandInfos()
+    {
+        var commands = new List<RpcCommandInfo>();
+        var extensionCommands = _extensionCommandStore?.Load() ?? [];
+        commands.AddRange(extensionCommands.Select(command => new RpcCommandInfo(
+            command.InvocationName,
+            command.Description,
+            "extension",
+            CreateSourceInfo(command.FilePath, command.Scope, Path.GetDirectoryName(command.FilePath)))));
+
+        var promptTemplates = _promptTemplateStore?.Load() ?? [];
+        commands.AddRange(promptTemplates.Select(template => new RpcCommandInfo(
+            template.Name,
+            template.Description,
+            "prompt",
+            CreateSourceInfo(template.FilePath, template.Scope, Path.GetDirectoryName(template.FilePath)))));
+
+        var skills = _skillStore?.Load() ?? [];
+        commands.AddRange(skills.Select(skill => new RpcCommandInfo(
+            $"skill:{skill.Name}",
+            skill.Description,
+            "skill",
+            CreateSourceInfo(skill.FilePath, skill.Scope, skill.BaseDirectory))));
+
+        return commands.ToArray();
+    }
+
+    private static RpcCommandSourceInfo CreateSourceInfo(string path, string scope, string? baseDir)
+    {
+        var normalizedScope = scope.Equals("user", StringComparison.OrdinalIgnoreCase)
+            ? "user"
+            : scope.Equals("project", StringComparison.OrdinalIgnoreCase)
+                ? "project"
+                : "temporary";
+        return new RpcCommandSourceInfo(
+            path,
+            "local",
+            normalizedScope,
+            "top-level",
+            string.IsNullOrWhiteSpace(baseDir) ? null : baseDir);
+    }
+
     private sealed record RpcResponse(
         string? Id,
         string Type,
@@ -1924,9 +2603,30 @@ public sealed class CodingAgentRpcHost
 
     private sealed record RpcCommandInfo(
         string Name,
-        string Usage,
         string Description,
-        string Source);
+        string Source,
+        RpcCommandSourceInfo? SourceInfo = null);
+
+    private sealed record RpcCommandSourceInfo(
+        string Path,
+        string Source,
+        string Scope,
+        string Origin,
+        string? BaseDir = null);
+
+    private sealed class ImmediateProgress<T>(Action<T> handler) : IProgress<T>
+    {
+        public void Report(T value) => handler(value);
+    }
+
+    private sealed class BashOutputQueueState
+    {
+        private long _droppedOutputEvents;
+
+        public long DroppedOutputEvents => Interlocked.Read(ref _droppedOutputEvents);
+
+        public void IncrementDroppedOutputEvents() => Interlocked.Increment(ref _droppedOutputEvents);
+    }
 
     private sealed record RpcPromptAttemptResult(bool IsSuccess, string? ErrorMessage)
     {

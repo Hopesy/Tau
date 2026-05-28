@@ -162,7 +162,7 @@ public sealed class GoogleVertexProvider : IStreamProvider
             body["systemInstruction"] = new Dictionary<string, object>
             {
                 ["role"] = "system",
-                ["parts"] = new List<object> { new Dictionary<string, object> { ["text"] = context.SystemPrompt! } }
+                ["parts"] = new List<object> { new Dictionary<string, object> { ["text"] = UnicodeTextSanitizer.RemoveUnpairedSurrogates(context.SystemPrompt!) } }
             };
         }
 

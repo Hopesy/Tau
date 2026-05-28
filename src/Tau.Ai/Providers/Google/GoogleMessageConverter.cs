@@ -64,7 +64,7 @@ internal static class GoogleMessageConverter
             switch (block)
             {
                 case TextContent text:
-                    parts.Add(new Dictionary<string, object> { ["text"] = text.Text });
+                    parts.Add(new Dictionary<string, object> { ["text"] = SanitizeText(text.Text) });
                     break;
                 case ImageContent image:
                     parts.Add(new Dictionary<string, object>
@@ -89,7 +89,7 @@ internal static class GoogleMessageConverter
             switch (block)
             {
                 case TextContent text when !string.IsNullOrEmpty(text.Text):
-                    parts.Add(new Dictionary<string, object> { ["text"] = text.Text });
+                    parts.Add(new Dictionary<string, object> { ["text"] = SanitizeText(text.Text) });
                     break;
                 case ToolCallContent toolCall:
                     var fn = new Dictionary<string, object>
@@ -106,7 +106,7 @@ internal static class GoogleMessageConverter
 
     private static Dictionary<string, object> BuildFunctionResponsePart(ToolResultMessage msg)
     {
-        var content = msg.Content.OfType<TextContent>().FirstOrDefault()?.Text ?? "";
+        var content = SanitizeText(msg.Content.OfType<TextContent>().FirstOrDefault()?.Text ?? "");
         return new Dictionary<string, object>
         {
             ["functionResponse"] = new Dictionary<string, object>
@@ -184,6 +184,9 @@ internal static class GoogleMessageConverter
         }
         return items;
     }
+
+    private static string SanitizeText(string text) =>
+        UnicodeTextSanitizer.RemoveUnpairedSurrogates(text);
 }
 
 [JsonSourceGenerationOptions(DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]

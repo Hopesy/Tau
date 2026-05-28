@@ -45,8 +45,8 @@
 
 - 相关文档：
   - `docs/ARCHITECTURE.md`
-  - `docs/product-specs/tau-port-overview.md`
   - `docs/QUALITY_SCORE.md`
+  - `next.md`
 - 相关代码路径：
   - `src/Tau.Ai/`
   - `src/Tau.Agent/`

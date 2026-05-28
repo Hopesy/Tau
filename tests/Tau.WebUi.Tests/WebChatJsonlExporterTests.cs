@@ -150,6 +150,58 @@ public sealed class WebChatJsonlExporterTests
     }
 
     [Fact]
+    public void Parse_RoundTripsExporterOutputPreservingSourceMetadata()
+    {
+        var session = CreateJsonlSession() with
+        {
+            SourceMetadata = new WebChatSessionSourceMetadataDto(
+                "coding-agent-jsonl",
+                "coding-session-1",
+                3,
+                DateTimeOffset.Parse("2026-05-23T01:02:03+00:00"),
+                "C:\\Users\\zhouh\\Desktop\\Tau",
+                "parent-session.jsonl",
+                "source-session.jsonl",
+                4,
+                3,
+                ImportStrategy: new CodingAgentJsonlImportStrategyDto(
+                    "conservative-timeline-linearized",
+                    "entry-tool",
+                    false,
+                    true,
+                    false,
+                    ["webchat_import_is_linearized"]))
+        };
+
+        var jsonl = WebChatJsonlExporter.Render(session);
+        using var header = JsonDocument.Parse(jsonl.Split('\n', StringSplitOptions.RemoveEmptyEntries)[0]);
+        var sourceMetadata = header.RootElement.GetProperty("sourceMetadata");
+        Assert.Equal("coding-agent-jsonl", sourceMetadata.GetProperty("kind").GetString());
+        Assert.Equal("coding-session-1", sourceMetadata.GetProperty("sessionId").GetString());
+        Assert.Equal("source-session.jsonl", sourceMetadata.GetProperty("filePath").GetString());
+        Assert.Equal("conservative-timeline-linearized", sourceMetadata.GetProperty("importStrategy").GetProperty("strategy").GetString());
+
+        var imported = WebChatJsonlImporter.Parse(jsonl);
+
+        Assert.NotNull(imported.SourceMetadata);
+        Assert.Equal("coding-agent-jsonl", imported.SourceMetadata!.Kind);
+        Assert.Equal("coding-session-1", imported.SourceMetadata.SessionId);
+        Assert.Equal(3, imported.SourceMetadata.Version);
+        Assert.Equal("C:\\Users\\zhouh\\Desktop\\Tau", imported.SourceMetadata.Cwd);
+        Assert.Equal("parent-session.jsonl", imported.SourceMetadata.ParentSession);
+        Assert.Equal("source-session.jsonl", imported.SourceMetadata.FilePath);
+        Assert.Equal(4, imported.SourceMetadata.EntryCount);
+        Assert.Equal(3, imported.SourceMetadata.MessageCount);
+        Assert.NotNull(imported.SourceMetadata.ImportStrategy);
+        Assert.Equal("conservative-timeline-linearized", imported.SourceMetadata.ImportStrategy!.Strategy);
+        Assert.Equal("entry-tool", imported.SourceMetadata.ImportStrategy.SourceLeafEntryId);
+        Assert.False(imported.SourceMetadata.ImportStrategy.CurrentBranchOnly);
+        Assert.True(imported.SourceMetadata.ImportStrategy.ImportsTimelineMessagesOnly);
+        Assert.False(imported.SourceMetadata.ImportStrategy.PersistsBranchTree);
+        Assert.Equal(["webchat_import_is_linearized"], imported.SourceMetadata.ImportStrategy.WarningCodes);
+    }
+
+    [Fact]
     public void Parse_RedactsImportedStringValuesAndDisabledRedactorPreservesOriginal()
     {
         var source = CreateSecretJsonlSession();

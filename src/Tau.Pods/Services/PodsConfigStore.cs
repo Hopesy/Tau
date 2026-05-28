@@ -23,10 +23,66 @@ public sealed class PodsConfigStore
         File.WriteAllText(path, JsonSerializer.Serialize(config, PodsJsonContext.Default.PodsConfig));
     }
 
+    public void ApplySetupResult(PodsConfig config, string podId, PodSetupRunResult result)
+    {
+        var pod = config.Pods.FirstOrDefault(candidate => candidate.Id.Equals(podId, StringComparison.OrdinalIgnoreCase))
+            ?? throw new InvalidOperationException($"Pod not found: {podId}");
+
+        pod.ModelsPath = result.Plan.ModelsPath;
+        pod.VllmVersion = result.Plan.VllmVersion;
+        pod.Gpus = result.Gpus.Select(gpu => new PodGpuInfo(gpu.Id, gpu.Name, gpu.Memory)).ToList();
+    }
+
+    public void AddOrUpdatePod(PodsConfig config, PodDefinition pod)
+    {
+        ArgumentNullException.ThrowIfNull(config);
+        ArgumentNullException.ThrowIfNull(pod);
+
+        var existingIndex = config.Pods.FindIndex(candidate => candidate.Id.Equals(pod.Id, StringComparison.OrdinalIgnoreCase));
+        if (existingIndex >= 0)
+        {
+            config.Pods[existingIndex] = pod;
+        }
+        else
+        {
+            config.Pods.Add(pod);
+        }
+
+        if (string.IsNullOrWhiteSpace(config.ActivePodId))
+        {
+            config.ActivePodId = pod.Id;
+        }
+    }
+
+    public bool SetActivePod(PodsConfig config, string podId)
+    {
+        ArgumentNullException.ThrowIfNull(config);
+        if (config.Pods.Any(candidate => candidate.Id.Equals(podId, StringComparison.OrdinalIgnoreCase)))
+        {
+            config.ActivePodId = podId;
+            return true;
+        }
+
+        return false;
+    }
+
+    public bool RemovePod(PodsConfig config, string podId)
+    {
+        ArgumentNullException.ThrowIfNull(config);
+        var removed = config.Pods.RemoveAll(candidate => candidate.Id.Equals(podId, StringComparison.OrdinalIgnoreCase)) > 0;
+        if (removed && config.ActivePodId is not null && config.ActivePodId.Equals(podId, StringComparison.OrdinalIgnoreCase))
+        {
+            config.ActivePodId = null;
+        }
+
+        return removed;
+    }
+
     public PodsConfig CreateSample()
     {
         return new PodsConfig
         {
+            ActivePodId = "dev-pod-1",
             Pods =
             [
                 new PodDefinition
@@ -48,6 +104,7 @@ public sealed class PodsConfigStore
                     SshHost = "pods.example.internal",
                     SshPort = 22,
                     ModelsPath = "/mnt/models",
+                    VllmVersion = "release",
                     Enabled = false,
                     Tags = ["staging"]
                 }

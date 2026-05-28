@@ -27,7 +27,8 @@ public static class WebChatJsonlExporter
             session.Title,
             session.Provider,
             session.Model,
-            "tau-webui");
+            "tau-webui",
+            session.SourceMetadata);
         AppendJsonl(builder, header, WebUiJsonlContext.Default.WebChatJsonlSessionHeader, redactor);
 
         string? parentId = null;
@@ -80,7 +81,8 @@ internal sealed record WebChatJsonlSessionHeader(
     string Title,
     string Provider,
     string Model,
-    string Source);
+    string Source,
+    WebChatSessionSourceMetadataDto? SourceMetadata = null);
 
 internal sealed record WebChatJsonlMessageEntry(
     string Type,

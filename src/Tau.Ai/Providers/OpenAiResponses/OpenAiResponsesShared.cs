@@ -30,7 +30,7 @@ public static class OpenAiResponsesShared
             messages.Add(new Dictionary<string, object>
             {
                 ["role"] = model.Reasoning ? "developer" : "system",
-                ["content"] = context.SystemPrompt!
+                ["content"] = SanitizeText(context.SystemPrompt!)
             });
         }
 
@@ -346,7 +346,7 @@ public static class OpenAiResponsesShared
                     content.Add(new Dictionary<string, object>
                     {
                         ["type"] = "input_text",
-                        ["text"] = text.Text
+                        ["text"] = SanitizeText(text.Text)
                     });
                     break;
                 case ImageContent image when model.InputModalities.Contains("image", StringComparer.OrdinalIgnoreCase):
@@ -389,7 +389,7 @@ public static class OpenAiResponsesShared
                     }
                     break;
                 case ThinkingContent thinking when !string.IsNullOrWhiteSpace(thinking.Thinking):
-                    items.Add(BuildAssistantTextItem($"msg_{assistantMessageIndex++}", thinking.Thinking, null));
+                    items.Add(BuildAssistantTextItem($"msg_{assistantMessageIndex++}", SanitizeText(thinking.Thinking), null));
                     break;
                 case TextContent text:
                     var signature = ParseTextSignature(text.TextSignature);
@@ -399,7 +399,7 @@ public static class OpenAiResponsesShared
                         messageId = $"msg_{ShortHash(messageId)}";
                     }
 
-                    items.Add(BuildAssistantTextItem(messageId, text.Text, signature.Phase));
+                    items.Add(BuildAssistantTextItem(messageId, SanitizeText(text.Text), signature.Phase));
                     break;
                 case ToolCallContent toolCall:
                     var normalizedId = NormalizeToolCallId(toolCall.Id, model, message);
@@ -472,6 +472,7 @@ public static class OpenAiResponsesShared
     private static object BuildToolResultOutput(IReadOnlyList<ContentBlock> content, Model model)
     {
         var text = string.Join("\n", content.OfType<TextContent>().Select(block => block.Text));
+        text = SanitizeText(text);
         var images = content.OfType<ImageContent>().ToList();
         if (images.Count > 0 && model.InputModalities.Contains("image", StringComparer.OrdinalIgnoreCase))
         {
@@ -505,6 +506,9 @@ public static class OpenAiResponsesShared
 
         return text;
     }
+
+    private static string SanitizeText(string text) =>
+        UnicodeTextSanitizer.RemoveUnpairedSurrogates(text);
 
     private static bool TryParseObject(string json, out object value)
     {

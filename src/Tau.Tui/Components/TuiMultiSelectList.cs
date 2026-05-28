@@ -383,7 +383,9 @@ public sealed class TuiMultiSelectList : ITuiInputComponent
     {
         var orderedItems = BuildDisplayOrder();
         _filteredItems.Clear();
-        _filteredItems.AddRange(orderedItems.Where(MatchesFilter));
+        _filteredItems.AddRange(_filter.Length == 0
+            ? orderedItems
+            : TuiFuzzyMatcher.Filter(orderedItems, _filter, SearchText));
 
         if (_filteredItems.Count == 0)
         {
@@ -424,19 +426,6 @@ public sealed class TuiMultiSelectList : ITuiInputComponent
         var selectedSet = ordered.Select(static item => item.Value).ToHashSet(StringComparer.OrdinalIgnoreCase);
         ordered.AddRange(_items.Where(item => !selectedSet.Contains(item.Value)));
         return ordered;
-    }
-
-    private bool MatchesFilter(TuiMultiSelectItem item)
-    {
-        if (_filter.Length == 0)
-        {
-            return true;
-        }
-
-        return item.Value.Contains(_filter, StringComparison.OrdinalIgnoreCase)
-            || item.Label.Contains(_filter, StringComparison.OrdinalIgnoreCase)
-            || (item.Description?.Contains(_filter, StringComparison.OrdinalIgnoreCase) ?? false)
-            || (item.Group?.Contains(_filter, StringComparison.OrdinalIgnoreCase) ?? false);
     }
 
     private void MoveBy(int delta, bool wrap)
@@ -536,6 +525,9 @@ public sealed class TuiMultiSelectList : ITuiInputComponent
 
     private static string DisplayValue(TuiMultiSelectItem item) =>
         string.IsNullOrEmpty(item.Label) ? item.Value : item.Label;
+
+    private static string SearchText(TuiMultiSelectItem item) =>
+        string.Join(' ', item.Value, item.Label, item.Description ?? string.Empty, item.Group ?? string.Empty);
 
     private static bool IsMoveUp(ConsoleKeyInfo key) =>
         key.Key == ConsoleKey.UpArrow || key.KeyChar is 'k' or 'K';

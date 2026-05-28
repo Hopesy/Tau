@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Microsoft.Extensions.Options;
 using Tau.Ai.Observability;
 using Tau.Mom;
@@ -46,10 +47,11 @@ builder.Services.AddSingleton<MomChannelMessageProcessor>();
 builder.Services.AddSingleton<MomChannelQueueDispatcher>();
 builder.Services.AddSingleton<SlackAttachmentDownloader>();
 builder.Services.AddSingleton<SlackBackfillService>();
+builder.Services.AddSingleton<SlackChannelHistoryDownloadService>();
 builder.Services.AddSingleton<SlackWebApiResponder>();
 builder.Services.AddSingleton<SlackSocketModeTransport>();
 
-if (!commandLine.RunOnce && !commandLine.ValidateSandbox)
+if (!commandLine.RunOnce && !commandLine.ValidateSandbox && !commandLine.ValidateSlack && !commandLine.HasDownload)
 {
     builder.Services.AddHostedService<Worker>();
     builder.Services.AddHostedService<SlackSocketModeWorker>();
@@ -57,11 +59,64 @@ if (!commandLine.RunOnce && !commandLine.ValidateSandbox)
 
 var host = builder.Build();
 
+if (commandLine.HasDownload)
+{
+    var logger = host.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Tau.Mom.Download");
+    if (string.IsNullOrWhiteSpace(commandLine.DownloadChannelId))
+    {
+        Console.Error.WriteLine("Usage: Tau.Mom --download <channel-id>");
+        Environment.ExitCode = 1;
+        return;
+    }
+
+    try
+    {
+        var downloader = host.Services.GetRequiredService<SlackChannelHistoryDownloadService>();
+        await downloader.DownloadAsync(commandLine.DownloadChannelId, Console.Out, Console.Error)
+            .ConfigureAwait(false);
+        return;
+    }
+    catch (Exception ex) when (ex is InvalidOperationException or HttpRequestException or JsonException)
+    {
+        logger.LogError("{Message}", ex.Message);
+        Environment.ExitCode = 1;
+        return;
+    }
+}
+
 if (commandLine.ValidateSandbox)
 {
     var options = host.Services.GetRequiredService<MomOptions>();
     var logger = host.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Tau.Mom.ValidateSandbox");
     var result = await MomSandboxValidator.ValidateAsync(options).ConfigureAwait(false);
+    if (commandLine.JsonOutput)
+    {
+        WriteValidationJson(ToSandboxJsonResult(result), result.Succeeded);
+        return;
+    }
+
+    if (result.Succeeded)
+    {
+        logger.LogInformation("{Message}", result.Message);
+        return;
+    }
+
+    logger.LogError("{Message}", result.Message);
+    Environment.ExitCode = 1;
+    return;
+}
+
+if (commandLine.ValidateSlack)
+{
+    var validator = host.Services.GetRequiredService<SlackSocketModeTransport>();
+    var logger = host.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Tau.Mom.ValidateSlack");
+    var result = await validator.ValidateAsync().ConfigureAwait(false);
+    if (commandLine.JsonOutput)
+    {
+        WriteValidationJson(ToSlackJsonResult(result), result.Succeeded);
+        return;
+    }
+
     if (result.Succeeded)
     {
         logger.LogInformation("{Message}", result.Message);
@@ -93,3 +148,28 @@ if (commandLine.RunOnce)
 }
 
 await host.RunAsync().ConfigureAwait(false);
+
+static void WriteValidationJson<TPayload>(TPayload payload, bool succeeded)
+{
+    Console.WriteLine(JsonSerializer.Serialize(payload, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+    if (!succeeded)
+    {
+        Environment.ExitCode = 1;
+    }
+}
+
+static MomSandboxValidationJsonResult ToSandboxJsonResult(MomSandboxValidationResult result) =>
+    new(
+        result.Succeeded,
+        result.Message,
+        result.Sandbox,
+        result.Succeeded ? null : result.Message);
+
+static MomSlackValidationJsonResult ToSlackJsonResult(MomSlackValidationResult result) =>
+    new(
+        result.Succeeded,
+        result.Message,
+        result.SlackSocketModeEnabled,
+        result.BotUserId,
+        result.SocketHost,
+        result.Error);

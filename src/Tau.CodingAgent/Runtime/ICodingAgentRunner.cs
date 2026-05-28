@@ -3,6 +3,7 @@ using Tau.Agent.Runtime;
 using Tau.Ai;
 using Tau.Ai.Auth;
 using Tau.Ai.Auth.OAuth;
+using Tau.Ai.Observability;
 
 namespace Tau.CodingAgent.Runtime;
 
@@ -30,11 +31,24 @@ public interface ICodingAgentRunner
     Task<CodingAgentBranchSummaryResult> SummarizeBranchAsync(
         IReadOnlyList<ChatMessage> messages,
         string? customInstructions = null,
+        bool replaceInstructions = false,
         CancellationToken cancellationToken = default);
     void Steer(string input);
+    void Steer(IReadOnlyList<ContentBlock> input);
     void FollowUp(string input);
+    void FollowUp(IReadOnlyList<ContentBlock> input);
     void RestoreSession(CodingAgentSessionSnapshot snapshot);
     void ResetSession();
     IAsyncEnumerable<AgentEvent> RunAsync(string input, CancellationToken cancellationToken = default);
     IAsyncEnumerable<AgentEvent> RunAsync(IReadOnlyList<ContentBlock> input, CancellationToken cancellationToken = default);
+    IAsyncEnumerable<AgentEvent> RunAsync(
+        string input,
+        TauRuntimeLogContext? logContext,
+        CancellationToken cancellationToken) =>
+        RunAsync(input, cancellationToken);
+    IAsyncEnumerable<AgentEvent> RunAsync(
+        IReadOnlyList<ContentBlock> input,
+        TauRuntimeLogContext? logContext,
+        CancellationToken cancellationToken) =>
+        RunAsync(input, cancellationToken);
 }

@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Options;
+using Tau.Ai.Observability;
 using Tau.WebUi;
 using Tau.WebUi.Services;
 
@@ -11,6 +12,19 @@ builder.Services.AddSingleton(sp =>
     var root = Directory.GetParent(env.ContentRootPath)?.Parent?.FullName ?? env.ContentRootPath;
     var path = Path.GetFullPath(configured.SessionsPath, root);
     return new WebChatStore(path);
+});
+builder.Services.AddSingleton<ITauLogSink>(_ =>
+{
+    try
+    {
+        return JsonlTauLogSink.FromEnvironment() is { } sink
+            ? sink
+            : NullTauLogSink.Instance;
+    }
+    catch
+    {
+        return NullTauLogSink.Instance;
+    }
 });
 builder.Services.AddSingleton<WebChatService>();
 

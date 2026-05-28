@@ -264,6 +264,65 @@ public sealed class TuiTranscriptViewportHostTests
     }
 
     [Fact]
+    public void Render_OverlayAnchorCentersWithinViewport()
+    {
+        var surface = new MemoryRenderSurface(width: 20, height: 6);
+        var host = new TuiTranscriptViewportHost(surface);
+        host.OpenOverlay(
+            new StaticComponent("one", "two"),
+            new TuiTranscriptOverlayOptions(
+                Width: 6,
+                Anchor: TuiTranscriptOverlayAnchor.Center));
+
+        var result = host.Render();
+
+        Assert.Equal(Padded("       one", 20), result.Frame.Lines[2]);
+        Assert.Equal(Padded("       two", 20), result.Frame.Lines[3]);
+        Assert.True(result.HasVisibleOverlay);
+        Assert.False(result.CursorVisible);
+    }
+
+    [Fact]
+    public void Render_OverlayAnchorRespectsMarginAndOffset()
+    {
+        var surface = new MemoryRenderSurface(width: 20, height: 6);
+        var host = new TuiTranscriptViewportHost(surface);
+        host.OpenOverlay(
+            new StaticComponent("edge"),
+            new TuiTranscriptOverlayOptions(
+                Width: 8,
+                Anchor: TuiTranscriptOverlayAnchor.BottomRight,
+                OffsetRow: -1,
+                OffsetColumn: -2,
+                Margin: TuiTranscriptOverlayMargin.All(1)));
+
+        var result = host.Render();
+
+        Assert.Equal(Padded("         edge", 20), result.Frame.Lines[3]);
+    }
+
+    [Fact]
+    public void Render_OverlayMinWidthAndMaxHeightClampToAvailableArea()
+    {
+        var surface = new MemoryRenderSurface(width: 12, height: 5);
+        var host = new TuiTranscriptViewportHost(surface);
+        host.OpenOverlay(
+            new StaticComponent("abcdefghi", "second", "third"),
+            new TuiTranscriptOverlayOptions(
+                Width: 2,
+                MinWidth: 8,
+                MaxHeight: 2,
+                Anchor: TuiTranscriptOverlayAnchor.TopLeft,
+                Margin: TuiTranscriptOverlayMargin.All(1)));
+
+        var result = host.Render();
+
+        Assert.Equal(Padded(" abcdefgh", 12), result.Frame.Lines[1]);
+        Assert.Equal(Padded(" second", 12), result.Frame.Lines[2]);
+        Assert.DoesNotContain("third", result.Frame.Lines[3], StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Render_ClosingOverlayDiffsBackToBaseTranscript()
     {
         var surface = new MemoryRenderSurface(width: 20, height: 4);

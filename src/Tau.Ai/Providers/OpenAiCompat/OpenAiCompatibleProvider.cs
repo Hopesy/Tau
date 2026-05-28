@@ -156,7 +156,7 @@ internal sealed class OpenAiCompatibleProvider : IStreamProvider
             messages.Add(new Dictionary<string, object>
             {
                 ["role"] = "system",
-                ["content"] = context.SystemPrompt!
+                ["content"] = UnicodeTextSanitizer.RemoveUnpairedSurrogates(context.SystemPrompt!)
             });
         }
 

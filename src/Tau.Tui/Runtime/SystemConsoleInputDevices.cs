@@ -15,6 +15,9 @@ public sealed class SystemConsoleInteractiveRenderer : IInteractiveRenderer
 {
     private int _promptLength;
     private int _lastRenderedLength;
+    private int _renderStartTop;
+    private int _lastRenderedLineCount = 1;
+    private int _lastRenderedFinalColumn;
 
     public int WindowWidth => SafeGetWindowWidth();
 
@@ -22,6 +25,8 @@ public sealed class SystemConsoleInteractiveRenderer : IInteractiveRenderer
     {
         _promptLength = prompt.Length;
         _lastRenderedLength = 0;
+        _lastRenderedLineCount = 1;
+        _lastRenderedFinalColumn = prompt.Length;
         var previous = Console.ForegroundColor;
         try
         {
@@ -31,6 +36,7 @@ public sealed class SystemConsoleInteractiveRenderer : IInteractiveRenderer
             }
 
             Console.Write(prompt);
+            _renderStartTop = SafeGetCursorTop();
         }
         finally
         {
@@ -41,6 +47,8 @@ public sealed class SystemConsoleInteractiveRenderer : IInteractiveRenderer
     public void Render(string buffer, int cursorIndex)
     {
         var rendered = buffer ?? string.Empty;
+        var lines = SplitLines(rendered);
+        var cursor = ComputeCursorPosition(rendered, cursorIndex);
 
         try
         {
@@ -51,25 +59,46 @@ public sealed class SystemConsoleInteractiveRenderer : IInteractiveRenderer
             // Some terminals (CI hosts) don't support CursorVisible; ignore.
         }
 
-        // Re-paint by moving the cursor back to the column after the prompt
-        // and overwriting any trailing characters that may have shrunk.
         try
         {
-            Console.SetCursorPosition(_promptLength, Console.CursorTop);
+            Console.SetCursorPosition(_promptLength, _renderStartTop);
         }
         catch
         {
             // No-op when running without a real console (tests, redirected output).
         }
 
-        Console.Write(rendered);
-        if (rendered.Length < _lastRenderedLength)
+        for (var i = 0; i < lines.Length; i++)
         {
-            var padding = new string(' ', _lastRenderedLength - rendered.Length);
-            Console.Write(padding);
+            if (i > 0)
+            {
+                try
+                {
+                    Console.SetCursorPosition(0, _renderStartTop + i);
+                }
+                catch
+                {
+                    // ignore
+                }
+            }
+
+            Console.Write(lines[i]);
             try
             {
-                Console.SetCursorPosition(_promptLength + rendered.Length, Console.CursorTop);
+                ClearRestOfLine();
+            }
+            catch
+            {
+                // ignore
+            }
+        }
+
+        for (var i = lines.Length; i < _lastRenderedLineCount; i++)
+        {
+            try
+            {
+                Console.SetCursorPosition(0, _renderStartTop + i);
+                ClearRestOfLine();
             }
             catch
             {
@@ -79,7 +108,8 @@ public sealed class SystemConsoleInteractiveRenderer : IInteractiveRenderer
 
         try
         {
-            Console.SetCursorPosition(_promptLength + cursorIndex, Console.CursorTop);
+            var cursorLeft = cursor.Line == 0 ? _promptLength + cursor.Column : cursor.Column;
+            Console.SetCursorPosition(cursorLeft, _renderStartTop + cursor.Line);
         }
         catch
         {
@@ -96,20 +126,30 @@ public sealed class SystemConsoleInteractiveRenderer : IInteractiveRenderer
         }
 
         _lastRenderedLength = rendered.Length;
+        _lastRenderedLineCount = Math.Max(1, lines.Length);
+        _lastRenderedFinalColumn = lines.Length == 1 ? _promptLength + lines[^1].Length : lines[^1].Length;
     }
 
     public void Commit()
     {
+        MoveToRenderEnd();
         Console.WriteLine();
         _promptLength = 0;
         _lastRenderedLength = 0;
+        _lastRenderedLineCount = 1;
+        _renderStartTop = 0;
+        _lastRenderedFinalColumn = 0;
     }
 
     public void Cancel()
     {
+        MoveToRenderEnd();
         Console.WriteLine();
         _promptLength = 0;
         _lastRenderedLength = 0;
+        _lastRenderedLineCount = 1;
+        _renderStartTop = 0;
+        _lastRenderedFinalColumn = 0;
     }
 
     public void RenderSearch(string pattern, string? match, int cursorInMatch)
@@ -164,6 +204,62 @@ public sealed class SystemConsoleInteractiveRenderer : IInteractiveRenderer
 
         _promptLength = prefix.Length;
         _lastRenderedLength = rendered.Length;
+        _lastRenderedLineCount = 1;
+        _renderStartTop = SafeGetCursorTop();
+        _lastRenderedFinalColumn = prefix.Length + rendered.Length;
+    }
+
+    private static string[] SplitLines(string text)
+    {
+        var normalized = (text ?? string.Empty).Replace("\r\n", "\n", StringComparison.Ordinal)
+            .Replace('\r', '\n');
+        return normalized.Split('\n');
+    }
+
+    private static (int Line, int Column) ComputeCursorPosition(string text, int cursorIndex)
+    {
+        text ??= string.Empty;
+        cursorIndex = Math.Clamp(cursorIndex, 0, text.Length);
+        var line = 0;
+        var column = 0;
+        for (var i = 0; i < cursorIndex; i++)
+        {
+            if (text[i] == '\n')
+            {
+                line++;
+                column = 0;
+            }
+            else if (text[i] != '\r')
+            {
+                column++;
+            }
+        }
+
+        return (line, column);
+    }
+
+    private static void ClearRestOfLine()
+    {
+        try
+        {
+            Console.Write("\u001b[K");
+        }
+        catch
+        {
+            // ignore
+        }
+    }
+
+    private void MoveToRenderEnd()
+    {
+        try
+        {
+            Console.SetCursorPosition(_lastRenderedFinalColumn, _renderStartTop + _lastRenderedLineCount - 1);
+        }
+        catch
+        {
+            // ignore
+        }
     }
 
     private static int SafeGetWindowWidth()
@@ -175,6 +271,18 @@ public sealed class SystemConsoleInteractiveRenderer : IInteractiveRenderer
         catch
         {
             return 80;
+        }
+    }
+
+    private static int SafeGetCursorTop()
+    {
+        try
+        {
+            return Console.CursorTop;
+        }
+        catch
+        {
+            return 0;
         }
     }
 }

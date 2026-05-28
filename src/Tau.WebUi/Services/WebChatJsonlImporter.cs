@@ -94,7 +94,8 @@ public static class WebChatJsonlImporter
             header.CreatedAt,
             header.UpdatedAt,
             false,
-            messages);
+            messages,
+            header.SourceMetadata);
     }
 
     private static string ReadType(string line, int lineNumber)

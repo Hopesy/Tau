@@ -1,10 +1,5 @@
 namespace Tau.Mom;
 
-public sealed record MomSandboxValidationResult(
-    string Sandbox,
-    bool Succeeded,
-    string Message);
-
 public static class MomSandboxValidator
 {
     public static async Task<MomSandboxValidationResult> ValidateAsync(

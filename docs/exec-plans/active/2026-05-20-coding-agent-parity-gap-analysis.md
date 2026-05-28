@@ -36,8 +36,8 @@
 - **上游**: `packages/coding-agent/src/modes/rpc/`
 - **功能**: JSON stdin/stdout 协议，允许外部进程嵌入 coding agent
 - **协议**: prompt, steer, follow_up, abort, get_state, set_model, set_thinking_level, cycle_thinking_level, compact, fork, clone, export_html, get_messages, get_commands 等 30+ 命令
-- **Tau 现状**: 已新增 `--mode rpc` 与 `CodingAgentRpcHost` baseline，走 LF-delimited JSONL stdin/stdout，覆盖 prompt / steer / follow_up / abort / new_session（含可选 parentSession metadata） / get_state / get_settings / update_settings / set_model / cycle_model / get_available_models / set_thinking_level / cycle_thinking_level / set_auto_retry / abort_retry / bash / abort_bash / set_steering_mode / set_follow_up_mode / set_auto_compaction / switch_session / get_fork_messages / compact / fork / clone / get_session_stats / get_messages / get_commands / export_html / get_last_assistant_text / set_session_name
-- **剩余影响**: extension UI sub-protocol、streamed bash output、上游 settings selector / theme / terminal / packages 等全量配置面和 full command parity 仍未完成
+- **Tau 现状**: 已新增 `--mode rpc` 与 `CodingAgentRpcHost` baseline，走 LF-delimited JSONL stdin/stdout，覆盖 prompt / steer / follow_up / abort / new_session（含可选 parentSession metadata，以及 `summarizeCurrentBranch` / `customInstructions` / `replaceInstructions` summary hook） / get_state / get_settings / update_settings / set_model / cycle_model / get_available_models / set_thinking_level / cycle_thinking_level / set_auto_retry / abort_retry / bash / abort_bash / set_steering_mode / set_follow_up_mode / set_auto_compaction / switch_session / get_fork_messages / compact / fork / clone / get_session_stats / get_messages / get_commands / export_html / get_last_assistant_text / set_session_name；`prompt`、`steer`、`follow_up` 现在会读取上游同名 `images` 数组并传递文本 + 图片内容块，active prompt 下的 `streamingBehavior=steer|followUp` 也走同一内容路径；其中 `get_commands` 当前按上游合同只返回 extension / prompt / skill 动态命令，不返回本地 slash catalog
+- **剩余影响**: extension UI sub-protocol、上游 settings selector / theme / terminal / packages 等全量配置面和 full command parity 仍未完成
 
 ### Tier 2：缺失的核心子系统
 
@@ -47,15 +47,17 @@
 
 #### 2.2 Branch Summarization（显式 `/fork --summarize` baseline 已接入）
 - **上游**: `packages/coding-agent/src/core/compaction/branch-summarization.ts`
-- **Tau 现状**: `/fork <entry-id> --summarize [instructions]` 会对被离开的 branch 生成结构化摘要，写 JSONL `branch_summary` entry，并在 branch restore 时注入 summary context；完整自动 branch switching hooks、extension events 与 cancellation UI 仍未完成
+- **Tau 现状**: `/fork <entry-id> --summarize [instructions]`、interactive `/tree --interactive` branch switch，以及 `/resume` / RPC `switch_session` 的 current-branch switch hook 都已经能对被离开的 branch 生成结构化摘要，写 JSONL `branch_summary` entry，并在 branch restore 时注入 summary context；tree summary decision 已支持 `customInstructions`、`replaceInstructions` foundation 和 label foundation，当前仍缺 `/new` 与 extension/runtime 驱动的 richer switch hook、extension events 与更完整 cancellation UI parity
 
-#### 2.3 Event Bus（完全缺失）
+#### 2.3 Event Bus（foundation 已接入）
 - **上游**: `packages/coding-agent/src/core/event-bus.ts`
 - **功能**: 发布/订阅系统，extension 间通信
+- **Tau 现状**: 已新增 `CodingAgentExtensionEventBus` 纯内存 foundation，支持 string event type 与 typed record publish/subscribe、订阅顺序 dispatch、`IDisposable` unsubscribe、handler exception 聚合结果和 cancellation 透传
+- **剩余影响**: 仍未接完整 TypeScript extension runtime、extension lifecycle events、custom tools/message renderer/shortcut/provider 注册或跨 extension 通信 surface
 
 #### 2.4 Steering/FollowUp 用户面暴露（CLI + RPC baseline 已接入，完整 TUI 未完成）
 - **上游**: Enter（steering）和 Alt+Enter（follow-up）在 agent 运行中注入消息
-- **Tau 现状**: `AgentRuntime` 已有 `Steer()` / `FollowUp()`，`ICodingAgentRunner`、`CodingAgentHost` active-turn input source 和 `CodingAgentRpcHost` `steer` / `follow_up` 命令已接入 baseline；完整 TUI overlay、快捷键提示仍未完成
+- **Tau 现状**: `AgentRuntime` 已有 `Steer()` / `FollowUp()`，`ICodingAgentRunner`、`CodingAgentHost` active-turn input source 和 `CodingAgentRpcHost` `steer` / `follow_up` 命令已接入 baseline；composition input overlay 已补默认快捷键提示行，动态 keybinding hints、完整 TUI overlay 和运行中输入提示仍未完成
 
 ### Tier 3：缺失的 Slash 命令
 
@@ -72,10 +74,10 @@
 
 ### Tier 4：缺失的 TUI 组件层
 
-- 差分渲染引擎（组件树、布局系统、message area、status area、footer）：组件树基础层、纯函数式 diff 计划器、可注入 render surface 和最小 ANSI diff sink 已接入 `Tau.Tui`；完整 terminal host / viewport / overlay compositing / hardware cursor 仍缺
+- 差分渲染引擎（组件树、布局系统、message area、status area、footer）：组件树基础层、纯函数式 diff 计划器、可注入 render surface、最小 ANSI diff sink 和 transcript overlay anchor/margin/min/max layout baseline 已接入 `Tau.Tui`；完整 terminal host / non-capturing overlay / hardware cursor 仍缺
 - Interactive Selectors（model/session/settings/theme/thinking/config/extension/scoped-models/auth/login/logout）：`TuiSelectList` 单选列表 foundation（含 footer hint 行）、`TuiMultiSelectList` 多选列表 foundation、`TuiSelectorSession` / `TuiMultiSelectSession` 输入/渲染 loop 已接入；`/theme select`、交互式 `/settings`、`/scoped-models`、`/model select` / Ctrl+L model selector、`/auth select` status selector、`/login` OAuth provider selector、`/logout` OAuth provider selector 和 `/thinking select` thinking level selector baseline 已接入真实 CodingAgent selector，完整 OAuth login dialog/session 和 resource selectors 仍缺
 - Rich Message Rendering（结构化消息渲染、diff 高亮、tool execution timeline）
-- Keybinding Hints / Footer（model selector 已有 auth filtering footer/scope/detail/search chrome baseline；全局 keybinding hints / footer 仍缺）
+- Keybinding Hints / Footer（composition input overlay 已有默认快捷键提示行，model selector 已有 auth filtering footer/scope/detail/search chrome baseline；动态 keybinding hints / 全局 footer 仍缺）
 
 ### Tier 5：缺失的 Rendering / Export 能力
 
@@ -98,7 +100,9 @@
 | Auto-compaction | LLM split-turn summarization、compaction events/cancellation UI |
 | Retry | settings UI parity、完整 cancellation UI |
 | Extension system | 完整 runtime |
-| HTML export | 语法高亮、custom tool renderer、richer template |
+| HTML export | read_file result details metadata block 已完成；语法高亮、custom tool renderer、richer template 仍缺 |
+| `read_file` tool | offset/limit 已对齐上游 1-based 分页和续读提示；兼容上游 `file_path` 参数别名；PNG/JPEG/GIF/WebP 已按文件头识别并作为 `ImageContent` 附件返回；已补保守 inline image size limit omit baseline；`ReadFileToolDetails` 已携带 renderer 可消费的 path/kind/language/line range/image metadata，并已被 HTML transcript exporter 消费为 read_file metadata block；自动 resize 与完整 TUI syntax-highlight render component 仍缺 |
+| `ls` tool | entry format、case-insensitive 排序、dotfile 可见、`limit` 参数、空目录和 path/file 错误文本已对齐上游；byte truncation、`ListDirectoryToolDetails` 与 HTML transcript directory-aware list/details 已完成；仍缺上游 TUI custom renderer/render component |
 
 ## 建议执行顺序
 
@@ -151,11 +155,40 @@
 - [x] RPC session switch / fork messages baseline（`switch_session` / `get_fork_messages` + 3 个 targeted tests，CodingAgent.Tests 233/233 通过）
 - [x] RPC queue / auto-compaction settings controls baseline（`set_steering_mode` / `set_follow_up_mode` / `set_auto_compaction` + settings-backed `get_state` + 5 个 RPC/settings tests，CodingAgent.Tests 238/238 通过；Agent.Tests 58/58 覆盖 queue drain）
 - [x] RPC bash / abort_bash baseline（`bash` / `abort_bash` + 可注入 shell runner + 4 个 targeted tests，CodingAgent.Tests 242/242 通过）
+- [x] RPC bash streamed output baseline（`bash` 保留最终 response contract，同时输出 `bash_output` stdout/stderr chunk、终态 truncation/fullOutputPath metadata 和 `bash_event` started/completed/cancelled/failed lifecycle；focused `CodingAgentRpcHostTests.RunAsync_Bash*` 4/4 通过）
 - [x] RPC settings baseline（`get_settings` / `update_settings` + Tau-supported settings snapshot/update + 3 个 targeted tests，CodingAgent.Tests 245/245 通过）
 - [x] RPC new_session parent metadata baseline（`new_session.parentSession` 写入 JSONL header `parentSession` + 1 个 targeted test，CodingAgent.Tests 246/246 通过）
 - [x] Context files baseline（`~/.tau/AGENTS.md|CLAUDE.md` + parent-to-cwd `AGENTS.md|CLAUDE.md` + `--no-context-files` / `-nc` + `/reload` refresh，CodingAgent.Tests 252/252 通过）
+- [x] Interactive tree label edit baseline（raw / composition `Shift+L` -> host label prompt -> `AppendLabelChange(...)` -> reopen tree 并尽量保持原选中 entry；定向 tree tests 40/40 与 `dotnet build Tau.slnx --no-restore --verbosity minimal` 通过）
+- [x] Interactive tree filter key parity correction（对齐上游 `keybindings.ts` / `tree-selector.ts`：`Ctrl+D` default、`Ctrl+T` no-tools、`Ctrl+U` user-only、`Ctrl+L` labeled-only、`Ctrl+A` all、`Ctrl+O/Shift+Ctrl+O` cycle；labeled-only 改为读真实 label 元数据，不再从渲染文本猜方括号；定向 tree tests 31/31 与 `dotnet build Tau.slnx --no-restore --verbosity minimal` 通过）
+- [x] Interactive tree summary-cancel reopen baseline（summary prompt cancel 不再直接退出 tree，而是回到 tree 并保留原选中 entry；custom summary prompt 输入取消时回到 summary choice；定向 tree router tests 8/8 与 `dotnet build Tau.slnx --no-restore --verbosity minimal` 通过）
+- [x] Interactive tree current-leaf no-op parity（选择当前 leaf 不再追加 branch/session_info entry、不触发 summary prompt，也不会对 current user leaf 误走 draft rewind；返回 `Already at this point`；定向 tree router tests 9/9 与 `dotnet build Tau.slnx --no-restore --verbosity minimal` 通过）
+- [x] Interactive tree navigation label foundation（`CodingAgentTreeNavigationDecision` 现在可携带可选 label；summarizing 时会把 label 绑定到新 `branch_summary` entry，不 summarizing 时绑定到目标 entry；当前仍无新的用户可见 label prompt，先作为后续 extension/runtime surface 的树导航语义基础；定向 tree router tests 11/11 与 `dotnet build Tau.slnx --no-restore --verbosity minimal` 通过）
+- [x] Interactive tree replaceInstructions foundation（`CodingAgentTreeNavigationDecision` 现在还能携带 `replaceInstructions`；interactive tree summary path 会把它透传到 runner，`replaceInstructions=true` 时 custom prompt 替换默认 branch summary 模板，而不是继续走 `Additional focus` 追加；focused `ReplaceInstructions` tests 2/2 与 `dotnet build Tau.slnx --no-restore --verbosity minimal` 通过）
+- [x] Resume selector baseline（交互式裸 `/resume` 在 selector 可用时改为打开 session selector，而不是直接跳 `latest`；selector 会预选当前 session，显示 session name/首条 user 文本、model、message count、mtime 和路径；切换前先 `SyncFromRunner()`，避免当前 branch 的未落盘 messages/session name 被 resume 覆盖；session 发现也已覆盖当前自定义 tree file 旁边的 sibling `coding-agent-sessions/`；focused `Resume` tests 3/3 与 `dotnet build Tau.slnx --no-restore --verbosity minimal` 通过）
+- [x] Resume selector search baseline（`CodingAgentResumeSelector` 已从 plain `TuiSelectList` 提升为带 `Search:` 的 input component；console/composition 两条路径都支持按 session name、provider/model、cwd 和路径做 case-insensitive contains 过滤，并保持当前 session 预选与 Enter/Esc 行为；focused `Resume` tests 5/5 与 `dotnet build Tau.slnx --no-restore --verbosity minimal` 通过）
+- [x] Resume selector rename parity baseline（selector 现在支持 `Ctrl+R` 进入 rename mode；会把当前 session rename 结果回传给 router，避免“在 `/resume` 里改了当前 session 名称，取消后 runner 还是旧名字”的内存/JSONL 分叉；rename 输入默认只预填显式 session name，不误把首条 user 文本当成真实名称；focused `Resume` tests 7/7 与 `dotnet build Tau.slnx --no-restore --verbosity minimal` 通过）
+- [x] Resume selector delete parity baseline（selector 现在支持 `Ctrl+D` 进入 delete confirm；按上游真实边界，当前 active session 不允许删除，会直接显示错误而不是动文件；非当前 session 确认后会优先尝试回收站/Recycle Bin，失败再回退直接删除，随后刷新 session 列表并保留 selector 流程；focused `Resume` tests 9/9 与 `dotnet build Tau.slnx --no-restore --verbosity minimal` 通过）
+- [x] Resume selector named/path browsing baseline（selector 现在支持 `Ctrl+N` 只看显式命名 session、`Ctrl+P` 切换路径显示，并在 header 明确展示当前 `Filter: all|named` 与 `Path: on|off` 状态；focused `Resume` tests 11/11 与 `dotnet build Tau.slnx --no-restore --verbosity minimal` 通过）
+- [x] Resume selector current/all scope baseline（selector 现在支持 `Tab` 在 current/all scope 间切换；当 current scope 为空时不再直接退出，而是允许用户切到 all 后继续选择；focused `Resume` tests 13/13 与 `dotnet build Tau.slnx --no-restore --verbosity minimal` 通过）
+- [x] Resume selector sort/threaded browsing baseline（selector 现在支持 `Ctrl+S` 在 threaded/recent/relevance 间切换；`CodingAgentResumeSessionInfo` 会从 JSONL header `parentSession` 归一 `ParentSessionPath`；threaded 模式在无搜索时把当前可见父子 session 渲染成树状列表；focused `CodingAgentResumeSelectorTests` 12/12 与 `Tau.CodingAgent` build 通过）
+- [x] Resume/switch-session summary hook baseline（当 `/resume` 真正切到别的 session 且当前 branch 有可摘要内容时，router 现在会复用 tree summary prompt，把当前 branch 汇总成 root-level `branch_summary` 后再切走，并保留当前 session 的 provider/model/name 供后续 resume 恢复；RPC `switch_session` 也已补显式 `summarizeCurrentBranch`、`customInstructions` 和 `replaceInstructions` contract；focused `Resume|SwitchSession` tests 3/3 与 `dotnet build Tau.slnx --no-restore --verbosity minimal` 通过）
+- [x] New/new-session summary hook baseline（`/new` 现在也会在 reset 前复用同一条 summary/cancel 决策；如果用户选择 summarize，会先把当前 branch 收成 root-level `branch_summary`，再 append `action=new` 开启新 branch。RPC `new_session` 也已补显式 `summarizeCurrentBranch`、`customInstructions` 和 `replaceInstructions` contract，同时保留既有 `parentSession` metadata 语义；focused `New|Resume|SwitchSession` tests 5/5 与 `dotnet build Tau.slnx --no-restore --verbosity minimal` 通过）
+- [x] JSONL import summary hook baseline（`.jsonl` `/import` 现在也会在真正替换当前 tree session 前复用同一条 summary/cancel 决策；如果当前 branch 有可摘要内容，会先写 root-level `branch_summary` 再切到目标 JSONL session。flat JSON snapshot import 继续保持原来直接恢复 snapshot 的边界，不强行并入同一替换语义；focused `ImportCommand` tests 3/3 与 `dotnet build Tau.slnx --no-restore --verbosity minimal` 通过）
+- [x] Session switch prompt context baseline（`CodingAgentTreeNavigationPromptState` 现在对 `/new`、`/resume`、`.jsonl` `/import` 与 tree navigation 统一携带 `reason` 和可选 `targetSessionPath`，host prompt 会据此区分 `tree switch`、`new session`、`resume <file>`、`import <file>`；这是向上游 `session_before_switch` 的 `reason/targetSessionFile` 语义靠拢的内层 foundation，不等于 extension runtime 已完成；focused `New|Resume|Import` tests 3/3 与 `dotnet build Tau.slnx --no-restore --verbosity minimal` 通过）
+- [x] Session switch prompt seam split baseline（session replacement 现在不再复用 `treeNavigationPrompt` 调用链，而是单独走 `sessionSwitchPrompt` seam；tree interactive summary 继续走 `treeNavigationPrompt`，两者共享同一套 decision/result 结构但不再共用同一个入口。这样后续继续接近 `session_before_switch` 时，不需要再从 tree navigation 命名和调用边界里反向拆分；focused `New|Resume|Import|TreeInteractive` tests 4/4 与 `dotnet build Tau.slnx --no-restore --verbosity minimal` 通过）
+- [x] Session switch hook seam baseline（新增 `sessionSwitchHook` seam，允许内部 hook 对 `/new`、`/resume`、`.jsonl` `/import` 和 RPC `new_session` / `switch_session` 做 cancel 或 decision override；hook cancel 时 RPC 返回 success response 且 `cancelled=true`，更接近上游 `session_before_switch` 的取消合同。tree interactive summary 不走这条 hook，继续只走 tree-specific 路径；focused `Hook|New|Resume|SwitchSession|TreeInteractive` tests 5/5 与 `dotnet build Tau.slnx --no-restore --verbosity minimal` 通过）
+- [x] Session switch hook target metadata baseline（`sessionSwitchHook` state 现在除了 current session path，还会携带 current `sessionName/provider/model`，以及 target session 的 `name/provider/model/messageCount` metadata；resume/import/switch hook 已能基于目标 session 事实做决定，不再只拿到一个 path。focused `ResumeHook|RpcHook` tests 3/3 与 `dotnet build Tau.slnx --no-restore --verbosity minimal` 通过）
+- [x] Shared session switch coordinator baseline（新增独立 `CodingAgentSessionSwitchCoordinator`，把 session replacement 的 summary/hook/prompt 决策链从 `CommandRouter` / `RpcHost` 两边收口到单一实现。CLI `/new`、`/resume`、`.jsonl` `/import` 与 RPC `new_session` / `switch_session` 现在都通过共享 coordinator 走同一条决策链；tree interactive summary 仍保持独立路径。focused `ResumeHook|RpcHook|TreeInteractive` tests 4/4 与 `dotnet build Tau.slnx --no-restore --verbosity minimal` 通过）
+- [x] Session switch result contract baseline（`CodingAgentSessionSwitchSummaryResult` 已从 `Cancelled + Summary` 扩成统一 audited outcome，携带 `reason`、previous/target session path、hook/prompt 使用情况、decision、summary entry count/token estimate；CLI 状态后缀和 RPC `new_session` / `switch_session` data 现在都从同一 result mapper 派生。RPC 对外继续保留上游兼容的 `cancelled` 主合同和 Tau 扩展 `summarizedCurrentBranch/branchSummary/alreadyCurrent` 字段，不继续把内部审计字段扩成公开协议。focused `SwitchSession|NewSession` 10/10、`Tau.CodingAgent.Tests` 397/397、`dotnet build Tau.slnx --no-restore --verbosity minimal` 与 `git diff --check` 通过）
+- [x] RPC fork result contract baseline（RPC `fork` 现在按上游 public contract 返回被 fork 的 user message `text` 与 `cancelled`，并切回目标 user message 的 parent branch；Tau 既有 `leafId/messageCount/provider/model` 继续作为扩展字段保留。`branch_summary` 仍不暴露为 RPC `fork` response data。focused `Fork` tests 3/3 与 `dotnet build src\Tau.CodingAgent\Tau.CodingAgent.csproj --no-restore --verbosity minimal` 通过）
+- [x] RPC steer/follow_up images baseline（`prompt`、`steer`、`follow_up` 现在对齐上游 `images?: ImageContent[]` 合同：新 prompt、direct steer/follow_up、以及 active prompt 下的 `streamingBehavior=steer|followUp` 都会把文本和图片内容块传给 runner。`CodingAgentRpcHostTests` 48/48、`RuntimeDelegationAgentRunnerTests` 10/10、`Tau.CodingAgent` build 和 `Tau.WebUi.Tests` build 通过）
+- [x] TUI transcript overlay layout baseline（`TuiTranscriptOverlayOptions` 新增 `Anchor`、`Margin`、`OffsetRow`、`OffsetColumn`、`MinWidth` 和 `MaxHeight`，保留旧 `Row/Column/Width` 绝对定位兼容；`TuiTranscriptViewportHostTests` 19/19 与 `Tau.Tui` build 通过）
+- [x] Read file text/image/render-details parity（`read_file` 的 `offset` 从 Tau 旧 0-based 改为上游 1-based；`offset=0` 宽松归一到第 1 行；兼容上游 `file_path` 参数别名；limit 截断时提示剩余行数和下一次 `offset`；offset 越界返回 error；文本输出已对齐上游 2000 行 / 50KB 截断；`ReadFileToolDetails` 已携带 renderer 可消费的 path/kind/language/line range/total lines/hasMore/image mime/size/omit metadata；PNG/JPEG/GIF/WebP 现在按 magic header 检测，不依赖扩展名，返回 `Read image file [mime]` 与 `ImageContent` base64 附件；超出 inline headroom 的图片会只返回 omit 提示而不附带图片；HTML transcript exporter 已消费 `ToolResult.Details` 并渲染 read_file metadata block。自动 resize 和完整 TUI syntax-highlight render component 仍未移植）
+- [x] TUI input editor kill ring / yank / minimal undo / Tab autocomplete baseline（`InteractiveInputEditor` 会话内维护 kill ring；Ctrl+K / Ctrl+U / Ctrl+Backspace / Ctrl+Delete 删除文本进入 kill ring，连续 kill 会合并，Ctrl+Y yank 最近 killed text，Alt+Y 只在刚 yank 后轮换上一条 kill ring 内容；Ctrl+Z / Ctrl+_ 会在当前 ReadLine 会话内恢复上一份 text+cursor 快照；Tab 现在可通过 `ITuiAutocompleteProvider` 应用 slash/path/`@file` suggestion，并在同一 autocomplete session 内 Tab 向前轮换候选、Shift+Tab 向后轮换候选且都支持回绕；Ctrl+Z 会回到触发补全前文本/cursor；未实现 redo、paste marker、完整 editor box、复杂 undo grouping、autocomplete popup 或可视候选选择 parity）
+- [x] Ls tool entry-format/limit/byte truncation/details parity（`ls` schema 新增 `limit`，默认 500；输出按 case-insensitive 名称排序，目录只追加 `/`，包含 dotfiles，不再输出 `[DIR]` 和文件大小；空目录返回 `(empty directory)`，缺失路径、文件路径和 limit 截断提示对齐上游；输出已接入 50KB `ToolOutputTruncator.TruncateHead(...)`，entry limit 和 byte truncation 都会写入 `ListDirectoryToolDetails`；HTML transcript 已把 `ls` 输出渲染为 directory-aware list，显示 `limit` tool summary，并渲染 directory metadata。仍未移植上游 TUI custom renderer/render component）
 - [~] Slash 命令 full parity（当前列出的缺失 slash 命令均已有 baseline；`/settings`、`/changelog` 与 `/reload` 的完整上游 startup/runtime parity 仍缺，`/scoped-models` 已有 TUI selector、per-entry thinking-level baseline 和模型能力 clamp，Ctrl+P/Ctrl+Shift+P model cycle、`/model select` / Ctrl+L model selector 和 model selector auth filtering/footer/scope/detail/search chrome baseline 已完成，但完整上游 theme/dynamic-border/terminal-host parity 和 per-entry thinking UI editor 仍缺；OAuth login/session parity 仍缺完整 dialog/session/refresh/e2e）
-- [ ] Extension Runtime
+- [~] Extension Runtime（已补 JSON command/resource baseline 与 `CodingAgentExtensionEventBus` 纯内存 event bus foundation；完整 TypeScript runtime、custom tools/events、message renderer、shortcut/provider 注册仍缺）
 - [~] TUI 组件层
 
 ## 已完成切片：Settings command baseline
@@ -318,14 +351,14 @@
 - `CodingAgentRpcHost` 直接消费 `TextReader` / `TextWriter`，使用严格 LF JSONL 作为 stdin/stdout framing。
 - 生产入口 `--mode rpc` 不创建交互式 editor，不写 welcome / prompt / TUI 文本到 stdout，避免污染 JSONL。
 - 当前命令覆盖 `prompt`、`steer`、`follow_up`、`abort`、`new_session`（含可选 `parentSession` 写入 JSONL header metadata）、`get_state`、`set_model`、`cycle_model`、`get_available_models`、`set_thinking_level`、`cycle_thinking_level`、`set_auto_retry`、`abort_retry`、`bash`、`abort_bash`、`set_steering_mode`、`set_follow_up_mode`、`set_auto_compaction`、`switch_session`、`get_fork_messages`、`compact`、`fork`、`clone`、`get_session_stats`、`get_messages`、`get_commands`、`export_html`、`get_last_assistant_text`、`set_session_name`。
-- 当前仍不是完整上游 RPC parity：extension UI request/response sub-protocol、streamed bash output、full settings RPC 和更多 command discovery provenance 仍未完成。
+- 当前仍不是完整上游 RPC parity：extension UI request/response sub-protocol、full settings RPC 和更多 command discovery provenance 仍未完成。
 
 ### Branch Summarization（baseline 已完成，剩余自动 hook / UI parity）
 - 上游：`packages/coding-agent/src/core/compaction/branch-summarization.ts`
-- 已完成触发：`/fork <entry-id> --summarize [instructions]` / `--summary` / `-s`
-- 已完成实现：用 LLM 对离开的 branch 生成结构化摘要（Goal/Constraints/Progress/Key Decisions/Next Steps），写 JSONL `branch_summary` entry，并在 branch restore 时转成 context user message
+- 已完成触发：`/fork <entry-id> --summarize [instructions]` / `--summary` / `-s`，以及 interactive `/tree --interactive` branch switch 的 `no summary / summarize / summarize with custom prompt`
+- 已完成实现：用 LLM 对离开的 branch 生成结构化摘要（Goal/Constraints/Progress/Key Decisions/Next Steps），写 JSONL `branch_summary` entry，并在 branch restore 时转成 context user message；interactive tree summary decision 也已支持 `customInstructions`、`replaceInstructions` foundation 与 label foundation
 - 已完成导出：`/tree --search` 能搜索 branch summary，HTML transcript timeline / branch outline 能渲染 branch summary、read files 和 modified files
-- 剩余：`/resume` / `/tree --interactive` navigation 的自动 summarization hook、extension event、cancellation UI 和完整上游 TreeSelector 集成仍未完成
+- 剩余：`/resume` 等自动 summarization hook、extension event、更完整 cancellation UI 和完整上游 TreeSelector / extension runtime 集成仍未完成
 
 ## 决策记录
 
@@ -348,6 +381,7 @@
 - 2026-05-21：决定 `/hotkeys` 第一刀只列出当前交互式 editor 的 `IKeyBindingMap`，而不是实现完整上游 app/session/tree/extension shortcut registry。原因是 Tau 已经有 `KeyBindingMap` 与 keybinding JSON override，最小可验证缺口是把当前实际绑定暴露到 slash command；全局 shortcut registry、tree/session-specific shortcut provenance 和 footer keybinding hints 依赖完整 TUI/extension runtime，继续后置。
 - 2026-05-21：决定 `/reload` 第一刀只重载 Tau 当时已经存在的可变事实源：settings、JSON extension resources、prompt templates、skills 和交互式 editor keybindings。原因是上游 reload 同时覆盖 keybindings、extensions、skills、prompts、themes/context files 和 extension runtime lifecycle；当时 Tau 尚无 theme/context file loader 或 TypeScript extension runtime，先把现有 settings/resource stores 做成可验证的当前进程 reload，避免把未移植 runtime 伪装成完成。context files baseline 后续已独立补齐，theme loader、完整 TypeScript extension runtime 和 full resource selector 仍后置。
 - 2026-05-21：决定 CodingAgent context files 先落 Tau-native `~/.tau` + ancestor `AGENTS.md` / `CLAUDE.md` baseline，而不是直接搬完整上游 theme/context/resource loader。原因是该切片最小用户价值是自动注入仓库协作规则，且可用本地文件系统测试完整验证；完整 theme loader、TypeScript extension runtime 和 full resource selector 继续作为后续 parity。
+- 2026-05-28：决定把 EventBus 第一刀限定为 `CodingAgentExtensionEventBus` 纯内存 publish/subscribe seam，不接 CLI、`/extensions` 或 TypeScript extension runtime。原因是 extension runtime 工作量大，但事件分发语义可以先本地固定：string/typed event、订阅顺序、unsubscribe、异常聚合和 cancellation 透传，后续 runtime 可直接复用。
 - 2026-05-21：决定 `/settings` 第一刀做 read-only CLI/settings summary，不做 selector UI。原因是 Tau 现有 `CodingAgentSettingsStore` 已覆盖默认模型、tree filter、retry、default thinking、queue modes、auto-compaction boolean 和 enabledModels scope，先固定可 inspect 的 settings contract；完整可编辑 selector UI 后置到 TUI/selector 层。
 - 2026-05-21：决定 `/logout` 第一刀只删除本地 `auth.json` provider credential entry，而不是移植完整 OAuth selector UI 或清理所有可能的 credential 来源。原因是上游 `AuthStorage.logout(provider)` 的核心语义是删除 auth storage 中该 provider 的本地 entry；环境变量和 `models.json` credential 配置不是同一个 store，自动删除会越界且可能破坏用户外部配置。2026-05-22 已补交互式 OAuth provider selector baseline，但完整 login/session parity、refresh UX 和真实 e2e 仍需继续推进。
 - 2026-05-21：决定 `/changelog` 第一刀只读取 Tau 本地 release notes 表，而不是移植完整上游启动 changelog、`collapseChangelog` 设置或 install/update telemetry。原因是 Tau 当前没有根级 `CHANGELOG.md`，但已有 `docs/releases/feature-release-notes.md` 作为用户可感知变更记录；先把显式命令接到这个仓库事实源，可以低风险补齐命令面，同时不引入启动副作用或网络遥测。

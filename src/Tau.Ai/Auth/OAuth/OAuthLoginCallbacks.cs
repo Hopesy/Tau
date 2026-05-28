@@ -7,3 +7,8 @@ public interface IOAuthLoginCallbacks
     void OnProgress(string message);
     Task<string>? OnManualCodeInputAsync();
 }
+
+public interface IOAuthManualCodeInputController
+{
+    void CancelManualCodeInput();
+}

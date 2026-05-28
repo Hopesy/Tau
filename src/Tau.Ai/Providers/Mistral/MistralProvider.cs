@@ -200,7 +200,7 @@ public sealed class MistralProvider : IStreamProvider
             messages.Add(new Dictionary<string, object>
             {
                 ["role"] = "system",
-                ["content"] = context.SystemPrompt!
+                ["content"] = SanitizeText(context.SystemPrompt!)
             });
         }
 
@@ -237,7 +237,7 @@ public sealed class MistralProvider : IStreamProvider
 
     private static Dictionary<string, object> ConvertUserMessage(UserMessage message, Model model)
     {
-        var text = string.Join(string.Empty, message.Content.OfType<TextContent>().Select(block => block.Text));
+        var text = SanitizeText(string.Join(string.Empty, message.Content.OfType<TextContent>().Select(block => block.Text)));
         var hasImages = message.Content.Any(block => block is ImageContent);
         if (hasImages && !model.InputModalities.Contains("image", StringComparer.OrdinalIgnoreCase))
         {
@@ -266,10 +266,10 @@ public sealed class MistralProvider : IStreamProvider
             switch (block)
             {
                 case TextContent text:
-                    content.Append(text.Text);
+                    content.Append(SanitizeText(text.Text));
                     break;
                 case ThinkingContent thinking when !string.IsNullOrWhiteSpace(thinking.Thinking):
-                    content.Append(thinking.Thinking);
+                    content.Append(SanitizeText(thinking.Thinking));
                     break;
                 case ToolCallContent toolCall:
                     var normalizedId = normalizer.Normalize(toolCall.Id);
@@ -329,7 +329,7 @@ public sealed class MistralProvider : IStreamProvider
 
     private static string GetText(IReadOnlyList<ContentBlock> content, bool isError)
     {
-        var text = string.Join("\n", content.OfType<TextContent>().Select(block => block.Text)).Trim();
+        var text = SanitizeText(string.Join("\n", content.OfType<TextContent>().Select(block => block.Text))).Trim();
         if (text.Length == 0)
         {
             text = "(no tool output)";
@@ -337,6 +337,9 @@ public sealed class MistralProvider : IStreamProvider
 
         return isError ? $"[tool error] {text}" : text;
     }
+
+    private static string SanitizeText(string text) =>
+        UnicodeTextSanitizer.RemoveUnpairedSurrogates(text);
 
     private static void ApplyAuthHeader(HttpRequestMessage request, string? apiKey)
     {

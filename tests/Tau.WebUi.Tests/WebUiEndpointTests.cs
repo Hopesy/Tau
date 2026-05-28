@@ -11,6 +11,7 @@ using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.Extensions.DependencyInjection;
 using Tau.Agent;
 using Tau.Ai;
+using Tau.Ai.Observability;
 using Tau.WebUi.Contracts;
 using Tau.WebUi.Services;
 
@@ -18,6 +19,135 @@ namespace Tau.WebUi.Tests;
 
 public sealed class WebUiEndpointTests
 {
+    [Fact]
+    public async Task AuthEndpoint_ReturnsStatusAndLogsAuthStatus()
+    {
+        using var scope = EnvironmentVariableScope.Acquire();
+        scope.Set("OPENAI_API_KEY", "secret-openai-key");
+        scope.Set("TAU_AUTH_FILE", Path.Combine(Path.GetTempPath(), $"missing-auth-{Guid.NewGuid():N}.json"));
+        var logSink = new CapturingLogSink();
+        await using var fixture = await WebUiEndpointFixture.StartAsync(StreamOk, logSink);
+
+        var response = await fixture.Client.GetAsync("/api/auth/openai");
+
+        response.EnsureSuccessStatusCode();
+        var status = JsonSerializer.Deserialize(
+            await response.Content.ReadAsStringAsync(),
+            WebUiEndpointJsonContext.Default.WebUiAuthStatusDto);
+        Assert.NotNull(status);
+        Assert.Equal("openai", status!.Provider);
+        Assert.True(status.IsConfigured);
+        Assert.Equal("environment", status.Source);
+        Assert.False(status.UsesOAuth);
+        Assert.False(status.CanLogin);
+        Assert.DoesNotContain("secret-openai-key", status.Message, StringComparison.Ordinal);
+
+        var evt = Assert.Single(logSink.Events);
+        Assert.Equal("auth", evt.Category);
+        Assert.Equal("status.checked", evt.Event);
+        Assert.Equal("openai", evt.Fields["provider"]);
+        Assert.Equal("true", evt.Fields["configured"]);
+        Assert.Equal("environment", evt.Fields["source"]);
+        Assert.Equal("false", evt.Fields["usesOAuth"]);
+        Assert.Equal("false", evt.Fields["canLogin"]);
+        Assert.False(evt.Fields.ContainsKey("message"));
+        var fields = string.Join(
+            Environment.NewLine,
+            evt.Fields.Select(field => $"{field.Key}={field.Value}"));
+        Assert.DoesNotContain("secret-openai-key", fields, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task MessageStreamEndpoint_DefaultRunnerLogsAgentRunEvents()
+    {
+        using var scope = EnvironmentVariableScope.Acquire();
+        var modelsPath = Path.Combine(Path.GetTempPath(), $"tau-webui-models-{Guid.NewGuid():N}.json");
+        await File.WriteAllTextAsync(
+            modelsPath,
+            """
+            {
+              "providers": {
+                "tau-webui-log-sink-test": {
+                  "models": [
+                    {
+                      "id": "local-only",
+                      "name": "Local Only",
+                      "api": "tau-test-unregistered-api",
+                      "baseUrl": "http://127.0.0.1:9"
+                    }
+                  ]
+                }
+              }
+            }
+            """);
+        scope.Set("TAU_MODELS_FILE", modelsPath);
+        scope.Set("TAU_AUTH_FILE", Path.Combine(Path.GetTempPath(), $"missing-auth-{Guid.NewGuid():N}.json"));
+        scope.Set("TAU_PROVIDER", null);
+        scope.Set("TAU_MODEL", null);
+        scope.Set("OPENAI_API_KEY", null);
+        var logSink = new CapturingLogSink();
+
+        try
+        {
+            await using var fixture = await WebUiEndpointFixture.StartDefaultRunnerAsync(logSink);
+            var created = await fixture.Client.PostAsync(
+                "/api/sessions",
+                JsonBody(
+                    new CreateSessionRequest("Runtime log", "tau-webui-log-sink-test", "local-only"),
+                    WebUiEndpointJsonContext.Default.CreateSessionRequest));
+            created.EnsureSuccessStatusCode();
+            var session = JsonSerializer.Deserialize(
+                await created.Content.ReadAsStringAsync(),
+                WebUiEndpointJsonContext.Default.WebChatSessionDto);
+            Assert.NotNull(session);
+
+            var streamed = await fixture.Client.PostAsync(
+                $"/api/sessions/{session!.Id}/messages/stream",
+                JsonBody(
+                    new SendMessageRequest("hello runtime"),
+                    WebUiEndpointJsonContext.Default.SendMessageRequest));
+
+            streamed.EnsureSuccessStatusCode();
+            Assert.Equal("application/x-ndjson", streamed.Content.Headers.ContentType?.MediaType);
+            var events = (await streamed.Content.ReadAsStringAsync())
+                .Split('\n', StringSplitOptions.RemoveEmptyEntries)
+                .Select(line => JsonSerializer.Deserialize(line, WebUiEndpointJsonContext.Default.WebChatStreamEventDto))
+                .Where(evt => evt is not null)
+                .Select(evt => evt!)
+                .ToArray();
+
+            Assert.Contains(events, evt => evt.Type == "user" && evt.Text == "hello runtime");
+            var streamError = Assert.Single(events, evt => evt.Type == "error");
+            Assert.Contains("No provider registered for API 'tau-test-unregistered-api'", streamError.Error, StringComparison.Ordinal);
+
+            var runStart = Assert.Single(logSink.Events, evt => evt.Category == "agent" && evt.Event == "run.start");
+            Assert.Equal("tau-webui-log-sink-test", runStart.Fields["provider"]);
+            Assert.Equal("local-only", runStart.Fields["model"]);
+            Assert.True(long.TryParse(runStart.Fields["inputBytes"], out var inputBytes));
+            Assert.True(inputBytes > 0);
+            Assert.Equal(session.Id, runStart.Fields["sessionId"]);
+            Assert.False(string.IsNullOrWhiteSpace(runStart.Fields["messageId"]));
+            Assert.False(string.IsNullOrWhiteSpace(runStart.Fields["correlationId"]));
+
+            var runError = Assert.Single(logSink.Events, evt => evt.Category == "agent" && evt.Event == "run.error");
+            Assert.Equal("tau-webui-log-sink-test", runError.Fields["provider"]);
+            Assert.Equal("local-only", runError.Fields["model"]);
+            Assert.Equal("KeyNotFoundException", runError.Fields["error"]);
+            Assert.Contains("No provider registered for API 'tau-test-unregistered-api'", runError.Fields["message"], StringComparison.Ordinal);
+            Assert.Equal(runStart.Fields["correlationId"], runError.Fields["correlationId"]);
+            Assert.Equal(session.Id, runError.Fields["sessionId"]);
+            Assert.Equal(runStart.Fields["messageId"], runError.Fields["messageId"]);
+            Assert.DoesNotContain(logSink.Events, evt => evt.Category == "agent" && evt.Event == "run.end");
+        }
+        finally
+        {
+            if (File.Exists(modelsPath))
+            {
+                File.Delete(modelsPath);
+            }
+        }
+    }
+
     [Fact]
     public async Task ExportJsonlEndpoint_ExportsSessionAndPreservesExistingJsonAndHtmlExports()
     {
@@ -262,6 +392,12 @@ public sealed class WebUiEndpointTests
         Assert.Equal(["entry-user", "entry-model", "entry-assistant", "entry-tool"], preview.Audit.CurrentBranchTimeline.Select(entry => entry.EntryId).ToArray());
         Assert.Contains(preview.Audit.Warnings, warning => warning.Code == "non_message_entries_not_imported_as_messages");
         Assert.Contains(preview.Audit.Warnings, warning => warning.Code == "webchat_import_is_linearized");
+        Assert.Equal("conservative-timeline-linearized", preview.ImportStrategy.Strategy);
+        Assert.Equal("entry-tool", preview.ImportStrategy.SourceLeafEntryId);
+        Assert.False(preview.ImportStrategy.CurrentBranchOnly);
+        Assert.True(preview.ImportStrategy.ImportsTimelineMessagesOnly);
+        Assert.False(preview.ImportStrategy.PersistsBranchTree);
+        Assert.Contains("webchat_import_is_linearized", preview.ImportStrategy.WarningCodes);
         Assert.Equal("user", preview.Messages[0].Role);
         Assert.Equal("hello coding agent", preview.Messages[0].TextPreview);
         Assert.Equal("entry-model", preview.Messages[1].ParentEntryId);
@@ -303,6 +439,10 @@ public sealed class WebUiEndpointTests
         Assert.Equal(5, preview.Tree.BranchEntryCount);
         Assert.Equal(3, preview.Audit.CurrentBranchMessageCount);
         Assert.Equal(2, preview.Audit.OffBranchMessageCount);
+        Assert.Equal("conservative-current-branch-linearized", preview.ImportStrategy.Strategy);
+        Assert.Equal("entry-label", preview.ImportStrategy.SourceLeafEntryId);
+        Assert.True(preview.ImportStrategy.CurrentBranchOnly);
+        Assert.DoesNotContain("off_branch_messages_in_timeline", preview.ImportStrategy.WarningCodes);
 
         var message = Assert.Single(preview.Messages);
         Assert.Equal("entry-after-summary", message.EntryId);
@@ -349,6 +489,14 @@ public sealed class WebUiEndpointTests
         Assert.Equal(1, result.SourceAudit.NonImportedEntryCount);
         Assert.Equal(3, result.SourceAudit.ImportedMessageCount);
         Assert.Contains(result.SourceAudit.Warnings, warning => warning.Code == "webchat_import_is_linearized");
+        Assert.Equal("conservative-timeline-linearized", result.SourceStrategy.Strategy);
+        Assert.Equal("entry-tool", result.SourceStrategy.SourceLeafEntryId);
+        Assert.False(result.SourceStrategy.CurrentBranchOnly);
+        Assert.True(result.SourceStrategy.ImportsTimelineMessagesOnly);
+        Assert.False(result.SourceStrategy.PersistsBranchTree);
+        Assert.Contains("webchat_import_is_linearized", result.SourceStrategy.WarningCodes);
+        Assert.Equal("conservative-timeline-linearized", result.SourceMetadata.ImportStrategy?.Strategy);
+        Assert.Equal("entry-tool", result.SourceMetadata.ImportStrategy?.SourceLeafEntryId);
 
         var fetched = await fixture.Client.GetAsync($"/api/sessions/{imported.Id}");
         fetched.EnsureSuccessStatusCode();
@@ -357,6 +505,8 @@ public sealed class WebUiEndpointTests
             WebUiEndpointJsonContext.Default.WebChatSessionDto);
         Assert.Equal(imported.Id, fetchedSession?.Id);
         Assert.Equal(3, fetchedSession?.Messages.Count);
+        Assert.Equal("conservative-timeline-linearized", fetchedSession?.SourceMetadata?.ImportStrategy?.Strategy);
+        Assert.Equal("entry-tool", fetchedSession?.SourceMetadata?.ImportStrategy?.SourceLeafEntryId);
     }
 
     [Fact]
@@ -438,6 +588,53 @@ public sealed class WebUiEndpointTests
         Assert.Contains(result.SourceAudit.Warnings, warning => warning.Code == "off_branch_messages_in_timeline");
         Assert.Contains(result.SourceAudit.Warnings, warning => warning.Code == "non_message_entries_not_imported_as_messages");
         Assert.Contains(result.SourceAudit.Warnings, warning => warning.Code == "webchat_import_is_linearized");
+    }
+
+    [Fact]
+    public async Task CodingAgentJsonlImportEndpoint_CanImportCurrentBranchOnly()
+    {
+        await using var fixture = await WebUiEndpointFixture.StartAsync(StreamOk);
+
+        var response = await fixture.Client.PostAsync(
+            "/api/sessions/import.coding-agent-jsonl?currentBranchOnly=true",
+            new StringContent(BranchedCodingAgentJsonl(), Encoding.UTF8, "application/x-ndjson"));
+
+        response.EnsureSuccessStatusCode();
+        var result = JsonSerializer.Deserialize(
+            await response.Content.ReadAsStringAsync(),
+            WebUiEndpointJsonContext.Default.CodingAgentJsonlImportResultDto);
+
+        Assert.NotNull(result);
+        Assert.Equal(3, result!.Session.Messages.Count);
+        Assert.Equal(["root", "left", "after summary"], result.Session.Messages.Select(message => message.Text).ToArray());
+        Assert.True(result.SourceAudit.WillImportCurrentBranchOnly);
+        Assert.Equal(3, result.SourceAudit.ImportedMessageCount);
+        Assert.Equal(6, result.SourceAudit.NonImportedEntryCount);
+        Assert.Equal(3, result.SourceAudit.CurrentBranchMessageCount);
+        Assert.Equal(2, result.SourceAudit.OffBranchMessageCount);
+        Assert.Equal(3, result.Summary.ImportedMessageCount);
+        Assert.True(result.Summary.CurrentBranchOnly);
+        Assert.Equal("conservative-current-branch-linearized", result.SourceStrategy.Strategy);
+        Assert.Equal("entry-label", result.SourceStrategy.SourceLeafEntryId);
+        Assert.True(result.SourceStrategy.CurrentBranchOnly);
+        Assert.True(result.SourceStrategy.ImportsTimelineMessagesOnly);
+        Assert.False(result.SourceStrategy.PersistsBranchTree);
+        Assert.DoesNotContain("off_branch_messages_in_timeline", result.SourceStrategy.WarningCodes);
+        Assert.True(result.SourceMetadata.Audit?.WillImportCurrentBranchOnly);
+        Assert.Equal("conservative-current-branch-linearized", result.SourceMetadata.ImportStrategy?.Strategy);
+        Assert.DoesNotContain(result.SourceAudit.Warnings, warning => warning.Code == "off_branch_messages_in_timeline");
+        Assert.DoesNotContain(result.Session.Messages, message => message.Text.Contains("right", StringComparison.Ordinal));
+
+        var fetched = await fixture.Client.GetAsync($"/api/sessions/{result.Session.Id}");
+        fetched.EnsureSuccessStatusCode();
+        var fetchedSession = JsonSerializer.Deserialize(
+            await fetched.Content.ReadAsStringAsync(),
+            WebUiEndpointJsonContext.Default.WebChatSessionDto);
+        Assert.Equal(3, fetchedSession?.Messages.Count);
+        Assert.Equal("coding-agent-jsonl", fetchedSession?.SourceMetadata?.Kind);
+        Assert.True(fetchedSession?.SourceMetadata?.Audit?.WillImportCurrentBranchOnly);
+        Assert.Equal("conservative-current-branch-linearized", fetchedSession?.SourceMetadata?.ImportStrategy?.Strategy);
+        Assert.Equal("entry-label", fetchedSession?.SourceMetadata?.ImportStrategy?.SourceLeafEntryId);
     }
 
     [Fact]
@@ -579,7 +776,25 @@ public sealed class WebUiEndpointTests
         public string StorePath { get; }
 
         public static async Task<WebUiEndpointFixture> StartAsync(
-            Func<string, CancellationToken, IAsyncEnumerable<AgentEvent>> run)
+            Func<string, CancellationToken, IAsyncEnumerable<AgentEvent>> run,
+            ITauLogSink? logSink = null)
+        {
+            return await StartAsync(sp => new WebChatService(
+                    sp.GetRequiredService<WebChatStore>(),
+                    (_, _, _, _) => new FakeWebUiRunner(run),
+                    logSink))
+                .ConfigureAwait(false);
+        }
+
+        public static async Task<WebUiEndpointFixture> StartDefaultRunnerAsync(ITauLogSink? logSink = null)
+        {
+            return await StartAsync(sp => new WebChatService(
+                    sp.GetRequiredService<WebChatStore>(),
+                    logSink))
+                .ConfigureAwait(false);
+        }
+
+        private static async Task<WebUiEndpointFixture> StartAsync(Func<IServiceProvider, WebChatService> chatFactory)
         {
             var storePath = Path.Combine(Path.GetTempPath(), $"tau-webui-endpoint-{Guid.NewGuid():N}.json");
             var builder = WebApplication.CreateBuilder(new WebApplicationOptions
@@ -588,10 +803,7 @@ public sealed class WebUiEndpointTests
             });
             builder.WebHost.UseUrls("http://127.0.0.1:0");
             builder.Services.AddSingleton(new WebChatStore(storePath));
-            builder.Services.AddSingleton<WebChatService>(sp => new WebChatService(
-                sp.GetRequiredService<WebChatStore>(),
-                (_, _, _) => new FakeWebUiRunner(run)));
-
+            builder.Services.AddSingleton(chatFactory);
             var app = builder.Build();
             app.MapWebUiEndpoints();
             await app.StartAsync();
@@ -614,11 +826,63 @@ public sealed class WebUiEndpointTests
             }
         }
     }
+
+    private sealed class CapturingLogSink : ITauLogSink
+    {
+        public List<TauLogEvent> Events { get; } = [];
+
+        public void Log(TauLogEvent evt) => Events.Add(evt);
+    }
+
+    private sealed class EnvironmentVariableScope : IDisposable
+    {
+        private static readonly SemaphoreSlim SyncRoot = new(1, 1);
+
+        private readonly Dictionary<string, string?> _originalValues = new(StringComparer.OrdinalIgnoreCase);
+        private bool _disposed;
+
+        private EnvironmentVariableScope()
+        {
+            SyncRoot.Wait();
+        }
+
+        public static EnvironmentVariableScope Acquire() => new();
+
+        public void Set(string name, string? value)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+
+            if (!_originalValues.ContainsKey(name))
+            {
+                _originalValues[name] = Environment.GetEnvironmentVariable(name);
+            }
+
+            Environment.SetEnvironmentVariable(name, value);
+        }
+
+        public void Dispose()
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            foreach (var (name, value) in _originalValues)
+            {
+                Environment.SetEnvironmentVariable(name, value);
+            }
+
+            _disposed = true;
+            SyncRoot.Release();
+        }
+    }
 }
 
 [JsonSerializable(typeof(CreateSessionRequest))]
 [JsonSerializable(typeof(SendMessageRequest))]
 [JsonSerializable(typeof(WebChatSessionDto))]
+[JsonSerializable(typeof(WebUiAuthStatusDto))]
+[JsonSerializable(typeof(WebChatStreamEventDto))]
 [JsonSerializable(typeof(WebChatSessionDto[]))]
 [JsonSerializable(typeof(CodingAgentJsonlSessionPreviewDto))]
 [JsonSerializable(typeof(CodingAgentJsonlTreeMetadataDto))]
@@ -627,6 +891,7 @@ public sealed class WebUiEndpointTests
 [JsonSerializable(typeof(CodingAgentJsonlBranchTimelineEntryDto))]
 [JsonSerializable(typeof(CodingAgentJsonlBranchLabelDto))]
 [JsonSerializable(typeof(CodingAgentJsonlAuditWarningDto))]
+[JsonSerializable(typeof(CodingAgentJsonlImportStrategyDto))]
 [JsonSerializable(typeof(CodingAgentJsonlImportResultDto))]
 [JsonSerializable(typeof(Dictionary<string, int>))]
 [JsonSerializable(typeof(IReadOnlyDictionary<string, int>))]

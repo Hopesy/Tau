@@ -10,6 +10,8 @@ public sealed class PodDefinition
     public string? SshHost { get; set; }
     public int? SshPort { get; set; }
     public string? ModelsPath { get; set; }
+    public string? VllmVersion { get; set; }
+    public List<PodGpuInfo> Gpus { get; set; } = [];
     public bool Enabled { get; set; } = true;
     public List<string> Tags { get; set; } = [];
 }

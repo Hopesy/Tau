@@ -17,7 +17,21 @@ public sealed record CodingAgentSettingsSnapshot(
     string? FollowUpMode = null,
     bool? AutoCompactionEnabled = null,
     string? Theme = null,
-    IReadOnlyList<string>? TreeCollapsedEntryIds = null);
+    IReadOnlyList<string>? TreeCollapsedEntryIds = null,
+    string? ShellPath = null,
+    string? ShellCommandPrefix = null,
+    IReadOnlyList<string>? NpmCommand = null,
+    bool? QuietStartup = null,
+    bool? CollapseChangelog = null,
+    bool? EnableInstallTelemetry = null,
+    bool? TerminalShowImages = null,
+    bool? TerminalClearOnShrink = null,
+    bool? ImagesAutoResize = null,
+    bool? ImagesBlockImages = null,
+    bool? ShowHardwareCursor = null,
+    int? EditorPaddingX = null,
+    int? AutocompleteMaxVisible = null,
+    string? MarkdownCodeBlockIndent = null);
 
 public sealed class CodingAgentSettingsStore
 {
@@ -65,7 +79,21 @@ public sealed class CodingAgentSettingsStore
                 CodingAgentQueueModes.NormalizeOrNull(document?.FollowUpMode),
                 document?.AutoCompactionEnabled,
                 NormalizeTheme(document?.Theme),
-                NormalizeStringList(document?.TreeCollapsedEntryIds));
+                NormalizeStringList(document?.TreeCollapsedEntryIds),
+                NormalizeOptionalString(document?.ShellPath),
+                NormalizeOptionalString(document?.ShellCommandPrefix),
+                NormalizeStringListPreserveOrder(document?.NpmCommand),
+                document?.QuietStartup,
+                document?.CollapseChangelog,
+                document?.EnableInstallTelemetry,
+                document?.Terminal?.ShowImages,
+                document?.Terminal?.ClearOnShrink,
+                document?.Images?.AutoResize,
+                document?.Images?.BlockImages,
+                document?.ShowHardwareCursor,
+                NormalizeEditorPaddingX(document?.EditorPaddingX),
+                NormalizeAutocompleteMaxVisible(document?.AutocompleteMaxVisible),
+                document?.Markdown?.CodeBlockIndent);
         }
         catch (JsonException)
         {
@@ -103,6 +131,18 @@ public sealed class CodingAgentSettingsStore
             AutoCompactionEnabled = snapshot.AutoCompactionEnabled,
             Theme = NormalizeTheme(snapshot.Theme),
             TreeCollapsedEntryIds = NormalizeStringList(snapshot.TreeCollapsedEntryIds),
+            ShellPath = NormalizeOptionalString(snapshot.ShellPath),
+            ShellCommandPrefix = NormalizeOptionalString(snapshot.ShellCommandPrefix),
+            NpmCommand = NormalizeStringListPreserveOrder(snapshot.NpmCommand),
+            QuietStartup = snapshot.QuietStartup,
+            CollapseChangelog = snapshot.CollapseChangelog,
+            EnableInstallTelemetry = snapshot.EnableInstallTelemetry,
+            Terminal = CreateTerminalSettingsDocument(snapshot),
+            Images = CreateImageSettingsDocument(snapshot),
+            ShowHardwareCursor = snapshot.ShowHardwareCursor,
+            EditorPaddingX = NormalizeEditorPaddingX(snapshot.EditorPaddingX),
+            AutocompleteMaxVisible = NormalizeAutocompleteMaxVisible(snapshot.AutocompleteMaxVisible),
+            Markdown = CreateMarkdownSettingsDocument(snapshot),
             UpdatedAt = DateTimeOffset.UtcNow
         };
 
@@ -149,8 +189,54 @@ public sealed class CodingAgentSettingsStore
         return normalized.Length == 0 ? null : normalized;
     }
 
+    private static string[]? NormalizeStringListPreserveOrder(IEnumerable<string>? values)
+    {
+        if (values is null)
+        {
+            return null;
+        }
+
+        var normalized = values
+            .Where(static value => !string.IsNullOrWhiteSpace(value))
+            .Select(static value => value.Trim())
+            .ToArray();
+        return normalized.Length == 0 ? null : normalized;
+    }
+
     private static string? NormalizeTheme(string? theme) =>
         string.IsNullOrWhiteSpace(theme) ? null : theme.Trim();
+
+    private static string? NormalizeOptionalString(string? value) =>
+        string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+
+    private static int? NormalizeEditorPaddingX(int? value) =>
+        value is null ? null : Math.Clamp(value.Value, 0, 3);
+
+    private static int? NormalizeAutocompleteMaxVisible(int? value) =>
+        value is null ? null : Math.Clamp(value.Value, 3, 20);
+
+    private static CodingAgentTerminalSettingsDocument? CreateTerminalSettingsDocument(CodingAgentSettingsSnapshot snapshot) =>
+        snapshot.TerminalShowImages is null && snapshot.TerminalClearOnShrink is null
+            ? null
+            : new CodingAgentTerminalSettingsDocument
+            {
+                ShowImages = snapshot.TerminalShowImages,
+                ClearOnShrink = snapshot.TerminalClearOnShrink
+            };
+
+    private static CodingAgentImageSettingsDocument? CreateImageSettingsDocument(CodingAgentSettingsSnapshot snapshot) =>
+        snapshot.ImagesAutoResize is null && snapshot.ImagesBlockImages is null
+            ? null
+            : new CodingAgentImageSettingsDocument
+            {
+                AutoResize = snapshot.ImagesAutoResize,
+                BlockImages = snapshot.ImagesBlockImages
+            };
+
+    private static CodingAgentMarkdownSettingsDocument? CreateMarkdownSettingsDocument(CodingAgentSettingsSnapshot snapshot) =>
+        snapshot.MarkdownCodeBlockIndent is null
+            ? null
+            : new CodingAgentMarkdownSettingsDocument { CodeBlockIndent = snapshot.MarkdownCodeBlockIndent };
 }
 
 internal sealed class CodingAgentSettingsDocument
@@ -168,7 +254,36 @@ internal sealed class CodingAgentSettingsDocument
     public bool? AutoCompactionEnabled { get; init; }
     public string? Theme { get; init; }
     public string[]? TreeCollapsedEntryIds { get; init; }
+    public string? ShellPath { get; init; }
+    public string? ShellCommandPrefix { get; init; }
+    public string[]? NpmCommand { get; init; }
+    public bool? QuietStartup { get; init; }
+    public bool? CollapseChangelog { get; init; }
+    public bool? EnableInstallTelemetry { get; init; }
+    public CodingAgentTerminalSettingsDocument? Terminal { get; init; }
+    public CodingAgentImageSettingsDocument? Images { get; init; }
+    public bool? ShowHardwareCursor { get; init; }
+    public int? EditorPaddingX { get; init; }
+    public int? AutocompleteMaxVisible { get; init; }
+    public CodingAgentMarkdownSettingsDocument? Markdown { get; init; }
     public DateTimeOffset UpdatedAt { get; init; }
+}
+
+internal sealed class CodingAgentTerminalSettingsDocument
+{
+    public bool? ShowImages { get; init; }
+    public bool? ClearOnShrink { get; init; }
+}
+
+internal sealed class CodingAgentImageSettingsDocument
+{
+    public bool? AutoResize { get; init; }
+    public bool? BlockImages { get; init; }
+}
+
+internal sealed class CodingAgentMarkdownSettingsDocument
+{
+    public string? CodeBlockIndent { get; init; }
 }
 
 internal static class CodingAgentQueueModes
@@ -213,4 +328,7 @@ internal static class CodingAgentQueueModes
     WriteIndented = true,
     DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]
 [JsonSerializable(typeof(CodingAgentSettingsDocument))]
+[JsonSerializable(typeof(CodingAgentTerminalSettingsDocument))]
+[JsonSerializable(typeof(CodingAgentImageSettingsDocument))]
+[JsonSerializable(typeof(CodingAgentMarkdownSettingsDocument))]
 internal sealed partial class CodingAgentSettingsJsonContext : JsonSerializerContext;

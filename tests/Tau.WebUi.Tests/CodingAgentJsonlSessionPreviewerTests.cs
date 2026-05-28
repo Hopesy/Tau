@@ -47,6 +47,12 @@ public sealed class CodingAgentJsonlSessionPreviewerTests
         Assert.DoesNotContain(preview.Audit.Warnings, warning => warning.Code == "branch_tree_not_persisted");
         Assert.Contains(preview.Audit.Warnings, warning => warning.Code == "non_message_entries_not_imported_as_messages" && warning.EntryId == "entry-model");
         Assert.Contains(preview.Audit.Warnings, warning => warning.Code == "webchat_import_is_linearized");
+        Assert.Equal("conservative-timeline-linearized", preview.ImportStrategy.Strategy);
+        Assert.Equal("entry-tool", preview.ImportStrategy.SourceLeafEntryId);
+        Assert.False(preview.ImportStrategy.CurrentBranchOnly);
+        Assert.True(preview.ImportStrategy.ImportsTimelineMessagesOnly);
+        Assert.False(preview.ImportStrategy.PersistsBranchTree);
+        Assert.Contains("webchat_import_is_linearized", preview.ImportStrategy.WarningCodes);
 
         var user = preview.Messages[0];
         Assert.Equal("entry-user", user.EntryId);
@@ -104,9 +110,18 @@ public sealed class CodingAgentJsonlSessionPreviewerTests
         Assert.Equal("entry-after-summary", message.EntryId);
         Assert.Equal("after summary", message.TextPreview);
         Assert.False(preview.Tree.Entries.Single(entry => entry.EntryId == "entry-right").IsOnCurrentBranch);
-        Assert.Equal(5, preview.Audit.ImportedMessageCount);
+        Assert.True(preview.Audit.WillImportCurrentBranchOnly);
+        Assert.Equal(3, preview.Audit.ImportedMessageCount);
+        Assert.Equal(6, preview.Audit.NonImportedEntryCount);
         Assert.Equal(3, preview.Audit.CurrentBranchMessageCount);
         Assert.Equal(2, preview.Audit.OffBranchMessageCount);
+        Assert.DoesNotContain(preview.Audit.Warnings, warning => warning.Code == "off_branch_messages_in_timeline");
+        Assert.Equal("conservative-current-branch-linearized", preview.ImportStrategy.Strategy);
+        Assert.Equal("entry-label", preview.ImportStrategy.SourceLeafEntryId);
+        Assert.True(preview.ImportStrategy.CurrentBranchOnly);
+        Assert.True(preview.ImportStrategy.ImportsTimelineMessagesOnly);
+        Assert.False(preview.ImportStrategy.PersistsBranchTree);
+        Assert.DoesNotContain("off_branch_messages_in_timeline", preview.ImportStrategy.WarningCodes);
     }
 
     [Fact]
