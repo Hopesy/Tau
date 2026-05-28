@@ -2,7 +2,9 @@
 
 这份文件只记录 **当前还没做完、后续需要继续推进的缺口**，方便快速检索。
 
-当前完整移植总路线图：`docs/exec-plans/active/2026-05-10-tau-complete-pi-mono-port.md`。后续所有 `pi-mono-main` parity 工作默认按这份 plan 推进，旧 `2026-04-23-tau-port-baseline.md` 保留为已完成 P1 基线和决策历史。
+当前 100% parity 多 Agent 收口计划：`docs/exec-plans/active/2026-05-28-tau-100-percent-pi-mono-parity.md`。
+
+当前完整移植总路线图：`docs/exec-plans/active/2026-05-10-tau-complete-pi-mono-port.md`。后续所有 `pi-mono-main` parity 工作默认以 100% parity 多 Agent 收口计划为最终验收入口，旧 `2026-04-23-tau-port-baseline.md` 保留为已完成 P1 基线和决策历史。
 
 ## P0：当前最值得继续推进的项
 
