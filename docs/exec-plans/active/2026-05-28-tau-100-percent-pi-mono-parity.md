@@ -444,7 +444,7 @@ git diff --check
 ## 进度记录
 
 - [x] Phase 0：baseline commit 已推送到 `origin/main`。
-- [ ] Phase 0：本 100% parity plan 提交并推送。
+- [x] Phase 0：本 100% parity plan 提交并推送。
 - [ ] Phase 1：上游 inventory freeze。
 - [ ] Phase 2：critical contract closure。
 - [ ] Phase 3：product runtime parity。
