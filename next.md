@@ -4,6 +4,10 @@
 
 当前 100% parity 多 Agent 收口计划：`docs/exec-plans/active/2026-05-28-tau-100-percent-pi-mono-parity.md`。
 
+当前 Phase 1 parity matrix：`docs/exec-plans/active/2026-05-28-pi-mono-parity-matrix.md`。
+
+当前 Phase 1 状态：matrix 已合并 capability-level inventory；下一步仍需冻结 file-level mapping，以及 CLI/RPC/HTTP/env/config/log/schema 子矩阵。
+
 当前完整移植总路线图：`docs/exec-plans/active/2026-05-10-tau-complete-pi-mono-port.md`。后续所有 `pi-mono-main` parity 工作默认以 100% parity 多 Agent 收口计划为最终验收入口，旧 `2026-04-23-tau-port-baseline.md` 保留为已完成 P1 基线和决策历史。
 
 ## P0：当前最值得继续推进的项

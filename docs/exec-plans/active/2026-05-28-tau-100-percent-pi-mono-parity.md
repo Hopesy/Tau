@@ -38,6 +38,7 @@
 - `docs/ARCHITECTURE.md`
 - `docs/QUALITY_SCORE.md`
 - `next.md`
+- `docs/exec-plans/active/2026-05-28-pi-mono-parity-matrix.md`
 - `docs/exec-plans/active/2026-05-10-tau-complete-pi-mono-port.md`
 - `docs/exec-plans/active/2026-05-20-coding-agent-parity-gap-analysis.md`
 
@@ -171,9 +172,9 @@ Docs/History Worker：
 任务：
 
 - [x] 提交并推送当前 WIP baseline。
-- [ ] 在 `next.md` 顶部挂本计划指针。
-- [ ] 新增 history。
-- [ ] docs-only 验证并提交本计划。
+- [x] 在 `next.md` 顶部挂本计划指针。
+- [x] 新增 history。
+- [x] docs-only 验证并提交本计划。
 
 Exit criteria：
 
@@ -445,7 +446,7 @@ git diff --check
 
 - [x] Phase 0：baseline commit 已推送到 `origin/main`。
 - [x] Phase 0：本 100% parity plan 提交并推送。
-- [ ] Phase 1：上游 inventory freeze。
+- [~] Phase 1：上游 inventory freeze（matrix 已创建并合并 capability-level inventory：`docs/exec-plans/active/2026-05-28-pi-mono-parity-matrix.md`；file-level mapping、command/API/env/config/log/schema submatrices 仍待冻结）。
 - [ ] Phase 2：critical contract closure。
 - [ ] Phase 3：product runtime parity。
 - [ ] Phase 4：external e2e closure。
@@ -457,3 +458,4 @@ git diff --check
 - 2026-05-28：把 100% 移植率定义为 inventory + behavior tests + real e2e + release artifact + docs/history closure，不再用单一百分比或主观进度声明。
 - 2026-05-28：本计划作为最终收口 plan；旧 `2026-05-10-tau-complete-pi-mono-port.md` 和 `2026-05-20-coding-agent-parity-gap-analysis.md` 保留历史和局部上下文，但后续最终验收以本计划为准。
 - 2026-05-28：多 Agent 默认按上游 package 与 Tau 模块一一映射并保持互斥文件边界；Main Integrator 独占共享 docs/scripts/solution 和最终验证。
+- 2026-05-28：部分 explorer 因额度或服务错误中断，Phase 1 不等待外部 agent 恢复；主控以本地扫描和已完成的 Mom explorer 输出补齐 capability-level matrix，后续继续扩成 file-level inventory。
