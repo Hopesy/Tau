@@ -52,6 +52,11 @@
 - [x] models.json dynamic OpenAI-compatible provider registration（未预注册 provider 只在 `apiKind` / `apiType` 显式标记为 `openai-compatible`、`openai-completions` 或 `openai-chat-completions` 时运行时注册；拼错或未知 api 不静默兜底）
 - [x] models.json 的 `apiKey/authHeader`、shell/env value resolution、运行时 request auth 合并
 
+### Tau.Agent
+
+- [x] high-level Agent facade baseline（`AgentOptions` / `Agent`，覆盖 model/provider registry/system prompt/tools/interceptors/options 持有，`PromptAsync`、`ContinueAsync`、`Subscribe`、`Steer`、`FollowUp`、queue clear、`HasQueuedMessages`、`Abort`、`WaitForIdleAsync`、`Reset`；prompt user message 和 tool result message lifecycle 已有测试）
+- [~] agent loop/event contract（已具备双层循环、tool execution、context transform/convert、tool-result message lifecycle 和 runtime trace；仍缺上游同形 `agent_end.messages`、`turn_end.message/toolResults`、rich tool update partial result、schema validation、tool exception -> error tool result、parallel event timing、完整 failure/cancel assistant message 语义和 public API compile-sample 冻结）
+
 ### Tau.CodingAgent
 
 - [x] flat session 持久化（`TAU_CODING_AGENT_SESSION_FILE` 或 `./.tau/coding-agent-session.json`，启动自动 rehydrate，回合后保存）

@@ -154,10 +154,10 @@ public sealed class RuntimeDelegationAgentRunner : IDelegationAgentRunner
                                 DurationMs: duration));
                             LogToolEnd(provider, model, workingDirectory, toolEnd.ToolCallId, toolName, toolEnd.Result, duration, logContext);
                             break;
-                        case MessageEndEvent messageEnd:
-                            ApplyAssistantMessage(messageEnd.Message, runner.Model, aggregatedUsage, ref stopReason);
-                            LogResponseEnd(provider, model, workingDirectory, messageEnd.Message, stopReason, logContext);
-                            if (messageEnd.Message.Usage is { } usage)
+                        case MessageEndEvent { Message: AssistantMessage assistantMessage }:
+                            ApplyAssistantMessage(assistantMessage, runner.Model, aggregatedUsage, ref stopReason);
+                            LogResponseEnd(provider, model, workingDirectory, assistantMessage, stopReason, logContext);
+                            if (assistantMessage.Usage is { } usage)
                             {
                                 LogUsage(provider, model, workingDirectory, runner.Model, usage, logContext);
                             }

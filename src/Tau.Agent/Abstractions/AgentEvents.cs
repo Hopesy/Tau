@@ -16,9 +16,13 @@ public sealed record AgentEndEvent(string? ErrorMessage = null) : AgentEvent("ag
 public sealed record TurnStartEvent(int TurnIndex) : AgentEvent("turn_start");
 public sealed record TurnEndEvent(int TurnIndex) : AgentEvent("turn_end");
 
-public sealed record MessageStartEvent(Ai.AssistantMessage Partial) : AgentEvent("message_start");
+public sealed record MessageStartEvent(Ai.ChatMessage Message) : AgentEvent("message_start")
+{
+    public Ai.ChatMessage Partial => Message;
+}
+
 public sealed record MessageUpdateEvent(Ai.StreamEvent StreamEvent) : AgentEvent("message_update");
-public sealed record MessageEndEvent(Ai.AssistantMessage Message) : AgentEvent("message_end");
+public sealed record MessageEndEvent(Ai.ChatMessage Message) : AgentEvent("message_end");
 
 public sealed record ToolExecutionStartEvent(string ToolCallId, string ToolName) : AgentEvent("tool_execution_start");
 public sealed record ToolExecutionUpdateEvent(string ToolCallId, ToolUpdate Update) : AgentEvent("tool_execution_update");

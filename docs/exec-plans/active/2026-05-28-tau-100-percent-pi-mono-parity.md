@@ -446,8 +446,8 @@ git diff --check
 
 - [x] Phase 0：baseline commit 已推送到 `origin/main`。
 - [x] Phase 0：本 100% parity plan 提交并推送。
-- [~] Phase 1：上游 inventory freeze（matrix 已创建并合并 capability-level inventory：`docs/exec-plans/active/2026-05-28-pi-mono-parity-matrix.md`；file-level mapping、command/API/env/config/log/schema submatrices 仍待冻结）。
-- [~] Phase 2：critical contract closure（首个 Agent stream proxy 切片已落地并通过 `Tau.Agent.Tests`）。
+- [~] Phase 1：上游 inventory freeze（matrix 已创建并合并 capability-level inventory；Agent package 已补 `agent.ts` / `agent-loop.ts` / `types.ts` / `proxy.ts` / `index.ts` file-level mapping；其它 package 的 file-level mapping、command/API/env/config/log/schema submatrices 仍待冻结）。
+- [~] Phase 2：critical contract closure（Agent stream proxy 已落地；Agent facade baseline 已落地，覆盖 `AgentOptions`、`Agent`、prompt/continue/subscribe/queue/wait/reset 和 prompt/tool-result message lifecycle，并通过 `Tau.Agent.Tests`；Agent loop event payload、tool update/schema/error/cancel 仍待继续闭环）。
 - [ ] Phase 3：product runtime parity。
 - [ ] Phase 4：external e2e closure。
 - [ ] Phase 5：release/CI/install delivery parity。
@@ -460,3 +460,4 @@ git diff --check
 - 2026-05-28：多 Agent 默认按上游 package 与 Tau 模块一一映射并保持互斥文件边界；Main Integrator 独占共享 docs/scripts/solution 和最终验证。
 - 2026-05-28：部分 explorer 因额度或服务错误中断，Phase 1 不等待外部 agent 恢复；主控以本地扫描和已完成的 Mom explorer 输出补齐 capability-level matrix，后续继续扩成 file-level inventory。
 - 2026-05-28：Phase 2 从 `packages/agent/src/proxy.ts` 对齐开始，新增 Tau-native `ProxyStreamProvider`，先关闭明确 missing 的 Agent stream proxy baseline，真实 proxy-server e2e 仍保留为后续验证项。
+- 2026-05-28：继续 Phase 2 Agent lane，新增 Tau-native high-level `Agent` facade；先关闭上游 `agent.ts` 的 prompt/continue/listener/queue/wait/reset baseline，不把它标为完整 Agent loop parity，后续继续收口 `agent-loop.ts` 的 event payload、tool update、schema validation 和 failure/cancel 语义。

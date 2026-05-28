@@ -108,7 +108,14 @@ tests/
 
 ### Tau.Agent
 
-维持原来的双层循环、工具执行、interceptor 和状态模型，继续作为所有应用面的共同 runtime 内核。
+当前从“只有底层 runtime”推进到上游 `packages/agent/src/agent.ts` 的高层 facade baseline：
+
+- `AgentRuntime` 继续承载双层循环、工具执行、steering/follow-up 队列、interceptor、runtime log context 和状态模型，是 WebUi / Mom / CodingAgent 共享内核。
+- `Agent` / `AgentOptions` 是 .NET-native 高层入口：持有 model/provider registry/system prompt/tools/interceptors/options，暴露 `PromptAsync`、`ContinueAsync`、`Subscribe`、`Steer`、`FollowUp`、queue clear、`Abort`、`WaitForIdleAsync` 和 `Reset`。
+- `AgentState` 现在同时暴露 system prompt、model、tools、messages、streaming message、pending tool calls、error 和 streaming 状态。
+- `MessageStartEvent` / `MessageEndEvent` 可承载任意 `ChatMessage`，facade 会为 prompt user message 发送 message lifecycle；runtime 对 tool result 也会发送 message lifecycle，以靠近上游 `agent-loop.ts` 事件语义。
+
+当前仍不是完整上游 Agent package parity：`agent_end.messages`、`turn_end.message/toolResults`、tool update partial result、schema validation、tool exception -> error tool result、parallel event timing 和完整 failure assistant message 合成仍是后续 Agent loop contract closure。
 
 ### Tau.Tui
 

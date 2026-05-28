@@ -19,6 +19,7 @@ public record AgentLoopConfig
     public string? SystemPrompt { get; init; }
     public SimpleStreamOptions? StreamOptions { get; init; }
     public ToolExecutionMode DefaultExecutionMode { get; init; } = ToolExecutionMode.Parallel;
+    public bool SkipInitialSteeringPoll { get; init; }
 
     /// <summary>
     /// Transform agent messages before sending to LLM (pruning, injection).
