@@ -207,6 +207,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\execute-release.ps1 patch
 powershell -ExecutionPolicy Bypass -File .\scripts\verify-release-contracts.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\verify-session-audit-scripts.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\verify-coding-agent-startup-profile.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\verify-release-version-sync.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\sync-release-versions.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\update-release-version.ps1 patch
 powershell -ExecutionPolicy Bypass -File .\scripts\update-release-notes.ps1 0.1.1
 powershell -ExecutionPolicy Bypass -File .\scripts\build-release-artifacts.ps1 -Configuration Release
@@ -216,7 +218,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build-release-matrix.ps1 -Run
 powershell -ExecutionPolicy Bypass -File .\scripts\package-release-matrix.ps1 -Runtimes win-x64
 ```
 
-`plan-release.ps1` 对照上游 `scripts/release.mjs` 的 clean worktree、version bump / explicit semver、changelog release section、commit/tag、publish 和 push 流程，生成 Tau 的 dry-run 发布计划。它会读取 `git status`、检查 release notes 与 release 脚本是否存在、从 `Directory.Build.props` 的 `VersionPrefix` 读取当前 Tau 产品版本、计算 `major|minor|patch` 或显式 `x.y.z` 的下一版本，并列出应运行的 guarded release preparation preview、guarded release validation preview、local release execution preview、version update preview、release notes update preview、release contract smoke、session audit script smoke、CodingAgent startup profile smoke、no-env gate、release matrix build/package 命令；脚本不会修改版本、release notes、history，不会执行 `git commit`、`git tag`、publish 或 push。`-CurrentVersion x.y.z` 仅用于临时覆盖当前版本；`-AllowDirty` 只用于 planning-only 场景，真实 release 前仍要求 clean worktree。
+`plan-release.ps1` 对照上游 `scripts/release.mjs` 的 clean worktree、version bump / explicit semver、changelog release section、commit/tag、publish 和 push 流程，生成 Tau 的 dry-run 发布计划。它会读取 `git status`、检查 release notes 与 release 脚本是否存在、从 `Directory.Build.props` 的 `VersionPrefix` 读取当前 Tau 产品版本、计算 `major|minor|patch` 或显式 `x.y.z` 的下一版本，并列出应运行的 guarded release preparation preview、guarded release validation preview、local release execution preview、version update preview、release notes update preview、release contract smoke、session audit script smoke、CodingAgent startup profile smoke、release version sync smoke、no-env gate、release matrix build/package 命令；脚本不会修改版本、release notes、history，不会执行 `git commit`、`git tag`、publish 或 push。`-CurrentVersion x.y.z` 仅用于临时覆盖当前版本；`-AllowDirty` 只用于 planning-only 场景，真实 release 前仍要求 clean worktree。
 
 `prepare-release.ps1` 是当前 release execution 的本地准备层：默认 dry-run，复用 `update-release-version.ps1` 和 `update-release-notes.ps1` 预览将要写入的版本与 release notes；只有显式传 `-Apply` 且工作树干净时，才依次写回 `Directory.Build.props` 与 `docs/releases/feature-release-notes.md`。`-Apply` 前会先跑两个 helper 的 dry-run 预检，避免 release notes 表结构等问题在版本已经写回后才暴露。该脚本仍不运行 no-env gate、release matrix build/package、commit、tag、publish 或 push；这些动作必须作为后续显式 release execution / operator 步骤处理。
 
@@ -250,6 +252,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\verify-coding-agent-startup-p
 
 `update-release-version.ps1` 只负责 Tau 产品版本写回这一件事：读取 `Directory.Build.props` 中唯一的 `Version` / `VersionPrefix` / `PackageVersion`，计算 bump 或验证显式 `x.y.z`，默认 dry-run 输出当前版本和下一版本；只有显式传 `-Apply` 时才写回该 MSBuild 属性。该脚本不编辑 release notes，不 commit/tag/publish/push。
 
+`sync-release-versions.ps1` 对照上游 `scripts/sync-versions.js` 的 lockstep version audit，但使用 Tau 的 .NET-native 版本模型：`Directory.Build.props` 是单一版本事实源，`src/**/*.csproj` 默认继承它，不维护 npm workspace dependency ranges。脚本会读取 `Directory.Build.props` 中唯一的 `Version` / `VersionPrefix` / `PackageVersion`，扫描 `src` 下项目的显式版本属性；dry-run 在发现显式项目版本漂移时返回非零，`-Apply` 会把这些显式项目版本同步到中心版本。`-IncludeTests` 可把 `tests` 项目也纳入审计。`verify-release-version-sync.ps1` 会先验证当前仓库无漂移，再用临时 fixture 固定 drift detection、ProjectReference 审计和 apply 修复行为。该脚本不替代 `update-release-version.ps1` 的版本 bump，也不声明 NuGet/package publish synchronization 完成。
+
 `update-release-notes.ps1` 只负责 Tau-native release notes 行写回这一件事：读取 `docs/releases/feature-release-notes.md`，按版本 `v<version>` 和日期生成当前月份表格行，默认 dry-run 输出将插入的 Markdown 行；只有显式传 `-Apply` 时才写回 release notes。该脚本不修改 MSBuild 版本，不 commit/tag/publish/push，也不替代 history 记录。
 
 如果需要用 `build-release-artifacts.ps1 -SkipRestore` 做离线/复用 restore 的发布验证，必须先执行带 RID 的 restore，例如 `dotnet restore Tau.slnx -r win-x64 --verbosity minimal`；普通 `dotnet restore Tau.slnx` 不会生成 `net10.0/win-x64` publish 需要的 assets target。
@@ -264,7 +268,7 @@ GitHub Actions CI baseline：
 .github/workflows/tau-ci.yml
 ```
 
-当前 CI 在 `push main`、`pull_request` 和手动触发时运行 Windows PowerShell gate：按 `global.json` 安装 .NET SDK，`dotnet restore Tau.slnx`，先执行 `verify-release-contracts.ps1` 固定 release dry-run JSON contract，再执行 `verify-session-audit-scripts.ps1` 固定 session transcript/cost audit scripts 的 fixture smoke，并执行 `verify-coding-agent-startup-profile.ps1` 固定 CodingAgent RPC startup profiler smoke，随后执行 `verify-no-env.ps1 -SkipRestore -RunSmoke`，构建 Release artifact，通过 `package-release-matrix.ps1 -Runtimes win-x64` 打包 `artifacts/releases/tau-win-x64.zip`，再用 `package-release-artifacts.ps1 -ArchiveFormat tar.gz -SkipExecutableSmoke` 做 tar.gz 格式/解压结构 smoke，并先解压 smoke Windows zip 后再上传该 zip 作为 workflow artifact。该 workflow 复用仓库现有 PowerShell 脚本，不另建一套 CI-only 行为；它关闭的是 Windows current-RID CI/release artifact baseline、release dry-run contract smoke baseline、session audit script smoke baseline 和 CodingAgent RPC startup profile smoke baseline，不代表非宿主平台 executable smoke、TUI first-frame profiling、Unix shell wrapper、version/tag/publish automation 或真实外部 e2e release smoke 已完成。
+当前 CI 在 `push main`、`pull_request` 和手动触发时运行 Windows PowerShell gate：按 `global.json` 安装 .NET SDK，`dotnet restore Tau.slnx`，先执行 `verify-release-contracts.ps1` 固定 release dry-run JSON contract，再执行 `verify-session-audit-scripts.ps1` 固定 session transcript/cost audit scripts 的 fixture smoke，执行 `verify-coding-agent-startup-profile.ps1` 固定 CodingAgent RPC startup profiler smoke，并执行 `verify-release-version-sync.ps1` 固定 MSBuild release version sync smoke，随后执行 `verify-no-env.ps1 -SkipRestore -RunSmoke`，构建 Release artifact，通过 `package-release-matrix.ps1 -Runtimes win-x64` 打包 `artifacts/releases/tau-win-x64.zip`，再用 `package-release-artifacts.ps1 -ArchiveFormat tar.gz -SkipExecutableSmoke` 做 tar.gz 格式/解压结构 smoke，并先解压 smoke Windows zip 后再上传该 zip 作为 workflow artifact。该 workflow 复用仓库现有 PowerShell 脚本，不另建一套 CI-only 行为；它关闭的是 Windows current-RID CI/release artifact baseline、release dry-run contract smoke baseline、session audit script smoke baseline、CodingAgent RPC startup profile smoke baseline 和 release version sync smoke baseline，不代表非宿主平台 executable smoke、TUI first-frame profiling、Unix shell wrapper、version/tag/publish automation 或真实外部 e2e release smoke 已完成。
 
 当前机器上的现场现实：
 

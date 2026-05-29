@@ -373,6 +373,8 @@ $requiredScripts = @(
     'scripts/verify-release-contracts.ps1',
     'scripts/verify-session-audit-scripts.ps1',
     'scripts/verify-coding-agent-startup-profile.ps1',
+    'scripts/verify-release-version-sync.ps1',
+    'scripts/sync-release-versions.ps1',
     'scripts/execute-release.ps1',
     'scripts/prepare-release.ps1',
     'scripts/validate-release.ps1',
@@ -417,6 +419,11 @@ $plannedCommands = @(
         name = 'coding-agent-startup-profile-smoke'
         command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-coding-agent-startup-profile.ps1'
         purpose = 'Validate the Tau CodingAgent RPC startup profiler against a local get_state run.'
+    },
+    [ordered]@{
+        name = 'release-version-sync-smoke'
+        command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-release-version-sync.ps1'
+        purpose = 'Validate the Tau MSBuild release version sync contract against the repository and a local fixture.'
     },
     [ordered]@{
         name = 'local-release-execution'
