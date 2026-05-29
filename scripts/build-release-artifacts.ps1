@@ -205,6 +205,154 @@ exec "`$SCRIPT_DIR/../$shellEntrypoint" "`$@"
     return $wrapperPath
 }
 
+function Get-FileSummary {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $item = Get-Item -LiteralPath $Path
+    return [ordered]@{
+        fileCount = 1
+        sizeBytes = [int64]$item.Length
+    }
+}
+
+function Get-DirectorySummary {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $files = @(Get-ChildItem -LiteralPath $Path -File -Recurse -Force)
+    $size = [int64]0
+    foreach ($file in $files) {
+        $size += [int64]$file.Length
+    }
+
+    return [ordered]@{
+        fileCount = $files.Count
+        sizeBytes = $size
+    }
+}
+
+function Add-ReleasePayloadEntry {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name,
+        [string]$Source = '',
+        [string]$Destination = '',
+        [Parameter(Mandatory = $true)]
+        [string]$Status,
+        [string]$Note = '',
+        [int]$FileCount = 0,
+        [Int64]$SizeBytes = 0
+    )
+
+    $sourceManifestPath = if ([string]::IsNullOrWhiteSpace($Source)) {
+        ''
+    }
+    else {
+        Convert-ToManifestPath -Path $Source
+    }
+    $destinationManifestPath = if ([string]::IsNullOrWhiteSpace($Destination)) {
+        ''
+    }
+    else {
+        Convert-ToManifestPath -Path $Destination
+    }
+
+    $script:manifestPayloads += [ordered]@{
+        name = $Name
+        source = $sourceManifestPath
+        destination = $destinationManifestPath
+        status = $Status
+        fileCount = $FileCount
+        sizeBytes = $SizeBytes
+        note = $Note
+    }
+}
+
+function Copy-ReleaseFile {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name,
+        [Parameter(Mandatory = $true)]
+        [string]$SourceRelative,
+        [Parameter(Mandatory = $true)]
+        [string]$DestinationRelative,
+        [switch]$Required
+    )
+
+    $sourcePath = Join-Path $repoRoot $SourceRelative
+    if (-not (Test-Path -LiteralPath $sourcePath)) {
+        if ($Required) {
+            throw "Required release payload file not found: $SourceRelative"
+        }
+
+        Add-ReleasePayloadEntry -Name $Name -Source $SourceRelative -Destination $DestinationRelative -Status 'missing'
+        return
+    }
+
+    $destinationPath = Join-Path $artifactRoot $DestinationRelative
+    $destinationParent = Split-Path -Parent $destinationPath
+    if (-not [string]::IsNullOrWhiteSpace($destinationParent)) {
+        New-Item -ItemType Directory -Force -Path $destinationParent | Out-Null
+    }
+
+    Copy-Item -LiteralPath $sourcePath -Destination $destinationPath -Force
+    $summary = Get-FileSummary -Path $sourcePath
+    Add-ReleasePayloadEntry `
+        -Name $Name `
+        -Source $SourceRelative `
+        -Destination $DestinationRelative `
+        -Status 'included' `
+        -FileCount $summary.fileCount `
+        -SizeBytes $summary.sizeBytes
+}
+
+function Copy-ReleaseDirectory {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name,
+        [Parameter(Mandatory = $true)]
+        [string]$SourceRelative,
+        [Parameter(Mandatory = $true)]
+        [string]$DestinationRelative,
+        [switch]$Required
+    )
+
+    $sourcePath = Join-Path $repoRoot $SourceRelative
+    if (-not (Test-Path -LiteralPath $sourcePath)) {
+        if ($Required) {
+            throw "Required release payload directory not found: $SourceRelative"
+        }
+
+        Add-ReleasePayloadEntry -Name $Name -Source $SourceRelative -Destination $DestinationRelative -Status 'missing'
+        return
+    }
+
+    $destinationPath = Join-Path $artifactRoot $DestinationRelative
+    if (Test-Path -LiteralPath $destinationPath) {
+        Remove-Item -LiteralPath $destinationPath -Recurse -Force
+    }
+
+    $destinationParent = Split-Path -Parent $destinationPath
+    if (-not [string]::IsNullOrWhiteSpace($destinationParent)) {
+        New-Item -ItemType Directory -Force -Path $destinationParent | Out-Null
+    }
+
+    Copy-Item -LiteralPath $sourcePath -Destination $destinationPath -Recurse -Force
+    $summary = Get-DirectorySummary -Path $sourcePath
+    Add-ReleasePayloadEntry `
+        -Name $Name `
+        -Source $SourceRelative `
+        -Destination $DestinationRelative `
+        -Status 'included' `
+        -FileCount $summary.fileCount `
+        -SizeBytes $summary.sizeBytes
+}
+
 if ([string]::IsNullOrWhiteSpace($Runtime)) {
     $Runtime = Get-DefaultRuntimeIdentifier
 }
@@ -272,6 +420,7 @@ Write-Host "==> runtime: $Runtime configuration: $Configuration selfContained: $
 
 $manifestApps = @()
 $manifestCommands = @()
+$script:manifestPayloads = @()
 
 foreach ($app in $apps) {
     $publishDir = Join-Path $artifactRoot $app.AppDir
@@ -315,15 +464,72 @@ foreach ($app in $apps) {
     }
 }
 
-Copy-Item -LiteralPath (Join-Path $repoRoot 'README.md') -Destination (Join-Path $artifactRoot 'README.md') -Force
-Copy-Item -LiteralPath (Join-Path $repoRoot 'LICENSE') -Destination (Join-Path $artifactRoot 'LICENSE') -Force
+Copy-ReleaseFile -Name 'readme' -SourceRelative 'README.md' -DestinationRelative 'README.md' -Required
+Copy-ReleaseFile -Name 'license' -SourceRelative 'LICENSE' -DestinationRelative 'LICENSE' -Required
+Copy-ReleaseDirectory -Name 'docs' -SourceRelative 'docs' -DestinationRelative 'docs' -Required
+Copy-ReleaseDirectory -Name 'examples' -SourceRelative 'examples' -DestinationRelative 'examples'
 
-$releaseNotes = Join-Path $repoRoot 'docs/releases/feature-release-notes.md'
-if (Test-Path -LiteralPath $releaseNotes) {
-    $artifactReleaseNotesDir = Join-Path $artifactRoot 'docs/releases'
-    New-Item -ItemType Directory -Force -Path $artifactReleaseNotesDir | Out-Null
-    Copy-Item -LiteralPath $releaseNotes -Destination (Join-Path $artifactReleaseNotesDir 'feature-release-notes.md') -Force
+$releaseNotesRelative = 'docs/releases/feature-release-notes.md'
+$releaseNotesPath = Join-Path $repoRoot $releaseNotesRelative
+if (Test-Path -LiteralPath $releaseNotesPath) {
+    $releaseNotesSummary = Get-FileSummary -Path $releaseNotesPath
+    Add-ReleasePayloadEntry `
+        -Name 'changelog' `
+        -Source $releaseNotesRelative `
+        -Destination $releaseNotesRelative `
+        -Status 'tau-native-docs' `
+        -FileCount $releaseNotesSummary.fileCount `
+        -SizeBytes $releaseNotesSummary.sizeBytes `
+        -Note 'Tau currently ships docs/releases/feature-release-notes.md as the release notes source instead of a root CHANGELOG.md.'
 }
+else {
+    Add-ReleasePayloadEntry `
+        -Name 'changelog' `
+        -Source $releaseNotesRelative `
+        -Destination $releaseNotesRelative `
+        -Status 'missing' `
+        -Note 'Tau has no release notes payload available; upstream ships CHANGELOG.md.'
+}
+
+Add-ReleasePayloadEntry `
+    -Name 'package-json' `
+    -Source 'package.json' `
+    -Destination 'manifest.json' `
+    -Status 'tau-native-manifest' `
+    -FileCount 1 `
+    -Note 'Tau is a .NET solution, so release package metadata is generated into manifest.json instead of copying an npm package.json.'
+
+Add-ReleasePayloadEntry `
+    -Name 'photon-wasm' `
+    -Source 'node_modules/@silvia-odwyer/photon-node/photon_rs_bg.wasm' `
+    -Destination 'photon_rs_bg.wasm' `
+    -Status 'missing' `
+    -Note 'Tau does not yet port the upstream Photon image resize/convert pipeline; image resize and EXIF handling remain parity gaps.'
+
+Add-ReleasePayloadEntry `
+    -Name 'theme' `
+    -Source 'src/Tau.CodingAgent/Runtime/CodingAgentThemeStore.cs' `
+    -Status 'tau-native-inline' `
+    -Note 'Tau built-in themes are compiled into CodingAgentThemeStore; project/user/extension themes remain runtime-discovered from .tau paths.'
+
+Add-ReleasePayloadEntry `
+    -Name 'export-html' `
+    -Source 'src/Tau.CodingAgent/Runtime/CodingAgentHtmlSessionExporter.cs' `
+    -Status 'tau-native-inline' `
+    -Note 'Tau HTML transcript export template, CSS and script are compiled into CodingAgentHtmlSessionExporter instead of copied as external template/vendor files.'
+
+Add-ReleasePayloadEntry `
+    -Name 'interactive-assets' `
+    -Source 'src/Tau.CodingAgent/assets' `
+    -Destination 'assets' `
+    -Status 'missing' `
+    -Note 'No Tau raster interactive asset directory exists yet; upstream clankolas.png-style asset packaging remains a product/release parity gap.'
+
+Add-ReleasePayloadEntry `
+    -Name 'koffi-windows-native' `
+    -Source 'node_modules/koffi' `
+    -Status 'not-applicable' `
+    -Note 'Upstream copies koffi for Bun Windows VT input; Tau release wrappers launch .NET executables and do not depend on koffi.'
 
 $manifest = [ordered]@{
     schemaVersion = 1
@@ -342,13 +548,15 @@ $manifest = [ordered]@{
         piPods = 'Tau.Pods release wrapper'
         tauWebUi = 'Tau.WebUi release wrapper'
     }
+    releasePayload = $script:manifestPayloads
     includedDocs = @(
-        'README.md',
-        'LICENSE',
-        'docs/releases/feature-release-notes.md'
+        $script:manifestPayloads |
+            Where-Object { $_.status -eq 'included' -and $_.destination -like 'docs*' } |
+            ForEach-Object { $_.destination }
     )
     remainingGaps = @(
-        'Cross-platform archive matrix parity with upstream build-binaries.sh',
+        'Non-host runner executable smoke for Linux and macOS release artifacts',
+        'Upstream examples, Photon image pipeline, interactive raster assets and external export-html vendor/template files are not copied because current Tau equivalents are compiled inline, represented by docs, or not yet ported',
         'Version bump, changelog release section, commit, tag and publish automation parity with upstream release.mjs',
         'Exact auth backup parity with upstream test.sh and pi-test.sh; Tau currently has PowerShell no-env child-process isolation scripts',
         'Real external provider, Slack, Docker, SSH, HF, GPU and vLLM e2e release smoke'

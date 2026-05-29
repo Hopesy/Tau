@@ -466,6 +466,43 @@ if ($manifest.schemaVersion -ne 1) {
     throw "Unsupported artifact manifest schema version: $($manifest.schemaVersion)"
 }
 
+$payloads = @($manifest.releasePayload)
+$requiredPayloads = @(
+    @{ Name = 'readme'; Status = 'included'; Destination = 'README.md' },
+    @{ Name = 'license'; Status = 'included'; Destination = 'LICENSE' },
+    @{ Name = 'docs'; Status = 'included'; Destination = 'docs' },
+    @{ Name = 'examples'; Status = 'missing' },
+    @{ Name = 'changelog'; Status = 'tau-native-docs'; Destination = 'docs/releases/feature-release-notes.md' },
+    @{ Name = 'package-json'; Status = 'tau-native-manifest'; Destination = 'manifest.json' },
+    @{ Name = 'photon-wasm'; Status = 'missing' },
+    @{ Name = 'theme'; Status = 'tau-native-inline' },
+    @{ Name = 'export-html'; Status = 'tau-native-inline' },
+    @{ Name = 'interactive-assets'; Status = 'missing' },
+    @{ Name = 'koffi-windows-native'; Status = 'not-applicable' }
+)
+
+foreach ($requiredPayload in $requiredPayloads) {
+    $entry = $payloads | Where-Object {
+        $_.name -eq $requiredPayload.Name -and $_.status -eq $requiredPayload.Status
+    } | Select-Object -First 1
+
+    if ($null -eq $entry) {
+        throw "Release manifest missing payload '$($requiredPayload.Name)' with status '$($requiredPayload.Status)'"
+    }
+
+    if ($requiredPayload.ContainsKey('Destination')) {
+        $payloadPath = Join-Path $script:artifactRoot $requiredPayload.Destination
+        if (-not (Test-Path -LiteralPath $payloadPath)) {
+            throw "Release payload '$($requiredPayload.Name)' was not found at $payloadPath"
+        }
+    }
+}
+
+$releaseNotesPath = Join-Path $script:artifactRoot 'docs/releases/feature-release-notes.md'
+if (-not (Test-Path -LiteralPath $releaseNotesPath)) {
+    throw "Release docs payload missing feature release notes: $releaseNotesPath"
+}
+
 Write-Host "==> smoke tau-ai list"
 $tauAi = Resolve-CommandWrapper -Name 'tau-ai'
 $tauAiResult = Invoke-ArtifactProcess -FilePath $tauAi -Arguments @('list') -TimeoutSeconds 20
