@@ -372,6 +372,7 @@ $requiredScripts = @(
     'scripts/verify-no-env.ps1',
     'scripts/verify-release-contracts.ps1',
     'scripts/verify-session-audit-scripts.ps1',
+    'scripts/verify-coding-agent-startup-profile.ps1',
     'scripts/execute-release.ps1',
     'scripts/prepare-release.ps1',
     'scripts/validate-release.ps1',
@@ -411,6 +412,11 @@ $plannedCommands = @(
         name = 'session-audit-script-smoke'
         command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-session-audit-scripts.ps1'
         purpose = 'Validate Tau session transcript and cost audit scripts against a local JSONL fixture.'
+    },
+    [ordered]@{
+        name = 'coding-agent-startup-profile-smoke'
+        command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-coding-agent-startup-profile.ps1'
+        purpose = 'Validate the Tau CodingAgent RPC startup profiler against a local get_state run.'
     },
     [ordered]@{
         name = 'local-release-execution'
