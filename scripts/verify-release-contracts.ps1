@@ -187,6 +187,7 @@ try {
     Assert-ContainsAll -Name 'plan command contract' -Actual (Get-Names -Items @($plan.plannedCommands)) -Expected @(
         'release-contract-smoke',
         'session-audit-script-smoke',
+        'coding-agent-session-migration-smoke',
         'edit-tool-stats-smoke',
         'mom-timestamp-migration-smoke',
         'coding-agent-startup-profile-smoke',
