@@ -205,6 +205,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\prepare-release.ps1 patch
 powershell -ExecutionPolicy Bypass -File .\scripts\validate-release.ps1 -Runtimes win-x64
 powershell -ExecutionPolicy Bypass -File .\scripts\execute-release.ps1 patch
 powershell -ExecutionPolicy Bypass -File .\scripts\verify-release-contracts.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\verify-session-audit-scripts.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\update-release-version.ps1 patch
 powershell -ExecutionPolicy Bypass -File .\scripts\update-release-notes.ps1 0.1.1
 powershell -ExecutionPolicy Bypass -File .\scripts\build-release-artifacts.ps1 -Configuration Release
@@ -224,6 +225,18 @@ powershell -ExecutionPolicy Bypass -File .\scripts\package-release-matrix.ps1 -R
 
 `verify-release-contracts.ps1` 是短 release script contract smoke，不跑 `dotnet build/test`，不生成 artifact，也不写版本或 release notes。它调用 `plan-release.ps1`、`prepare-release.ps1`、`validate-release.ps1` 和 `execute-release.ps1` 的 `-Json` dry-run 输出，断言 dry-run boundary、next version、planned command names、local release mutation plan、non-executed publish/push/external mutation boundary、preparation changed files，以及 validation coverage metadata。这个脚本用于固定 release automation 的 JSON 契约，当前 CI 会在长 no-env/build/release artifact 步骤前先运行它。
 
+Session audit scripts baseline：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\export-session-transcripts.ps1 -OutputDirectory .\session-transcripts
+powershell -ExecutionPolicy Bypass -File .\scripts\report-session-costs.ps1 -Directory . -Days 7
+powershell -ExecutionPolicy Bypass -File .\scripts\verify-session-audit-scripts.ps1
+```
+
+`export-session-transcripts.ps1` 对照上游 `scripts/session-transcripts.ts` 的本地 transcript utility：默认扫描当前工作目录的 `.tau/coding-agent-session.jsonl` 和 `.tau/coding-agent-sessions/*.jsonl`，也可用 `-SessionPath` 或 `-SessionsDirectory` 指定输入；只导出 `user` / `assistant` 的文本内容，兼容 Tau 当前 content block 数组和上游 string content 形态，并按 `-MaxCharsPerFile` 切片写入 `session-transcripts-000.txt` 等文件。`-Analyze` 当前只返回未实现 warning，不会启动子 agent，因为 Tau 还没有上游 `pi --mode json --tools read,write` 分析流程的完整等价合同。
+
+`report-session-costs.ps1` 对照上游 `scripts/cost.ts` 的本地 session usage report：按 `-Directory` / `-Days` 和可选 `-SessionPath` / `-SessionsDirectory` 扫 Tau JSONL session，汇总 assistant message 上已经持久化的 `usage.cost.total/input/output/cacheRead/cacheWrite`，同时统计 `inputTokens/outputTokens/cacheReadTokens/cacheWriteTokens`。当前 Tau CodingAgent tree session 默认不持久化 assistant usage cost；脚本在没有 `usage.cost` 时会明确输出 warning 和 0 cost records，不会用当前模型 catalog 反推历史美元成本。`verify-session-audit-scripts.ps1` 用临时 JSONL fixture 固定 transcript 内容、坏行跳过、toolResult 忽略、cost/token 汇总和 JSON 数组形状。
+
 `update-release-version.ps1` 只负责 Tau 产品版本写回这一件事：读取 `Directory.Build.props` 中唯一的 `Version` / `VersionPrefix` / `PackageVersion`，计算 bump 或验证显式 `x.y.z`，默认 dry-run 输出当前版本和下一版本；只有显式传 `-Apply` 时才写回该 MSBuild 属性。该脚本不编辑 release notes，不 commit/tag/publish/push。
 
 `update-release-notes.ps1` 只负责 Tau-native release notes 行写回这一件事：读取 `docs/releases/feature-release-notes.md`，按版本 `v<version>` 和日期生成当前月份表格行，默认 dry-run 输出将插入的 Markdown 行；只有显式传 `-Apply` 时才写回 release notes。该脚本不修改 MSBuild 版本，不 commit/tag/publish/push，也不替代 history 记录。
@@ -240,7 +253,7 @@ GitHub Actions CI baseline：
 .github/workflows/tau-ci.yml
 ```
 
-当前 CI 在 `push main`、`pull_request` 和手动触发时运行 Windows PowerShell gate：按 `global.json` 安装 .NET SDK，`dotnet restore Tau.slnx`，先执行 `verify-release-contracts.ps1` 固定 release dry-run JSON contract，再执行 `verify-no-env.ps1 -SkipRestore -RunSmoke`，构建 Release artifact，通过 `package-release-matrix.ps1 -Runtimes win-x64` 打包 `artifacts/releases/tau-win-x64.zip`，再用 `package-release-artifacts.ps1 -ArchiveFormat tar.gz -SkipExecutableSmoke` 做 tar.gz 格式/解压结构 smoke，并先解压 smoke Windows zip 后再上传该 zip 作为 workflow artifact。该 workflow 复用仓库现有 PowerShell 脚本，不另建一套 CI-only 行为；它关闭的是 Windows current-RID CI/release artifact baseline 和 release dry-run contract smoke baseline，不代表非宿主平台 executable smoke、Unix shell wrapper、version/tag/publish automation 或真实外部 e2e release smoke 已完成。
+当前 CI 在 `push main`、`pull_request` 和手动触发时运行 Windows PowerShell gate：按 `global.json` 安装 .NET SDK，`dotnet restore Tau.slnx`，先执行 `verify-release-contracts.ps1` 固定 release dry-run JSON contract，再执行 `verify-session-audit-scripts.ps1` 固定 session transcript/cost audit scripts 的 fixture smoke，随后执行 `verify-no-env.ps1 -SkipRestore -RunSmoke`，构建 Release artifact，通过 `package-release-matrix.ps1 -Runtimes win-x64` 打包 `artifacts/releases/tau-win-x64.zip`，再用 `package-release-artifacts.ps1 -ArchiveFormat tar.gz -SkipExecutableSmoke` 做 tar.gz 格式/解压结构 smoke，并先解压 smoke Windows zip 后再上传该 zip 作为 workflow artifact。该 workflow 复用仓库现有 PowerShell 脚本，不另建一套 CI-only 行为；它关闭的是 Windows current-RID CI/release artifact baseline、release dry-run contract smoke baseline 和 session audit script smoke baseline，不代表非宿主平台 executable smoke、Unix shell wrapper、version/tag/publish automation 或真实外部 e2e release smoke 已完成。
 
 当前机器上的现场现实：
 

@@ -186,6 +186,7 @@ try {
     Assert-Equal -Name 'plan version source' -Actual $plan.currentVersion.source -Expected 'msbuild'
     Assert-ContainsAll -Name 'plan command contract' -Actual (Get-Names -Items @($plan.plannedCommands)) -Expected @(
         'release-contract-smoke',
+        'session-audit-script-smoke',
         'local-release-execution',
         'release-preparation',
         'release-validation',

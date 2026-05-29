@@ -371,6 +371,7 @@ else {
 $requiredScripts = @(
     'scripts/verify-no-env.ps1',
     'scripts/verify-release-contracts.ps1',
+    'scripts/verify-session-audit-scripts.ps1',
     'scripts/execute-release.ps1',
     'scripts/prepare-release.ps1',
     'scripts/validate-release.ps1',
@@ -405,6 +406,11 @@ $plannedCommands = @(
         name = 'release-contract-smoke'
         command = "powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-release-contracts.ps1 -ReleaseTarget $ReleaseTarget -Runtimes $runtimeArgument"
         purpose = 'Validate guarded release dry-run JSON contracts before longer no-env or release matrix work.'
+    },
+    [ordered]@{
+        name = 'session-audit-script-smoke'
+        command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-session-audit-scripts.ps1'
+        purpose = 'Validate Tau session transcript and cost audit scripts against a local JSONL fixture.'
     },
     [ordered]@{
         name = 'local-release-execution'
