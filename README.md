@@ -200,12 +200,15 @@ powershell -ExecutionPolicy Bypass -File .\scripts\pi-test.ps1 --no-env --no-bui
 Release artifact baseline：
 
 ```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\plan-release.ps1 patch -CurrentVersion 0.1.0
 powershell -ExecutionPolicy Bypass -File .\scripts\build-release-artifacts.ps1 -Configuration Release
 powershell -ExecutionPolicy Bypass -File .\scripts\smoke-release-artifacts.ps1 -ArtifactRoot .\artifacts\tau-win-x64
 powershell -ExecutionPolicy Bypass -File .\scripts\package-release-artifacts.ps1 -ArtifactRoot .\artifacts\tau-win-x64
 powershell -ExecutionPolicy Bypass -File .\scripts\build-release-matrix.ps1 -Runtimes win-x64
 powershell -ExecutionPolicy Bypass -File .\scripts\package-release-matrix.ps1 -Runtimes win-x64
 ```
+
+`plan-release.ps1` 对照上游 `scripts/release.mjs` 的 clean worktree、version bump / explicit semver、changelog release section、commit/tag、publish 和 push 流程，生成 Tau 的 dry-run 发布计划。它会读取 `git status`、检查 release notes 与 release 脚本是否存在、计算 `major|minor|patch` 或显式 `x.y.z` 的下一版本，并列出应运行的 no-env gate、release matrix build/package 命令；脚本不会修改版本、release notes、history，不会执行 `git commit`、`git tag`、publish 或 push。当前 Tau 还没有 repo-owned `Version` / `VersionPrefix` / `PackageVersion`，所以 bump 目标需要传 `-CurrentVersion x.y.z` 才能计算下一版本；显式 `x.y.z` 目标可以规划，但会记录无法和当前仓库版本比较。`-AllowDirty` 只用于 planning-only 场景，真实 release 前仍要求 clean worktree。
 
 如果需要用 `build-release-artifacts.ps1 -SkipRestore` 做离线/复用 restore 的发布验证，必须先执行带 RID 的 restore，例如 `dotnet restore Tau.slnx -r win-x64 --verbosity minimal`；普通 `dotnet restore Tau.slnx` 不会生成 `net10.0/win-x64` publish 需要的 assets target。
 
