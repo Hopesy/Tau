@@ -396,6 +396,11 @@ $plannedCommands = @(
         purpose = 'Validate whitespace and patch hygiene before release preparation.'
     },
     [ordered]@{
+        name = 'version-update'
+        command = "powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\update-release-version.ps1 $ReleaseTarget"
+        purpose = 'Preview the repo-owned MSBuild version update; pass -Apply only inside an explicit release execution flow.'
+    },
+    [ordered]@{
         name = 'no-env-validation'
         command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-no-env.ps1 -SkipRestore -RunSmoke'
         purpose = 'Run the current Tau project gate under provider/auth-isolated child-process environment.'
@@ -420,7 +425,7 @@ $upstreamReleaseMapping = @(
     },
     [ordered]@{
         upstreamStep = 'bump or set version'
-        tauPlan = 'dry-run computes the requested next version only when a current version is available or an explicit x.y.z target is supplied.'
+        tauPlan = 'dry-run computes the requested next version from the repo-owned MSBuild version source; update-release-version.ps1 can apply the same value when an explicit release execution flow exists.'
         state = $versionPlanStatus
     },
     [ordered]@{
@@ -446,7 +451,7 @@ $upstreamReleaseMapping = @(
 )
 
 $nonExecutedMutations = @(
-    "Set or update Tau repo-owned version source to $versionToken.",
+    "Apply repo-owned version update to $versionToken with scripts/update-release-version.ps1 -Apply.",
     'Update docs/releases/feature-release-notes.md release section and keep docs/histories/YYYY-MM synchronized.',
     "Create release commit, e.g. git commit -m `"Release $tagToken`".",
     "Create tag $tagToken.",
