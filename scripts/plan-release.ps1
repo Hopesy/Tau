@@ -372,6 +372,8 @@ $requiredScripts = @(
     'scripts/verify-no-env.ps1',
     'scripts/verify-release-contracts.ps1',
     'scripts/verify-session-audit-scripts.ps1',
+    'scripts/verify-edit-tool-stats.ps1',
+    'scripts/report-edit-tool-stats.ps1',
     'scripts/verify-coding-agent-startup-profile.ps1',
     'scripts/verify-release-version-sync.ps1',
     'scripts/sync-release-versions.ps1',
@@ -414,6 +416,11 @@ $plannedCommands = @(
         name = 'session-audit-script-smoke'
         command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-session-audit-scripts.ps1'
         purpose = 'Validate Tau session transcript and cost audit scripts against a local JSONL fixture.'
+    },
+    [ordered]@{
+        name = 'edit-tool-stats-smoke'
+        command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-edit-tool-stats.ps1'
+        purpose = 'Validate the Tau edit tool statistics report against Tau and upstream-style JSONL fixture records.'
     },
     [ordered]@{
         name = 'coding-agent-startup-profile-smoke'
