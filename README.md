@@ -202,6 +202,7 @@ Release artifact baseline：
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\plan-release.ps1 patch
 powershell -ExecutionPolicy Bypass -File .\scripts\prepare-release.ps1 patch
+powershell -ExecutionPolicy Bypass -File .\scripts\validate-release.ps1 -Runtimes win-x64
 powershell -ExecutionPolicy Bypass -File .\scripts\update-release-version.ps1 patch
 powershell -ExecutionPolicy Bypass -File .\scripts\update-release-notes.ps1 0.1.1
 powershell -ExecutionPolicy Bypass -File .\scripts\build-release-artifacts.ps1 -Configuration Release
@@ -214,6 +215,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\package-release-matrix.ps1 -R
 `plan-release.ps1` 对照上游 `scripts/release.mjs` 的 clean worktree、version bump / explicit semver、changelog release section、commit/tag、publish 和 push 流程，生成 Tau 的 dry-run 发布计划。它会读取 `git status`、检查 release notes 与 release 脚本是否存在、从 `Directory.Build.props` 的 `VersionPrefix` 读取当前 Tau 产品版本、计算 `major|minor|patch` 或显式 `x.y.z` 的下一版本，并列出应运行的 guarded release preparation preview、version update preview、release notes update preview、no-env gate、release matrix build/package 命令；脚本不会修改版本、release notes、history，不会执行 `git commit`、`git tag`、publish 或 push。`-CurrentVersion x.y.z` 仅用于临时覆盖当前版本；`-AllowDirty` 只用于 planning-only 场景，真实 release 前仍要求 clean worktree。
 
 `prepare-release.ps1` 是当前 release execution 的本地准备层：默认 dry-run，复用 `update-release-version.ps1` 和 `update-release-notes.ps1` 预览将要写入的版本与 release notes；只有显式传 `-Apply` 且工作树干净时，才依次写回 `Directory.Build.props` 与 `docs/releases/feature-release-notes.md`。`-Apply` 前会先跑两个 helper 的 dry-run 预检，避免 release notes 表结构等问题在版本已经写回后才暴露。该脚本仍不运行 no-env gate、release matrix build/package、commit、tag、publish 或 push；这些动作必须作为后续显式 release execution / operator 步骤处理。
+
+`validate-release.ps1` 是当前 release validation 的本地编排层：默认 dry-run，只列出 `git diff --check`、`verify-no-env.ps1` 和 `build-release-matrix.ps1` 将要执行的命令；只有显式传 `-Run` 才真正执行这些本地验证。默认 `-Run` 要求工作树干净，`-AllowDirty` 只用于本地 WIP validation。该脚本不调用 `prepare-release.ps1 -Apply`，不修改版本或 release notes，也不 commit/tag/publish/push。
 
 `update-release-version.ps1` 只负责 Tau 产品版本写回这一件事：读取 `Directory.Build.props` 中唯一的 `Version` / `VersionPrefix` / `PackageVersion`，计算 bump 或验证显式 `x.y.z`，默认 dry-run 输出当前版本和下一版本；只有显式传 `-Apply` 时才写回该 MSBuild 属性。该脚本不编辑 release notes，不 commit/tag/publish/push。
 

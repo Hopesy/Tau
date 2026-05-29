@@ -371,6 +371,7 @@ else {
 $requiredScripts = @(
     'scripts/verify-no-env.ps1',
     'scripts/prepare-release.ps1',
+    'scripts/validate-release.ps1',
     'scripts/update-release-version.ps1',
     'scripts/update-release-notes.ps1',
     'scripts/build-release-artifacts.ps1',
@@ -402,6 +403,11 @@ $plannedCommands = @(
         name = 'release-preparation'
         command = "powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\prepare-release.ps1 $ReleaseTarget"
         purpose = 'Preview the guarded local release preparation flow that can apply version and release notes writes only when -Apply is explicit.'
+    },
+    [ordered]@{
+        name = 'release-validation'
+        command = "powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\validate-release.ps1 -Runtimes $runtimeArgument"
+        purpose = 'Preview the guarded local release validation flow that can run diff, no-env and release matrix validation only when -Run is explicit.'
     },
     [ordered]@{
         name = 'version-update'
