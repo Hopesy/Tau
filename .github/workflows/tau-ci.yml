@@ -54,6 +54,10 @@ jobs:
         shell: pwsh
         run: powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-coding-agent-tools-to-bin-migration.ps1
 
+      - name: CodingAgent deprecated extension dirs audit smoke
+        shell: pwsh
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-coding-agent-deprecated-extension-dirs-audit.ps1
+
       - name: Edit tool stats smoke
         shell: pwsh
         run: powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-edit-tool-stats.ps1

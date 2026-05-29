@@ -190,6 +190,7 @@ try {
         'coding-agent-session-migration-smoke',
         'coding-agent-commands-migration-smoke',
         'coding-agent-tools-to-bin-migration-smoke',
+        'coding-agent-deprecated-extension-dirs-audit-smoke',
         'edit-tool-stats-smoke',
         'mom-timestamp-migration-smoke',
         'coding-agent-startup-profile-smoke',
