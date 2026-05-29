@@ -380,6 +380,8 @@ $requiredScripts = @(
     'scripts/migrate-coding-agent-tools-to-bin.ps1',
     'scripts/verify-coding-agent-deprecated-extension-dirs-audit.ps1',
     'scripts/audit-coding-agent-deprecated-extension-dirs.ps1',
+    'scripts/verify-coding-agent-keybindings-migration.ps1',
+    'scripts/migrate-coding-agent-keybindings.ps1',
     'scripts/verify-edit-tool-stats.ps1',
     'scripts/report-edit-tool-stats.ps1',
     'scripts/verify-mom-timestamp-migration.ps1',
@@ -446,6 +448,11 @@ $plannedCommands = @(
         name = 'coding-agent-deprecated-extension-dirs-audit-smoke'
         command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-coding-agent-deprecated-extension-dirs-audit.ps1'
         purpose = 'Validate the Tau CodingAgent deprecated hooks/tools extension directory audit helper against local base directory fixtures.'
+    },
+    [ordered]@{
+        name = 'coding-agent-keybindings-migration-smoke'
+        command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-coding-agent-keybindings-migration.ps1'
+        purpose = 'Validate the Tau CodingAgent legacy keybinding id migration helper against a local keybindings fixture.'
     },
     [ordered]@{
         name = 'edit-tool-stats-smoke'
