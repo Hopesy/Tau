@@ -370,6 +370,8 @@ else {
 
 $requiredScripts = @(
     'scripts/verify-no-env.ps1',
+    'scripts/update-release-version.ps1',
+    'scripts/update-release-notes.ps1',
     'scripts/build-release-artifacts.ps1',
     'scripts/build-release-matrix.ps1',
     'scripts/package-release-artifacts.ps1',
@@ -401,6 +403,11 @@ $plannedCommands = @(
         purpose = 'Preview the repo-owned MSBuild version update; pass -Apply only inside an explicit release execution flow.'
     },
     [ordered]@{
+        name = 'release-notes-update'
+        command = "powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\update-release-notes.ps1 $versionToken"
+        purpose = 'Preview the Tau release notes row update; pass -Apply only inside an explicit release execution flow.'
+    },
+    [ordered]@{
         name = 'no-env-validation'
         command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-no-env.ps1 -SkipRestore -RunSmoke'
         purpose = 'Run the current Tau project gate under provider/auth-isolated child-process environment.'
@@ -430,7 +437,7 @@ $upstreamReleaseMapping = @(
     },
     [ordered]@{
         upstreamStep = 'update changelogs'
-        tauPlan = 'Tau uses docs/releases/feature-release-notes.md plus docs/histories; this script lists the required mutation but does not edit files.'
+        tauPlan = 'Tau uses docs/releases/feature-release-notes.md plus docs/histories; update-release-notes.ps1 can preview or explicitly apply the release row, but this planner never edits files.'
         state = 'planned-only'
     },
     [ordered]@{
@@ -452,7 +459,7 @@ $upstreamReleaseMapping = @(
 
 $nonExecutedMutations = @(
     "Apply repo-owned version update to $versionToken with scripts/update-release-version.ps1 -Apply.",
-    'Update docs/releases/feature-release-notes.md release section and keep docs/histories/YYYY-MM synchronized.',
+    "Apply docs/releases/feature-release-notes.md release row for $tagToken with scripts/update-release-notes.ps1 -Apply and keep docs/histories/YYYY-MM synchronized.",
     "Create release commit, e.g. git commit -m `"Release $tagToken`".",
     "Create tag $tagToken.",
     'Publish/upload verified release archives after external e2e decisions are satisfied.',
@@ -460,7 +467,7 @@ $nonExecutedMutations = @(
 )
 
 $remainingGaps = @(
-    'Tau has a repo-owned MSBuild version source for planning, but this dry-run planner does not update it.',
+    'Tau has repo-owned version and release notes helpers, but this dry-run planner does not apply either mutation.',
     'This is a dry-run planner; it does not bump versions, edit release notes, commit, tag, publish or push.',
     'Real non-host runner executable smoke and external provider/Slack/Docker/SSH/HF/GPU/vLLM release e2e remain open.',
     'Exact Unix release wrapper/auth-backup parity and upstream examples/Photon/interactive asset payload parity remain open.'

@@ -201,6 +201,8 @@ Release artifact baseline：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\plan-release.ps1 patch
+powershell -ExecutionPolicy Bypass -File .\scripts\update-release-version.ps1 patch
+powershell -ExecutionPolicy Bypass -File .\scripts\update-release-notes.ps1 0.1.1
 powershell -ExecutionPolicy Bypass -File .\scripts\build-release-artifacts.ps1 -Configuration Release
 powershell -ExecutionPolicy Bypass -File .\scripts\smoke-release-artifacts.ps1 -ArtifactRoot .\artifacts\tau-win-x64
 powershell -ExecutionPolicy Bypass -File .\scripts\package-release-artifacts.ps1 -ArtifactRoot .\artifacts\tau-win-x64
@@ -208,9 +210,11 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build-release-matrix.ps1 -Run
 powershell -ExecutionPolicy Bypass -File .\scripts\package-release-matrix.ps1 -Runtimes win-x64
 ```
 
-`plan-release.ps1` 对照上游 `scripts/release.mjs` 的 clean worktree、version bump / explicit semver、changelog release section、commit/tag、publish 和 push 流程，生成 Tau 的 dry-run 发布计划。它会读取 `git status`、检查 release notes 与 release 脚本是否存在、从 `Directory.Build.props` 的 `VersionPrefix` 读取当前 Tau 产品版本、计算 `major|minor|patch` 或显式 `x.y.z` 的下一版本，并列出应运行的 no-env gate、release matrix build/package 命令；脚本不会修改版本、release notes、history，不会执行 `git commit`、`git tag`、publish 或 push。`-CurrentVersion x.y.z` 仅用于临时覆盖当前版本；`-AllowDirty` 只用于 planning-only 场景，真实 release 前仍要求 clean worktree。
+`plan-release.ps1` 对照上游 `scripts/release.mjs` 的 clean worktree、version bump / explicit semver、changelog release section、commit/tag、publish 和 push 流程，生成 Tau 的 dry-run 发布计划。它会读取 `git status`、检查 release notes 与 release 脚本是否存在、从 `Directory.Build.props` 的 `VersionPrefix` 读取当前 Tau 产品版本、计算 `major|minor|patch` 或显式 `x.y.z` 的下一版本，并列出应运行的 version update preview、release notes update preview、no-env gate、release matrix build/package 命令；脚本不会修改版本、release notes、history，不会执行 `git commit`、`git tag`、publish 或 push。`-CurrentVersion x.y.z` 仅用于临时覆盖当前版本；`-AllowDirty` 只用于 planning-only 场景，真实 release 前仍要求 clean worktree。
 
 `update-release-version.ps1` 只负责 Tau 产品版本写回这一件事：读取 `Directory.Build.props` 中唯一的 `Version` / `VersionPrefix` / `PackageVersion`，计算 bump 或验证显式 `x.y.z`，默认 dry-run 输出当前版本和下一版本；只有显式传 `-Apply` 时才写回该 MSBuild 属性。该脚本不编辑 release notes，不 commit/tag/publish/push。
+
+`update-release-notes.ps1` 只负责 Tau-native release notes 行写回这一件事：读取 `docs/releases/feature-release-notes.md`，按版本 `v<version>` 和日期生成当前月份表格行，默认 dry-run 输出将插入的 Markdown 行；只有显式传 `-Apply` 时才写回 release notes。该脚本不修改 MSBuild 版本，不 commit/tag/publish/push，也不替代 history 记录。
 
 如果需要用 `build-release-artifacts.ps1 -SkipRestore` 做离线/复用 restore 的发布验证，必须先执行带 RID 的 restore，例如 `dotnet restore Tau.slnx -r win-x64 --verbosity minimal`；普通 `dotnet restore Tau.slnx` 不会生成 `net10.0/win-x64` publish 需要的 assets target。
 
