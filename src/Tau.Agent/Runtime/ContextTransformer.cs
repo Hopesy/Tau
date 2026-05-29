@@ -7,12 +7,19 @@ namespace Tau.Agent.Runtime;
 /// </summary>
 internal static class ContextTransformer
 {
-    public static LlmContext Build(
+    public static async ValueTask<LlmContext> BuildAsync(
         AgentLoopConfig config,
-        IReadOnlyList<ChatMessage> messages)
+        IReadOnlyList<ChatMessage> messages,
+        CancellationToken cancellationToken)
     {
-        var transformed = config.TransformContext?.Invoke(messages) ?? messages;
+        cancellationToken.ThrowIfCancellationRequested();
+        var transformed = config.TransformContextAsync is not null
+            ? await config.TransformContextAsync(messages, cancellationToken).ConfigureAwait(false)
+            : config.TransformContext?.Invoke(messages) ?? messages;
+        cancellationToken.ThrowIfCancellationRequested();
+
         var llmMessages = config.ConvertToLlm?.Invoke(transformed) ?? transformed;
+        cancellationToken.ThrowIfCancellationRequested();
 
         var tools = config.Tools
             .Select(t => new Tool(t.Name, t.Description, t.ParameterSchema))

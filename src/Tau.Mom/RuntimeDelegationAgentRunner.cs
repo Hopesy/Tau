@@ -143,7 +143,7 @@ public sealed class RuntimeDelegationAgentRunner : IDelegationAgentRunner
                             }
                             else
                             {
-                                toolName = string.Empty;
+                                toolName = toolEnd.ToolName ?? string.Empty;
                                 duration = null;
                             }
                             toolEvents.Add(new DelegationToolEvent(
@@ -619,6 +619,7 @@ public sealed class RuntimeDelegationAgentRunner : IDelegationAgentRunner
         StopReason.ToolUse => "tool_use",
         StopReason.ContentFilter => "content_filter",
         StopReason.Error => "error",
+        StopReason.Aborted => "aborted",
         _ => stopReason.ToString().ToLowerInvariant()
     };
 

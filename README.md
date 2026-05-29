@@ -178,6 +178,45 @@ powershell -ExecutionPolicy Bypass -File .\scripts\verify-dotnet.ps1 -SkipRestor
 powershell -ExecutionPolicy Bypass -File .\scripts\verify-dotnet.ps1 -SkipRestore -RunSmoke
 ```
 
+No-env PowerShell 验证入口：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\verify-no-env.ps1 -SkipRestore
+powershell -ExecutionPolicy Bypass -File .\scripts\verify-no-env.ps1 -SkipRestore -RunSmoke
+```
+
+`verify-no-env.ps1` 通过 `scripts/invoke-no-env.ps1` 只对子进程清除 OpenAI / Anthropic / Google / Azure / AWS / HF / Slack / Tau auth/config 相关环境变量，设置 `PI_NO_LOCAL_LLM=1` 与 `TAU_NO_LOCAL_LLM=1`，并把 `TAU_AUTH_FILE`、`TAU_MODELS_FILE`、CodingAgent session/settings/history/keybindings 和 `TAU_LOG_FILE` 指到临时目录。脚本不会移动用户真实 `auth.json`，也不会输出任何 secret 值；`-RunSmoke` 会额外做 `tau-ai list` 和 CodingAgent RPC `get_state` no-env smoke。
+
+CodingAgent 直达 no-env wrapper：
+
+```powershell
+$rpcInput = Join-Path $env:TEMP "tau-rpc-input.jsonl"
+[System.IO.File]::WriteAllText($rpcInput, '{"id":"state","type":"get_state"}' + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($false))
+powershell -ExecutionPolicy Bypass -File .\scripts\pi-test.ps1 --no-env --no-build --input-file $rpcInput -- --mode rpc --no-context-files --no-themes
+```
+
+`pi-test.ps1` 对照上游 `pi-test.sh --no-env` 的职责，直接启动 `Tau.CodingAgent`，并在 `--no-env` 时复用 `invoke-no-env.ps1` 的子进程环境清理和临时 Tau 状态。需要给 RPC/stdin 场景喂输入时使用 `--input-file <path>`；脚本会用 shell redirection 交给子进程，避免 PowerShell stdin BOM 破坏 JSONL。该 wrapper 是 PowerShell-first 等价入口，不移动用户真实 auth 文件，也不是 Unix shell wrapper。
+
+Release artifact baseline：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\build-release-artifacts.ps1 -Configuration Release
+powershell -ExecutionPolicy Bypass -File .\scripts\smoke-release-artifacts.ps1 -ArtifactRoot .\artifacts\tau-win-x64
+powershell -ExecutionPolicy Bypass -File .\scripts\package-release-artifacts.ps1 -ArtifactRoot .\artifacts\tau-win-x64
+```
+
+如果需要用 `build-release-artifacts.ps1 -SkipRestore` 做离线/复用 restore 的发布验证，必须先执行带 RID 的 restore，例如 `dotnet restore Tau.slnx -r win-x64 --verbosity minimal`；普通 `dotnet restore Tau.slnx` 不会生成 `net10.0/win-x64` publish 需要的 assets target。
+
+当前 release artifact 输出到 `artifacts/tau-<rid>/`，Windows 当前平台是 `artifacts/tau-win-x64/`。目录内包含 `apps/**` 的 `dotnet publish` 输出、`manifest.json`、基础文档，以及 `bin/pi.cmd`、`bin/tau-ai.cmd`、`bin/pi-ai.cmd`、`bin/mom.cmd`、`bin/pi-pods.cmd`、`bin/tau-web-ui.cmd` wrapper。artifact smoke 会验证 AI CLI provider list、`pi` RPC `get_state`、Pods help、WebUi health/status/catalog/session store 和 Mom `--once` 本地 delegation 链路。`package-release-artifacts.ps1` 会把该目录打包为 `artifacts/releases/tau-<rid>.zip`，再解压到全新临时目录并复用同一套 artifact smoke 验证 extracted copy。当前这是 current-RID 可执行交付物 + zip archive baseline；cross-platform archive matrix、Unix tar.gz parity、exact auth-backup parity、version/changelog/tag/publish automation 和真实外部 e2e release smoke 仍是 Phase 5 后续缺口。
+
+GitHub Actions CI baseline：
+
+```text
+.github/workflows/tau-ci.yml
+```
+
+当前 CI 在 `push main`、`pull_request` 和手动触发时运行 Windows PowerShell gate：按 `global.json` 安装 .NET SDK，`dotnet restore Tau.slnx`，执行 `verify-no-env.ps1 -SkipRestore -RunSmoke`，构建 Release artifact，打包 `artifacts/releases/tau-win-x64.zip`，并先解压 smoke 后再上传该 zip 作为 workflow artifact。该 workflow 复用仓库现有 PowerShell 脚本，不另建一套 CI-only 行为；它关闭的是 Windows current-RID CI/release artifact baseline，不代表跨平台 archive matrix、Unix shell wrapper、version/tag/publish automation 或真实外部 e2e release smoke 已完成。
+
 当前机器上的现场现实：
 
 - 项目级验证仍保留 bash 入口，但旧 harness-init 的通用脚手架已移除

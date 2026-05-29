@@ -626,6 +626,7 @@ public static class OpenAiResponsesShared
     {
         private readonly AssistantMessageStream _stream;
         private readonly Dictionary<string, int> _itemIndexes = new(StringComparer.Ordinal);
+        private readonly Dictionary<int, string> _toolCallArguments = new();
         private readonly Action? _beforeDone;
         private readonly string? _requestedServiceTier;
         private readonly Func<string?, string?, string?>? _resolveServiceTier;
@@ -732,8 +733,13 @@ public static class OpenAiResponsesShared
                     var callId = GetString(item, "call_id") ?? GetString(item, "id") ?? itemId;
                     var name = GetString(item, "name") ?? string.Empty;
                     var arguments = GetString(item, "arguments") ?? string.Empty;
-                    AddBlock(itemId, new ToolCallContent($"{callId}|{itemId}", name, arguments));
-                    _stream.Push(new ToolCallStartEvent(_itemIndexes[itemId], _partial));
+                    AddBlock(itemId, new ToolCallContent(
+                        $"{callId}|{itemId}",
+                        name,
+                        StreamingJsonParser.ParseStreamingJsonObjectRawText(arguments)));
+                    var index = _itemIndexes[itemId];
+                    _toolCallArguments[index] = arguments;
+                    _stream.Push(new ToolCallStartEvent(index, _partial));
                     break;
             }
         }
@@ -799,8 +805,9 @@ public static class OpenAiResponsesShared
                 return;
             }
 
+            var accumulatedArguments = AccumulateToolCallArguments(index.Value, delta);
             UpdateBlock(index.Value, block => block is ToolCallContent toolCall
-                ? toolCall with { Arguments = toolCall.Arguments + delta }
+                ? toolCall with { Arguments = StreamingJsonParser.ParseStreamingJsonObjectRawText(accumulatedArguments) }
                 : block);
             _stream.Push(new ToolCallDeltaEvent(index.Value, delta, _partial));
         }
@@ -811,8 +818,9 @@ public static class OpenAiResponsesShared
             var arguments = GetString(root, "arguments");
             if (index is not null && arguments is not null)
             {
+                _toolCallArguments[index.Value] = arguments;
                 UpdateBlock(index.Value, block => block is ToolCallContent toolCall
-                    ? toolCall with { Arguments = arguments }
+                    ? toolCall with { Arguments = StreamingJsonParser.ParseStreamingJsonObjectRawText(arguments) }
                     : block);
             }
         }
@@ -912,14 +920,27 @@ public static class OpenAiResponsesShared
                     var itemId = GetString(item, "id");
                     var name = GetString(item, "name");
                     var args = GetString(item, "arguments");
+                    var finalArgs = args ?? (_toolCallArguments.TryGetValue(index, out var accumulated)
+                        ? accumulated
+                        : toolCall.Arguments);
                     UpdateBlock(index, _ => toolCall with
                     {
                         Id = callId is not null && itemId is not null ? $"{callId}|{itemId}" : toolCall.Id,
                         Name = name ?? toolCall.Name,
-                        Arguments = args ?? toolCall.Arguments
+                        Arguments = StreamingJsonParser.ParseStreamingJsonObjectRawText(finalArgs)
                     });
                     break;
             }
+        }
+
+        private string AccumulateToolCallArguments(int index, string delta)
+        {
+            var current = _toolCallArguments.TryGetValue(index, out var existing)
+                ? existing
+                : string.Empty;
+            var accumulated = current + delta;
+            _toolCallArguments[index] = accumulated;
+            return accumulated;
         }
 
         private int? FindIndex(JsonElement root, Func<ContentBlock, bool> predicate)
@@ -1013,7 +1034,8 @@ public static class OpenAiResponsesShared
             return status switch
             {
                 "incomplete" => StopReason.MaxTokens,
-                "failed" or "cancelled" => StopReason.Error,
+                "failed" => StopReason.Error,
+                "cancelled" or "aborted" => StopReason.Aborted,
                 _ => StopReason.EndTurn
             };
         }

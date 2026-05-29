@@ -94,7 +94,8 @@ internal sealed class AnthropicStreamParser
             "tool_use" => new ToolCallContent(
                 block.GetProperty("id").GetString()!,
                 block.GetProperty("name").GetString()!,
-                ""),
+                StreamingJsonParser.ParseStreamingJsonObjectRawText(
+                    block.TryGetProperty("input", out var input) ? input.GetRawText() : null)),
             _ => new TextContent("")
         };
 
@@ -166,7 +167,7 @@ internal sealed class AnthropicStreamParser
                     if (_toolInputs.TryGetValue(index, out var acc) && current is ToolCallContent tcc)
                     {
                         acc.Builder.Append(partialJson);
-                        var updated = tcc with { Arguments = acc.Builder.ToString() };
+                        var updated = tcc with { Arguments = StreamingJsonParser.ParseStreamingJsonObjectRawText(acc.Builder.ToString()) };
                         ReplaceContent(index, updated);
                         _stream.Push(new ToolCallDeltaEvent(index, partialJson, _partial));
                     }
@@ -186,7 +187,7 @@ internal sealed class AnthropicStreamParser
         {
             TextContent => new TextEndEvent(index, _partial),
             ThinkingContent => new ThinkingEndEvent(index, _partial),
-            ToolCallContent => new ToolCallEndEvent(index, _partial),
+            ToolCallContent toolCall => FinalizeToolCall(index, toolCall),
             _ => new TextEndEvent(index, _partial)
         };
         _stream.Push(evt);
@@ -234,6 +235,15 @@ internal sealed class AnthropicStreamParser
         var list = _partial.Content.ToList();
         list[index] = block;
         _partial = _partial with { Content = list };
+    }
+
+    private ToolCallEndEvent FinalizeToolCall(int index, ToolCallContent toolCall)
+    {
+        var rawArguments = _toolInputs.TryGetValue(index, out var acc)
+            ? acc.Builder.ToString()
+            : toolCall.Arguments;
+        ReplaceContent(index, toolCall with { Arguments = StreamingJsonParser.ParseStreamingJsonObjectRawText(rawArguments) });
+        return new ToolCallEndEvent(index, _partial);
     }
 
     private void EnsureContentSlot(int index)

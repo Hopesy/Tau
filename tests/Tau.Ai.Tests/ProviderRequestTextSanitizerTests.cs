@@ -5,6 +5,7 @@ using Tau.Ai.Providers.Anthropic;
 using Tau.Ai.Providers.Bedrock;
 using Tau.Ai.Providers.Google;
 using Tau.Ai.Providers.Mistral;
+using Tau.Ai.Providers.OpenAi;
 
 namespace Tau.Ai.Tests;
 
@@ -33,6 +34,83 @@ public sealed class ProviderRequestTextSanitizerTests
             "thinking  🙈",
             "assistant  🙈",
             "tool  🙈");
+    }
+
+    [Fact]
+    public async Task AnthropicProvider_ParsesPartialStreamingToolArguments()
+    {
+        using var handler = new OpenAiResponsesProviderTests.StubHandler(_ => OpenAiResponsesProviderTests.SseResponse(
+            """
+            event: message_start
+            data: {"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":1,"output_tokens":0}}}
+
+            event: content_block_start
+            data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"read_file","input":{}}}
+
+            event: content_block_delta
+            data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"README"}}
+
+            event: content_block_delta
+            data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":".md\"}"}}
+
+            event: content_block_stop
+            data: {"type":"content_block_stop","index":0}
+
+            event: message_delta
+            data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":1}}
+
+            event: message_stop
+            data: {"type":"message_stop"}
+
+            """));
+        using var client = new HttpClient(handler);
+        var provider = new AnthropicProvider(client);
+
+        var events = await OpenAiResponsesProviderTests.CollectAsync(provider.Stream(
+            AnthropicModel(),
+            new LlmContext { Messages = [new UserMessage("read")] },
+            new StreamOptions { ApiKey = "anthropic-key" }));
+
+        var firstDelta = Assert.IsType<ToolCallDeltaEvent>(events.First(evt => evt is ToolCallDeltaEvent));
+        var partialToolCall = Assert.IsType<ToolCallContent>(Assert.Single(firstDelta.Partial.Content));
+        Assert.Equal("""{"path":"README"}""", partialToolCall.Arguments);
+
+        var done = Assert.Single(events.OfType<DoneEvent>());
+        var toolCall = Assert.IsType<ToolCallContent>(Assert.Single(done.Message.Content));
+        Assert.Equal("toolu_1", toolCall.Id);
+        Assert.Equal("read_file", toolCall.Name);
+        Assert.Equal("""{"path":"README.md"}""", toolCall.Arguments);
+    }
+
+    [Fact]
+    public async Task OpenAiProvider_ParsesPartialStreamingToolArguments()
+    {
+        using var handler = new OpenAiResponsesProviderTests.StubHandler(_ => OpenAiResponsesProviderTests.SseResponse(
+            """
+            data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"README"}}]},"finish_reason":null}]}
+
+            data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":".md\"}"}}]},"finish_reason":null}]}
+
+            data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":1,"completion_tokens":2}}
+
+            """));
+        using var client = new HttpClient(handler);
+        var provider = new OpenAiProvider(client);
+
+        var events = await OpenAiResponsesProviderTests.CollectAsync(provider.Stream(
+            OpenAiModel(),
+            new LlmContext { Messages = [new UserMessage("read")] },
+            new StreamOptions { ApiKey = "openai-key" }));
+
+        var firstDelta = Assert.IsType<ToolCallDeltaEvent>(events.First(evt => evt is ToolCallDeltaEvent));
+        var partialToolCall = Assert.IsType<ToolCallContent>(Assert.Single(firstDelta.Partial.Content));
+        Assert.Equal("""{"path":"README"}""", partialToolCall.Arguments);
+
+        var done = Assert.Single(events.OfType<DoneEvent>());
+        var toolCall = Assert.IsType<ToolCallContent>(Assert.Single(done.Message.Content));
+        Assert.Equal("call_1", toolCall.Id);
+        Assert.Equal("read_file", toolCall.Name);
+        Assert.Equal("""{"path":"README.md"}""", toolCall.Arguments);
     }
 
     [Fact]
@@ -161,6 +239,15 @@ public sealed class ProviderRequestTextSanitizerTests
         Provider = "anthropic",
         BaseUrl = "https://api.anthropic.com",
         Reasoning = true
+    };
+
+    private static Model OpenAiModel() => new()
+    {
+        Id = "gpt-5.4",
+        Name = "GPT-5.4",
+        Api = "openai-chat-completions",
+        Provider = "openai",
+        BaseUrl = "https://example.invalid/v1"
     };
 
     private static Model GoogleModel(string api, string provider, string baseUrl) => new()

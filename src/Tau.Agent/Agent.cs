@@ -16,6 +16,7 @@ public sealed record AgentOptions
     public IReadOnlyList<IToolInterceptor> Interceptors { get; init; } = [];
     public SimpleStreamOptions? StreamOptions { get; init; }
     public Func<IReadOnlyList<ChatMessage>, IReadOnlyList<ChatMessage>>? TransformContext { get; init; }
+    public Func<IReadOnlyList<ChatMessage>, CancellationToken, Task<IReadOnlyList<ChatMessage>>>? TransformContextAsync { get; init; }
     public Func<IReadOnlyList<ChatMessage>, IReadOnlyList<ChatMessage>>? ConvertToLlm { get; init; }
     public AgentQueueMode SteeringMode { get; init; } = AgentQueueMode.OneAtATime;
     public AgentQueueMode FollowUpMode { get; init; } = AgentQueueMode.OneAtATime;
@@ -46,6 +47,7 @@ public sealed class Agent
         _interceptors = options.Interceptors.ToArray();
         StreamOptions = options.StreamOptions;
         TransformContext = options.TransformContext;
+        TransformContextAsync = options.TransformContextAsync;
         ConvertToLlm = options.ConvertToLlm;
         ToolExecution = options.ToolExecution;
         LogSink = options.LogSink;
@@ -106,6 +108,7 @@ public sealed class Agent
 
     public SimpleStreamOptions? StreamOptions { get; set; }
     public Func<IReadOnlyList<ChatMessage>, IReadOnlyList<ChatMessage>>? TransformContext { get; set; }
+    public Func<IReadOnlyList<ChatMessage>, CancellationToken, Task<IReadOnlyList<ChatMessage>>>? TransformContextAsync { get; set; }
     public Func<IReadOnlyList<ChatMessage>, IReadOnlyList<ChatMessage>>? ConvertToLlm { get; set; }
     public ToolExecutionMode ToolExecution { get; set; }
     public ITauLogSink LogSink { get; set; }
@@ -313,10 +316,10 @@ public sealed class Agent
 
         try
         {
-            await foreach (var evt in _runtime.RunAsync(CreateConfig(skipInitialSteeringPoll), cancellationToken)
-                               .WithCancellation(cancellationToken)
+            await foreach (var runtimeEvent in _runtime.RunAsync(CreateConfig(skipInitialSteeringPoll), cancellationToken)
                                .ConfigureAwait(false))
             {
+                var evt = NormalizeRuntimeEvent(runtimeEvent);
                 await EmitAsync(evt, cancellationToken).ConfigureAwait(false);
                 if (!emittedPromptMessages && evt is TurnStartEvent)
                 {
@@ -338,24 +341,34 @@ public sealed class Agent
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             const string error = "Operation canceled.";
-            State.SetError(error);
-            if (!sawAgentEnd)
-            {
-                await EmitAsync(new AgentEndEvent(error), cancellationToken).ConfigureAwait(false);
-            }
+            await EmitFailureAsync(error, aborted: true, sawAgentEnd, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
-            State.SetError(ex.Message);
-            if (!sawAgentEnd)
-            {
-                await EmitAsync(new AgentEndEvent(ex.Message), cancellationToken).ConfigureAwait(false);
-            }
+            await EmitFailureAsync(ex.Message, aborted: false, sawAgentEnd, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
             State.SetStreaming(false);
         }
+    }
+
+    private static AgentEvent NormalizeRuntimeEvent(AgentEvent evt)
+    {
+        if (evt is not AgentEndEvent end || string.IsNullOrWhiteSpace(end.ErrorMessage))
+        {
+            return evt;
+        }
+
+        var failureMessage = end.Messages
+            .OfType<AssistantMessage>()
+            .LastOrDefault(static message =>
+                !string.IsNullOrWhiteSpace(message.ErrorMessage) ||
+                message.StopReason is StopReason.Error or StopReason.Aborted);
+
+        return failureMessage is null
+            ? evt
+            : new AgentEndEvent(end.ErrorMessage, [failureMessage]);
     }
 
     private AgentLoopConfig CreateConfig(bool skipInitialSteeringPoll) =>
@@ -371,9 +384,40 @@ public sealed class Agent
             StreamOptions = StreamOptions,
             DefaultExecutionMode = ToolExecution,
             TransformContext = TransformContext,
+            TransformContextAsync = TransformContextAsync,
             ConvertToLlm = ConvertToLlm,
             SkipInitialSteeringPoll = skipInitialSteeringPoll
         };
+
+    private async Task EmitFailureAsync(
+        string error,
+        bool aborted,
+        bool sawAgentEnd,
+        CancellationToken cancellationToken)
+    {
+        State.SetError(error);
+        var failureMessage = CreateFailureMessage(error, aborted);
+        _runtime.State.AddMessage(failureMessage);
+
+        if (!sawAgentEnd)
+        {
+            await EmitAsync(new AgentEndEvent(error, [failureMessage]), cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private AssistantMessage CreateFailureMessage(string error, bool aborted)
+    {
+        return new AssistantMessage([new TextContent(string.Empty)])
+        {
+            ErrorMessage = error,
+            StopReason = aborted ? StopReason.Aborted : StopReason.Error,
+            Usage = new Usage(0, 0, 0, 0),
+            Api = _model.Api,
+            Provider = _model.Provider,
+            Model = _model.Id,
+            Timestamp = DateTimeOffset.UtcNow
+        };
+    }
 
     private async Task EmitAsync(AgentEvent evt, CancellationToken cancellationToken)
     {

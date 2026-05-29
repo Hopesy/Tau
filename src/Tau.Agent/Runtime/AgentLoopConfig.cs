@@ -27,6 +27,12 @@ public record AgentLoopConfig
     public Func<IReadOnlyList<ChatMessage>, IReadOnlyList<ChatMessage>>? TransformContext { get; init; }
 
     /// <summary>
+    /// Cancellation-aware transform applied before sending messages to the LLM.
+    /// Takes precedence over <see cref="TransformContext" /> when set.
+    /// </summary>
+    public Func<IReadOnlyList<ChatMessage>, CancellationToken, Task<IReadOnlyList<ChatMessage>>>? TransformContextAsync { get; init; }
+
+    /// <summary>
     /// Convert agent messages to LLM-visible messages (filter custom types).
     /// </summary>
     public Func<IReadOnlyList<ChatMessage>, IReadOnlyList<ChatMessage>>? ConvertToLlm { get; init; }

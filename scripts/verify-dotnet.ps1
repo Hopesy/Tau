@@ -58,6 +58,21 @@ function Wait-HttpReady {
     throw "Timed out waiting for $Url"
 }
 
+function Invoke-AiCliSmoke {
+    $output = & dotnet run --project 'src/Tau.Ai.Cli/Tau.Ai.Cli.csproj' --no-build -- list 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        $joined = ($output -join [Environment]::NewLine)
+        throw "tau-ai list smoke failed with exit code $LASTEXITCODE. Output: $joined"
+    }
+
+    $text = $output -join [Environment]::NewLine
+    if ($text -notmatch 'Available OAuth providers:' -or
+        $text -notmatch 'anthropic' -or
+        $text -notmatch 'openai-codex') {
+        throw "tau-ai list smoke output did not include expected provider list"
+    }
+}
+
 function Invoke-WebUiSmoke {
     $smokeRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("tau-webui-smoke-" + [Guid]::NewGuid().ToString("N"))
     $sessionsPath = Join-Path $smokeRoot 'webui-sessions.json'
@@ -222,6 +237,7 @@ function Invoke-MomSmoke {
 
 $sourceProjects = @(
     'src/Tau.Ai/Tau.Ai.csproj',
+    'src/Tau.Ai.Cli/Tau.Ai.Cli.csproj',
     'src/Tau.Agent/Tau.Agent.csproj',
     'src/Tau.Tui/Tau.Tui.csproj',
     'src/Tau.CodingAgent/Tau.CodingAgent.csproj',
@@ -266,6 +282,8 @@ foreach ($project in $testProjects) {
 }
 
 if ($RunSmoke) {
+    Write-Host '==> smoke tau-ai'
+    Invoke-AiCliSmoke
     Write-Host '==> smoke webui'
     Invoke-WebUiSmoke
     Write-Host '==> smoke mom'

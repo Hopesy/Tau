@@ -778,8 +778,8 @@ public sealed class BedrockProviderTests
             return EventStreamResponse(
                 EventJson("messageStart", """{"role":"assistant"}"""),
                 EventJson("contentBlockStart", """{"contentBlockIndex":0,"start":{"toolUse":{"toolUseId":"toolu_1","name":"read_file"}}}"""),
-                EventJson("contentBlockDelta", """{"contentBlockIndex":0,"delta":{"toolUse":{"input":"{\"path\""}}}"""),
-                EventJson("contentBlockDelta", """{"contentBlockIndex":0,"delta":{"toolUse":{"input":":\"README.md\"}"}}}"""),
+                EventJson("contentBlockDelta", """{"contentBlockIndex":0,"delta":{"toolUse":{"input":"{\"path\":\"README"}}}"""),
+                EventJson("contentBlockDelta", """{"contentBlockIndex":0,"delta":{"toolUse":{"input":".md\"}"}}}"""),
                 EventJson("contentBlockStop", """{"contentBlockIndex":0}"""),
                 EventJson("messageStop", """{"stopReason":"tool_use"}"""));
         });
@@ -812,6 +812,9 @@ public sealed class BedrockProviderTests
         Assert.Contains(events, evt => evt is ToolCallStartEvent);
         Assert.Contains(events, evt => evt is ToolCallDeltaEvent);
         Assert.Contains(events, evt => evt is ToolCallEndEvent);
+        var firstDelta = Assert.IsType<ToolCallDeltaEvent>(events.First(evt => evt is ToolCallDeltaEvent));
+        var partialToolCall = Assert.IsType<ToolCallContent>(Assert.Single(firstDelta.Partial.Content));
+        Assert.Equal("""{"path":"README"}""", partialToolCall.Arguments);
         var done = Assert.Single(events.OfType<DoneEvent>());
         var toolCall = Assert.IsType<ToolCallContent>(Assert.Single(done.Message.Content));
         Assert.Equal("toolu_1", toolCall.Id);

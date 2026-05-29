@@ -11,10 +11,17 @@ public sealed class AssistantMessageStream : EventStream<StreamEvent, AssistantM
         extractResult: static evt => evt switch
         {
             DoneEvent done => done.Message,
-            ErrorEvent err => new AssistantMessage
+            ErrorEvent err => err.Message ?? new AssistantMessage
             {
                 ErrorMessage = err.Error,
-                Content = err.Partial?.Content ?? []
+                Content = err.Partial?.Content ?? [],
+                StopReason = err.Partial?.StopReason ?? StopReason.Error,
+                Usage = err.Partial?.Usage,
+                Api = err.Partial?.Api,
+                Provider = err.Partial?.Provider,
+                Model = err.Partial?.Model,
+                ResponseId = err.Partial?.ResponseId,
+                Timestamp = err.Partial?.Timestamp
             },
             _ => null
         })

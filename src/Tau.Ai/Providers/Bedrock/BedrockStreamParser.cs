@@ -24,6 +24,7 @@ internal sealed class BedrockStreamParser
     private AssistantMessage _partial;
     private readonly AssistantMessageStream _stream;
     private readonly Dictionary<int, int> _contentIndexByBedrockIndex = new();
+    private readonly Dictionary<int, string> _toolUseInputsByLocalIndex = new();
     private bool _started;
 
     public BedrockStreamParser(AssistantMessage initial, AssistantMessageStream stream)
@@ -126,7 +127,8 @@ internal sealed class BedrockStreamParser
 
         var toolUseId = GetString(toolUse, "toolUseId") ?? string.Empty;
         var name = GetString(toolUse, "name") ?? string.Empty;
-        var localIndex = AddOrReplaceContent(bedrockIndex, new ToolCallContent(toolUseId, name, string.Empty));
+        var localIndex = AddOrReplaceContent(bedrockIndex, new ToolCallContent(toolUseId, name, "{}"));
+        _toolUseInputsByLocalIndex[localIndex] = string.Empty;
         _stream.Push(new ToolCallStartEvent(localIndex, _partial));
     }
 
@@ -157,7 +159,11 @@ internal sealed class BedrockStreamParser
             if (_contentIndexByBedrockIndex.TryGetValue(bedrockIndex, out var localIndex) &&
                 _partial.Content[localIndex] is ToolCallContent current)
             {
-                ReplaceContent(localIndex, current with { Arguments = current.Arguments + input });
+                var rawInput = _toolUseInputsByLocalIndex.TryGetValue(localIndex, out var existing)
+                    ? existing + input
+                    : input;
+                _toolUseInputsByLocalIndex[localIndex] = rawInput;
+                ReplaceContent(localIndex, current with { Arguments = StreamingJsonParser.ParseStreamingJsonObjectRawText(rawInput) });
                 _stream.Push(new ToolCallDeltaEvent(localIndex, input, _partial));
             }
             return;
@@ -206,6 +212,13 @@ internal sealed class BedrockStreamParser
                 _stream.Push(new ThinkingEndEvent(localIndex, _partial));
                 break;
             case ToolCallContent:
+                if (_partial.Content[localIndex] is ToolCallContent toolCall)
+                {
+                    var rawInput = _toolUseInputsByLocalIndex.TryGetValue(localIndex, out var input)
+                        ? input
+                        : toolCall.Arguments;
+                    ReplaceContent(localIndex, toolCall with { Arguments = StreamingJsonParser.ParseStreamingJsonObjectRawText(rawInput) });
+                }
                 _stream.Push(new ToolCallEndEvent(localIndex, _partial));
                 break;
         }

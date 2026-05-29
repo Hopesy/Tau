@@ -9,18 +9,19 @@ public sealed class ProviderAuthResolver
     private readonly OAuthProviderRegistry _oauthProviders;
     private readonly OAuthCredentialStore _credentialStore;
     private readonly ITauLogSink _logSink;
+    private readonly ModelConfigurationStore _configurationStore;
 
     public ProviderAuthResolver(
         OAuthProviderRegistry? oauthProviders = null,
         OAuthCredentialStore? credentialStore = null,
-        ITauLogSink? logSink = null)
+        ITauLogSink? logSink = null,
+        ModelConfigurationStore? configurationStore = null)
     {
         _oauthProviders = oauthProviders ?? new OAuthProviderRegistry();
         _credentialStore = credentialStore ?? new OAuthCredentialStore();
         _logSink = logSink ?? NullTauLogSink.Instance;
+        _configurationStore = configurationStore ?? new ModelConfigurationStore();
     }
-
-
 
     public ProviderAuthStatus GetStatus(Model model, string? explicitApiKey = null)
     {
@@ -86,7 +87,7 @@ public sealed class ProviderAuthResolver
 
         if (model is not null)
         {
-            var requestConfig = new ModelConfigurationStore().InspectRequestConfigurationStatus(model);
+            var requestConfig = _configurationStore.InspectRequestConfigurationStatus(model);
             if (requestConfig.IsConfigured)
             {
                 var detail = requestConfig.HasCommandBackedSecret

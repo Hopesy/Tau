@@ -22,6 +22,9 @@
     <ProjectReference Include="..\..\src\Tau.Ai\Tau.Ai.csproj">
       <SkipGetTargetFrameworkProperties>true</SkipGetTargetFrameworkProperties>
     </ProjectReference>
+    <ProjectReference Include="..\..\src\Tau.Ai.Cli\Tau.Ai.Cli.csproj">
+      <SkipGetTargetFrameworkProperties>true</SkipGetTargetFrameworkProperties>
+    </ProjectReference>
   </ItemGroup>
 
 </Project>

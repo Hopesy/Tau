@@ -1,4 +1,5 @@
 using System.Text.RegularExpressions;
+using Tau.Ai;
 
 namespace Tau.CodingAgent.Runtime;
 
@@ -88,13 +89,7 @@ internal static partial class CodingAgentRetryClassifier
     }
 
     public static bool IsContextOverflow(string? errorMessage) =>
-        !string.IsNullOrWhiteSpace(errorMessage)
-        && ContextOverflowErrorPattern().IsMatch(errorMessage);
-
-    [GeneratedRegex(
-        "context.?overflow|context.?window|context.?length|max(?:imum)?.?context|token.?limit|too many tokens|prompt.?too.?long|input.?too.?long",
-        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
-    private static partial Regex ContextOverflowErrorPattern();
+        ContextOverflowDetector.IsContextOverflowError(errorMessage);
 
     [GeneratedRegex(
         "overloaded|provider.?returned.?error|rate.?limit|too many requests|429|500|502|503|504|service.?unavailable|server.?error|internal.?error|network.?error|connection.?error|connection.?refused|connection.?lost|other side closed|fetch failed|upstream.?connect|reset before headers|socket hang up|ended without|timed? out|timeout|terminated|retry delay",

@@ -2205,25 +2205,53 @@ public sealed class CodingAgentRpcHost
     private static object ToRpcEvent(AgentEvent evt) => evt switch
     {
         AgentStartEvent => new { type = evt.Type },
-        AgentEndEvent end => new { type = evt.Type, errorMessage = end.ErrorMessage },
+        AgentEndEvent end => new
+        {
+            type = evt.Type,
+            errorMessage = end.ErrorMessage,
+            messages = end.Messages.Select(ToRpcMessage).ToArray()
+        },
         TurnStartEvent turn => new { type = evt.Type, turnIndex = turn.TurnIndex },
-        TurnEndEvent turn => new { type = evt.Type, turnIndex = turn.TurnIndex },
+        TurnEndEvent turn => new
+        {
+            type = evt.Type,
+            turnIndex = turn.TurnIndex,
+            message = turn.Message is null ? null : ToRpcMessage(turn.Message),
+            toolResults = turn.ToolResults.Select(ToRpcMessage).ToArray()
+        },
         MessageStartEvent message => new { type = evt.Type, message = ToRpcMessage(message.Partial) },
-        MessageUpdateEvent update => new { type = evt.Type, streamEvent = ToRpcStreamEvent(update.StreamEvent) },
+        MessageUpdateEvent update => new
+        {
+            type = evt.Type,
+            streamEvent = ToRpcStreamEvent(update.StreamEvent),
+            message = update.Message is null ? null : ToRpcMessage(update.Message)
+        },
         MessageEndEvent message => new { type = evt.Type, message = ToRpcMessage(message.Message) },
-        ToolExecutionStartEvent tool => new { type = evt.Type, toolCallId = tool.ToolCallId, toolName = tool.ToolName },
-        ToolExecutionUpdateEvent tool => new { type = evt.Type, toolCallId = tool.ToolCallId, update = new { text = tool.Update.Text } },
+        ToolExecutionStartEvent tool => new { type = evt.Type, toolCallId = tool.ToolCallId, toolName = tool.ToolName, args = tool.Args },
+        ToolExecutionUpdateEvent tool => new
+        {
+            type = evt.Type,
+            toolCallId = tool.ToolCallId,
+            toolName = tool.ToolName,
+            args = tool.Args,
+            update = new { text = tool.Update.Text },
+            partialResult = tool.PartialResult is null ? null : ToRpcToolResult(tool.PartialResult)
+        },
         ToolExecutionEndEvent tool => new
         {
             type = evt.Type,
             toolCallId = tool.ToolCallId,
-            result = new
-            {
-                isError = tool.Result.IsError,
-                content = tool.Result.Content.Select(ToRpcContent).ToArray()
-            }
+            toolName = tool.ToolName,
+            isError = tool.IsError,
+            result = ToRpcToolResult(tool.Result)
         },
         _ => new { type = evt.Type }
+    };
+
+    private static object ToRpcToolResult(ToolResult result) => new
+    {
+        isError = result.IsError,
+        content = result.Content.Select(ToRpcContent).ToArray()
     };
 
     private static object ToRpcStreamEvent(StreamEvent evt) => evt switch

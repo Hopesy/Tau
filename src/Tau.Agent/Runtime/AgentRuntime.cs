@@ -2,6 +2,7 @@ using System.Runtime.CompilerServices;
 using System.Threading.Channels;
 using Tau.Ai;
 using Tau.Ai.Providers;
+using Tau.Ai.Streaming;
 
 namespace Tau.Agent.Runtime;
 
@@ -41,6 +42,40 @@ public sealed class AgentRuntime
         DrainChannel(_followUpQueue);
     }
 
+    public EventStream<AgentEvent, ChatMessage[]> RunStream(
+        AgentLoopConfig config,
+        CancellationToken ct = default)
+    {
+        var stream = CreateEventStream();
+
+        _ = Task.Run(async () =>
+        {
+            var sawAgentEnd = false;
+            try
+            {
+                await foreach (var evt in RunAsync(config, ct).ConfigureAwait(false))
+                {
+                    stream.Push(evt);
+                    if (evt is AgentEndEvent)
+                    {
+                        sawAgentEnd = true;
+                    }
+                }
+
+                if (!sawAgentEnd)
+                {
+                    stream.Fault(new InvalidOperationException("Agent stream completed without agent_end."));
+                }
+            }
+            catch (Exception ex)
+            {
+                stream.Fault(ex);
+            }
+        }, CancellationToken.None);
+
+        return stream;
+    }
+
     public async IAsyncEnumerable<AgentEvent> RunAsync(
         AgentLoopConfig config,
         [EnumeratorCancellation] CancellationToken ct = default)
@@ -77,7 +112,31 @@ public sealed class AgentRuntime
                     yield return new TurnStartEvent(turnIndex);
 
                     // Build context and stream LLM response
-                    var context = ContextTransformer.Build(config, State.Messages);
+                    LlmContext context = default;
+                    AssistantMessage? contextFailureMessage = null;
+                    try
+                    {
+                        context = await ContextTransformer.BuildAsync(config, State.Messages, token).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException) when (token.IsCancellationRequested)
+                    {
+                        const string error = "Operation canceled.";
+                        var failureMessage = CreateFailureMessage(error, StopReason.Aborted, config.Model);
+                        State.SetStreaming(false);
+                        State.SetError(error);
+                        State.AddMessage(failureMessage);
+                        contextFailureMessage = failureMessage;
+                    }
+
+                    if (contextFailureMessage is not null)
+                    {
+                        yield return new MessageStartEvent(contextFailureMessage);
+                        yield return new MessageEndEvent(contextFailureMessage);
+                        yield return new TurnEndEvent(turnIndex, contextFailureMessage, []);
+                        yield return new AgentEndEvent(contextFailureMessage.ErrorMessage, State.Messages.ToArray());
+                        yield break;
+                    }
+
                     var stream = StreamFunctions.StreamSimple(
                         config.ProviderRegistry,
                         config.Model,
@@ -86,9 +145,35 @@ public sealed class AgentRuntime
 
                     AssistantMessage? assistantMessage = null;
                     var assistantStarted = false;
+                    var turnToolResults = new List<ToolResultMessage>();
 
-                    await foreach (var evt in stream.WithCancellation(token))
+                    await using var streamEnumerator = stream.GetAsyncEnumerator(token);
+                    while (true)
                     {
+                        var streamRead = await MoveNextStreamAsync(streamEnumerator, token).ConfigureAwait(false);
+                        if (streamRead.Cancelled)
+                        {
+                            const string error = "Operation canceled.";
+                            assistantMessage = CreateFailureMessage(error, StopReason.Aborted, config.Model, State.StreamingMessage);
+                            State.SetStreaming(false);
+                            State.SetError(error);
+                            if (!assistantStarted)
+                            {
+                                yield return new MessageStartEvent(assistantMessage);
+                            }
+                            State.AddMessage(assistantMessage);
+                            yield return new MessageEndEvent(assistantMessage);
+                            yield return new TurnEndEvent(turnIndex, assistantMessage, turnToolResults);
+                            yield return new AgentEndEvent(error, State.Messages.ToArray());
+                            yield break;
+                        }
+
+                        if (!streamRead.HasEvent)
+                        {
+                            break;
+                        }
+
+                        var evt = streamRead.Event!;
                         if (evt is StartEvent start)
                         {
                             assistantStarted = true;
@@ -108,20 +193,42 @@ public sealed class AgentRuntime
                         }
                         else if (evt is ErrorEvent error)
                         {
+                            assistantMessage = (error.Message ?? error.Partial ?? new AssistantMessage()) with
+                            {
+                                ErrorMessage = error.Error,
+                                StopReason = error.Message?.StopReason ?? error.Partial?.StopReason ?? StopReason.Error
+                            };
                             State.SetStreaming(false);
                             State.SetError(error.Error);
-                            yield return new AgentEndEvent(error.Error);
+                            if (!assistantStarted)
+                            {
+                                yield return new MessageStartEvent(assistantMessage);
+                            }
+                            State.AddMessage(assistantMessage);
+                            yield return new MessageEndEvent(assistantMessage);
+                            yield return new TurnEndEvent(turnIndex, assistantMessage, turnToolResults);
+                            yield return new AgentEndEvent(error.Error, State.Messages.ToArray());
                             yield break;
                         }
                         else
                         {
-                            yield return new MessageUpdateEvent(evt);
+                            yield return new MessageUpdateEvent(evt, GetPartialMessage(evt));
                         }
                     }
 
                     if (assistantMessage is null)
                     {
-                        yield return new AgentEndEvent("Stream ended without a message.");
+                        const string error = "Stream ended without a message.";
+                        assistantMessage = CreateFailureMessage(error, StopReason.Error, config.Model);
+                        State.SetError(error);
+                        if (!assistantStarted)
+                        {
+                            yield return new MessageStartEvent(assistantMessage);
+                        }
+                        State.AddMessage(assistantMessage);
+                        yield return new MessageEndEvent(assistantMessage);
+                        yield return new TurnEndEvent(turnIndex, assistantMessage, turnToolResults);
+                        yield return new AgentEndEvent(error, State.Messages.ToArray());
                         yield break;
                     }
 
@@ -133,27 +240,33 @@ public sealed class AgentRuntime
                     if (toolCalls.Count > 0)
                     {
                         State.SetPendingToolCalls(toolCalls);
-
-                        await foreach (var toolEvt in ToolExecutor.ExecuteToolCallsAsync(
-                            toolCalls, config.Tools, config.Interceptors,
-                            State.Messages, config.DefaultExecutionMode, config.LogSink, config.LogContext, token))
+                        try
                         {
-                            yield return toolEvt;
-
-                            // Add tool results to conversation
-                            if (toolEvt is ToolExecutionEndEvent endEvt)
+                            await foreach (var toolEvt in ToolExecutor.ExecuteToolCallsAsync(
+                                toolCalls, config.Tools, config.Interceptors,
+                                State.Messages, config.DefaultExecutionMode, config.LogSink, config.LogContext, token))
                             {
-                                var toolResultMessage = new ToolResultMessage(
-                                    endEvt.ToolCallId,
-                                    endEvt.Result.Content,
-                                    endEvt.Result.IsError);
-                                State.AddMessage(toolResultMessage);
-                                yield return new MessageStartEvent(toolResultMessage);
-                                yield return new MessageEndEvent(toolResultMessage);
+                                yield return toolEvt;
+
+                                // Add tool results to conversation
+                                if (toolEvt is ToolExecutionEndEvent endEvt)
+                                {
+                                    var toolResultMessage = new ToolResultMessage(
+                                        endEvt.ToolCallId,
+                                        endEvt.Result.Content,
+                                        endEvt.Result.IsError);
+                                    State.AddMessage(toolResultMessage);
+                                    turnToolResults.Add(toolResultMessage);
+                                    yield return new MessageStartEvent(toolResultMessage);
+                                    yield return new MessageEndEvent(toolResultMessage);
+                                }
                             }
                         }
+                        finally
+                        {
+                            State.SetPendingToolCalls([]);
+                        }
 
-                        State.SetPendingToolCalls([]);
                         hasMoreWork = true;
                     }
 
@@ -161,7 +274,7 @@ public sealed class AgentRuntime
                     if (_steeringQueue.Reader.TryPeek(out _))
                         hasMoreWork = true;
 
-                    yield return new TurnEndEvent(turnIndex);
+                    yield return new TurnEndEvent(turnIndex, assistantMessage, turnToolResults);
                     turnIndex++;
 
                 } while (hasMoreWork && !token.IsCancellationRequested);
@@ -169,13 +282,55 @@ public sealed class AgentRuntime
             } while (!token.IsCancellationRequested &&
                      DrainQueuedMessages(_followUpQueue, FollowUpMode));
 
-            yield return new AgentEndEvent();
+            yield return new AgentEndEvent(messages: State.Messages.ToArray());
         }
         finally
         {
             State.SetStreaming(false);
             _idleTcs.TrySetResult();
         }
+    }
+
+    private static EventStream<AgentEvent, ChatMessage[]> CreateEventStream() =>
+        new(
+            isComplete: static evt => evt is AgentEndEvent,
+            extractResult: static evt => evt is AgentEndEvent end ? end.Messages.ToArray() : null);
+
+    private static async Task<StreamReadResult> MoveNextStreamAsync(
+        IAsyncEnumerator<StreamEvent> enumerator,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (await enumerator.MoveNextAsync().ConfigureAwait(false))
+            {
+                return new StreamReadResult(true, false, enumerator.Current);
+            }
+
+            return new StreamReadResult(false, false, null);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return new StreamReadResult(false, true, null);
+        }
+    }
+
+    private static AssistantMessage CreateFailureMessage(
+        string error,
+        StopReason stopReason,
+        Model model,
+        AssistantMessage? partial = null)
+    {
+        return (partial ?? new AssistantMessage([new TextContent(string.Empty)])) with
+        {
+            ErrorMessage = error,
+            StopReason = stopReason,
+            Usage = partial?.Usage ?? new Usage(0, 0, 0, 0),
+            Api = partial?.Api ?? model.Api,
+            Provider = partial?.Provider ?? model.Provider,
+            Model = partial?.Model ?? model.Id,
+            Timestamp = partial?.Timestamp ?? DateTimeOffset.UtcNow
+        };
     }
 
     private bool DrainQueuedMessages(Channel<ChatMessage> channel, AgentQueueMode mode)
@@ -219,4 +374,25 @@ public sealed class AgentRuntime
     {
         while (channel.Reader.TryRead(out _)) { }
     }
+
+    private static ChatMessage? GetPartialMessage(StreamEvent evt) => evt switch
+    {
+        TextStartEvent text => text.Partial,
+        TextDeltaEvent text => text.Partial,
+        TextEndEvent text => text.Partial,
+        ThinkingStartEvent thinking => thinking.Partial,
+        ThinkingDeltaEvent thinking => thinking.Partial,
+        ThinkingEndEvent thinking => thinking.Partial,
+        ToolCallStartEvent toolCall => toolCall.Partial,
+        ToolCallDeltaEvent toolCall => toolCall.Partial,
+        ToolCallEndEvent toolCall => toolCall.Partial,
+        DoneEvent done => done.Message,
+        ErrorEvent error => error.Partial,
+        _ => null
+    };
+
+    private readonly record struct StreamReadResult(
+        bool HasEvent,
+        bool Cancelled,
+        StreamEvent? Event);
 }

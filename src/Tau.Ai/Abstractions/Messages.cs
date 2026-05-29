@@ -46,5 +46,6 @@ public enum StopReason
     MaxTokens,
     ToolUse,
     ContentFilter,
-    Error
+    Error,
+    Aborted
 }

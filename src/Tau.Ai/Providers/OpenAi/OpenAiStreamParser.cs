@@ -73,23 +73,43 @@ internal static class OpenAiStreamParser
                     toolCallAccumulators[index] = acc;
 
                     contentIndex++;
-                    var tcContent = new ToolCallContent(acc.Id, acc.Name, "");
+                    var tcContent = new ToolCallContent(acc.Id, acc.Name, "{}");
                     var tcList = partial.Content.ToList();
                     tcList.Add(tcContent);
                     partial = partial with { Content = tcList };
                     stream.Push(new ToolCallStartEvent(contentIndex, partial));
                 }
 
-                if (tc.TryGetProperty("function", out var func) && func.TryGetProperty("arguments", out var argDelta))
+                if (tc.TryGetProperty("function", out var func))
                 {
-                    var argChunk = argDelta.GetString() ?? "";
+                    if (func.TryGetProperty("name", out var nameDelta) &&
+                        nameDelta.ValueKind == JsonValueKind.String &&
+                        !string.IsNullOrWhiteSpace(nameDelta.GetString()) &&
+                        string.IsNullOrWhiteSpace(acc.Name))
+                    {
+                        acc = acc with { Name = nameDelta.GetString()! };
+                    }
+
+                    if (!func.TryGetProperty("arguments", out var argDelta))
+                    {
+                        toolCallAccumulators[index] = acc;
+                        continue;
+                    }
+
+                    var argChunk = argDelta.ValueKind == JsonValueKind.String
+                        ? argDelta.GetString() ?? ""
+                        : argDelta.GetRawText();
                     acc = acc with { Arguments = acc.Arguments + argChunk };
                     toolCallAccumulators[index] = acc;
 
                     var tcIdx = partial.Content.Count - toolCallAccumulators.Count + index;
                     if (tcIdx >= 0 && tcIdx < partial.Content.Count && partial.Content[tcIdx] is ToolCallContent existing)
                     {
-                        var updatedTc = existing with { Arguments = acc.Arguments };
+                        var updatedTc = existing with
+                        {
+                            Name = string.IsNullOrWhiteSpace(existing.Name) ? acc.Name : existing.Name,
+                            Arguments = StreamingJsonParser.ParseStreamingJsonObjectRawText(acc.Arguments)
+                        };
                         var newContent = partial.Content.ToList();
                         newContent[tcIdx] = updatedTc;
                         partial = partial with { Content = newContent };

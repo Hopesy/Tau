@@ -63,9 +63,9 @@ public sealed class OpenAiResponsesProviderTests
             """
             data: {"type":"response.output_item.added","item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"read_file","arguments":""}}
 
-            data: {"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"{\"path\""}
+            data: {"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"{\"path\":\"README"}
 
-            data: {"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":":\"README.md\"}"}
+            data: {"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":".md\"}"}
 
             data: {"type":"response.output_item.done","item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"read_file","arguments":"{\"path\":\"README.md\"}"}}
 
@@ -80,6 +80,9 @@ public sealed class OpenAiResponsesProviderTests
         Assert.Contains(events, evt => evt is ToolCallStartEvent);
         Assert.Contains(events, evt => evt is ToolCallDeltaEvent);
         Assert.Contains(events, evt => evt is ToolCallEndEvent);
+        var firstDelta = Assert.IsType<ToolCallDeltaEvent>(events.First(evt => evt is ToolCallDeltaEvent));
+        var partialToolCall = Assert.IsType<ToolCallContent>(Assert.Single(firstDelta.Partial.Content));
+        Assert.Equal("""{"path":"README"}""", partialToolCall.Arguments);
         var done = Assert.Single(events.OfType<DoneEvent>());
         var toolCall = Assert.IsType<ToolCallContent>(Assert.Single(done.Message.Content));
         Assert.Equal("call_1|fc_1", toolCall.Id);

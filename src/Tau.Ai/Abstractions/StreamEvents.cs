@@ -21,4 +21,7 @@ public sealed record ToolCallDeltaEvent(int ContentIndex, string Delta, Assistan
 public sealed record ToolCallEndEvent(int ContentIndex, AssistantMessage Partial) : StreamEvent("toolcall_end");
 
 public sealed record DoneEvent(AssistantMessage Message) : StreamEvent("done");
-public sealed record ErrorEvent(string Error, AssistantMessage? Partial = null) : StreamEvent("error");
+public sealed record ErrorEvent(
+    string Error,
+    AssistantMessage? Partial = null,
+    AssistantMessage? Message = null) : StreamEvent("error");

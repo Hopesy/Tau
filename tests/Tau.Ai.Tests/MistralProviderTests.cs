@@ -73,6 +73,38 @@ public sealed class MistralProviderTests
     }
 
     [Fact]
+    public async Task Stream_ParsesPartialStreamingToolArguments()
+    {
+        using var handler = new OpenAiResponsesProviderTests.StubHandler(_ => OpenAiResponsesProviderTests.SseResponse(
+            """
+            data: {"id":"cmpl_1","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"README"}}]},"finish_reason":null}]}
+
+            data: {"id":"cmpl_1","choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":".md\"}"}}]},"finish_reason":null}]}
+
+            data: {"id":"cmpl_1","choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":1,"completion_tokens":2}}
+
+            """));
+        using var client = new HttpClient(handler);
+        var provider = new MistralProvider(client);
+
+        var events = await OpenAiResponsesProviderTests.CollectAsync(provider.Stream(
+            BuildModel(),
+            new LlmContext { Messages = [new UserMessage("read")] },
+            new StreamOptions { ApiKey = "mistral-key" }));
+
+        var firstDelta = Assert.IsType<ToolCallDeltaEvent>(events.First(evt => evt is ToolCallDeltaEvent));
+        var partialToolCall = Assert.IsType<ToolCallContent>(Assert.Single(firstDelta.Partial.Content));
+        Assert.Equal("""{"path":"README"}""", partialToolCall.Arguments);
+
+        var done = Assert.Single(events.OfType<DoneEvent>());
+        var toolCall = Assert.IsType<ToolCallContent>(Assert.Single(done.Message.Content));
+        Assert.Equal("call_1", toolCall.Id);
+        Assert.Equal("read_file", toolCall.Name);
+        Assert.Equal("""{"path":"README.md"}""", toolCall.Arguments);
+    }
+
+
+    [Fact]
     public async Task Stream_NormalizesAssistantToolCallIdsToNineAlphanumericCharacters()
     {
         using var handler = new OpenAiResponsesProviderTests.StubHandler(_ => new HttpResponseMessage(HttpStatusCode.BadRequest)

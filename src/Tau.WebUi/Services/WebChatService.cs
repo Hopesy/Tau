@@ -635,7 +635,7 @@ public sealed class WebChatService
                             break;
                         case ToolExecutionUpdateEvent toolUpdate:
                             {
-                                var updated = UpsertToolCall(toolCalls, toolCallIndex, toolUpdate.ToolCallId, "tool");
+                                var updated = UpsertToolCall(toolCalls, toolCallIndex, toolUpdate.ToolCallId, toolUpdate.ToolName ?? "tool");
                                 updated.Status = "running";
                                 updated.Updates.Add(toolUpdate.Update.Text);
                                 yield return new WebChatStreamEventDto(
@@ -648,7 +648,7 @@ public sealed class WebChatService
                         case ToolExecutionEndEvent toolEnd:
                             var endEvent = $"end:{toolEnd.ToolCallId}:{(toolEnd.Result.IsError ? "error" : "ok")}";
                             toolEvents.Add(endEvent);
-                            var ended = UpsertToolCall(toolCalls, toolCallIndex, toolEnd.ToolCallId, "tool");
+                            var ended = UpsertToolCall(toolCalls, toolCallIndex, toolEnd.ToolCallId, toolEnd.ToolName ?? "tool");
                             ended.Status = toolEnd.Result.IsError ? "error" : "completed";
                             ended.IsError = toolEnd.Result.IsError;
                             ended.Output = FormatToolResultContent(toolEnd.Result.Content);

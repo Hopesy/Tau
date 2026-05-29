@@ -461,7 +461,8 @@ public sealed class ProxyStreamProvider : IStreamProvider
         {
             "length" => StopReason.MaxTokens,
             "toolUse" or "tool_use" => StopReason.ToolUse,
-            "error" or "aborted" => StopReason.Error,
+            "error" => StopReason.Error,
+            "aborted" or "cancelled" => StopReason.Aborted,
             _ => StopReason.EndTurn
         };
 
@@ -473,6 +474,7 @@ public sealed class ProxyStreamProvider : IStreamProvider
             StopReason.ToolUse => "toolUse",
             StopReason.ContentFilter => "contentFilter",
             StopReason.Error => "error",
+            StopReason.Aborted => "aborted",
             _ => null
         };
 

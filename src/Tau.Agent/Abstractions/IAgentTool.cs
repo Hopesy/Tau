@@ -35,4 +35,15 @@ public record ToolResult(
     bool IsError = false,
     object? Details = null);
 
-public record ToolUpdate(string Text);
+public record ToolUpdate(
+    string Text,
+    IReadOnlyList<Ai.ContentBlock>? Content = null,
+    bool? IsError = null,
+    object? Details = null)
+{
+    internal ToolResult ToPartialResult()
+    {
+        var content = Content ?? [new Ai.TextContent(Text)];
+        return new ToolResult(content, IsError.GetValueOrDefault(), Details);
+    }
+}

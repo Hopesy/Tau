@@ -2,6 +2,7 @@
   <Folder Name="/src/">
     <Project Path="src/Tau.Agent/Tau.Agent.csproj" />
     <Project Path="src/Tau.Ai/Tau.Ai.csproj" />
+    <Project Path="src/Tau.Ai.Cli/Tau.Ai.Cli.csproj" />
     <Project Path="src/Tau.CodingAgent/Tau.CodingAgent.csproj" />
     <Project Path="src/Tau.Mom/Tau.Mom.csproj" />
     <Project Path="src/Tau.Pods/Tau.Pods.csproj" />

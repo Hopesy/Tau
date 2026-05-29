@@ -22,6 +22,8 @@ temp/
 .env
 .env.local
 .env.*.local
+auth.json
+auth.json.*.tmp
 .tau/auth.json
 .tau/auth.json.*.tmp
 .tau/models.json

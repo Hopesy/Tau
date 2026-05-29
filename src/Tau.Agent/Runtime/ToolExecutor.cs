@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text.Json;
+using System.Threading.Channels;
 using Tau.Ai;
 using Tau.Ai.Observability;
 
@@ -64,14 +65,274 @@ internal static class ToolExecutor
         TauRuntimeLogContext? logContext,
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
     {
-        var tasks = toolCalls.Select(tc =>
-            CollectEventsAsync(ExecuteSingleAsync(tc, toolMap, interceptors, conversationHistory, logSink, logContext, ct))).ToList();
+        var preparedCalls = new List<ParallelPreparedToolCall>();
 
-        var results = await Task.WhenAll(tasks).ConfigureAwait(false);
+        foreach (var tc in toolCalls)
+        {
+            var startedAt = Stopwatch.GetTimestamp();
+            var found = toolMap.TryGetValue(tc.Name, out var tool);
+            LogToolStart(logSink, tc, found ? tool!.ExecutionMode : null, logContext);
 
-        foreach (var events in results)
-        foreach (var evt in events)
-            yield return evt;
+            yield return new ToolExecutionStartEvent(tc.Id, tc.Name, tc.Arguments);
+
+            var preparation = await PrepareParallelToolCallAsync(
+                tc, tool, found, startedAt, interceptors, conversationHistory, logSink, logContext, ct)
+                .ConfigureAwait(false);
+
+            if (preparation.ImmediateEnd is not null)
+            {
+                yield return preparation.ImmediateEnd;
+            }
+            else if (preparation.Prepared is not null)
+            {
+                preparedCalls.Add(preparation.Prepared);
+            }
+        }
+
+        if (preparedCalls.Count == 0)
+        {
+            yield break;
+        }
+
+        var updateChannel = Channel.CreateUnbounded<AgentEvent>(
+            new UnboundedChannelOptions { SingleReader = true, SingleWriter = false });
+        var runningCalls = preparedCalls
+            .Select(prepared => new ParallelRunningToolCall(
+                prepared,
+                ExecutePreparedParallelToolCallAsync(prepared, updateChannel.Writer, logSink, logContext, ct)))
+            .ToList();
+
+        foreach (var running in runningCalls)
+        {
+            while (!running.Execution.IsCompleted)
+            {
+                var waitForUpdate = updateChannel.Reader.WaitToReadAsync().AsTask();
+                var completed = await Task.WhenAny(running.Execution, waitForUpdate).ConfigureAwait(false);
+                if (completed == waitForUpdate && await waitForUpdate.ConfigureAwait(false))
+                {
+                    while (updateChannel.Reader.TryRead(out var updateEvent))
+                    {
+                        yield return updateEvent;
+                    }
+                }
+            }
+
+            while (updateChannel.Reader.TryRead(out var updateEvent))
+            {
+                yield return updateEvent;
+            }
+
+            var executed = await running.Execution.ConfigureAwait(false);
+            yield return await FinalizeParallelToolCallAsync(
+                running.Prepared, executed, interceptors, logSink, logContext, ct)
+                .ConfigureAwait(false);
+        }
+
+        while (updateChannel.Reader.TryRead(out var updateEvent))
+        {
+            yield return updateEvent;
+        }
+    }
+
+    private static async Task<ParallelToolPreparation> PrepareParallelToolCallAsync(
+        ToolCallContent tc,
+        IAgentTool? tool,
+        bool found,
+        long startedAt,
+        IReadOnlyList<IToolInterceptor> interceptors,
+        IReadOnlyList<ChatMessage> conversationHistory,
+        ITauLogSink logSink,
+        TauRuntimeLogContext? logContext,
+        CancellationToken ct)
+    {
+        if (!found || tool is null)
+        {
+            var missingResult = new ToolResult([new TextContent($"Tool '{tc.Name}' not found.")], IsError: true);
+            LogToolEnd(logSink, tc, startedAt, missingResult, "not-found", logContext);
+            return new ParallelToolPreparation(
+                Prepared: null,
+                ImmediateEnd: new ToolExecutionEndEvent(tc.Id, missingResult, tc.Name));
+        }
+
+        JsonElement args = default;
+        ToolCallContext? callContext = null;
+        ToolResult? terminalResult = null;
+        string? terminalFailureKind = null;
+        string? terminalExceptionType = null;
+        string? terminalReason = null;
+
+        try
+        {
+            var rawArgs = ParseArgs(tc.Arguments);
+            args = await tool.PrepareArgumentsAsync(rawArgs, ct).ConfigureAwait(false);
+            args = ToolArgumentValidator.ValidateToolArguments(ToAiTool(tool), tc, args);
+            callContext = new ToolCallContext(tc.Id, tc.Name, args, conversationHistory);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            terminalResult = CreateCancelledToolResult();
+            terminalFailureKind = "cancelled";
+            terminalExceptionType = nameof(OperationCanceledException);
+        }
+        catch (JsonException ex)
+        {
+            terminalResult = CreateErrorToolResult($"Invalid arguments for tool \"{tc.Name}\": {ex.Message}");
+            terminalFailureKind = "invalid-arguments";
+            terminalExceptionType = ex.GetType().Name;
+        }
+        catch (ToolArgumentValidationException ex)
+        {
+            terminalResult = CreateErrorToolResult(ex.Message);
+            terminalFailureKind = "invalid-arguments";
+            terminalExceptionType = ex.GetType().Name;
+        }
+        catch (Exception ex)
+        {
+            terminalResult = CreateErrorToolResult(ex.Message);
+            terminalFailureKind = "prepare-exception";
+            terminalExceptionType = ex.GetType().Name;
+        }
+
+        if (terminalResult is not null)
+        {
+            LogToolEnd(logSink, tc, startedAt, terminalResult, terminalFailureKind!, logContext, terminalReason, terminalExceptionType);
+            return new ParallelToolPreparation(
+                Prepared: null,
+                ImmediateEnd: new ToolExecutionEndEvent(tc.Id, terminalResult, tc.Name));
+        }
+
+        var effectiveCallContext = callContext ?? throw new InvalidOperationException("Tool call context was not prepared.");
+
+        foreach (var interceptor in interceptors)
+        {
+            ToolCallDecision decision;
+            try
+            {
+                decision = await interceptor.BeforeToolCallAsync(effectiveCallContext, ct).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                terminalResult = CreateCancelledToolResult();
+                terminalFailureKind = "cancelled";
+                terminalExceptionType = nameof(OperationCanceledException);
+                break;
+            }
+            catch (Exception ex)
+            {
+                terminalResult = CreateErrorToolResult(ex.Message);
+                terminalFailureKind = "before-exception";
+                terminalExceptionType = ex.GetType().Name;
+                break;
+            }
+
+            if (decision.Blocked)
+            {
+                var blockedMessage = string.IsNullOrWhiteSpace(decision.Reason)
+                    ? "Tool call blocked."
+                    : $"Tool call blocked: {decision.Reason}";
+                terminalResult = CreateErrorToolResult(blockedMessage);
+                terminalFailureKind = "blocked";
+                terminalReason = decision.Reason;
+                break;
+            }
+        }
+
+        if (terminalResult is not null)
+        {
+            LogToolEnd(logSink, tc, startedAt, terminalResult, terminalFailureKind!, logContext, terminalReason, terminalExceptionType);
+            return new ParallelToolPreparation(
+                Prepared: null,
+                ImmediateEnd: new ToolExecutionEndEvent(tc.Id, terminalResult, tc.Name));
+        }
+
+        return new ParallelToolPreparation(
+            new ParallelPreparedToolCall(tc, tool, args, effectiveCallContext, startedAt),
+            ImmediateEnd: null);
+    }
+
+    private static async Task<ParallelExecutedToolCall> ExecutePreparedParallelToolCallAsync(
+        ParallelPreparedToolCall prepared,
+        ChannelWriter<AgentEvent> updateWriter,
+        ITauLogSink logSink,
+        TauRuntimeLogContext? logContext,
+        CancellationToken ct)
+    {
+        ToolResult result;
+        var failureKind = "none";
+        string? exceptionType = null;
+
+        try
+        {
+            result = await prepared.Tool.ExecuteAsync(prepared.ToolCall.Id, prepared.Args, ct,
+                update =>
+                {
+                    var updateEvent = new ToolExecutionUpdateEvent(
+                        prepared.ToolCall.Id,
+                        update,
+                        prepared.ToolCall.Name,
+                        prepared.Args.GetRawText(),
+                        update.ToPartialResult());
+                    return updateWriter.WriteAsync(updateEvent, ct).AsTask();
+                }).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            result = CreateCancelledToolResult();
+            failureKind = "cancelled";
+            exceptionType = nameof(OperationCanceledException);
+        }
+        catch (Exception ex)
+        {
+            result = CreateErrorToolResult(ex.Message);
+            failureKind = "exception";
+            exceptionType = ex.GetType().Name;
+        }
+
+        return new ParallelExecutedToolCall(result, failureKind, exceptionType);
+    }
+
+    private static async Task<ToolExecutionEndEvent> FinalizeParallelToolCallAsync(
+        ParallelPreparedToolCall prepared,
+        ParallelExecutedToolCall executed,
+        IReadOnlyList<IToolInterceptor> interceptors,
+        ITauLogSink logSink,
+        TauRuntimeLogContext? logContext,
+        CancellationToken ct)
+    {
+        var result = executed.Result;
+        var failureKind = executed.FailureKind;
+        var exceptionType = executed.ExceptionType;
+
+        foreach (var interceptor in interceptors)
+        {
+            try
+            {
+                result = await interceptor.AfterToolCallAsync(prepared.Context, result, ct).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                result = CreateCancelledToolResult();
+                failureKind = "cancelled";
+                exceptionType = nameof(OperationCanceledException);
+                break;
+            }
+            catch (Exception ex)
+            {
+                result = CreateErrorToolResult(ex.Message);
+                failureKind = "after-exception";
+                exceptionType = ex.GetType().Name;
+                break;
+            }
+        }
+
+        if (failureKind == "none" && result.IsError)
+        {
+            failureKind = "tool-result-error";
+        }
+
+        LogToolEnd(logSink, prepared.ToolCall, prepared.StartedAt, result, failureKind, logContext, exceptionType: exceptionType);
+
+        return new ToolExecutionEndEvent(prepared.ToolCall.Id, result, prepared.ToolCall.Name);
     }
 
     private static async IAsyncEnumerable<AgentEvent> ExecuteSingleAsync(
@@ -87,66 +348,171 @@ internal static class ToolExecutor
         var found = toolMap.TryGetValue(tc.Name, out var tool);
         LogToolStart(logSink, tc, found ? tool!.ExecutionMode : null, logContext);
 
-        yield return new ToolExecutionStartEvent(tc.Id, tc.Name);
+        yield return new ToolExecutionStartEvent(tc.Id, tc.Name, tc.Arguments);
 
         if (!found)
         {
             var missingResult = new ToolResult([new TextContent($"Tool '{tc.Name}' not found.")], IsError: true);
             LogToolEnd(logSink, tc, startedAt, missingResult, "not-found", logContext);
-            yield return new ToolExecutionEndEvent(tc.Id, missingResult);
+            yield return new ToolExecutionEndEvent(tc.Id, missingResult, tc.Name);
             yield break;
         }
 
-        ToolCallContext callContext;
+        JsonElement args = default;
+        ToolCallContext? callContext = null;
+        ToolResult? terminalResult = null;
+        string? terminalFailureKind = null;
+        string? terminalExceptionType = null;
+        string? terminalReason = null;
         try
         {
-            callContext = new ToolCallContext(tc.Id, tc.Name, ParseArgs(tc.Arguments), conversationHistory);
+            var rawArgs = ParseArgs(tc.Arguments);
+            args = await tool!.PrepareArgumentsAsync(rawArgs, ct).ConfigureAwait(false);
+            args = ToolArgumentValidator.ValidateToolArguments(ToAiTool(tool), tc, args);
+            callContext = new ToolCallContext(tc.Id, tc.Name, args, conversationHistory);
         }
-        catch (JsonException)
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
-            LogToolEnd(logSink, tc, startedAt, result: null, "invalid-arguments", logContext);
-            throw;
+            terminalResult = CreateCancelledToolResult();
+            terminalFailureKind = "cancelled";
+            terminalExceptionType = nameof(OperationCanceledException);
+        }
+        catch (JsonException ex)
+        {
+            terminalResult = CreateErrorToolResult($"Invalid arguments for tool \"{tc.Name}\": {ex.Message}");
+            terminalFailureKind = "invalid-arguments";
+            terminalExceptionType = ex.GetType().Name;
+        }
+        catch (ToolArgumentValidationException ex)
+        {
+            terminalResult = CreateErrorToolResult(ex.Message);
+            terminalFailureKind = "invalid-arguments";
+            terminalExceptionType = ex.GetType().Name;
+        }
+        catch (Exception ex)
+        {
+            terminalResult = CreateErrorToolResult(ex.Message);
+            terminalFailureKind = "prepare-exception";
+            terminalExceptionType = ex.GetType().Name;
+        }
+
+        if (terminalResult is not null)
+        {
+            LogToolEnd(logSink, tc, startedAt, terminalResult, terminalFailureKind!, logContext, terminalReason, terminalExceptionType);
+            yield return new ToolExecutionEndEvent(tc.Id, terminalResult, tc.Name);
+            yield break;
+        }
+
+        var preparedArgs = args;
+        var effectiveCallContext = callContext ?? throw new InvalidOperationException("Tool call context was not prepared.");
+
+        foreach (var interceptor in interceptors)
+        {
+            ToolCallDecision decision;
+            try
+            {
+                decision = await interceptor.BeforeToolCallAsync(effectiveCallContext, ct).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                terminalResult = CreateCancelledToolResult();
+                terminalFailureKind = "cancelled";
+                terminalExceptionType = nameof(OperationCanceledException);
+                break;
+            }
+            catch (Exception ex)
+            {
+                terminalResult = CreateErrorToolResult(ex.Message);
+                terminalFailureKind = "before-exception";
+                terminalExceptionType = ex.GetType().Name;
+                break;
+            }
+
+            if (decision.Blocked)
+            {
+                var blockedMessage = string.IsNullOrWhiteSpace(decision.Reason)
+                    ? "Tool call blocked."
+                    : $"Tool call blocked: {decision.Reason}";
+                terminalResult = CreateErrorToolResult(blockedMessage);
+                terminalFailureKind = "blocked";
+                terminalReason = decision.Reason;
+                break;
+            }
+        }
+
+        if (terminalResult is not null)
+        {
+            LogToolEnd(logSink, tc, startedAt, terminalResult, terminalFailureKind!, logContext, terminalReason, terminalExceptionType);
+            yield return new ToolExecutionEndEvent(tc.Id, terminalResult, tc.Name);
+            yield break;
+        }
+
+        var updateEvents = new List<ToolExecutionUpdateEvent>();
+        ToolResult result;
+        var failureKind = "none";
+        string? exceptionType = null;
+        try
+        {
+            result = await tool!.ExecuteAsync(tc.Id, preparedArgs, ct,
+                update =>
+                {
+                    updateEvents.Add(new ToolExecutionUpdateEvent(
+                        tc.Id,
+                        update,
+                        tc.Name,
+                        preparedArgs.GetRawText(),
+                        update.ToPartialResult()));
+                    return Task.CompletedTask;
+                }).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            result = CreateCancelledToolResult();
+            failureKind = "cancelled";
+            exceptionType = nameof(OperationCanceledException);
+        }
+        catch (Exception ex)
+        {
+            result = CreateErrorToolResult(ex.Message);
+            failureKind = "exception";
+            exceptionType = ex.GetType().Name;
+        }
+
+        foreach (var updateEvent in updateEvents)
+        {
+            yield return updateEvent;
         }
 
         foreach (var interceptor in interceptors)
         {
-            var decision = await interceptor.BeforeToolCallAsync(callContext, ct).ConfigureAwait(false);
-            if (decision.Blocked)
+            try
             {
-                var blockedResult = new ToolResult([new TextContent($"Tool call blocked: {decision.Reason}")], IsError: true);
-                LogToolEnd(logSink, tc, startedAt, blockedResult, "blocked", logContext, decision.Reason);
-                yield return new ToolExecutionEndEvent(tc.Id, blockedResult);
-                yield break;
+                result = await interceptor.AfterToolCallAsync(effectiveCallContext, result, ct).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                result = CreateCancelledToolResult();
+                failureKind = "cancelled";
+                exceptionType = nameof(OperationCanceledException);
+                break;
+            }
+            catch (Exception ex)
+            {
+                result = CreateErrorToolResult(ex.Message);
+                failureKind = "after-exception";
+                exceptionType = ex.GetType().Name;
+                break;
             }
         }
 
-        ToolResult result;
-        try
+        if (failureKind == "none" && result.IsError)
         {
-            var args = await tool!.PrepareArgumentsAsync(callContext.Arguments, ct).ConfigureAwait(false);
-
-            result = await tool.ExecuteAsync(tc.Id, args, ct,
-                update => Task.CompletedTask).ConfigureAwait(false);
-
-            foreach (var interceptor in interceptors)
-            {
-                result = await interceptor.AfterToolCallAsync(callContext, result, ct).ConfigureAwait(false);
-            }
-        }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested)
-        {
-            LogToolEnd(logSink, tc, startedAt, result: null, "cancelled", logContext);
-            throw;
-        }
-        catch (Exception ex)
-        {
-            LogToolEnd(logSink, tc, startedAt, result: null, "exception", logContext, exceptionType: ex.GetType().Name);
-            throw;
+            failureKind = "tool-result-error";
         }
 
-        LogToolEnd(logSink, tc, startedAt, result, result.IsError ? "tool-result-error" : "none", logContext);
+        LogToolEnd(logSink, tc, startedAt, result, failureKind, logContext, exceptionType: exceptionType);
 
-        yield return new ToolExecutionEndEvent(tc.Id, result);
+        yield return new ToolExecutionEndEvent(tc.Id, result, tc.Name);
     }
 
     private static void LogToolStart(
@@ -224,11 +590,35 @@ internal static class ToolExecutor
         return JsonDocument.Parse(arguments).RootElement.Clone();
     }
 
-    private static async Task<List<AgentEvent>> CollectEventsAsync(IAsyncEnumerable<AgentEvent> source)
+    private static Tool ToAiTool(IAgentTool tool) =>
+        new(tool.Name, tool.Description, tool.ParameterSchema);
+
+    private static ToolResult CreateErrorToolResult(string? message)
     {
-        var events = new List<AgentEvent>();
-        await foreach (var evt in source)
-            events.Add(evt);
-        return events;
+        var text = string.IsNullOrWhiteSpace(message) ? "Tool execution failed." : message;
+        return new ToolResult([new TextContent(text)], IsError: true);
     }
+
+    private static ToolResult CreateCancelledToolResult() =>
+        CreateErrorToolResult("Operation canceled.");
+
+    private sealed record ParallelToolPreparation(
+        ParallelPreparedToolCall? Prepared,
+        ToolExecutionEndEvent? ImmediateEnd);
+
+    private sealed record ParallelPreparedToolCall(
+        ToolCallContent ToolCall,
+        IAgentTool Tool,
+        JsonElement Args,
+        ToolCallContext Context,
+        long StartedAt);
+
+    private sealed record ParallelExecutedToolCall(
+        ToolResult Result,
+        string FailureKind,
+        string? ExceptionType);
+
+    private sealed record ParallelRunningToolCall(
+        ParallelPreparedToolCall Prepared,
+        Task<ParallelExecutedToolCall> Execution);
 }

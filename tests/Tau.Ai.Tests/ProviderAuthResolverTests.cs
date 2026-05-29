@@ -1,6 +1,7 @@
 using Tau.Ai.Auth;
 using Tau.Ai.Auth.OAuth;
 using Tau.Ai.Observability;
+using Tau.Ai.Registry;
 
 namespace Tau.Ai.Tests;
 
@@ -15,8 +16,6 @@ public sealed class ProviderAuthResolverTests
 
         Assert.Equal("explicit-key", result);
     }
-
-
 
     [Fact]
     public void GetStatus_ReportsEnvironmentCredentialsWithoutLeakingSecret()
@@ -64,7 +63,6 @@ public sealed class ProviderAuthResolverTests
     [Fact]
     public void GetStatus_ReportsModelsJsonCredentials()
     {
-        using var scope = EnvironmentVariableScope.Acquire();
         var tempDir = Path.Combine(Path.GetTempPath(), $"tau-auth-status-{Guid.NewGuid():N}");
         Directory.CreateDirectory(tempDir);
 
@@ -85,9 +83,6 @@ public sealed class ProviderAuthResolverTests
                   }
                 }
                 """);
-            scope.Set("TAU_AUTH_FILE", authPath);
-            scope.Set("TAU_MODELS_FILE", modelsPath);
-
             var model = new Model
             {
                 Provider = "custom-provider",
@@ -95,7 +90,7 @@ public sealed class ProviderAuthResolverTests
                 Name = "Custom Model",
                 Api = "openai-chat-completions"
             };
-            var resolver = new ProviderAuthResolver();
+            var resolver = CreateResolver(authPath, modelsPath);
 
             var status = resolver.GetStatus(model);
 
@@ -112,7 +107,6 @@ public sealed class ProviderAuthResolverTests
     [Fact]
     public void GetStatus_ReportsCommandBackedModelsJsonCredentialWithoutExecutingCommand()
     {
-        using var scope = EnvironmentVariableScope.Acquire();
         var tempDir = Path.Combine(Path.GetTempPath(), $"tau-auth-status-{Guid.NewGuid():N}");
         Directory.CreateDirectory(tempDir);
 
@@ -136,9 +130,6 @@ public sealed class ProviderAuthResolverTests
                   }
                 }
                 """);
-            scope.Set("TAU_AUTH_FILE", authPath);
-            scope.Set("TAU_MODELS_FILE", modelsPath);
-
             var model = new Model
             {
                 Provider = "custom-provider",
@@ -146,7 +137,7 @@ public sealed class ProviderAuthResolverTests
                 Name = "Custom Model",
                 Api = "openai-chat-completions"
             };
-            var resolver = new ProviderAuthResolver();
+            var resolver = CreateResolver(authPath, modelsPath);
 
             var status = resolver.GetStatus(model);
 
@@ -165,7 +156,6 @@ public sealed class ProviderAuthResolverTests
     [Fact]
     public void GetStatus_ReportsModelsJsonCredentialHeadersWithoutLeakingSecret()
     {
-        using var scope = EnvironmentVariableScope.Acquire();
         var tempDir = Path.Combine(Path.GetTempPath(), $"tau-auth-status-{Guid.NewGuid():N}");
         Directory.CreateDirectory(tempDir);
 
@@ -188,9 +178,6 @@ public sealed class ProviderAuthResolverTests
                   }
                 }
                 """);
-            scope.Set("TAU_AUTH_FILE", authPath);
-            scope.Set("TAU_MODELS_FILE", modelsPath);
-
             var model = new Model
             {
                 Provider = "custom-provider",
@@ -198,7 +185,7 @@ public sealed class ProviderAuthResolverTests
                 Name = "Custom Model",
                 Api = "openai-chat-completions"
             };
-            var resolver = new ProviderAuthResolver();
+            var resolver = CreateResolver(authPath, modelsPath);
 
             var status = resolver.GetStatus(model);
 
@@ -387,6 +374,11 @@ public sealed class ProviderAuthResolverTests
 
         public void Log(TauLogEvent evt) => Events.Add(evt);
     }
+
+    private static ProviderAuthResolver CreateResolver(string authPath, string modelsPath) =>
+        new(
+            credentialStore: new OAuthCredentialStore([authPath]),
+            configurationStore: new ModelConfigurationStore([modelsPath]));
 
     private static string CreateSecretCommand(string tempDir, string markerPath)
     {

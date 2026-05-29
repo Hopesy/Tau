@@ -118,6 +118,79 @@ public sealed class AgentFacadeTests
     }
 
     [Fact]
+    public async Task PromptAsync_StreamFaultAppendsFailureAssistantMessageAndReportsItAtAgentEnd()
+    {
+        var provider = new BlockingProvider();
+        var agent = CreateAgent(provider);
+        var events = new List<AgentEvent>();
+        agent.Subscribe(events.Add);
+
+        var promptTask = agent.PromptAsync("hello");
+        await provider.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        provider.CurrentStream.Fault(new InvalidOperationException("boom"));
+        await promptTask.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Collection(
+            agent.State.Messages,
+            message => Assert.Equal("hello", ReadText(Assert.IsType<UserMessage>(message))),
+            message =>
+            {
+                var assistant = Assert.IsType<AssistantMessage>(message);
+                Assert.Equal("boom", assistant.ErrorMessage);
+                Assert.Equal(StopReason.Error, assistant.StopReason);
+                Assert.Equal(string.Empty, ReadText(assistant));
+            });
+        Assert.Equal("boom", agent.State.ErrorMessage);
+        Assert.False(agent.State.IsStreaming);
+
+        var end = Assert.IsType<AgentEndEvent>(events.Last());
+        Assert.Equal("boom", end.ErrorMessage);
+        var failure = Assert.Single(end.Messages);
+        var failureAssistant = Assert.IsType<AssistantMessage>(failure);
+        Assert.Equal("boom", failureAssistant.ErrorMessage);
+        Assert.Equal(StopReason.Error, failureAssistant.StopReason);
+        Assert.Equal(string.Empty, ReadText(failureAssistant));
+    }
+
+    [Fact]
+    public async Task PromptAsync_CancellationAppendsAbortedAssistantMessageAndReportsItAtAgentEnd()
+    {
+        var provider = new BlockingProvider();
+        var agent = CreateAgent(provider);
+        var events = new List<AgentEvent>();
+        agent.Subscribe(events.Add);
+        using var cancellationTokenSource = new CancellationTokenSource();
+
+        var promptTask = agent.PromptAsync("hello", cancellationToken: cancellationTokenSource.Token);
+        await provider.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        cancellationTokenSource.Cancel();
+        await promptTask.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Collection(
+            agent.State.Messages,
+            message => Assert.Equal("hello", ReadText(Assert.IsType<UserMessage>(message))),
+            message =>
+            {
+                var assistant = Assert.IsType<AssistantMessage>(message);
+                Assert.Equal("Operation canceled.", assistant.ErrorMessage);
+                Assert.Equal(StopReason.Aborted, assistant.StopReason);
+                Assert.Equal(string.Empty, ReadText(assistant));
+            });
+        Assert.Equal("Operation canceled.", agent.State.ErrorMessage);
+        Assert.False(agent.State.IsStreaming);
+
+        var end = Assert.IsType<AgentEndEvent>(events.Last());
+        Assert.Equal("Operation canceled.", end.ErrorMessage);
+        var failure = Assert.Single(end.Messages);
+        var failureAssistant = Assert.IsType<AssistantMessage>(failure);
+        Assert.Equal("Operation canceled.", failureAssistant.ErrorMessage);
+        Assert.Equal(StopReason.Aborted, failureAssistant.StopReason);
+        Assert.Equal(string.Empty, ReadText(failureAssistant));
+    }
+
+    [Fact]
     public void Reset_ClearsMessagesAndQueuesButKeepsConfiguration()
     {
         var provider = new RecordingProvider();
