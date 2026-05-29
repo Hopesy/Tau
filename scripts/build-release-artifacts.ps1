@@ -4,7 +4,8 @@ param(
     [string]$OutputRoot = 'artifacts',
     [switch]$SelfContained,
     [switch]$SkipRestore,
-    [switch]$SkipSmoke
+    [switch]$SkipSmoke,
+    [switch]$ForceSmoke
 )
 
 $ErrorActionPreference = 'Stop'
@@ -43,6 +44,15 @@ function Get-DefaultRuntimeIdentifier {
         'arm' { return "$os-arm" }
         default { throw "Unable to infer runtime identifier for architecture '$arch'. Pass -Runtime explicitly." }
     }
+}
+
+function Test-IsHostRuntime {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RuntimeIdentifier
+    )
+
+    return $RuntimeIdentifier.Equals((Get-DefaultRuntimeIdentifier), [StringComparison]::OrdinalIgnoreCase)
 }
 
 function Convert-ToFullPath {
@@ -180,9 +190,15 @@ exec "`$SCRIPT_DIR/../$shellEntrypoint" "`$@"
     [System.IO.File]::WriteAllText($wrapperPath, $content.Replace("`r`n", "`n"), [System.Text.UTF8Encoding]::new($false))
 
     if (-not $IsWindows) {
-        & chmod +x $wrapperPath
-        if ($LASTEXITCODE -ne 0) {
-            exit $LASTEXITCODE
+        $chmod = Get-Command chmod -ErrorAction SilentlyContinue
+        if ($chmod) {
+            & chmod +x $wrapperPath
+            if ($LASTEXITCODE -ne 0) {
+                exit $LASTEXITCODE
+            }
+        }
+        else {
+            Write-Warning "chmod was not found; Unix wrapper executable bit could not be set for $wrapperPath"
         }
     }
 
@@ -344,8 +360,13 @@ $manifestJson = $manifest | ConvertTo-Json -Depth 12
 [System.IO.File]::WriteAllText($manifestPath, $manifestJson + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($false))
 
 if (-not $SkipSmoke) {
-    Write-Host '==> smoke release artifact'
-    & (Join-Path $repoRoot 'scripts/smoke-release-artifacts.ps1') -ArtifactRoot $artifactRoot
+    if ((Test-IsHostRuntime -RuntimeIdentifier $Runtime) -or $ForceSmoke) {
+        Write-Host '==> smoke release artifact'
+        & (Join-Path $repoRoot 'scripts/smoke-release-artifacts.ps1') -ArtifactRoot $artifactRoot
+    }
+    else {
+        Write-Host "==> skipping executable smoke because runtime '$Runtime' does not match host runtime"
+    }
 }
 
 Write-Host "Tau release artifact built at $artifactRoot"

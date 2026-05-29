@@ -44,7 +44,11 @@ jobs:
 
       - name: Package and smoke release archive
         shell: pwsh
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\package-release-artifacts.ps1 -ArtifactRoot .\artifacts\tau-win-x64
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\package-release-matrix.ps1 -Runtimes win-x64
+
+      - name: Package tar.gz structure smoke
+        shell: pwsh
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\package-release-artifacts.ps1 -ArtifactRoot .\artifacts\tau-win-x64 -ArchiveFormat tar.gz -ArchiveRoot .\artifacts\release-format-smoke -SkipExecutableSmoke
 
       - name: Upload release archive
         uses: actions/upload-artifact@v7

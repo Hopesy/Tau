@@ -203,11 +203,15 @@ Release artifact baseline：
 powershell -ExecutionPolicy Bypass -File .\scripts\build-release-artifacts.ps1 -Configuration Release
 powershell -ExecutionPolicy Bypass -File .\scripts\smoke-release-artifacts.ps1 -ArtifactRoot .\artifacts\tau-win-x64
 powershell -ExecutionPolicy Bypass -File .\scripts\package-release-artifacts.ps1 -ArtifactRoot .\artifacts\tau-win-x64
+powershell -ExecutionPolicy Bypass -File .\scripts\build-release-matrix.ps1 -Runtimes win-x64
+powershell -ExecutionPolicy Bypass -File .\scripts\package-release-matrix.ps1 -Runtimes win-x64
 ```
 
 如果需要用 `build-release-artifacts.ps1 -SkipRestore` 做离线/复用 restore 的发布验证，必须先执行带 RID 的 restore，例如 `dotnet restore Tau.slnx -r win-x64 --verbosity minimal`；普通 `dotnet restore Tau.slnx` 不会生成 `net10.0/win-x64` publish 需要的 assets target。
 
-当前 release artifact 输出到 `artifacts/tau-<rid>/`，Windows 当前平台是 `artifacts/tau-win-x64/`。目录内包含 `apps/**` 的 `dotnet publish` 输出、`manifest.json`、基础文档，以及 `bin/pi.cmd`、`bin/tau-ai.cmd`、`bin/pi-ai.cmd`、`bin/mom.cmd`、`bin/pi-pods.cmd`、`bin/tau-web-ui.cmd` wrapper。artifact smoke 会验证 AI CLI provider list、`pi` RPC `get_state`、Pods help、WebUi health/status/catalog/session store 和 Mom `--once` 本地 delegation 链路。`package-release-artifacts.ps1` 会把该目录打包为 `artifacts/releases/tau-<rid>.zip`，再解压到全新临时目录并复用同一套 artifact smoke 验证 extracted copy。当前这是 current-RID 可执行交付物 + zip archive baseline；cross-platform archive matrix、Unix tar.gz parity、exact auth-backup parity、version/changelog/tag/publish automation 和真实外部 e2e release smoke 仍是 Phase 5 后续缺口。
+当前 release artifact 输出到 `artifacts/tau-<rid>/`，Windows 当前平台是 `artifacts/tau-win-x64/`。目录内包含 `apps/**` 的 `dotnet publish` 输出、`manifest.json`、基础文档，以及 `bin/pi.cmd`、`bin/tau-ai.cmd`、`bin/pi-ai.cmd`、`bin/mom.cmd`、`bin/pi-pods.cmd`、`bin/tau-web-ui.cmd` wrapper。artifact smoke 会验证 AI CLI provider list、`pi` RPC `get_state`、Pods help、WebUi health/status/catalog/session store 和 Mom `--once` 本地 delegation 链路。
+
+`package-release-artifacts.ps1` 支持 `-ArchiveFormat auto|zip|tar.gz`，`auto` 会按 RID 对齐上游 `build-binaries.sh`：`win-*` 生成 `artifacts/releases/tau-<rid>.zip`，`linux-*` / `osx-*` 生成 `artifacts/releases/tau-<rid>.tar.gz`。脚本会保留 `tau-<rid>` 顶层目录，解压到全新临时目录并校验结构；只有 archive RID 等于宿主 RID 时才默认运行 executable smoke，非宿主 RID 只做归档/解压结构校验，除非显式传 `-ForceSmoke`。`package-release-matrix.ps1` 用于对已经存在的 `artifacts/tau-<rid>/` 批量归档，默认矩阵是 `osx-arm64`、`osx-x64`、`linux-x64`、`linux-arm64`、`win-x64`；`build-release-matrix.ps1` 则按同一矩阵逐个 restore/build/package。当前这把 Phase 5 从 current-RID zip 推进到上游风格 archive format/RID matrix baseline；仍不声明非宿主平台已在本机执行 smoke，也不关闭 exact auth-backup parity、version/changelog/tag/publish automation 或真实外部 e2e release smoke。
 
 GitHub Actions CI baseline：
 
@@ -215,7 +219,7 @@ GitHub Actions CI baseline：
 .github/workflows/tau-ci.yml
 ```
 
-当前 CI 在 `push main`、`pull_request` 和手动触发时运行 Windows PowerShell gate：按 `global.json` 安装 .NET SDK，`dotnet restore Tau.slnx`，执行 `verify-no-env.ps1 -SkipRestore -RunSmoke`，构建 Release artifact，打包 `artifacts/releases/tau-win-x64.zip`，并先解压 smoke 后再上传该 zip 作为 workflow artifact。该 workflow 复用仓库现有 PowerShell 脚本，不另建一套 CI-only 行为；它关闭的是 Windows current-RID CI/release artifact baseline，不代表跨平台 archive matrix、Unix shell wrapper、version/tag/publish automation 或真实外部 e2e release smoke 已完成。
+当前 CI 在 `push main`、`pull_request` 和手动触发时运行 Windows PowerShell gate：按 `global.json` 安装 .NET SDK，`dotnet restore Tau.slnx`，执行 `verify-no-env.ps1 -SkipRestore -RunSmoke`，构建 Release artifact，通过 `package-release-matrix.ps1 -Runtimes win-x64` 打包 `artifacts/releases/tau-win-x64.zip`，再用 `package-release-artifacts.ps1 -ArchiveFormat tar.gz -SkipExecutableSmoke` 做 tar.gz 格式/解压结构 smoke，并先解压 smoke Windows zip 后再上传该 zip 作为 workflow artifact。该 workflow 复用仓库现有 PowerShell 脚本，不另建一套 CI-only 行为；它关闭的是 Windows current-RID CI/release artifact baseline，不代表非宿主平台 executable smoke、Unix shell wrapper、version/tag/publish automation 或真实外部 e2e release smoke 已完成。
 
 当前机器上的现场现实：
 

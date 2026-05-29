@@ -3,8 +3,12 @@ param(
     [string]$OutputRoot = 'artifacts',
     [string]$ArchiveRoot = 'artifacts/releases',
     [string]$Runtime = '',
+    [ValidateSet('auto', 'zip', 'tar.gz')]
+    [string]$ArchiveFormat = 'auto',
     [int]$TimeoutSeconds = 25,
     [switch]$SkipSmoke,
+    [switch]$SkipExecutableSmoke,
+    [switch]$ForceSmoke,
     [switch]$KeepExtracted
 )
 
@@ -123,6 +127,60 @@ function Convert-ToZipPath {
     return ($Path -replace '\\', '/')
 }
 
+function Get-ArchiveFormatForRuntime {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RuntimeIdentifier,
+        [Parameter(Mandatory = $true)]
+        [string]$RequestedFormat
+    )
+
+    if ($RequestedFormat -ne 'auto') {
+        return $RequestedFormat
+    }
+
+    if ($RuntimeIdentifier.StartsWith('win-', [StringComparison]::OrdinalIgnoreCase)) {
+        return 'zip'
+    }
+
+    return 'tar.gz'
+}
+
+function Get-ArchiveExtension {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Format
+    )
+
+    switch ($Format) {
+        'zip' { return 'zip' }
+        'tar.gz' { return 'tar.gz' }
+        default { throw "Unsupported archive format: $Format" }
+    }
+}
+
+function Test-IsHostRuntime {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RuntimeIdentifier
+    )
+
+    return $RuntimeIdentifier.Equals((Get-DefaultRuntimeIdentifier), [StringComparison]::OrdinalIgnoreCase)
+}
+
+function Invoke-Tar {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$Arguments
+    )
+
+    Write-Host "tar $($Arguments -join ' ')"
+    & tar @Arguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "tar failed with exit code $LASTEXITCODE"
+    }
+}
+
 function Add-ZipEntryFromFile {
     param(
         [Parameter(Mandatory = $true)]
@@ -151,6 +209,76 @@ function Add-ZipEntryFromFile {
             $entryStream.Dispose()
         }
     }
+}
+
+function New-ZipArchiveFromDirectory {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$SourceRoot,
+        [Parameter(Mandatory = $true)]
+        [string]$TopLevelDirectory,
+        [Parameter(Mandatory = $true)]
+        [string]$ArchivePath
+    )
+
+    $zipStream = $null
+    $archive = $null
+    try {
+        $zipStream = [System.IO.File]::Open($ArchivePath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::ReadWrite)
+        $archive = [System.IO.Compression.ZipArchive]::new($zipStream, [System.IO.Compression.ZipArchiveMode]::Create)
+
+        $files = Get-ChildItem -LiteralPath $SourceRoot -File -Recurse | Sort-Object FullName
+        foreach ($file in $files) {
+            $relativePath = Get-RelativePath -BasePath $SourceRoot -TargetPath $file.FullName
+            $entryName = Convert-ToZipPath -Path (Join-Path $TopLevelDirectory $relativePath)
+            Add-ZipEntryFromFile -Archive $archive -FilePath $file.FullName -EntryName $entryName
+        }
+    }
+    finally {
+        if ($archive) {
+            $archive.Dispose()
+        }
+        if ($zipStream) {
+            $zipStream.Dispose()
+        }
+    }
+}
+
+function New-TarGzArchiveFromDirectory {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$SourceRoot,
+        [Parameter(Mandatory = $true)]
+        [string]$TopLevelDirectory,
+        [Parameter(Mandatory = $true)]
+        [string]$ArchivePath
+    )
+
+    $sourceParent = Split-Path -Parent $SourceRoot
+    Invoke-Tar -Arguments @('-czf', $ArchivePath, '-C', $sourceParent, $TopLevelDirectory)
+}
+
+function Expand-ReleaseArchive {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ArchivePath,
+        [Parameter(Mandatory = $true)]
+        [string]$DestinationRoot,
+        [Parameter(Mandatory = $true)]
+        [string]$Format
+    )
+
+    if ($Format -eq 'zip') {
+        [System.IO.Compression.ZipFile]::ExtractToDirectory($ArchivePath, $DestinationRoot)
+        return
+    }
+
+    if ($Format -eq 'tar.gz') {
+        Invoke-Tar -Arguments @('-xzf', $ArchivePath, '-C', $DestinationRoot)
+        return
+    }
+
+    throw "Unsupported archive format: $Format"
 }
 
 if ([string]::IsNullOrWhiteSpace($Runtime)) {
@@ -187,8 +315,12 @@ if ($manifest.runtimeIdentifier -and $manifest.runtimeIdentifier -ne $Runtime) {
     $Runtime = $manifest.runtimeIdentifier
 }
 
+$effectiveArchiveFormat = Get-ArchiveFormatForRuntime -RuntimeIdentifier $Runtime -RequestedFormat $ArchiveFormat
+$archiveExtension = Get-ArchiveExtension -Format $effectiveArchiveFormat
+$isHostRuntime = Test-IsHostRuntime -RuntimeIdentifier $Runtime
+
 New-Item -ItemType Directory -Force -Path $archiveRootFull | Out-Null
-$archivePath = Join-Path $archiveRootFull "tau-$Runtime.zip"
+$archivePath = Join-Path $archiveRootFull "tau-$Runtime.$archiveExtension"
 
 if (Test-Path -LiteralPath $archivePath) {
     Remove-Item -LiteralPath $archivePath -Force
@@ -196,27 +328,16 @@ if (Test-Path -LiteralPath $archivePath) {
 
 Write-Host "==> packaging $artifactRootFull"
 Write-Host "==> archive $archivePath"
+Write-Host "==> format $effectiveArchiveFormat runtime $Runtime hostRuntime=$isHostRuntime"
 
-$zipStream = $null
-$archive = $null
-try {
-    $zipStream = [System.IO.File]::Open($archivePath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::ReadWrite)
-    $archive = [System.IO.Compression.ZipArchive]::new($zipStream, [System.IO.Compression.ZipArchiveMode]::Create)
-
-    $files = Get-ChildItem -LiteralPath $artifactRootFull -File -Recurse | Sort-Object FullName
-    foreach ($file in $files) {
-        $relativePath = Get-RelativePath -BasePath $artifactRootFull -TargetPath $file.FullName
-        $entryName = Convert-ToZipPath -Path (Join-Path $artifactLeaf $relativePath)
-        Add-ZipEntryFromFile -Archive $archive -FilePath $file.FullName -EntryName $entryName
-    }
+if ($effectiveArchiveFormat -eq 'zip') {
+    New-ZipArchiveFromDirectory -SourceRoot $artifactRootFull -TopLevelDirectory $artifactLeaf -ArchivePath $archivePath
 }
-finally {
-    if ($archive) {
-        $archive.Dispose()
-    }
-    if ($zipStream) {
-        $zipStream.Dispose()
-    }
+elseif ($effectiveArchiveFormat -eq 'tar.gz') {
+    New-TarGzArchiveFromDirectory -SourceRoot $artifactRootFull -TopLevelDirectory $artifactLeaf -ArchivePath $archivePath
+}
+else {
+    throw "Unsupported archive format: $effectiveArchiveFormat"
 }
 
 $archiveInfo = Get-Item -LiteralPath $archivePath
@@ -233,14 +354,19 @@ if (-not $SkipSmoke) {
 
     try {
         Write-Host "==> extracting archive smoke root $extractRoot"
-        [System.IO.Compression.ZipFile]::ExtractToDirectory($archivePath, $extractRoot)
+        Expand-ReleaseArchive -ArchivePath $archivePath -DestinationRoot $extractRoot -Format $effectiveArchiveFormat
 
         if (-not (Test-Path -LiteralPath $extractedArtifactRoot)) {
             throw "Extracted artifact root not found: $extractedArtifactRoot"
         }
 
-        Write-Host '==> smoke extracted release artifact'
-        & (Join-Path $repoRoot 'scripts/smoke-release-artifacts.ps1') -ArtifactRoot $extractedArtifactRoot -TimeoutSeconds $TimeoutSeconds
+        if ((-not $SkipExecutableSmoke) -and ($isHostRuntime -or $ForceSmoke)) {
+            Write-Host '==> smoke extracted release artifact'
+            & (Join-Path $repoRoot 'scripts/smoke-release-artifacts.ps1') -ArtifactRoot $extractedArtifactRoot -TimeoutSeconds $TimeoutSeconds
+        }
+        else {
+            Write-Host "==> extracted archive structure verified; skipping executable smoke"
+        }
     }
     finally {
         if ($KeepExtracted) {
