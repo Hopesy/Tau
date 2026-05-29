@@ -374,6 +374,8 @@ $requiredScripts = @(
     'scripts/verify-session-audit-scripts.ps1',
     'scripts/verify-edit-tool-stats.ps1',
     'scripts/report-edit-tool-stats.ps1',
+    'scripts/verify-mom-timestamp-migration.ps1',
+    'scripts/migrate-mom-timestamps.ps1',
     'scripts/verify-coding-agent-startup-profile.ps1',
     'scripts/verify-release-version-sync.ps1',
     'scripts/sync-release-versions.ps1',
@@ -421,6 +423,11 @@ $plannedCommands = @(
         name = 'edit-tool-stats-smoke'
         command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-edit-tool-stats.ps1'
         purpose = 'Validate the Tau edit tool statistics report against Tau and upstream-style JSONL fixture records.'
+    },
+    [ordered]@{
+        name = 'mom-timestamp-migration-smoke'
+        command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-mom-timestamp-migration.ps1'
+        purpose = 'Validate the Tau Mom log timestamp migration helper against a local channel log fixture.'
     },
     [ordered]@{
         name = 'coding-agent-startup-profile-smoke'

@@ -308,7 +308,7 @@ foreach($p in $pkgs){
 | Download | `src/download.ts`, `main.ts --download` | `SlackChannelHistoryDownloadService.cs`, download tests | external-e2e-needed | HTTP contract tests exist; real Slack history/replies smoke remains open. |
 | Sandbox/Docker | `src/sandbox.ts`, `docker.sh`, `dev.sh` | `MomSandbox.cs`, `MomSandboxValidator.cs`, sandbox/tool tests | external-e2e-needed | Host and Docker command construction seams exist; no real Docker container smoke or lifecycle helper parity yet. |
 | Tools | `tools/bash.ts`, `read.ts`, `write.ts`, `edit.ts`, `attach.ts`, `truncate.ts` | `MomTools.cs`, `MomToolOutputTruncator.cs`, `MomSandboxAndToolsTests.cs` | ported | Five same-name tools exist with schema/diff/truncation/attachment behavior; Docker execution still gated by sandbox e2e. |
-| Operator docs/helpers | `README.md`, `docs/slack-bot-minimal-guide.md`, `docs/sandbox.md`, `docs/events.md`, `scripts/migrate-timestamps.ts` | Root docs/architecture/next/history | partial | Tau lacks Mom-specific operator docs and `migrate-timestamps.ts` equivalent; exploratory docs may become non-goals only after user confirmation. |
+| Operator docs/helpers | `README.md`, `docs/slack-bot-minimal-guide.md`, `docs/sandbox.md`, `docs/events.md`, `scripts/migrate-timestamps.ts` | Root docs/architecture/next/history, `scripts/migrate-mom-timestamps.ps1`, `scripts/verify-mom-timestamp-migration.ps1` | partial | Tau now has a PowerShell-first timestamp migration helper for channel `log.jsonl` files with fixture smoke coverage. Mom-specific operator docs are still partial, and real Slack/Docker e2e remains open. |
 | Runtime trace/correlation | Upstream `log.ts` + AgentSession events | `TauRuntimeLogContext`, `JsonlTauLogSink`, runtime delegation tests | partial | Tau emits delegation/response/tool/usage/end and propagates context to runner; not yet a complete cross CodingAgent/Agent/Mom/Pods e2e trace protocol. |
 
 ### Mom File-Level Matrix
@@ -325,7 +325,7 @@ foreach($p in $pkgs){
 | `store.ts` | `ChannelAttachmentStore.cs`, `ChannelLogStore.cs`, `ChannelStatusStore.cs`, `ChannelSessionStore.cs` | ported | Attachment manifest, channel log, status and session context stores are implemented and reused. Schema/layout are Tau-native. |
 | `download.ts` | `SlackChannelHistoryDownloadService.cs`, download tests | external-e2e-needed | History download/thread expansion/Bearer behavior has fake HTTP tests. Real Slack API validation remains open. |
 | `tools/*.ts` | `MomTools.cs`, `MomToolOutputTruncator.cs`, sandbox/tool tests | ported | `read/write/edit/bash/attach` and truncation/diff/attachment behavior are implemented and tested. Docker execution still needs real smoke. |
-| `packages/mom/scripts/migrate-timestamps.ts` | no direct Tau equivalent | missing | No timestamp migration command/script exists. Needs separate migration boundary or explicit non-goal. |
+| `packages/mom/scripts/migrate-timestamps.ts` | `scripts/migrate-mom-timestamps.ps1`, `scripts/verify-mom-timestamp-migration.ps1` | partial | Tau has a dry-run-by-default PowerShell migration helper for `<data-dir>/<channel>/log.jsonl`, converting millisecond Unix `ts` values to Slack `seconds.microseconds`, preserving malformed lines and Tau-native `*-bot` timestamps. Fixture smoke covers dry-run, apply and idempotency. |
 
 ### Mom Slack / Event / Session / Sandbox / Env / Config / Log / Schema Surface
 
@@ -402,7 +402,7 @@ foreach($p in $pkgs){
 | `packages/ai/scripts/generate-test-image.ts` | Generates AI test image fixture. | Tau tests embed fixtures/stub content | missing | Needs decision whether script is test-only non-goal or Tau test utility. |
 | `packages/pods/scripts/pod_setup.sh` | Remote setup script: validates HF/API tokens, installs vLLM variants, exports token/env, configures model path. | `PodSetupPlanner`/`PodSetupService` expects compatible remote script contract but does not vendor a Tau script file yet | partial | Tau builds command and can copy custom `--script`; real script packaging and remote smoke remain open. |
 | `packages/pods/scripts/model_run.sh` | Remote vLLM wrapper with env and PID/log monitoring. | `PodVllmOrchestrationService` builds systemd/nohup service directly | partial | Tau intentionally uses service/nohup orchestration; command-level output and startup-monitor parity still need real smoke/decision. |
-| `packages/mom/scripts/migrate-timestamps.ts` | Mom timestamp migration helper. | none | missing | Needs Mom schema migration decision. |
+| `packages/mom/scripts/migrate-timestamps.ts` | Mom timestamp migration helper. | `scripts/migrate-mom-timestamps.ps1`, `scripts/verify-mom-timestamp-migration.ps1` | partial | Tau has a local migration helper and smoke coverage; this does not prove real Slack runtime/session sync. |
 | `packages/coding-agent/scripts/migrate-sessions.sh` | CodingAgent session migration helper. | no direct script; JSONL/session stores handle current schema | missing | Needs session migration parity decision. |
 
 ## Phase 1 Normalization Result

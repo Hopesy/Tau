@@ -46,6 +46,10 @@ jobs:
         shell: pwsh
         run: powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-edit-tool-stats.ps1
 
+      - name: Mom timestamp migration smoke
+        shell: pwsh
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-mom-timestamp-migration.ps1
+
       - name: CodingAgent startup profile smoke
         shell: pwsh
         run: powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-coding-agent-startup-profile.ps1
