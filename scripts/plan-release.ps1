@@ -455,7 +455,7 @@ $nonExecutedMutations = @(
 )
 
 $remainingGaps = @(
-    'No repo-owned Tau version source is currently defined unless -CurrentVersion is supplied or a future Version property is added.',
+    'Tau has a repo-owned MSBuild version source for planning, but this dry-run planner does not update it.',
     'This is a dry-run planner; it does not bump versions, edit release notes, commit, tag, publish or push.',
     'Real non-host runner executable smoke and external provider/Slack/Docker/SSH/HF/GPU/vLLM release e2e remain open.',
     'Exact Unix release wrapper/auth-backup parity and upstream examples/Photon/interactive asset payload parity remain open.'

@@ -129,6 +129,33 @@ function Resolve-AppEntrypoint {
     throw "Release app entrypoint not found: $AppDir/$AssemblyName"
 }
 
+function Get-RepoVersion {
+    $propsPath = Join-Path $repoRoot 'Directory.Build.props'
+    if (-not (Test-Path -LiteralPath $propsPath)) {
+        throw 'Directory.Build.props not found; release artifact smoke requires a repo-owned version source.'
+    }
+
+    [xml]$props = Get-Content -LiteralPath $propsPath -Raw
+    foreach ($propertyName in @('Version', 'VersionPrefix', 'PackageVersion')) {
+        $node = $props.SelectSingleNode("//*[local-name()='$propertyName']")
+        if ($null -eq $node -or [string]::IsNullOrWhiteSpace($node.InnerText)) {
+            continue
+        }
+
+        $value = $node.InnerText.Trim()
+        if ($value -notmatch '^\d+\.\d+\.\d+$') {
+            throw "Release version source $propertyName in Directory.Build.props must use x.y.z format. Actual: $value"
+        }
+
+        return [ordered]@{
+            value = $value
+            property = $propertyName
+        }
+    }
+
+    throw 'Directory.Build.props does not define Version, VersionPrefix or PackageVersion.'
+}
+
 function ConvertTo-CmdArgument {
     param(
         [Parameter(Mandatory = $true)]
@@ -464,6 +491,15 @@ foreach ($entrypoint in @(
 
 if ($manifest.schemaVersion -ne 1) {
     throw "Unsupported artifact manifest schema version: $($manifest.schemaVersion)"
+}
+
+$repoVersion = Get-RepoVersion
+if ($manifest.version -ne $repoVersion.value) {
+    throw "Release manifest version '$($manifest.version)' does not match Directory.Build.props $($repoVersion.property) '$($repoVersion.value)'."
+}
+
+if ($manifest.versionSource.path -ne 'Directory.Build.props' -or $manifest.versionSource.property -ne $repoVersion.property) {
+    throw "Release manifest version source is not Directory.Build.props/$($repoVersion.property)."
 }
 
 $payloads = @($manifest.releasePayload)

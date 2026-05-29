@@ -97,6 +97,34 @@ function Get-RelativePath {
     return [System.Uri]::UnescapeDataString($relativeUri.ToString()).Replace('/', [System.IO.Path]::DirectorySeparatorChar)
 }
 
+function Get-RepoVersion {
+    $propsPath = Join-Path $repoRoot 'Directory.Build.props'
+    if (-not (Test-Path -LiteralPath $propsPath)) {
+        throw 'Directory.Build.props not found; release artifacts require a repo-owned version source.'
+    }
+
+    [xml]$props = Get-Content -LiteralPath $propsPath -Raw
+    foreach ($propertyName in @('Version', 'VersionPrefix', 'PackageVersion')) {
+        $node = $props.SelectSingleNode("//*[local-name()='$propertyName']")
+        if ($null -eq $node -or [string]::IsNullOrWhiteSpace($node.InnerText)) {
+            continue
+        }
+
+        $value = $node.InnerText.Trim()
+        if ($value -notmatch '^\d+\.\d+\.\d+$') {
+            throw "Release version source $propertyName in Directory.Build.props must use x.y.z format. Actual: $value"
+        }
+
+        return [ordered]@{
+            value = $value
+            source = 'Directory.Build.props'
+            property = $propertyName
+        }
+    }
+
+    throw 'Directory.Build.props does not define Version, VersionPrefix or PackageVersion.'
+}
+
 function Assert-ArtifactPath {
     param(
         [Parameter(Mandatory = $true)]
@@ -363,6 +391,7 @@ $binDir = Join-Path $artifactRoot 'bin'
 $appsDir = Join-Path $artifactRoot 'apps'
 $isWindowsRid = $Runtime.StartsWith('win-', [StringComparison]::OrdinalIgnoreCase)
 $entrypointExtension = if ($isWindowsRid) { '.exe' } else { '' }
+$repoVersion = Get-RepoVersion
 
 Assert-ArtifactPath -ArtifactRoot $artifactRoot -OutputRoot $outputRootFull
 
@@ -534,6 +563,11 @@ Add-ReleasePayloadEntry `
 $manifest = [ordered]@{
     schemaVersion = 1
     createdAt = (Get-Date).ToUniversalTime().ToString('O')
+    version = $repoVersion.value
+    versionSource = [ordered]@{
+        path = $repoVersion.source
+        property = $repoVersion.property
+    }
     runtimeIdentifier = $Runtime
     configuration = $Configuration
     selfContained = $SelfContained.IsPresent
