@@ -203,6 +203,7 @@ Release artifact baseline：
 powershell -ExecutionPolicy Bypass -File .\scripts\plan-release.ps1 patch
 powershell -ExecutionPolicy Bypass -File .\scripts\prepare-release.ps1 patch
 powershell -ExecutionPolicy Bypass -File .\scripts\validate-release.ps1 -Runtimes win-x64
+powershell -ExecutionPolicy Bypass -File .\scripts\verify-release-contracts.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\update-release-version.ps1 patch
 powershell -ExecutionPolicy Bypass -File .\scripts\update-release-notes.ps1 0.1.1
 powershell -ExecutionPolicy Bypass -File .\scripts\build-release-artifacts.ps1 -Configuration Release
@@ -216,7 +217,9 @@ powershell -ExecutionPolicy Bypass -File .\scripts\package-release-matrix.ps1 -R
 
 `prepare-release.ps1` 是当前 release execution 的本地准备层：默认 dry-run，复用 `update-release-version.ps1` 和 `update-release-notes.ps1` 预览将要写入的版本与 release notes；只有显式传 `-Apply` 且工作树干净时，才依次写回 `Directory.Build.props` 与 `docs/releases/feature-release-notes.md`。`-Apply` 前会先跑两个 helper 的 dry-run 预检，避免 release notes 表结构等问题在版本已经写回后才暴露。该脚本仍不运行 no-env gate、release matrix build/package、commit、tag、publish 或 push；这些动作必须作为后续显式 release execution / operator 步骤处理。
 
-`validate-release.ps1` 是当前 release validation 的本地编排层：默认 dry-run，只列出 `git diff --check`、`verify-no-env.ps1` 和 `build-release-matrix.ps1` 将要执行的命令；只有显式传 `-Run` 才真正执行这些本地验证。默认 `-Run` 要求工作树干净，`-AllowDirty` 只用于本地 WIP validation。该脚本不调用 `prepare-release.ps1 -Apply`，不修改版本或 release notes，也不 commit/tag/publish/push。
+`validate-release.ps1` 是当前 release validation 的本地编排层：默认 dry-run，只列出 `git diff --check`、`verify-no-env.ps1` 和 `build-release-matrix.ps1` 将要执行的命令；只有显式传 `-Run` 才真正执行这些本地验证。默认 `-Run` 要求工作树干净，`-AllowDirty` 只用于本地 WIP validation。JSON 输出会记录 `validationLevel`、enabled/skipped validation count 和 validation name 列表，默认三段全开为 `full-local-dry-run`，同时跳过 no-env 与 matrix 时会标成 `minimal-diff-only-dry-run` 并给出 coverage warning，避免把只跑 `git diff --check` 误读成完整 release validation。该脚本不调用 `prepare-release.ps1 -Apply`，不修改版本或 release notes，也不 commit/tag/publish/push。
+
+`verify-release-contracts.ps1` 是短 release script contract smoke，不跑 `dotnet build/test`，不生成 artifact，也不写版本或 release notes。它只调用 `plan-release.ps1`、`prepare-release.ps1` 和 `validate-release.ps1` 的 `-Json` dry-run 输出，断言 dry-run boundary、next version、planned command names、non-executed commit/tag/publish/push mutation boundary、preparation changed files，以及 validation coverage metadata。这个脚本用于固定 release automation 的 JSON 契约，当前 CI 会在长 no-env/build/release artifact 步骤前先运行它。
 
 `update-release-version.ps1` 只负责 Tau 产品版本写回这一件事：读取 `Directory.Build.props` 中唯一的 `Version` / `VersionPrefix` / `PackageVersion`，计算 bump 或验证显式 `x.y.z`，默认 dry-run 输出当前版本和下一版本；只有显式传 `-Apply` 时才写回该 MSBuild 属性。该脚本不编辑 release notes，不 commit/tag/publish/push。
 
@@ -234,7 +237,7 @@ GitHub Actions CI baseline：
 .github/workflows/tau-ci.yml
 ```
 
-当前 CI 在 `push main`、`pull_request` 和手动触发时运行 Windows PowerShell gate：按 `global.json` 安装 .NET SDK，`dotnet restore Tau.slnx`，执行 `verify-no-env.ps1 -SkipRestore -RunSmoke`，构建 Release artifact，通过 `package-release-matrix.ps1 -Runtimes win-x64` 打包 `artifacts/releases/tau-win-x64.zip`，再用 `package-release-artifacts.ps1 -ArchiveFormat tar.gz -SkipExecutableSmoke` 做 tar.gz 格式/解压结构 smoke，并先解压 smoke Windows zip 后再上传该 zip 作为 workflow artifact。该 workflow 复用仓库现有 PowerShell 脚本，不另建一套 CI-only 行为；它关闭的是 Windows current-RID CI/release artifact baseline，不代表非宿主平台 executable smoke、Unix shell wrapper、version/tag/publish automation 或真实外部 e2e release smoke 已完成。
+当前 CI 在 `push main`、`pull_request` 和手动触发时运行 Windows PowerShell gate：按 `global.json` 安装 .NET SDK，`dotnet restore Tau.slnx`，先执行 `verify-release-contracts.ps1` 固定 release dry-run JSON contract，再执行 `verify-no-env.ps1 -SkipRestore -RunSmoke`，构建 Release artifact，通过 `package-release-matrix.ps1 -Runtimes win-x64` 打包 `artifacts/releases/tau-win-x64.zip`，再用 `package-release-artifacts.ps1 -ArchiveFormat tar.gz -SkipExecutableSmoke` 做 tar.gz 格式/解压结构 smoke，并先解压 smoke Windows zip 后再上传该 zip 作为 workflow artifact。该 workflow 复用仓库现有 PowerShell 脚本，不另建一套 CI-only 行为；它关闭的是 Windows current-RID CI/release artifact baseline 和 release dry-run contract smoke baseline，不代表非宿主平台 executable smoke、Unix shell wrapper、version/tag/publish automation 或真实外部 e2e release smoke 已完成。
 
 当前机器上的现场现实：
 

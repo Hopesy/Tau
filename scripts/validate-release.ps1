@@ -312,6 +312,29 @@ $plannedCommands = @(
     }
 )
 
+$enabledValidationCommands = @($plannedCommands | Where-Object { $_.enabled })
+$skippedValidationCommands = @($plannedCommands | Where-Object { -not $_.enabled })
+$validationBaseLevel = 'full-local'
+if ($SkipNoEnv -and $SkipMatrix) {
+    $validationBaseLevel = 'minimal-diff-only'
+}
+elseif ($SkipNoEnv -or $SkipMatrix) {
+    $validationBaseLevel = 'partial-local'
+}
+$validationLevel = if ($Run) { $validationBaseLevel } else { "$validationBaseLevel-dry-run" }
+$enabledValidationNames = @($enabledValidationCommands | ForEach-Object { $_.name })
+$skippedValidationNames = @($skippedValidationCommands | ForEach-Object { $_.name })
+
+if ($SkipNoEnv -and $SkipMatrix) {
+    Add-Check -Name 'validation-coverage' -Status 'warning' -Detail 'Only git diff --check is enabled; no-env and release matrix validation are both skipped.'
+}
+elseif ($SkipNoEnv -or $SkipMatrix) {
+    Add-Check -Name 'validation-coverage' -Status 'warning' -Detail "Partial local validation is enabled; skipped step(s): $($skippedValidationNames -join ', ')."
+}
+else {
+    Add-Check -Name 'validation-coverage' -Status 'passed' -Detail 'Full local release validation plan is enabled: diff-check, no-env validation and release matrix build/package.'
+}
+
 $remainingGaps = @(
     'This validation script does not run prepare-release.ps1 -Apply, commit, tag, publish or push.',
     'Real non-host runner executable smoke and external provider/Slack/Docker/SSH/HF/GPU/vLLM release e2e remain open.',
@@ -334,6 +357,11 @@ if ($Run -and $script:hardPreflightFailure) {
             status = $gitStatus.entries
         }
         checks = $script:checks
+        validationLevel = $validationLevel
+        enabledValidationCount = $enabledValidationCommands.Count
+        skippedValidationCount = $skippedValidationCommands.Count
+        enabledValidationNames = $enabledValidationNames
+        skippedValidationNames = $skippedValidationNames
         plannedCommands = $plannedCommands
         commandResults = $script:commandResults
         remainingGaps = $remainingGaps
@@ -399,6 +427,11 @@ $result = [ordered]@{
         status = $gitStatus.entries
     }
     checks = $script:checks
+    validationLevel = $validationLevel
+    enabledValidationCount = $enabledValidationCommands.Count
+    skippedValidationCount = $skippedValidationCommands.Count
+    enabledValidationNames = $enabledValidationNames
+    skippedValidationNames = $skippedValidationNames
     plannedCommands = $plannedCommands
     commandResults = $script:commandResults
     remainingGaps = $remainingGaps
@@ -412,6 +445,11 @@ else {
     Write-Host "  mode: $(if ($Run) { 'run' } else { 'dry-run' })"
     Write-Host "  configuration: $Configuration"
     Write-Host "  runtimes: $($normalizedRuntimes -join ', ')"
+    Write-Host "  validation level: $validationLevel"
+    Write-Host "  enabled validations: $($enabledValidationNames -join ', ')"
+    if ($skippedValidationNames.Count -gt 0) {
+        Write-Host "  skipped validations: $($skippedValidationNames -join ', ')"
+    }
     Write-Host "  output root: $outputRootFull"
     Write-Host "  archive root: $archiveRootFull"
     Write-Host ''

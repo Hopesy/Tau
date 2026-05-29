@@ -370,6 +370,7 @@ else {
 
 $requiredScripts = @(
     'scripts/verify-no-env.ps1',
+    'scripts/verify-release-contracts.ps1',
     'scripts/prepare-release.ps1',
     'scripts/validate-release.ps1',
     'scripts/update-release-version.ps1',
@@ -398,6 +399,11 @@ $plannedCommands = @(
         name = 'diff-check'
         command = 'git diff --check'
         purpose = 'Validate whitespace and patch hygiene before release preparation.'
+    },
+    [ordered]@{
+        name = 'release-contract-smoke'
+        command = "powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-release-contracts.ps1 -ReleaseTarget $ReleaseTarget -Runtimes $runtimeArgument"
+        purpose = 'Validate guarded release dry-run JSON contracts before longer no-env or release matrix work.'
     },
     [ordered]@{
         name = 'release-preparation'
