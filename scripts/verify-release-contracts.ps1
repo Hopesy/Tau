@@ -188,6 +188,7 @@ try {
         'release-contract-smoke',
         'session-audit-script-smoke',
         'coding-agent-session-migration-smoke',
+        'coding-agent-commands-migration-smoke',
         'edit-tool-stats-smoke',
         'mom-timestamp-migration-smoke',
         'coding-agent-startup-profile-smoke',

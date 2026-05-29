@@ -374,6 +374,8 @@ $requiredScripts = @(
     'scripts/verify-session-audit-scripts.ps1',
     'scripts/verify-coding-agent-session-migration.ps1',
     'scripts/migrate-coding-agent-sessions.ps1',
+    'scripts/verify-coding-agent-commands-migration.ps1',
+    'scripts/migrate-coding-agent-commands.ps1',
     'scripts/verify-edit-tool-stats.ps1',
     'scripts/report-edit-tool-stats.ps1',
     'scripts/verify-mom-timestamp-migration.ps1',
@@ -425,6 +427,11 @@ $plannedCommands = @(
         name = 'coding-agent-session-migration-smoke'
         command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-coding-agent-session-migration.ps1'
         purpose = 'Validate the Tau CodingAgent root JSONL session relocation helper against local session fixtures.'
+    },
+    [ordered]@{
+        name = 'coding-agent-commands-migration-smoke'
+        command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-coding-agent-commands-migration.ps1'
+        purpose = 'Validate the Tau CodingAgent commands-to-prompts migration helper against local base directory fixtures.'
     },
     [ordered]@{
         name = 'edit-tool-stats-smoke'

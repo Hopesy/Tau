@@ -46,6 +46,10 @@ jobs:
         shell: pwsh
         run: powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-coding-agent-session-migration.ps1
 
+      - name: CodingAgent commands migration smoke
+        shell: pwsh
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-coding-agent-commands-migration.ps1
+
       - name: Edit tool stats smoke
         shell: pwsh
         run: powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-edit-tool-stats.ps1
