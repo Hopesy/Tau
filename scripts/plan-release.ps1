@@ -371,6 +371,7 @@ else {
 $requiredScripts = @(
     'scripts/verify-no-env.ps1',
     'scripts/verify-release-contracts.ps1',
+    'scripts/execute-release.ps1',
     'scripts/prepare-release.ps1',
     'scripts/validate-release.ps1',
     'scripts/update-release-version.ps1',
@@ -404,6 +405,11 @@ $plannedCommands = @(
         name = 'release-contract-smoke'
         command = "powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-release-contracts.ps1 -ReleaseTarget $ReleaseTarget -Runtimes $runtimeArgument"
         purpose = 'Validate guarded release dry-run JSON contracts before longer no-env or release matrix work.'
+    },
+    [ordered]@{
+        name = 'local-release-execution'
+        command = "powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\execute-release.ps1 $ReleaseTarget -Runtimes $runtimeArgument"
+        purpose = 'Preview the guarded local release execution flow; pass -Apply only when ready to prepare, validate, commit and tag locally.'
     },
     [ordered]@{
         name = 'release-preparation'

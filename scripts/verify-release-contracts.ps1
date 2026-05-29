@@ -148,6 +148,7 @@ try {
     $prepare = Invoke-JsonScript -Name 'prepare-release' -ScriptPath 'scripts/prepare-release.ps1' -Arguments $prepareArgs
     $validate = Invoke-JsonScript -Name 'validate-release' -ScriptPath 'scripts/validate-release.ps1' -Arguments $validateArgs
     $minimalValidate = Invoke-JsonScript -Name 'validate-release-minimal' -ScriptPath 'scripts/validate-release.ps1' -Arguments $minimalValidateArgs
+    $execute = Invoke-JsonScript -Name 'execute-release' -ScriptPath 'scripts/execute-release.ps1' -Arguments $prepareArgs
 
     $script:results.plan = [ordered]@{
         nextVersion = $plan.nextVersion
@@ -171,6 +172,12 @@ try {
         skippedValidationCount = $minimalValidate.skippedValidationCount
         skippedValidationNames = @($minimalValidate.skippedValidationNames)
     }
+    $script:results.execute = [ordered]@{
+        nextVersion = $execute.nextVersion
+        dryRun = $execute.dryRun
+        applied = $execute.applied
+        localMutationNames = Get-Names -Items @($execute.localMutationPlan)
+    }
 
     Assert-Equal -Name 'plan schema version' -Actual $plan.schemaVersion -Expected 1
     Assert-Equal -Name 'plan dry-run' -Actual $plan.dryRun -Expected $true
@@ -179,6 +186,7 @@ try {
     Assert-Equal -Name 'plan version source' -Actual $plan.currentVersion.source -Expected 'msbuild'
     Assert-ContainsAll -Name 'plan command contract' -Actual (Get-Names -Items @($plan.plannedCommands)) -Expected @(
         'release-contract-smoke',
+        'local-release-execution',
         'release-preparation',
         'release-validation',
         'version-update',
@@ -241,6 +249,24 @@ try {
     )
     $coverageWarning = @($minimalValidate.checks | Where-Object { $_.name -eq 'validation-coverage' -and $_.status -eq 'warning' })
     Assert-Equal -Name 'minimal validate coverage warning' -Actual $coverageWarning.Count -Expected 1
+
+    Assert-Equal -Name 'execute schema version' -Actual $execute.schemaVersion -Expected 1
+    Assert-Equal -Name 'execute dry-run' -Actual $execute.dryRun -Expected $true
+    Assert-Equal -Name 'execute not applied' -Actual $execute.applied -Expected $false
+    Assert-Equal -Name 'execute next version matches plan' -Actual $execute.nextVersion -Expected $plan.nextVersion
+    Assert-ContainsAll -Name 'execute local mutation contract' -Actual (Get-Names -Items @($execute.localMutationPlan)) -Expected @(
+        'release-contract-smoke',
+        'release-preparation-apply',
+        'release-validation-run',
+        'release-stage',
+        'release-commit',
+        'release-tag'
+    )
+    Assert-TextContainsAll -Name 'execute non-executed boundary' -Text (@($execute.nonExecutedMutations) -join [Environment]::NewLine) -ExpectedPatterns @(
+        'Publish|publish',
+        'Push|push',
+        'external'
+    )
 
     $finalResult = [ordered]@{
         schemaVersion = 1
