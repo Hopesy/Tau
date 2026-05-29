@@ -370,6 +370,7 @@ else {
 
 $requiredScripts = @(
     'scripts/verify-no-env.ps1',
+    'scripts/prepare-release.ps1',
     'scripts/update-release-version.ps1',
     'scripts/update-release-notes.ps1',
     'scripts/build-release-artifacts.ps1',
@@ -396,6 +397,11 @@ $plannedCommands = @(
         name = 'diff-check'
         command = 'git diff --check'
         purpose = 'Validate whitespace and patch hygiene before release preparation.'
+    },
+    [ordered]@{
+        name = 'release-preparation'
+        command = "powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\prepare-release.ps1 $ReleaseTarget"
+        purpose = 'Preview the guarded local release preparation flow that can apply version and release notes writes only when -Apply is explicit.'
     },
     [ordered]@{
         name = 'version-update'
@@ -432,12 +438,12 @@ $upstreamReleaseMapping = @(
     },
     [ordered]@{
         upstreamStep = 'bump or set version'
-        tauPlan = 'dry-run computes the requested next version from the repo-owned MSBuild version source; update-release-version.ps1 can apply the same value when an explicit release execution flow exists.'
+        tauPlan = 'dry-run computes the requested next version from the repo-owned MSBuild version source; prepare-release.ps1 can compose the version and release-notes helpers locally when -Apply is explicit.'
         state = $versionPlanStatus
     },
     [ordered]@{
         upstreamStep = 'update changelogs'
-        tauPlan = 'Tau uses docs/releases/feature-release-notes.md plus docs/histories; update-release-notes.ps1 can preview or explicitly apply the release row, but this planner never edits files.'
+        tauPlan = 'Tau uses docs/releases/feature-release-notes.md plus docs/histories; prepare-release.ps1 can explicitly apply the release row together with the version update, but this planner never edits files.'
         state = 'planned-only'
     },
     [ordered]@{
@@ -458,8 +464,7 @@ $upstreamReleaseMapping = @(
 )
 
 $nonExecutedMutations = @(
-    "Apply repo-owned version update to $versionToken with scripts/update-release-version.ps1 -Apply.",
-    "Apply docs/releases/feature-release-notes.md release row for $tagToken with scripts/update-release-notes.ps1 -Apply and keep docs/histories/YYYY-MM synchronized.",
+    "Apply local release preparation for $tagToken with scripts/prepare-release.ps1 -Apply, which composes version and release notes writes only.",
     "Create release commit, e.g. git commit -m `"Release $tagToken`".",
     "Create tag $tagToken.",
     'Publish/upload verified release archives after external e2e decisions are satisfied.',
@@ -467,7 +472,7 @@ $nonExecutedMutations = @(
 )
 
 $remainingGaps = @(
-    'Tau has repo-owned version and release notes helpers, but this dry-run planner does not apply either mutation.',
+    'Tau has a guarded local release preparation script, but this dry-run planner does not apply any mutation.',
     'This is a dry-run planner; it does not bump versions, edit release notes, commit, tag, publish or push.',
     'Real non-host runner executable smoke and external provider/Slack/Docker/SSH/HF/GPU/vLLM release e2e remain open.',
     'Exact Unix release wrapper/auth-backup parity and upstream examples/Photon/interactive asset payload parity remain open.'
