@@ -372,6 +372,8 @@ $requiredScripts = @(
     'scripts/verify-no-env.ps1',
     'scripts/verify-release-contracts.ps1',
     'scripts/verify-session-audit-scripts.ps1',
+    'scripts/verify-coding-agent-auth-migration.ps1',
+    'scripts/migrate-coding-agent-auth.ps1',
     'scripts/verify-coding-agent-session-migration.ps1',
     'scripts/migrate-coding-agent-sessions.ps1',
     'scripts/verify-coding-agent-commands-migration.ps1',
@@ -428,6 +430,11 @@ $plannedCommands = @(
         name = 'session-audit-script-smoke'
         command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-session-audit-scripts.ps1'
         purpose = 'Validate Tau session transcript and cost audit scripts against a local JSONL fixture.'
+    },
+    [ordered]@{
+        name = 'coding-agent-auth-migration-smoke'
+        command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-coding-agent-auth-migration.ps1'
+        purpose = 'Validate the Tau CodingAgent legacy oauth.json/settings.json apiKeys to auth.json migration helper against local auth fixtures.'
     },
     [ordered]@{
         name = 'coding-agent-session-migration-smoke'
