@@ -86,6 +86,12 @@ public static class TuiText
         return text + new string(' ', width - visibleWidth);
     }
 
+    public static string ApplyBackgroundToLine(string? line, int width, Func<string, string> backgroundFormatter)
+    {
+        ArgumentNullException.ThrowIfNull(backgroundFormatter);
+        return backgroundFormatter(PadRightToWidth(line, Math.Max(1, width)));
+    }
+
     public static string NormalizeSingleLine(string? text) =>
         string.Join(' ', (text ?? string.Empty).Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)).Trim();
 

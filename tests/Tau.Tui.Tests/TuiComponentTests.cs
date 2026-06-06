@@ -32,6 +32,56 @@ public sealed class TuiComponentTests
     }
 
     [Fact]
+    public void TextBlock_AppliesBackgroundFormatterAndInvalidatesCache()
+    {
+        var block = new TuiTextBlock(
+            "body",
+            paddingX: 1,
+            paddingY: 1,
+            backgroundFormatter: static value => $"\u001b[41m{value}\u001b[0m");
+
+        var first = block.Render(8);
+        var second = block.Render(8);
+
+        Assert.Same(first, second);
+        Assert.Equal(3, first.Count);
+        Assert.All(first, line =>
+        {
+            Assert.StartsWith("\u001b[41m", line, StringComparison.Ordinal);
+            Assert.Equal(8, TuiText.VisibleWidth(line));
+        });
+
+        block.SetCustomBackgroundFormatter(static value => $"\u001b[42m{value}\u001b[0m");
+
+        var updated = block.Render(8);
+
+        Assert.NotSame(first, updated);
+        Assert.All(updated, line => Assert.StartsWith("\u001b[42m", line, StringComparison.Ordinal));
+        Assert.Contains("body", updated[1], StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TruncatedText_RendersFirstLineWithPaddingAndEllipsis()
+    {
+        var truncated = new TuiTruncatedText("abcdef\nsecond", paddingX: 1, paddingY: 1);
+
+        var lines = truncated.Render(6);
+
+        Assert.Equal(["      ", " a... ", "      "], lines);
+        Assert.All(lines, line => Assert.Equal(6, TuiText.VisibleWidth(line)));
+    }
+
+    [Fact]
+    public void TruncatedText_EmptyTextStillRendersPaddedLine()
+    {
+        var truncated = new TuiTruncatedText(string.Empty, paddingX: 1, paddingY: 1);
+
+        var lines = truncated.Render(4);
+
+        Assert.Equal(["    ", "    ", "    "], lines);
+    }
+
+    [Fact]
     public void Container_RendersChildrenInOrder()
     {
         var root = new TuiContainer();

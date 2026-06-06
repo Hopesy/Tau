@@ -126,7 +126,7 @@ tests/
 当前从输入编辑器继续推进到可复用 TUI foundation：
 
 - `ITuiComponent` / `ITuiInputComponent` 定义组件渲染和键盘输入的最小合同
-- `TuiContainer` / `TuiBox` / `TuiTextBlock` 提供纵向组件树、padding 容器和文本块渲染
+- `TuiContainer` / `TuiBox` / `TuiTextBlock` / `TuiTruncatedText` 提供纵向组件树、padding 容器、上游 `components/text.ts` 的文本块渲染与 background formatter/cache baseline，以及上游 `components/truncated-text.ts` 的首行截断文本组件
 - `TuiSpacer` 提供上游 `components/spacer.ts` 的空行占位组件：默认 1 行、可动态更新 line count、负数按空输出处理，并可在 `TuiContainer` / `TuiBox` 等组合树中插入 vertical gap
 - `TuiText` 提供终端可见宽度、ANSI escape 忽略、CJK/emoji 宽字符估算、截断、padding 和 word wrap helper
 - `TuiLoader` / `TuiCancellableLoader` 提供上游 loader 家族的库层 foundation：10 帧 spinner、message update、formatter hook、可选 timer、手动 tick、render request callback，以及 Escape/Ctrl-C abort signal

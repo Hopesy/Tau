@@ -9,16 +9,23 @@ public sealed class TuiTextBlock : ITuiComponent
     private readonly int _paddingY;
     private readonly bool _wrap;
     private string _text;
+    private Func<string, string>? _backgroundFormatter;
     private string? _cachedText;
     private int? _cachedWidth;
     private IReadOnlyList<string>? _cachedLines;
 
-    public TuiTextBlock(string text = "", int paddingX = 1, int paddingY = 1, bool wrap = true)
+    public TuiTextBlock(
+        string text = "",
+        int paddingX = 1,
+        int paddingY = 1,
+        bool wrap = true,
+        Func<string, string>? backgroundFormatter = null)
     {
         _text = text;
         _paddingX = Math.Max(0, paddingX);
         _paddingY = Math.Max(0, paddingY);
         _wrap = wrap;
+        _backgroundFormatter = backgroundFormatter;
     }
 
     public string Text => _text;
@@ -31,6 +38,12 @@ public sealed class TuiTextBlock : ITuiComponent
         }
 
         _text = text;
+        Invalidate();
+    }
+
+    public void SetCustomBackgroundFormatter(Func<string, string>? backgroundFormatter)
+    {
+        _backgroundFormatter = backgroundFormatter;
         Invalidate();
     }
 
@@ -61,7 +74,7 @@ public sealed class TuiTextBlock : ITuiComponent
         var contentWidth = Math.Max(1, width - (_paddingX * 2));
         var sourceLines = _wrap ? TuiText.Wrap(_text, contentWidth) : FirstLineOnly(_text);
         var lines = new List<string>();
-        var emptyLine = new string(' ', width);
+        var emptyLine = FormatLine(string.Empty, width);
 
         for (var i = 0; i < _paddingY; i++)
         {
@@ -75,7 +88,7 @@ public sealed class TuiTextBlock : ITuiComponent
             var rendered = _wrap
                 ? sourceLine
                 : TuiText.TruncateToWidth(sourceLine, contentWidth);
-            lines.Add(TuiText.PadRightToWidth(left + rendered + right, width));
+            lines.Add(FormatLine(left + rendered + right, width));
         }
 
         for (var i = 0; i < _paddingY; i++)
@@ -88,6 +101,11 @@ public sealed class TuiTextBlock : ITuiComponent
         _cachedLines = lines;
         return lines;
     }
+
+    private string FormatLine(string line, int width) =>
+        _backgroundFormatter is { } formatter
+            ? TuiText.ApplyBackgroundToLine(line, width, formatter)
+            : TuiText.PadRightToWidth(line, width);
 
     private static IReadOnlyList<string> FirstLineOnly(string text)
     {
