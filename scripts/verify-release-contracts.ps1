@@ -152,6 +152,7 @@ try {
     $finalize = Invoke-JsonScript -Name 'release-finalize-smoke' -ScriptPath 'scripts/verify-release-finalize.ps1' -Arguments @('-Json')
     $packagePublish = Invoke-JsonScript -Name 'release-package-publish-smoke' -ScriptPath 'scripts/verify-release-package-publish.ps1' -Arguments @('-Json')
     $provenance = Invoke-JsonScript -Name 'release-provenance-smoke' -ScriptPath 'scripts/verify-release-provenance.ps1' -Arguments @('-Json')
+    $aiTestImage = Invoke-JsonScript -Name 'ai-test-image-smoke' -ScriptPath 'scripts/verify-ai-test-image.ps1' -Arguments @('-Json')
 
     $script:results.plan = [ordered]@{
         nextVersion = $plan.nextVersion
@@ -206,6 +207,11 @@ try {
         signApplyExitCode = $provenance.results.signApply.exitCode
         signNoCertApplyExitCode = $provenance.results.signNoCertApply.exitCode
     }
+    $script:results.aiTestImage = [ordered]@{
+        succeeded = $aiTestImage.succeeded
+        assertionCount = @($aiTestImage.assertions).Count
+        sha256 = $aiTestImage.sha256
+    }
 
     Assert-Equal -Name 'plan schema version' -Actual $plan.schemaVersion -Expected 1
     Assert-Equal -Name 'plan dry-run' -Actual $plan.dryRun -Expected $true
@@ -217,6 +223,7 @@ try {
         'release-finalize-smoke',
         'release-package-publish-smoke',
         'release-provenance-smoke',
+        'ai-test-image-smoke',
         'session-audit-script-smoke',
         'coding-agent-auth-migration-smoke',
         'coding-agent-session-migration-smoke',
@@ -333,6 +340,8 @@ try {
     Assert-Equal -Name 'release package signing dry-run exit code' -Actual $provenance.results.signDryRun.exitCode -Expected 0
     Assert-Equal -Name 'release package signing apply exit code' -Actual $provenance.results.signApply.exitCode -Expected 0
     Assert-Equal -Name 'release package signing no certificate apply blocked' -Actual ($provenance.results.signNoCertApply.exitCode -ne 0) -Expected $true
+    Assert-Equal -Name 'ai test image smoke succeeded' -Actual $aiTestImage.succeeded -Expected $true
+    Assert-Matches -Name 'ai test image sha256 shape' -Actual $aiTestImage.sha256 -Pattern '^[0-9a-f]{64}$'
 
     $finalResult = [ordered]@{
         schemaVersion = 1

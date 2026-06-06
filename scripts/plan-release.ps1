@@ -400,6 +400,8 @@ $requiredScripts = @(
     'scripts/generate-release-provenance.ps1',
     'scripts/sign-release-packages.ps1',
     'scripts/verify-release-provenance.ps1',
+    'scripts/generate-ai-test-image.ps1',
+    'scripts/verify-ai-test-image.ps1',
     'scripts/prepare-release.ps1',
     'scripts/validate-release.ps1',
     'scripts/update-release-version.ps1',
@@ -448,6 +450,11 @@ $plannedCommands = @(
         name = 'release-provenance-smoke'
         command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-release-provenance.ps1'
         purpose = 'Validate release provenance manifest generation and guarded NuGet package signing against temp fixtures and fake dotnet without using a real signing certificate.'
+    },
+    [ordered]@{
+        name = 'ai-test-image-smoke'
+        command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-ai-test-image.ps1'
+        purpose = 'Validate the Tau AI red-circle test image generator against a local PNG fixture.'
     },
     [ordered]@{
         name = 'session-audit-script-smoke'
