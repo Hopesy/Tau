@@ -46,6 +46,10 @@ jobs:
         shell: pwsh
         run: powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-release-package-publish.ps1
 
+      - name: Release provenance and signing smoke
+        shell: pwsh
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-release-provenance.ps1
+
       - name: Session audit script smoke
         shell: pwsh
         run: powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-session-audit-scripts.ps1

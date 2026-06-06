@@ -151,6 +151,7 @@ try {
     $execute = Invoke-JsonScript -Name 'execute-release' -ScriptPath 'scripts/execute-release.ps1' -Arguments $prepareArgs
     $finalize = Invoke-JsonScript -Name 'release-finalize-smoke' -ScriptPath 'scripts/verify-release-finalize.ps1' -Arguments @('-Json')
     $packagePublish = Invoke-JsonScript -Name 'release-package-publish-smoke' -ScriptPath 'scripts/verify-release-package-publish.ps1' -Arguments @('-Json')
+    $provenance = Invoke-JsonScript -Name 'release-provenance-smoke' -ScriptPath 'scripts/verify-release-provenance.ps1' -Arguments @('-Json')
 
     $script:results.plan = [ordered]@{
         nextVersion = $plan.nextVersion
@@ -196,6 +197,15 @@ try {
         packageCount = $packagePublish.results.apply.packageCount
         dirtyApplyExitCode = $packagePublish.results.dirtyApply.exitCode
     }
+    $script:results.provenance = [ordered]@{
+        succeeded = $provenance.succeeded
+        assertionCount = @($provenance.assertions).Count
+        provenanceDryRunExitCode = $provenance.results.provenanceDryRun.exitCode
+        provenanceApplyExitCode = $provenance.results.provenanceApply.exitCode
+        signDryRunExitCode = $provenance.results.signDryRun.exitCode
+        signApplyExitCode = $provenance.results.signApply.exitCode
+        signNoCertApplyExitCode = $provenance.results.signNoCertApply.exitCode
+    }
 
     Assert-Equal -Name 'plan schema version' -Actual $plan.schemaVersion -Expected 1
     Assert-Equal -Name 'plan dry-run' -Actual $plan.dryRun -Expected $true
@@ -206,6 +216,7 @@ try {
         'release-contract-smoke',
         'release-finalize-smoke',
         'release-package-publish-smoke',
+        'release-provenance-smoke',
         'session-audit-script-smoke',
         'coding-agent-auth-migration-smoke',
         'coding-agent-session-migration-smoke',
@@ -220,6 +231,8 @@ try {
         'local-release-execution',
         'release-finalization',
         'release-package-publish',
+        'release-provenance',
+        'release-package-signing',
         'release-preparation',
         'release-validation',
         'version-update',
@@ -312,6 +325,14 @@ try {
     Assert-Equal -Name 'release package publish apply exit code' -Actual $packagePublish.results.apply.exitCode -Expected 0
     Assert-Equal -Name 'release package publish default package count' -Actual $packagePublish.results.apply.packageCount -Expected 3
     Assert-Equal -Name 'release package publish dirty apply blocked' -Actual ($packagePublish.results.dirtyApply.exitCode -ne 0) -Expected $true
+
+    Assert-Equal -Name 'release provenance smoke succeeded' -Actual $provenance.succeeded -Expected $true
+    Assert-Equal -Name 'release provenance dry-run exit code' -Actual $provenance.results.provenanceDryRun.exitCode -Expected 0
+    Assert-Equal -Name 'release provenance apply exit code' -Actual $provenance.results.provenanceApply.exitCode -Expected 0
+    Assert-Equal -Name 'release provenance dirty apply blocked' -Actual ($provenance.results.provenanceDirtyApply.exitCode -ne 0) -Expected $true
+    Assert-Equal -Name 'release package signing dry-run exit code' -Actual $provenance.results.signDryRun.exitCode -Expected 0
+    Assert-Equal -Name 'release package signing apply exit code' -Actual $provenance.results.signApply.exitCode -Expected 0
+    Assert-Equal -Name 'release package signing no certificate apply blocked' -Actual ($provenance.results.signNoCertApply.exitCode -ne 0) -Expected $true
 
     $finalResult = [ordered]@{
         schemaVersion = 1

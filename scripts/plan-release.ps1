@@ -397,6 +397,9 @@ $requiredScripts = @(
     'scripts/verify-release-finalize.ps1',
     'scripts/publish-release-packages.ps1',
     'scripts/verify-release-package-publish.ps1',
+    'scripts/generate-release-provenance.ps1',
+    'scripts/sign-release-packages.ps1',
+    'scripts/verify-release-provenance.ps1',
     'scripts/prepare-release.ps1',
     'scripts/validate-release.ps1',
     'scripts/update-release-version.ps1',
@@ -440,6 +443,11 @@ $plannedCommands = @(
         name = 'release-package-publish-smoke'
         command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-release-package-publish.ps1'
         purpose = 'Validate guarded NuGet/package publish synchronization against a temp fixture and fake dotnet command without touching real package registries.'
+    },
+    [ordered]@{
+        name = 'release-provenance-smoke'
+        command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-release-provenance.ps1'
+        purpose = 'Validate release provenance manifest generation and guarded NuGet package signing against temp fixtures and fake dotnet without using a real signing certificate.'
     },
     [ordered]@{
         name = 'session-audit-script-smoke'
@@ -512,6 +520,16 @@ $plannedCommands = @(
         purpose = 'Preview the guarded package registry publish stage; pass -Apply only after release validation and with the intended package source/API key configured.'
     },
     [ordered]@{
+        name = 'release-provenance'
+        command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\generate-release-provenance.ps1'
+        purpose = 'Preview the release provenance manifest for local release archives and NuGet packages; pass -Apply only after release archives and packages exist.'
+    },
+    [ordered]@{
+        name = 'release-package-signing'
+        command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\sign-release-packages.ps1'
+        purpose = 'Preview NuGet package signing commands; pass -Apply only with a real code-signing certificate and timestamp server.'
+    },
+    [ordered]@{
         name = 'release-preparation'
         command = "powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\prepare-release.ps1 $ReleaseTarget"
         purpose = 'Preview the guarded local release preparation flow that can apply version and release notes writes only when -Apply is explicit.'
@@ -571,7 +589,7 @@ $upstreamReleaseMapping = @(
     },
     [ordered]@{
         upstreamStep = 'publish'
-        tauPlan = 'GitHub release archive upload is available through finalize-release.ps1 -CreateGitHubRelease after verified archives exist; NuGet/package registry synchronization is guarded by publish-release-packages.ps1 and defaults to Tau.Ai/Tau.Agent/Tau.Tui library packages, with real registry execution still requiring explicit -Apply and credentials.'
+        tauPlan = 'GitHub release archive upload is available through finalize-release.ps1 -CreateGitHubRelease after verified archives exist; NuGet/package registry synchronization is guarded by publish-release-packages.ps1 and defaults to Tau.Ai/Tau.Agent/Tau.Tui library packages, with provenance manifest and NuGet signing previews available through generate-release-provenance.ps1 and sign-release-packages.ps1. Real registry execution and package signing still require explicit -Apply, credentials and signing material.'
         state = 'guarded-package-publish-available'
     },
     [ordered]@{
@@ -587,14 +605,16 @@ $nonExecutedMutations = @(
     "Create tag $tagToken.",
     "Build/package verified release archives, then run scripts/finalize-release.ps1 $tagToken -Apply to push $Branch and $tagToken.",
     "Optionally run scripts/finalize-release.ps1 $tagToken -Apply -CreateGitHubRelease to upload verified archives with GitHub CLI.",
-    'Run scripts/publish-release-packages.ps1 -Apply only after package publication source, credentials and library/application package boundary are confirmed.'
+    'Run scripts/publish-release-packages.ps1 -Apply only after package publication source, credentials and library/application package boundary are confirmed.',
+    'Run scripts/generate-release-provenance.ps1 -Apply only after release archives and NuGet packages exist.',
+    'Run scripts/sign-release-packages.ps1 -Apply only with the intended code-signing certificate and timestamp server.'
 )
 
 $remainingGaps = @(
     'Tau has a guarded local release preparation script, but this dry-run planner does not apply any mutation.',
     'This is a dry-run planner; it does not bump versions, edit release notes, commit, tag, create GitHub releases, publish to package registries or push.',
     'Real non-host runner executable smoke and external provider/Slack/Docker/SSH/HF/GPU/vLLM release e2e remain open.',
-    'Exact Unix release wrapper/auth-backup parity, package signing/provenance and upstream examples/Photon/interactive asset payload parity remain open.'
+    'Exact Unix release wrapper/auth-backup parity, real package registry/signing/provenance rehearsal and upstream examples/Photon/interactive asset payload parity remain open.'
 )
 
 $releasePlan = [ordered]@{
