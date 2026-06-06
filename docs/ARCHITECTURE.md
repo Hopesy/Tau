@@ -128,6 +128,7 @@ tests/
 - `ITuiComponent` / `ITuiInputComponent` 定义组件渲染和键盘输入的最小合同
 - `TuiContainer` / `TuiBox` / `TuiTextBlock` 提供纵向组件树、padding 容器和文本块渲染
 - `TuiText` 提供终端可见宽度、ANSI escape 忽略、CJK/emoji 宽字符估算、截断、padding 和 word wrap helper
+- `TuiLoader` / `TuiCancellableLoader` 提供上游 loader 家族的库层 foundation：10 帧 spinner、message update、formatter hook、可选 timer、手动 tick、render request callback，以及 Escape/Ctrl-C abort signal
 - `TuiSelectList` 提供上游 selector 家族需要的基础单选列表：过滤、选中态、j/k/方向键/Home/End/PageUp/PageDown/Enter/Esc/Ctrl-C、描述列对齐、滚动提示和 footer hint 行
 - `TuiMultiSelectList` / `TuiMultiSelectSession` 提供 scoped-model selector 需要的多选列表：filter、Enter/Space toggle、Ctrl+A enable all、Ctrl+X clear、Ctrl+P provider toggle、Alt+Up/Down reorder、Ctrl+S save、Esc/Ctrl-C cancel，并保留 null = all enabled 的选择语义
 - `TuiDiffRenderer` / `TuiRenderFrame` / `TuiRenderOperation` 提供纯函数式差分渲染计划：首帧/强制/宽高变化走 full redraw，稳定尺寸下只返回 changed/cleared lines
@@ -139,7 +140,7 @@ tests/
 - `TuiTranscriptViewport` 组合 `TuiMessageArea`、`TuiStatusBar` 和 `TuiScrollbackBuffer`，提供固定高度 transcript viewport：最后一行固定 status，消息区占剩余高度，支持 append/set/clear、line/page scroll、resize rewrap 和 bottom-follow 语义；当前仍是纯内存 foundation，不写 Console、不接 terminal host
 - `TuiTranscriptViewportHost` 把 `TuiTranscriptViewport`、`ITuiRenderSurface` 和 `TuiDiffRenderer` 包成可复用 runtime host：每次 `Render()` 会按 surface width/height resize viewport，生成 `TuiRenderFrame`，diff 上一帧后把 `TuiRenderDiff` apply 到 surface；支持 append/set/clear messages、status 更新、line/page scroll、Home-style scroll top、End-style scroll bottom 和 reset frame。`TuiTranscriptSession` 在其上提供 start/stop、auto-render mutation、滚动键输入和可注入 key reader seam。它们仍只是 transcript runtime seam，不是完整 terminal lifecycle、overlay compositor、硬件 cursor 或 CodingAgent 主屏
 
-当前这仍是 foundation + 若干 CodingAgent selector / app action 接线，已经能用 targeted tests 固定组件/render/selector/session/ANSI sink/message-status/scrollback/transcript viewport/viewport host/transcript session foundation、Ctrl+P/Ctrl+Shift+P model cycle 行为和 Ctrl+L model selector 行为，并已把主题、settings、scoped models、model select、auth status、`/login` OAuth provider 选择、`/logout` OAuth provider 选择和 `/thinking select` thinking level 选择接回真实命令；但 `TuiScrollbackBuffer` / `TuiTranscriptViewport` / `TuiTranscriptViewportHost` / `TuiTranscriptSession` 尚未接管 `InteractiveConsoleSession`、`TuiAnsiRenderSurface`、CodingAgent 主屏或 selector overlay，完整上游 TUI host、overlay compositing、硬件 cursor、theme rendering 和完整 OAuth login dialog/session / resource selector UI 仍是后续切片。
+当前这仍是 foundation + 若干 CodingAgent selector / app action 接线，已经能用 targeted tests 固定组件/render/selector/session/ANSI sink/message-status/scrollback/transcript viewport/viewport host/transcript session/loader foundation、Ctrl+P/Ctrl+Shift+P model cycle 行为和 Ctrl+L model selector 行为，并已把主题、settings、scoped models、model select、auth status、`/login` OAuth provider 选择、`/logout` OAuth provider 选择和 `/thinking select` thinking level 选择接回真实命令；但 `TuiScrollbackBuffer` / `TuiTranscriptViewport` / `TuiTranscriptViewportHost` / `TuiTranscriptSession` 尚未接管 `InteractiveConsoleSession`、`TuiAnsiRenderSurface`、CodingAgent 主屏或 selector overlay，完整上游 TUI host、overlay compositing、硬件 cursor、theme rendering、terminal image、rich markdown 和完整 OAuth login dialog/session / resource selector UI 仍是后续切片。
 
 ### Tau.CodingAgent
 
