@@ -107,7 +107,7 @@ public sealed class TuiMarkdown : ITuiComponent
         var wrapped = new List<string>();
         foreach (var line in rendered)
         {
-            if (IsImageLine(line))
+            if (TuiTerminalImage.IsImageLine(line))
             {
                 wrapped.Add(line);
                 continue;
@@ -127,7 +127,7 @@ public sealed class TuiMarkdown : ITuiComponent
         var right = new string(' ', _paddingX);
         foreach (var line in wrapped)
         {
-            if (IsImageLine(line))
+            if (TuiTerminalImage.IsImageLine(line))
             {
                 result.Add(line);
                 continue;
@@ -772,14 +772,8 @@ public sealed class TuiMarkdown : ITuiComponent
         return trimmed.Length >= 3 && trimmed.All(static c => c == '-');
     }
 
-    private static bool IsImageLine(string line) =>
-        line.StartsWith("\u001b_G", StringComparison.Ordinal) ||
-        line.StartsWith("\u001b]1337;File=", StringComparison.Ordinal) ||
-        line.Contains("\u001b_G", StringComparison.Ordinal) ||
-        line.Contains("\u001b]1337;File=", StringComparison.Ordinal);
-
     private static string Hyperlink(string text, string url) =>
-        $"\u001b]8;;{url}\u001b\\{text}\u001b]8;;\u001b\\";
+        TuiTerminalImage.Hyperlink(text, url);
 
     private readonly record struct ListMarker(int Depth, string Bullet, string Text);
 }
