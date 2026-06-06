@@ -42,6 +42,38 @@ public sealed class TuiComponentTests
     }
 
     [Fact]
+    public void Spacer_RendersConfigurableEmptyLines()
+    {
+        var spacer = new TuiSpacer();
+
+        Assert.Equal([string.Empty], spacer.Render(80));
+
+        spacer.SetLines(3);
+
+        Assert.Equal([string.Empty, string.Empty, string.Empty], spacer.Render(1));
+        Assert.Equal(3, spacer.Lines);
+    }
+
+    [Fact]
+    public void Spacer_NegativeLinesRenderNothing()
+    {
+        var spacer = new TuiSpacer(lines: -1);
+
+        Assert.Empty(spacer.Render(80));
+    }
+
+    [Fact]
+    public void Container_RendersSpacerBetweenChildren()
+    {
+        var root = new TuiContainer();
+        root.Add(new TuiTextBlock("one", paddingX: 0, paddingY: 0, wrap: false));
+        root.Add(new TuiSpacer(lines: 2));
+        root.Add(new TuiTextBlock("two", paddingX: 0, paddingY: 0, wrap: false));
+
+        Assert.Equal(["one       ", string.Empty, string.Empty, "two       "], root.Render(10));
+    }
+
+    [Fact]
     public void Box_AppliesPaddingAroundChildren()
     {
         var box = new TuiBox(paddingX: 2, paddingY: 1);
