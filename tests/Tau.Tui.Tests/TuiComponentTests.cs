@@ -133,6 +133,36 @@ public sealed class TuiComponentTests
     }
 
     [Fact]
+    public void Box_AppliesBackgroundFormatterAndDetectsFormatterChanges()
+    {
+        var box = new TuiBox(
+            paddingX: 1,
+            paddingY: 1,
+            backgroundFormatter: static value => $"\u001b[44m{value}\u001b[0m");
+        box.Add(new TuiTextBlock("body", paddingX: 0, paddingY: 0, wrap: false));
+
+        var first = box.Render(8);
+        var second = box.Render(8);
+
+        Assert.Same(first, second);
+        Assert.Equal(3, first.Count);
+        Assert.All(first, line =>
+        {
+            Assert.StartsWith("\u001b[44m", line, StringComparison.Ordinal);
+            Assert.Equal(8, TuiText.VisibleWidth(line));
+        });
+        Assert.Contains("body", first[1], StringComparison.Ordinal);
+
+        box.SetBackgroundFormatter(static value => $"\u001b[45m{value}\u001b[0m");
+
+        var updated = box.Render(8);
+
+        Assert.NotSame(first, updated);
+        Assert.All(updated, line => Assert.StartsWith("\u001b[45m", line, StringComparison.Ordinal));
+        Assert.Contains("body", updated[1], StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void SelectList_RendersDescriptionsInAlignedColumn()
     {
         var list = new TuiSelectList(
