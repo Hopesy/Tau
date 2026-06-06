@@ -38,6 +38,14 @@ jobs:
         shell: pwsh
         run: powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-release-contracts.ps1
 
+      - name: Release finalize smoke
+        shell: pwsh
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-release-finalize.ps1
+
+      - name: Release package publish smoke
+        shell: pwsh
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-release-package-publish.ps1
+
       - name: Session audit script smoke
         shell: pwsh
         run: powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-session-audit-scripts.ps1

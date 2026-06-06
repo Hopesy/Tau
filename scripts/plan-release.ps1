@@ -3,6 +3,7 @@ param(
     [string]$ReleaseTarget,
     [string]$CurrentVersion = '',
     [string]$Configuration = 'Release',
+    [string]$Branch = 'main',
     [string[]]$Runtimes = @('osx-arm64', 'osx-x64', 'linux-x64', 'linux-arm64', 'win-x64'),
     [switch]$AllowDirty,
     [switch]$Json
@@ -392,6 +393,10 @@ $requiredScripts = @(
     'scripts/verify-release-version-sync.ps1',
     'scripts/sync-release-versions.ps1',
     'scripts/execute-release.ps1',
+    'scripts/finalize-release.ps1',
+    'scripts/verify-release-finalize.ps1',
+    'scripts/publish-release-packages.ps1',
+    'scripts/verify-release-package-publish.ps1',
     'scripts/prepare-release.ps1',
     'scripts/validate-release.ps1',
     'scripts/update-release-version.ps1',
@@ -425,6 +430,16 @@ $plannedCommands = @(
         name = 'release-contract-smoke'
         command = "powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-release-contracts.ps1 -ReleaseTarget $ReleaseTarget -Runtimes $runtimeArgument"
         purpose = 'Validate guarded release dry-run JSON contracts before longer no-env or release matrix work.'
+    },
+    [ordered]@{
+        name = 'release-finalize-smoke'
+        command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-release-finalize.ps1'
+        purpose = 'Validate guarded release finalization against a temp Git repository, temp bare remote and fake GitHub CLI without touching real remotes.'
+    },
+    [ordered]@{
+        name = 'release-package-publish-smoke'
+        command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-release-package-publish.ps1'
+        purpose = 'Validate guarded NuGet/package publish synchronization against a temp fixture and fake dotnet command without touching real package registries.'
     },
     [ordered]@{
         name = 'session-audit-script-smoke'
@@ -487,6 +502,16 @@ $plannedCommands = @(
         purpose = 'Preview the guarded local release execution flow; pass -Apply only when ready to prepare, validate, commit and tag locally.'
     },
     [ordered]@{
+        name = 'release-finalization'
+        command = "powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\finalize-release.ps1 $tagToken"
+        purpose = 'Preview the guarded final release stage; pass -Apply after local commit/tag and verified archives exist, and add -CreateGitHubRelease to upload archives with gh.'
+    },
+    [ordered]@{
+        name = 'release-package-publish'
+        command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\publish-release-packages.ps1'
+        purpose = 'Preview the guarded package registry publish stage; pass -Apply only after release validation and with the intended package source/API key configured.'
+    },
+    [ordered]@{
         name = 'release-preparation'
         command = "powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\prepare-release.ps1 $ReleaseTarget"
         purpose = 'Preview the guarded local release preparation flow that can apply version and release notes writes only when -Apply is explicit.'
@@ -546,13 +571,13 @@ $upstreamReleaseMapping = @(
     },
     [ordered]@{
         upstreamStep = 'publish'
-        tauPlan = 'Would publish/upload verified Tau release archives after an explicit future release command; this script never publishes.'
-        state = 'planned-only'
+        tauPlan = 'GitHub release archive upload is available through finalize-release.ps1 -CreateGitHubRelease after verified archives exist; NuGet/package registry synchronization is guarded by publish-release-packages.ps1 and defaults to Tau.Ai/Tau.Agent/Tau.Tui library packages, with real registry execution still requiring explicit -Apply and credentials.'
+        state = 'guarded-package-publish-available'
     },
     [ordered]@{
         upstreamStep = 'push main and tag'
-        tauPlan = 'Would push only from a future explicit release execution script or manual operator action; this script never pushes.'
-        state = 'planned-only'
+        tauPlan = 'finalize-release.ps1 -Apply pushes the release branch and tag after clean-worktree, tag-tip and archive preflight checks; this planner remains dry-run only.'
+        state = 'guarded-finalize-available'
     }
 )
 
@@ -560,15 +585,16 @@ $nonExecutedMutations = @(
     "Apply local release preparation for $tagToken with scripts/prepare-release.ps1 -Apply, which composes version and release notes writes only.",
     "Create release commit, e.g. git commit -m `"Release $tagToken`".",
     "Create tag $tagToken.",
-    'Publish/upload verified release archives after external e2e decisions are satisfied.',
-    "Push main and $tagToken only after explicit release approval."
+    "Build/package verified release archives, then run scripts/finalize-release.ps1 $tagToken -Apply to push $Branch and $tagToken.",
+    "Optionally run scripts/finalize-release.ps1 $tagToken -Apply -CreateGitHubRelease to upload verified archives with GitHub CLI.",
+    'Run scripts/publish-release-packages.ps1 -Apply only after package publication source, credentials and library/application package boundary are confirmed.'
 )
 
 $remainingGaps = @(
     'Tau has a guarded local release preparation script, but this dry-run planner does not apply any mutation.',
-    'This is a dry-run planner; it does not bump versions, edit release notes, commit, tag, publish or push.',
+    'This is a dry-run planner; it does not bump versions, edit release notes, commit, tag, create GitHub releases, publish to package registries or push.',
     'Real non-host runner executable smoke and external provider/Slack/Docker/SSH/HF/GPU/vLLM release e2e remain open.',
-    'Exact Unix release wrapper/auth-backup parity and upstream examples/Photon/interactive asset payload parity remain open.'
+    'Exact Unix release wrapper/auth-backup parity, package signing/provenance and upstream examples/Photon/interactive asset payload parity remain open.'
 )
 
 $releasePlan = [ordered]@{

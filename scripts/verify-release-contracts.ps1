@@ -149,6 +149,8 @@ try {
     $validate = Invoke-JsonScript -Name 'validate-release' -ScriptPath 'scripts/validate-release.ps1' -Arguments $validateArgs
     $minimalValidate = Invoke-JsonScript -Name 'validate-release-minimal' -ScriptPath 'scripts/validate-release.ps1' -Arguments $minimalValidateArgs
     $execute = Invoke-JsonScript -Name 'execute-release' -ScriptPath 'scripts/execute-release.ps1' -Arguments $prepareArgs
+    $finalize = Invoke-JsonScript -Name 'release-finalize-smoke' -ScriptPath 'scripts/verify-release-finalize.ps1' -Arguments @('-Json')
+    $packagePublish = Invoke-JsonScript -Name 'release-package-publish-smoke' -ScriptPath 'scripts/verify-release-package-publish.ps1' -Arguments @('-Json')
 
     $script:results.plan = [ordered]@{
         nextVersion = $plan.nextVersion
@@ -178,6 +180,22 @@ try {
         applied = $execute.applied
         localMutationNames = Get-Names -Items @($execute.localMutationPlan)
     }
+    $script:results.finalize = [ordered]@{
+        succeeded = $finalize.succeeded
+        assertionCount = @($finalize.assertions).Count
+        dryRunExitCode = $finalize.results.dryRun.exitCode
+        applyExitCode = $finalize.results.apply.exitCode
+        githubReleaseExitCode = $finalize.results.githubRelease.exitCode
+        dirtyApplyExitCode = $finalize.results.dirtyApply.exitCode
+    }
+    $script:results.packagePublish = [ordered]@{
+        succeeded = $packagePublish.succeeded
+        assertionCount = @($packagePublish.assertions).Count
+        dryRunExitCode = $packagePublish.results.dryRun.exitCode
+        applyExitCode = $packagePublish.results.apply.exitCode
+        packageCount = $packagePublish.results.apply.packageCount
+        dirtyApplyExitCode = $packagePublish.results.dirtyApply.exitCode
+    }
 
     Assert-Equal -Name 'plan schema version' -Actual $plan.schemaVersion -Expected 1
     Assert-Equal -Name 'plan dry-run' -Actual $plan.dryRun -Expected $true
@@ -186,6 +204,8 @@ try {
     Assert-Equal -Name 'plan version source' -Actual $plan.currentVersion.source -Expected 'msbuild'
     Assert-ContainsAll -Name 'plan command contract' -Actual (Get-Names -Items @($plan.plannedCommands)) -Expected @(
         'release-contract-smoke',
+        'release-finalize-smoke',
+        'release-package-publish-smoke',
         'session-audit-script-smoke',
         'coding-agent-auth-migration-smoke',
         'coding-agent-session-migration-smoke',
@@ -198,6 +218,8 @@ try {
         'coding-agent-startup-profile-smoke',
         'release-version-sync-smoke',
         'local-release-execution',
+        'release-finalization',
+        'release-package-publish',
         'release-preparation',
         'release-validation',
         'version-update',
@@ -278,6 +300,18 @@ try {
         'Push|push',
         'external'
     )
+
+    Assert-Equal -Name 'release finalize smoke succeeded' -Actual $finalize.succeeded -Expected $true
+    Assert-Equal -Name 'release finalize dry-run exit code' -Actual $finalize.results.dryRun.exitCode -Expected 0
+    Assert-Equal -Name 'release finalize apply exit code' -Actual $finalize.results.apply.exitCode -Expected 0
+    Assert-Equal -Name 'release finalize github release exit code' -Actual $finalize.results.githubRelease.exitCode -Expected 0
+    Assert-Equal -Name 'release finalize dirty apply blocked' -Actual ($finalize.results.dirtyApply.exitCode -ne 0) -Expected $true
+
+    Assert-Equal -Name 'release package publish smoke succeeded' -Actual $packagePublish.succeeded -Expected $true
+    Assert-Equal -Name 'release package publish dry-run exit code' -Actual $packagePublish.results.dryRun.exitCode -Expected 0
+    Assert-Equal -Name 'release package publish apply exit code' -Actual $packagePublish.results.apply.exitCode -Expected 0
+    Assert-Equal -Name 'release package publish default package count' -Actual $packagePublish.results.apply.packageCount -Expected 3
+    Assert-Equal -Name 'release package publish dirty apply blocked' -Actual ($packagePublish.results.dirtyApply.exitCode -ne 0) -Expected $true
 
     $finalResult = [ordered]@{
         schemaVersion = 1
