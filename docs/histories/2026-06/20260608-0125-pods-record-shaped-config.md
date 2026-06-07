@@ -20,6 +20,7 @@
 * **[Pod metadata]**: `PodDefinition` now carries the original `ssh` command and per-pod configured model state so upstream `models` records can round-trip through Tau.
 * **[CLI registration]**: local `setup` registration preserves the parsed SSH command in persisted pod config.
 * **[Tests/docs]**: added config store regression coverage for upstream record-shaped load/save and legacy list-shaped load; synced parity matrix, `next.md`, architecture and quality notes.
+* **[Goal sync]**: after the slice reached `origin/main`, updated `GOAL.md` and quality rows so current audit text no longer lists record-shaped config/schema as an open Pods blocker.
 
 ### Design Intent (Why)
 
@@ -36,6 +37,7 @@ Upstream `packages/pods/src/config.ts` stores pods as a record keyed by pod id, 
 * `src/Tau.Pods/Services/PodsConfigValidator.cs`
 * `tests/Tau.Pods.Tests/PodsConfigValidatorTests.cs`
 * `docs/ARCHITECTURE.md`
+* `GOAL.md`
 * `docs/QUALITY_SCORE.md`
 * `docs/exec-plans/active/2026-05-28-pi-mono-parity-matrix.md`
 * `docs/exec-plans/active/2026-05-28-tau-100-percent-pi-mono-parity.md`
@@ -44,3 +46,4 @@ Upstream `packages/pods/src/config.ts` stores pods as a record keyed by pod id, 
 ### Validation
 
 * `dotnet test tests\Tau.Pods.Tests\Tau.Pods.Tests.csproj --no-restore --verbosity minimal` passed 192/192.
+* `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-dotnet.ps1 -SkipRestore` passed with `Tau.Ai.Tests` 280, `Tau.Agent.Tests` 119, `Tau.Tui.Tests` 251, `Tau.CodingAgent.Tests` 438, `Tau.WebUi.Tests` 44, and `Tau.Pods.Tests` 192.
