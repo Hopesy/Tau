@@ -112,7 +112,7 @@ public class PodsCliTests
     }
 
     [Fact]
-    public async Task List_UsesPiConfigDirPodsJsonWhenNoConfigPath()
+    public async Task Pods_UsesPiConfigDirPodsJsonWhenNoConfigPath()
     {
         await CurrentDirectoryGate.WaitAsync();
         var previousDirectory = Environment.CurrentDirectory;
@@ -134,7 +134,7 @@ public class PodsCliTests
             new PodsConfigStore().Save(envConfigPath, ConfigWithHttpPod("env-pod"));
             new PodsConfigStore().Save("tau.pods.json", ConfigWithHttpPod("local-pod"));
 
-            var exitCode = await PodsCli.RunAsync(["list"]);
+            var exitCode = await PodsCli.RunAsync(["pods"]);
 
             var output = stdout.ToString();
             Assert.Equal(0, exitCode);
@@ -195,7 +195,7 @@ public class PodsCliTests
     }
 
     [Fact]
-    public async Task List_MissingDefaultConfigReturnsEmptyConfig()
+    public async Task Pods_MissingDefaultConfigReturnsEmptyConfig()
     {
         await CurrentDirectoryGate.WaitAsync();
         var previousConfigDir = Environment.GetEnvironmentVariable(PiConfigDirEnvVar);
@@ -212,7 +212,7 @@ public class PodsCliTests
             Console.SetOut(stdout);
             Console.SetError(stderr);
 
-            var exitCode = await PodsCli.RunAsync(["list", "--json"]);
+            var exitCode = await PodsCli.RunAsync(["pods", "--json"]);
 
             Assert.Equal(0, exitCode);
             Assert.DoesNotContain("Config not found", stderr.ToString(), StringComparison.Ordinal);
@@ -719,6 +719,48 @@ public class PodsCliTests
             Assert.True(root.GetProperty("success").GetBoolean());
             Assert.Single(root.GetProperty("deployments").EnumerateArray());
             Assert.Equal("served-model", root.GetProperty("deployments")[0].GetProperty("name").GetString());
+        }
+        finally
+        {
+            Console.SetOut(previousOut);
+            tempDir.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task List_UsesUpstreamRunningModelSemanticsWithActivePod()
+    {
+        var tempDir = Directory.CreateTempSubdirectory("tau-pods-cli-list-upstream-");
+        var configPath = Path.Combine(tempDir.FullName, "custom-pods.json");
+        var stdout = new StringWriter();
+        var previousOut = Console.Out;
+        var commands = new List<string>();
+        var execService = new PodExecService((psi, _) =>
+        {
+            commands.Add(RemoteCommand(psi));
+            return Task.FromResult(new PodExecService.ProcessExecutionResult(
+                0,
+                "{\"name\":\"served-model\",\"model\":\"org/model\",\"status\":\"running\",\"ts\":\"2026-05-27T00:00:00Z\"}\n",
+                string.Empty));
+        });
+
+        try
+        {
+            Console.SetOut(stdout);
+            var config = ConfigWithSshPod();
+            config.ActivePodId = "ssh-pod";
+            new PodsConfigStore().Save(configPath, config);
+
+            var exitCode = await PodsCli.RunAsync(["list", "--json", "--config", configPath], execService);
+
+            Assert.Equal(0, exitCode);
+            using var document = JsonDocument.Parse(stdout.ToString());
+            var root = document.RootElement;
+            Assert.Equal("ssh-pod", root.GetProperty("podId").GetString());
+            Assert.True(root.GetProperty("success").GetBoolean());
+            Assert.Equal("served-model", root.GetProperty("deployments")[0].GetProperty("name").GetString());
+            Assert.Single(commands);
+            Assert.Contains("for f in ~/.tau_pods/*.json", commands[0], StringComparison.Ordinal);
         }
         finally
         {
@@ -1447,6 +1489,63 @@ public class PodsCliTests
             Assert.Null(savedConfig.ActivePodId);
             var savedPod = Assert.Single(savedConfig.Pods);
             Assert.Equal("ssh-pod", savedPod.Id);
+        }
+        finally
+        {
+            Console.SetOut(previousOut);
+            tempDir.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task PodsGroup_SetupActiveAndRemove_MapToUpstreamSubcommands()
+    {
+        var tempDir = Directory.CreateTempSubdirectory("tau-pods-cli-pods-group-");
+        var configPath = Path.Combine(tempDir.FullName, "custom-pods.json");
+        var stdout = new StringWriter();
+        var previousOut = Console.Out;
+
+        try
+        {
+            Console.SetOut(stdout);
+
+            var setupExitCode = await PodsCli.RunAsync(
+                [
+                    "pods",
+                    "setup",
+                    "--json",
+                    "--mount",
+                    "mount -t nfs store:/models /mnt/models",
+                    configPath,
+                    "gpu-a",
+                    "ssh -p 2200 user@pods.example.internal"
+                ]);
+
+            Assert.Equal(0, setupExitCode);
+            using (var setupDocument = JsonDocument.Parse(stdout.ToString()))
+            {
+                Assert.Equal("gpu-a", setupDocument.RootElement.GetProperty("activePodId").GetString());
+                Assert.Equal("/mnt/models", setupDocument.RootElement.GetProperty("modelsPath").GetString());
+            }
+
+            stdout.GetStringBuilder().Clear();
+            var activeExitCode = await PodsCli.RunAsync(["pods", "active", "--json", configPath, "gpu-a"]);
+
+            Assert.Equal(0, activeExitCode);
+            using (var activeDocument = JsonDocument.Parse(stdout.ToString()))
+            {
+                Assert.Equal("gpu-a", activeDocument.RootElement.GetProperty("activePodId").GetString());
+            }
+
+            stdout.GetStringBuilder().Clear();
+            var removeExitCode = await PodsCli.RunAsync(["pods", "remove", "--json", configPath, "gpu-a"]);
+
+            Assert.Equal(0, removeExitCode);
+            using (var removeDocument = JsonDocument.Parse(stdout.ToString()))
+            {
+                Assert.Equal("gpu-a", removeDocument.RootElement.GetProperty("podId").GetString());
+                Assert.Null(removeDocument.RootElement.GetProperty("activePodId").GetString());
+            }
         }
         finally
         {
@@ -3224,6 +3323,137 @@ public class PodsCliTests
             Assert.Equal("org/model", plan.GetProperty("model").GetString());
             Assert.Contains("'--tensor-parallel-size' '2'", plan.GetProperty("serveCommand").GetString(), StringComparison.Ordinal);
             Assert.Contains("--tensor-parallel-size", commands[1], StringComparison.Ordinal);
+        }
+        finally
+        {
+            Console.SetOut(previousOut);
+            tempDir.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Start_WithName_UsesUpstreamTopLevelVllmDeployContract()
+    {
+        var tempDir = Directory.CreateTempSubdirectory("tau-pods-cli-start-upstream-");
+        var configPath = Path.Combine(tempDir.FullName, "custom-pods.json");
+        var stdout = new StringWriter();
+        var previousOut = Console.Out;
+        var commands = new List<string>();
+        var execService = new PodExecService((psi, _) =>
+        {
+            var command = RemoteCommand(psi);
+            commands.Add(command);
+            if (IsPreflightCommand(command))
+            {
+                return Task.FromResult(new PodExecService.ProcessExecutionResult(0, PreflightOk("/mnt/models/models--org--model"), ""));
+            }
+
+            return Task.FromResult(new PodExecService.ProcessExecutionResult(0, "started\n", ""));
+        });
+
+        try
+        {
+            Console.SetOut(stdout);
+            var config = ConfigWithSshPod();
+            config.ActivePodId = "ssh-pod";
+            new PodsConfigStore().Save(configPath, config);
+
+            var exitCode = await PodsCli.RunAsync(
+                [
+                    "start",
+                    "org/model",
+                    "--json",
+                    "--no-health",
+                    "--config",
+                    configPath,
+                    "--name",
+                    "served model",
+                    "--vllm",
+                    "--tensor-parallel-size",
+                    "2"
+                ],
+                execService);
+
+            Assert.Equal(0, exitCode);
+            using var document = JsonDocument.Parse(stdout.ToString());
+            var root = document.RootElement;
+            Assert.Equal("deploy", root.GetProperty("operation").GetString());
+            Assert.Equal("ssh-pod", root.GetProperty("pod").GetString());
+            Assert.Equal("served-model", root.GetProperty("deployment").GetString());
+            Assert.Equal("org/model", root.GetProperty("plan").GetProperty("model").GetString());
+            Assert.Contains("'--tensor-parallel-size' '2'", root.GetProperty("plan").GetProperty("serveCommand").GetString(), StringComparison.Ordinal);
+            Assert.Equal(2, commands.Count);
+            Assert.Contains("cat > ~/.tau_pods/served-model.service <<'EOF'", commands[1], StringComparison.Ordinal);
+        }
+        finally
+        {
+            Console.SetOut(previousOut);
+            tempDir.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Start_WithoutName_ReportsUpstreamNameRequirement()
+    {
+        var stderr = new StringWriter();
+        var previousError = Console.Error;
+
+        try
+        {
+            Console.SetError(stderr);
+
+            var exitCode = await PodsCli.RunAsync(["start", "org/model"]);
+
+            Assert.Equal(1, exitCode);
+            Assert.Contains("--name is required", stderr.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            Console.SetError(previousError);
+        }
+    }
+
+    [Fact]
+    public async Task Stop_WithDeploymentName_UsesUpstreamTopLevelVllmStopContract()
+    {
+        var tempDir = Directory.CreateTempSubdirectory("tau-pods-cli-stop-upstream-");
+        var configPath = Path.Combine(tempDir.FullName, "custom-pods.json");
+        var stdout = new StringWriter();
+        var previousOut = Console.Out;
+        var commands = new List<string>();
+        var execService = new PodExecService((psi, _) =>
+        {
+            var command = RemoteCommand(psi);
+            commands.Add(command);
+            if (command.Contains("cat ~/.tau_pods/served-model.json", StringComparison.Ordinal))
+            {
+                return Task.FromResult(new PodExecService.ProcessExecutionResult(
+                    0,
+                    "{\"port\":8000,\"unitName\":\"tau-pod-served-model.service\"}\n",
+                    string.Empty));
+            }
+
+            return Task.FromResult(new PodExecService.ProcessExecutionResult(0, "stopped\n", string.Empty));
+        });
+
+        try
+        {
+            Console.SetOut(stdout);
+            var config = ConfigWithSshPod();
+            config.ActivePodId = "ssh-pod";
+            new PodsConfigStore().Save(configPath, config);
+
+            var exitCode = await PodsCli.RunAsync(["stop", "--json", "--config", configPath, "served model"], execService);
+
+            Assert.Equal(0, exitCode);
+            using var document = JsonDocument.Parse(stdout.ToString());
+            var root = document.RootElement;
+            Assert.Equal("stop", root.GetProperty("operation").GetString());
+            Assert.Equal("ssh-pod", root.GetProperty("pod").GetString());
+            Assert.Equal("served-model", root.GetProperty("deployment").GetString());
+            Assert.Equal("stopped\n", root.GetProperty("stdout").GetString());
+            Assert.Single(commands);
+            Assert.Contains("systemctl --user disable --now 'tau-pod-served-model.service'", commands[0], StringComparison.Ordinal);
         }
         finally
         {

@@ -47,7 +47,8 @@ public static class PodsCli
         return command switch
         {
             "init" => Init(args, store),
-            "list" => List(args, store, validator),
+            "pods" => await PodsCommandAsync(args, store, validator, setupPlanner, setupService).ConfigureAwait(false),
+            "list" => await UpstreamListAsync(args, path, store, validator, lifecycleService).ConfigureAwait(false),
             "validate" => Validate(args, store, validator),
             "status" => Status(args, store, validator),
             "active" => Active(args, store, validator),
@@ -57,7 +58,8 @@ public static class PodsCli
             "ssh" => await SshAsync(args, path, store, validator, execService).ConfigureAwait(false),
             "health" => await HealthAsync(args, store, validator, lifecycleService).ConfigureAwait(false),
             "deploy" => await DeployAsync(args, path, store, validator, lifecycleService).ConfigureAwait(false),
-            "stop" => await StopAsync(args, path, store, validator, lifecycleService).ConfigureAwait(false),
+            "start" => await StartAsync(args, store, validator, vllmPlanner, vllmService).ConfigureAwait(false),
+            "stop" => await StopCompatAsync(args, path, store, validator, lifecycleService, vllmService).ConfigureAwait(false),
             "restart" => await RestartAsync(args, path, store, validator, lifecycleService).ConfigureAwait(false),
             "logs" => await LogsAsync(args, store, validator, lifecycleService).ConfigureAwait(false),
             "deployments" => await DeploymentsAsync(args, path, store, validator, lifecycleService).ConfigureAwait(false),
@@ -78,6 +80,149 @@ public static class PodsCli
         {
             return null;
         }
+    }
+
+    private static async Task<int> PodsCommandAsync(
+        string[] args,
+        PodsConfigStore store,
+        PodsConfigValidator validator,
+        PodSetupPlanner setupPlanner,
+        PodSetupService setupService)
+    {
+        if (args.Length > 1 && IsHelp(args[1]))
+        {
+            PrintPodsHelp();
+            return 0;
+        }
+
+        if (args.Length == 1 || args[1].StartsWith("-", StringComparison.Ordinal) || LooksLikeConfigPath(args[1]))
+        {
+            return List(RewriteCommand(args, "list", startIndex: 1), store, validator);
+        }
+
+        var subcommand = args[1].ToLowerInvariant();
+        return subcommand switch
+        {
+            "setup" => await Setup(RewriteCommand(args, "setup", startIndex: 2), store, validator, setupPlanner, setupService).ConfigureAwait(false),
+            "active" => Active(RewriteCommand(args, "active", startIndex: 2), store, validator),
+            "remove" => Remove(RewriteCommand(args, "remove", startIndex: 2), store, validator),
+            _ => UnknownPodsSubcommand(subcommand)
+        };
+    }
+
+    private static async Task<int> StartAsync(
+        string[] args,
+        PodsConfigStore store,
+        PodsConfigValidator validator,
+        PodVllmCommandPlanner planner,
+        PodVllmOrchestrationService service)
+    {
+        if (args.Length < 2 || IsHelp(args[1]))
+        {
+            PrintKnownModels();
+            return 0;
+        }
+
+        if (!HasStringOptionBeforeVllmSentinel(args, "--name", startIndex: 2))
+        {
+            Console.Error.WriteLine("--name is required");
+            Console.Error.WriteLine("Usage: start <model-id> --name <deployment-name> [--config path] [--pod pod-id] [--memory percent] [--context size] [--gpus n] [--vllm <args...>]");
+            return 1;
+        }
+
+        return await VllmDeploy(RewriteCommand(args, "vllm", "deploy", startIndex: 1), store, validator, planner, service).ConfigureAwait(false);
+    }
+
+    private static async Task<int> UpstreamListAsync(
+        string[] args,
+        string path,
+        PodsConfigStore store,
+        PodsConfigValidator validator,
+        PodLifecycleService lifecycleService)
+    {
+        return await DeploymentsAsync(RewriteCommand(args, "deployments", startIndex: 1), path, store, validator, lifecycleService).ConfigureAwait(false);
+    }
+
+    private static async Task<int> StopCompatAsync(
+        string[] args,
+        string path,
+        PodsConfigStore store,
+        PodsConfigValidator validator,
+        PodLifecycleService lifecycleService,
+        PodVllmOrchestrationService vllmService)
+    {
+        if (LooksLikeLegacyStopCommand(args))
+        {
+            return await StopAsync(args, path, store, validator, lifecycleService).ConfigureAwait(false);
+        }
+
+        return await VllmStop(RewriteCommand(args, "vllm", "stop", startIndex: 1), store, validator, vllmService).ConfigureAwait(false);
+    }
+
+    private static string[] RewriteCommand(string[] args, string command, int startIndex)
+    {
+        var rewritten = new string[1 + Math.Max(0, args.Length - startIndex)];
+        rewritten[0] = command;
+        if (args.Length > startIndex)
+        {
+            Array.Copy(args, startIndex, rewritten, 1, args.Length - startIndex);
+        }
+
+        return rewritten;
+    }
+
+    private static string[] RewriteCommand(string[] args, string command, string subcommand, int startIndex)
+    {
+        var rewritten = new string[2 + Math.Max(0, args.Length - startIndex)];
+        rewritten[0] = command;
+        rewritten[1] = subcommand;
+        if (args.Length > startIndex)
+        {
+            Array.Copy(args, startIndex, rewritten, 2, args.Length - startIndex);
+        }
+
+        return rewritten;
+    }
+
+    private static bool HasStringOptionBeforeVllmSentinel(string[] args, string option, int startIndex)
+    {
+        for (var i = startIndex; i < args.Length; i++)
+        {
+            if (args[i].Equals(VllmExtraArgsSentinel, StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            if (args[i].Equals(option, StringComparison.OrdinalIgnoreCase))
+            {
+                return i + 1 < args.Length && !args[i + 1].StartsWith("--", StringComparison.Ordinal);
+            }
+        }
+
+        return false;
+    }
+
+    private static bool LooksLikeLegacyStopCommand(string[] args)
+    {
+        if (args.Any(arg => arg.Equals("--config", StringComparison.OrdinalIgnoreCase) || arg.Equals("--pod", StringComparison.OrdinalIgnoreCase)))
+        {
+            return false;
+        }
+
+        TryConsumeTargetJsonFlag(args, out var positionalArgs);
+        var values = positionalArgs.Skip(1).ToArray();
+        return values.Length >= 2;
+    }
+
+    private static void PrintKnownModels()
+    {
+        Console.WriteLine("Known models:");
+        foreach (var model in new PodKnownModelRegistry().GetKnownModels())
+        {
+            Console.WriteLine($"  {model}");
+        }
+        Console.WriteLine();
+        Console.WriteLine("Usage: start <model-id> --name <deployment-name> [--pod pod-id] [--memory percent] [--context size] [--gpus n] [--vllm <args...>]");
     }
 
     private static string GetDefaultConfigPath()
@@ -2539,6 +2684,13 @@ public static class PodsCli
         return 1;
     }
 
+    private static int UnknownPodsSubcommand(string subcommand)
+    {
+        Console.Error.WriteLine($"Unknown pods subcommand: {subcommand}");
+        Console.Error.WriteLine("Usage: pods [--json] [path] OR pods <setup|active|remove> [args]");
+        return 1;
+    }
+
     private static int UnknownSetupSubcommand(string subcommand)
     {
         Console.Error.WriteLine($"Unknown setup subcommand: {subcommand}");
@@ -3555,15 +3707,20 @@ public static class PodsCli
     {
         Console.WriteLine("Tau.Pods commands:");
         Console.WriteLine("  init [--json] [path]           Create a sample pod config");
-        Console.WriteLine("  list [--json] [path]           List configured pods");
+        Console.WriteLine("  pods [--json] [path]           List configured pods (* = active)");
+        Console.WriteLine("  pods setup [--json] [--mount <command>] [--models-path <path>] [--vllm release|nightly|gpt-oss] [path] <id> \"ssh [-p port] <host>\" Register a pod");
+        Console.WriteLine("  pods active [--json] [path] <id> Switch active pod");
+        Console.WriteLine("  pods remove [--json] [path] <id> Remove pod from local config");
+        Console.WriteLine("  list [--json] [--config path] [--pod id] List running vLLM deployments on the active or specified pod");
         Console.WriteLine("  validate [--json] [path]       Validate pod config");
         Console.WriteLine("  status [--json] [path]         Print enabled/disabled and transport summary");
         Console.WriteLine("  probe [--json] [path]          Probe enabled pod endpoints or ssh/tcp targets");
         Console.WriteLine("  health [--json] [path]         Check health of all enabled pods");
         Console.WriteLine("  exec [--json] [--config path] [--pod id] <command> Execute a remote command on the active or specified ssh pod");
         Console.WriteLine("  ssh [--json] [--config path] [--pod id] <command> Alias for exec");
+        Console.WriteLine("  start <model> --name <name> [--json] [--config path] [--pod id] [--memory percent] [--context size] [--gpus n] [--vllm <args...>] Start a vLLM deployment");
         Console.WriteLine("  deploy [--json] [path] <id> <model> [name] Deploy a model to a pod");
-        Console.WriteLine("  stop [--json] [path] <id> <name> Stop a deployment on a pod");
+        Console.WriteLine("  stop [--json] [--config path] [--pod id] <name> Stop a vLLM deployment on the active or specified pod");
         Console.WriteLine("  restart [--json] [path] <id> <name> Restart a deployment on a pod");
         Console.WriteLine("  logs [--json] [--config path] [--pod id] <name> [tail] Fetch deployment logs from the active or specified pod");
         Console.WriteLine("  deployments [--json] [--config path] [--pod id] List deployments on a pod");
@@ -3583,6 +3740,15 @@ public static class PodsCli
         Console.WriteLine("Environment:");
         Console.WriteLine("  PI_CONFIG_DIR                  Config directory; default is ~/.pi");
         Console.WriteLine("  Default config                 <config-dir>/pods.json");
+    }
+
+    private static void PrintPodsHelp()
+    {
+        Console.WriteLine("Tau.Pods pod commands:");
+        Console.WriteLine("  pods [--json] [path]           List configured pods (* = active)");
+        Console.WriteLine("  pods setup [--json] [--mount <command>] [--models-path <path>] [--vllm release|nightly|gpt-oss] [path] <id> \"ssh [-p port] <host>\"");
+        Console.WriteLine("  pods active [--json] [path] <id>");
+        Console.WriteLine("  pods remove [--json] [path] <id>");
     }
 
     private sealed record TargetCommandArguments(string ConfigPath, string PodId, IReadOnlyList<string> Values);
