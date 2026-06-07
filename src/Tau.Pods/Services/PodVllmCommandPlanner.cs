@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text;
 using Tau.Pods.Models;
 
@@ -25,11 +26,26 @@ public sealed class PodVllmCommandPlanner
             ? deploymentName
             : options.ServedModelName.Trim();
         var revision = NormalizeRevision(options.Revision);
-        var knownConfig = ResolveKnownModelConfig(pod, options);
-        var environment = MergeEnvironment(knownConfig?.Environment, options.Environment);
-        var extraArgs = options.ExtraArgs is { Count: > 0 }
+        var hasExplicitVllmArgs = options.ExtraArgs is { Count: > 0 };
+        var requestedGpuCount = hasExplicitVllmArgs ? null : options.RequestedGpuCount;
+        var memoryOverride = hasExplicitVllmArgs ? null : NormalizeOptionValue(options.Memory);
+        var contextOverride = hasExplicitVllmArgs ? null : NormalizeOptionValue(options.Context);
+        var knownConfig = hasExplicitVllmArgs
+            ? null
+            : ResolveKnownModelConfig(pod, options.ModelId, requestedGpuCount);
+        var selectedGpuIds = ResolveSelectedGpuIds(pod, knownConfig, hasExplicitVllmArgs);
+        var autoEnvironment = BuildGpuEnvironment(selectedGpuIds);
+        var environment = MergeEnvironment(autoEnvironment, knownConfig?.Environment, options.Environment);
+        double? memoryUtilization = null;
+        int? contextTokens = null;
+        var extraArgs = hasExplicitVllmArgs
             ? options.ExtraArgs
-            : knownConfig?.Args;
+            : ApplyConvenienceOverrides(
+                knownConfig?.Args,
+                memoryOverride,
+                contextOverride,
+                out memoryUtilization,
+                out contextTokens);
         var modelCachePath = BuildModelCachePath(pod, options.ModelId);
         var hasResolvedModelPath = !string.IsNullOrWhiteSpace(options.ResolvedModelPath);
         var usesSnapshotDiscovery = !hasResolvedModelPath;
@@ -39,7 +55,22 @@ public sealed class PodVllmCommandPlanner
             ? BuildServeCommand(modelPath, port, servedModelName, environment, extraArgs)
             : BuildSnapshotDiscoveryServeCommand(modelCachePath, port, servedModelName, environment, extraArgs, revision);
         var unit = BuildSystemdUnit(unitName, serveCommand);
-        var metadata = BuildMetadataJson(options.ModelId.Trim(), deploymentName, modelPath, usesSnapshotDiscovery, port, servedModelName, unitName, revision, knownConfig);
+        var metadata = BuildMetadataJson(
+            options.ModelId.Trim(),
+            deploymentName,
+            modelPath,
+            usesSnapshotDiscovery,
+            port,
+            servedModelName,
+            unitName,
+            revision,
+            knownConfig,
+            requestedGpuCount,
+            selectedGpuIds,
+            memoryOverride,
+            memoryUtilization,
+            contextOverride,
+            contextTokens);
         var remoteCommand =
             $"mkdir -p ~/.tau_pods && " +
             $"cat > ~/.tau_pods/{deploymentName}.service <<'EOF'\n{unit}\nEOF\n" +
@@ -63,7 +94,13 @@ public sealed class PodVllmCommandPlanner
             KnownModelGpuCount: knownConfig?.GpuCount,
             KnownModelArgs: knownConfig?.Args,
             KnownModelEnvironment: knownConfig?.Environment,
-            KnownModelNotes: knownConfig?.Notes);
+            KnownModelNotes: knownConfig?.Notes,
+            RequestedGpuCount: requestedGpuCount,
+            SelectedGpuIds: selectedGpuIds,
+            MemoryOverride: memoryOverride,
+            MemoryUtilization: memoryUtilization,
+            ContextOverride: contextOverride,
+            ContextTokens: contextTokens);
     }
 
     public string BuildModelCachePath(PodDefinition pod, string modelId)
@@ -121,44 +158,224 @@ public sealed class PodVllmCommandPlanner
         return builder.ToString();
     }
 
-    private PodKnownModelConfig? ResolveKnownModelConfig(PodDefinition pod, PodVllmServeOptions options)
+    private PodKnownModelConfig? ResolveKnownModelConfig(
+        PodDefinition pod,
+        string modelId,
+        int? requestedGpuCount)
     {
-        if (options.ExtraArgs is { Count: > 0 })
+        if (_knownModels.IsKnownModel(modelId))
+        {
+            if (requestedGpuCount is { } requested)
+            {
+                if (requested > pod.Gpus.Count)
+                {
+                    throw new InvalidOperationException($"Error: Requested {requested} GPUs but pod only has {pod.Gpus.Count}.");
+                }
+
+                var requestedConfig = _knownModels.GetConfig(modelId, pod.Gpus, requested);
+                if (requestedConfig is null)
+                {
+                    throw new InvalidOperationException(
+                        $"Model '{_knownModels.GetModelName(modelId)}' does not have a configuration for {requested} GPU(s). Available configurations: {FormatAvailableKnownModelConfigs(modelId, pod.Gpus)}.");
+                }
+
+                return requestedConfig;
+            }
+
+            var bestConfig = _knownModels.GetBestConfig(modelId, pod.Gpus);
+            if (bestConfig is null)
+            {
+                throw new InvalidOperationException($"Model '{_knownModels.GetModelName(modelId)}' not compatible with this pod's GPUs.");
+            }
+
+            return bestConfig;
+        }
+
+        if (requestedGpuCount is not null)
+        {
+            throw new InvalidOperationException("Error: --gpus can only be used with predefined models. For custom models, use --vllm with tensor-parallel-size or similar arguments.");
+        }
+
+        return null;
+    }
+
+    private string FormatAvailableKnownModelConfigs(string modelId, IReadOnlyList<PodGpuInfo> gpus)
+    {
+        var values = new List<string>();
+        for (var gpuCount = 1; gpuCount <= gpus.Count; gpuCount++)
+        {
+            if (_knownModels.GetConfig(modelId, gpus, gpuCount) is not null)
+            {
+                values.Add($"{gpuCount} GPU(s)");
+            }
+        }
+
+        return values.Count == 0 ? "none" : string.Join(", ", values);
+    }
+
+    private static IReadOnlyList<int>? ResolveSelectedGpuIds(
+        PodDefinition pod,
+        PodKnownModelConfig? knownConfig,
+        bool hasExplicitVllmArgs)
+    {
+        if (hasExplicitVllmArgs)
         {
             return null;
         }
 
-        return _knownModels.GetBestConfig(options.ModelId, pod.Gpus);
+        var gpuCount = knownConfig?.GpuCount ?? (pod.Gpus.Count > 0 ? 1 : 0);
+        return SelectGpuIds(pod, gpuCount);
+    }
+
+    private static IReadOnlyList<int> SelectGpuIds(PodDefinition pod, int count)
+    {
+        if (count <= 0 || pod.Gpus.Count == 0)
+        {
+            return [];
+        }
+
+        if (count > pod.Gpus.Count)
+        {
+            throw new InvalidOperationException($"Error: Requested {count} GPUs but pod only has {pod.Gpus.Count}.");
+        }
+
+        return pod.Gpus.Take(count).Select(static gpu => gpu.Id).ToArray();
+    }
+
+    private static IReadOnlyDictionary<string, string>? BuildGpuEnvironment(IReadOnlyList<int>? selectedGpuIds)
+    {
+        if (selectedGpuIds is not { Count: 1 })
+        {
+            return null;
+        }
+
+        return new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["CUDA_VISIBLE_DEVICES"] = selectedGpuIds[0].ToString(CultureInfo.InvariantCulture)
+        };
     }
 
     private static IReadOnlyDictionary<string, string>? MergeEnvironment(
-        IReadOnlyDictionary<string, string>? knownEnvironment,
-        IReadOnlyDictionary<string, string>? explicitEnvironment)
+        params IReadOnlyDictionary<string, string>?[] dictionaries)
     {
-        if (knownEnvironment is null && explicitEnvironment is null)
-        {
-            return null;
-        }
-
         var merged = new Dictionary<string, string>(StringComparer.Ordinal);
-        if (knownEnvironment is not null)
+        foreach (var dictionary in dictionaries)
         {
-            foreach (var pair in knownEnvironment)
+            if (dictionary is null)
+            {
+                continue;
+            }
+
+            foreach (var pair in dictionary)
             {
                 merged[pair.Key] = pair.Value;
             }
         }
 
-        if (explicitEnvironment is not null)
-        {
-            foreach (var pair in explicitEnvironment)
-            {
-                merged[pair.Key] = pair.Value;
-            }
-        }
-
-        return merged;
+        return merged.Count == 0 ? null : merged;
     }
+
+    private static IReadOnlyList<string>? ApplyConvenienceOverrides(
+        IReadOnlyList<string>? baseArgs,
+        string? memoryOverride,
+        string? contextOverride,
+        out double? memoryUtilization,
+        out int? contextTokens)
+    {
+        memoryUtilization = null;
+        contextTokens = null;
+        var args = baseArgs is null
+            ? new List<string>()
+            : baseArgs.Where(static arg => !string.IsNullOrWhiteSpace(arg)).Select(static arg => arg.Trim()).ToList();
+
+        if (memoryOverride is not null)
+        {
+            memoryUtilization = ParseMemoryUtilization(memoryOverride);
+            RemoveVllmOption(args, "--gpu-memory-utilization");
+            args.Add("--gpu-memory-utilization");
+            args.Add(FormatDouble(memoryUtilization.Value));
+        }
+
+        if (contextOverride is not null)
+        {
+            contextTokens = ParseContextTokens(contextOverride);
+            RemoveVllmOption(args, "--max-model-len");
+            args.Add("--max-model-len");
+            args.Add(contextTokens.Value.ToString(CultureInfo.InvariantCulture));
+        }
+
+        return args.Count == 0 ? null : args.ToArray();
+    }
+
+    private static void RemoveVllmOption(List<string> args, string optionName)
+    {
+        for (var i = args.Count - 1; i >= 0; i--)
+        {
+            var arg = args[i];
+            if (arg.Equals(optionName, StringComparison.Ordinal) ||
+                arg.StartsWith(optionName + "=", StringComparison.Ordinal))
+            {
+                var removeValue = arg.Equals(optionName, StringComparison.Ordinal) &&
+                    i + 1 < args.Count &&
+                    !args[i + 1].StartsWith("--", StringComparison.Ordinal);
+                args.RemoveAt(i);
+                if (removeValue)
+                {
+                    args.RemoveAt(i);
+                }
+            }
+        }
+    }
+
+    private static double ParseMemoryUtilization(string value)
+    {
+        var normalized = value.Trim();
+        if (normalized.EndsWith('%'))
+        {
+            normalized = normalized[..^1];
+        }
+
+        if (!double.TryParse(normalized, NumberStyles.Float, CultureInfo.InvariantCulture, out var percent) ||
+            percent <= 0)
+        {
+            throw new InvalidOperationException("Invalid --memory value.");
+        }
+
+        return percent / 100.0d;
+    }
+
+    private static int ParseContextTokens(string value)
+    {
+        var normalized = value.Trim().ToLowerInvariant();
+        var mapped = normalized switch
+        {
+            "4k" => 4096,
+            "8k" => 8192,
+            "16k" => 16384,
+            "32k" => 32768,
+            "64k" => 65536,
+            "128k" => 131072,
+            _ => 0
+        };
+        if (mapped > 0)
+        {
+            return mapped;
+        }
+
+        if (!int.TryParse(normalized, NumberStyles.Integer, CultureInfo.InvariantCulture, out var tokens) ||
+            tokens <= 0)
+        {
+            throw new InvalidOperationException("Invalid --context value.");
+        }
+
+        return tokens;
+    }
+
+    private static string? NormalizeOptionValue(string? value) =>
+        string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+
+    private static string FormatDouble(double value) =>
+        value.ToString("0.###############", CultureInfo.InvariantCulture);
 
     private static string BuildVllmServeCommand(
         string modelArgument,
@@ -256,7 +473,13 @@ public sealed class PodVllmCommandPlanner
         string servedModelName,
         string unitName,
         string? revision,
-        PodKnownModelConfig? knownConfig)
+        PodKnownModelConfig? knownConfig,
+        int? requestedGpuCount,
+        IReadOnlyList<int>? selectedGpuIds,
+        string? memoryOverride,
+        double? memoryUtilization,
+        string? contextOverride,
+        int? contextTokens)
     {
         var builder = new StringBuilder()
             .Append("{\"model\":\"").Append(EscapeJsonString(modelId))
@@ -270,11 +493,41 @@ public sealed class PodVllmCommandPlanner
             .Append("\"")
             .Append(revision is null ? string.Empty : ",\"revision\":\"" + EscapeJsonString(revision) + "\"");
 
+        if (requestedGpuCount is not null)
+        {
+            builder.Append(",\"requestedGpuCount\":").Append(requestedGpuCount.Value.ToString(CultureInfo.InvariantCulture));
+        }
+
+        if (selectedGpuIds is not null)
+        {
+            builder.Append(",\"selectedGpus\":").Append(JsonIntArray(selectedGpuIds));
+        }
+
+        if (memoryOverride is not null)
+        {
+            builder.Append(",\"memory\":\"").Append(EscapeJsonString(memoryOverride)).Append("\"");
+        }
+
+        if (memoryUtilization is not null)
+        {
+            builder.Append(",\"memoryUtilization\":").Append(FormatDouble(memoryUtilization.Value));
+        }
+
+        if (contextOverride is not null)
+        {
+            builder.Append(",\"context\":\"").Append(EscapeJsonString(contextOverride)).Append("\"");
+        }
+
+        if (contextTokens is not null)
+        {
+            builder.Append(",\"contextTokens\":").Append(contextTokens.Value.ToString(CultureInfo.InvariantCulture));
+        }
+
         if (knownConfig is not null)
         {
             builder
                 .Append(",\"knownModel\":{\"name\":\"").Append(EscapeJsonString(knownConfig.Name))
-                .Append("\",\"gpuCount\":").Append(knownConfig.GpuCount.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                .Append("\",\"gpuCount\":").Append(knownConfig.GpuCount.ToString(CultureInfo.InvariantCulture))
                 .Append(",\"args\":").Append(JsonStringArray(knownConfig.Args));
             if (knownConfig.Environment is not null)
             {
@@ -304,6 +557,22 @@ public sealed class PodVllmCommandPlanner
             }
 
             builder.Append('"').Append(EscapeJsonString(values[i])).Append('"');
+        }
+
+        return builder.Append(']').ToString();
+    }
+
+    private static string JsonIntArray(IReadOnlyList<int> values)
+    {
+        var builder = new StringBuilder("[");
+        for (var i = 0; i < values.Count; i++)
+        {
+            if (i > 0)
+            {
+                builder.Append(',');
+            }
+
+            builder.Append(values[i].ToString(CultureInfo.InvariantCulture));
         }
 
         return builder.Append(']').ToString();

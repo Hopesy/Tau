@@ -12,7 +12,10 @@ public sealed record PodVllmServeOptions(
     int HealthBackoffMilliseconds = 5000,
     string? ResolvedModelPath = null,
     string? Revision = null,
-    bool Prefetch = false);
+    bool Prefetch = false,
+    int? RequestedGpuCount = null,
+    string? Memory = null,
+    string? Context = null);
 
 public sealed record PodVllmServePlan(
     string DeploymentName,
@@ -31,4 +34,10 @@ public sealed record PodVllmServePlan(
     int? KnownModelGpuCount = null,
     IReadOnlyList<string>? KnownModelArgs = null,
     IReadOnlyDictionary<string, string>? KnownModelEnvironment = null,
-    string? KnownModelNotes = null);
+    string? KnownModelNotes = null,
+    int? RequestedGpuCount = null,
+    IReadOnlyList<int>? SelectedGpuIds = null,
+    string? MemoryOverride = null,
+    double? MemoryUtilization = null,
+    string? ContextOverride = null,
+    int? ContextTokens = null);

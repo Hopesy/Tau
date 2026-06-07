@@ -2017,10 +2017,166 @@ public class PodsCliTests
                 arg => arg.GetString() == "--tensor-parallel-size");
             Assert.Contains("--tensor-parallel-size", root.GetProperty("serveCommand").GetString(), StringComparison.Ordinal);
             Assert.Equal("GPT-OSS-120B", root.GetProperty("metadata").GetProperty("knownModel").GetProperty("name").GetString());
+            Assert.Equal(JsonValueKind.Null, root.GetProperty("requestedGpuCount").ValueKind);
+            Assert.Equal(2, root.GetProperty("selectedGpus").GetArrayLength());
         }
         finally
         {
             Console.SetOut(previousOut);
+            tempDir.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task VllmPlan_WithGpuMemoryAndContextOptions_PrintsPlanningContract()
+    {
+        var tempDir = Directory.CreateTempSubdirectory("tau-pods-cli-vllm-plan-options-");
+        var configPath = Path.Combine(tempDir.FullName, "custom-pods.json");
+        var stdout = new StringWriter();
+        var previousOut = Console.Out;
+
+        try
+        {
+            Console.SetOut(stdout);
+            var config = ConfigWithSshPod();
+            config.Pods[0].Gpus.Add(new PodGpuInfo(0, "NVIDIA H100 80GB HBM3", "81559 MiB"));
+            config.Pods[0].Gpus.Add(new PodGpuInfo(1, "NVIDIA H100 80GB HBM3", "81559 MiB"));
+            config.Pods[0].Gpus.Add(new PodGpuInfo(2, "NVIDIA H100 80GB HBM3", "81559 MiB"));
+            new PodsConfigStore().Save(configPath, config);
+
+            var exitCode = await PodsCli.RunAsync(
+                [
+                    "vllm",
+                    "plan",
+                    "--json",
+                    "--config",
+                    configPath,
+                    "--pod",
+                    "ssh-pod",
+                    "openai/gpt-oss-120b",
+                    "--gpus",
+                    "2",
+                    "--memory",
+                    "50%",
+                    "--context",
+                    "32k"
+                ]);
+
+            Assert.Equal(0, exitCode);
+            using var document = JsonDocument.Parse(stdout.ToString());
+            var root = document.RootElement;
+            Assert.Equal(2, root.GetProperty("requestedGpuCount").GetInt32());
+            Assert.Equal(2, root.GetProperty("selectedGpus").GetArrayLength());
+            Assert.Equal(0, root.GetProperty("selectedGpus")[0].GetInt32());
+            Assert.Equal(1, root.GetProperty("selectedGpus")[1].GetInt32());
+            Assert.Equal("50%", root.GetProperty("memory").GetString());
+            Assert.Equal(0.5d, root.GetProperty("memoryUtilization").GetDouble());
+            Assert.Equal("32k", root.GetProperty("context").GetString());
+            Assert.Equal(32768, root.GetProperty("contextTokens").GetInt32());
+            Assert.Contains("--tensor-parallel-size", root.GetProperty("serveCommand").GetString(), StringComparison.Ordinal);
+            Assert.Contains("--gpu-memory-utilization", root.GetProperty("serveCommand").GetString(), StringComparison.Ordinal);
+            Assert.Contains("'0.5'", root.GetProperty("serveCommand").GetString(), StringComparison.Ordinal);
+            Assert.Contains("--max-model-len", root.GetProperty("serveCommand").GetString(), StringComparison.Ordinal);
+            Assert.Contains("'32768'", root.GetProperty("serveCommand").GetString(), StringComparison.Ordinal);
+            Assert.DoesNotContain("'0.94'", root.GetProperty("serveCommand").GetString(), StringComparison.Ordinal);
+
+            var metadata = root.GetProperty("metadata");
+            Assert.Equal(2, metadata.GetProperty("requestedGpuCount").GetInt32());
+            Assert.Equal(2, metadata.GetProperty("selectedGpus").GetArrayLength());
+            Assert.Equal(0.5d, metadata.GetProperty("memoryUtilization").GetDouble());
+            Assert.Equal(32768, metadata.GetProperty("contextTokens").GetInt32());
+        }
+        finally
+        {
+            Console.SetOut(previousOut);
+            tempDir.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task VllmPlan_WithVllmExtraArgs_IgnoresConvenienceOptions()
+    {
+        var tempDir = Directory.CreateTempSubdirectory("tau-pods-cli-vllm-plan-options-override-");
+        var configPath = Path.Combine(tempDir.FullName, "custom-pods.json");
+        var stdout = new StringWriter();
+        var previousOut = Console.Out;
+
+        try
+        {
+            Console.SetOut(stdout);
+            var config = ConfigWithSshPod();
+            config.Pods[0].Gpus.Add(new PodGpuInfo(0, "NVIDIA B200", "180000 MiB"));
+            new PodsConfigStore().Save(configPath, config);
+
+            var exitCode = await PodsCli.RunAsync(
+                [
+                    "vllm",
+                    "plan",
+                    "--json",
+                    "--config",
+                    configPath,
+                    "--pod",
+                    "ssh-pod",
+                    "openai/gpt-oss-20b",
+                    "--gpus",
+                    "1",
+                    "--memory",
+                    "50%",
+                    "--context",
+                    "32k",
+                    "--vllm",
+                    "--manual-arg"
+                ]);
+
+            Assert.Equal(0, exitCode);
+            using var document = JsonDocument.Parse(stdout.ToString());
+            var root = document.RootElement;
+            Assert.Equal(JsonValueKind.Null, root.GetProperty("knownModel").ValueKind);
+            Assert.Equal(JsonValueKind.Null, root.GetProperty("requestedGpuCount").ValueKind);
+            Assert.Equal(JsonValueKind.Null, root.GetProperty("selectedGpus").ValueKind);
+            Assert.Equal(JsonValueKind.Null, root.GetProperty("memory").ValueKind);
+            Assert.Equal(JsonValueKind.Null, root.GetProperty("context").ValueKind);
+            Assert.Contains("--manual-arg", root.GetProperty("serveCommand").GetString(), StringComparison.Ordinal);
+            Assert.DoesNotContain("CUDA_VISIBLE_DEVICES", root.GetProperty("serveCommand").GetString(), StringComparison.Ordinal);
+            Assert.DoesNotContain("gpu-memory-utilization", root.GetProperty("serveCommand").GetString(), StringComparison.Ordinal);
+            Assert.DoesNotContain("max-model-len", root.GetProperty("serveCommand").GetString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            Console.SetOut(previousOut);
+            tempDir.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task VllmPlan_UnknownModelWithGpuCountReportsError()
+    {
+        var tempDir = Directory.CreateTempSubdirectory("tau-pods-cli-vllm-plan-gpus-error-");
+        var configPath = Path.Combine(tempDir.FullName, "custom-pods.json");
+        var stdout = new StringWriter();
+        var stderr = new StringWriter();
+        var previousOut = Console.Out;
+        var previousError = Console.Error;
+
+        try
+        {
+            Console.SetOut(stdout);
+            Console.SetError(stderr);
+            var config = ConfigWithSshPod();
+            config.Pods[0].Gpus.Add(new PodGpuInfo(0, "NVIDIA H100", "80000 MiB"));
+            new PodsConfigStore().Save(configPath, config);
+
+            var exitCode = await PodsCli.RunAsync(
+                ["vllm", "plan", "--config", configPath, "--pod", "ssh-pod", "org/model", "--gpus", "1"]);
+
+            Assert.Equal(1, exitCode);
+            Assert.Empty(stdout.ToString());
+            Assert.Contains("--gpus can only be used with predefined models", stderr.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            Console.SetOut(previousOut);
+            Console.SetError(previousError);
             tempDir.Delete(recursive: true);
         }
     }

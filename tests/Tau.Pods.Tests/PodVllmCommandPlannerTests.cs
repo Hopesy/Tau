@@ -123,6 +123,108 @@ public sealed class PodVllmCommandPlannerTests
         Assert.Equal("GPT-OSS-20B", knownModel.GetProperty("name").GetString());
         Assert.Equal(1, knownModel.GetProperty("gpuCount").GetInt32());
         Assert.Equal("1", knownModel.GetProperty("env").GetProperty("VLLM_USE_TRTLLM_ATTENTION").GetString());
+        Assert.Contains("CUDA_VISIBLE_DEVICES='0'", plan.ServeCommand, StringComparison.Ordinal);
+        Assert.Equal(new[] { 0 }, plan.SelectedGpuIds!);
+    }
+
+    [Fact]
+    public void PlanServe_WithKnownModelGpuMemoryAndContextOptions_AppliesPlannerOverrides()
+    {
+        var planner = new PodVllmCommandPlanner();
+        var pod = new PodDefinition
+        {
+            Id = "gpu-1",
+            SshHost = "host.example.com",
+            Gpus =
+            [
+                new PodGpuInfo(0, "NVIDIA H100", "80000 MiB"),
+                new PodGpuInfo(1, "NVIDIA H100", "80000 MiB"),
+                new PodGpuInfo(2, "NVIDIA H100", "80000 MiB")
+            ]
+        };
+
+        var plan = planner.PlanServe(
+            pod,
+            new PodVllmServeOptions(
+                "openai/gpt-oss-120b",
+                RequestedGpuCount: 2,
+                Memory: "50%",
+                Context: "32k"));
+
+        Assert.Equal("GPT-OSS-120B", plan.KnownModelName);
+        Assert.Equal(2, plan.KnownModelGpuCount);
+        Assert.Equal(2, plan.RequestedGpuCount);
+        Assert.Equal(new[] { 0, 1 }, plan.SelectedGpuIds!);
+        Assert.Equal("50%", plan.MemoryOverride);
+        Assert.Equal(0.5d, plan.MemoryUtilization);
+        Assert.Equal("32k", plan.ContextOverride);
+        Assert.Equal(32768, plan.ContextTokens);
+        Assert.Contains("'--tensor-parallel-size' '2'", plan.ServeCommand, StringComparison.Ordinal);
+        Assert.Contains("'--gpu-memory-utilization' '0.5'", plan.ServeCommand, StringComparison.Ordinal);
+        Assert.Contains("'--max-model-len' '32768'", plan.ServeCommand, StringComparison.Ordinal);
+        Assert.DoesNotContain("'0.94'", plan.ServeCommand, StringComparison.Ordinal);
+        Assert.DoesNotContain("CUDA_VISIBLE_DEVICES", plan.ServeCommand, StringComparison.Ordinal);
+
+        using var metadata = JsonDocument.Parse(plan.MetadataJson);
+        Assert.Equal(2, metadata.RootElement.GetProperty("requestedGpuCount").GetInt32());
+        Assert.Equal(2, metadata.RootElement.GetProperty("selectedGpus").GetArrayLength());
+        Assert.Equal(0.5d, metadata.RootElement.GetProperty("memoryUtilization").GetDouble());
+        Assert.Equal(32768, metadata.RootElement.GetProperty("contextTokens").GetInt32());
+    }
+
+    [Fact]
+    public void PlanServe_UnknownModelWithGpuCountThrows()
+    {
+        var planner = new PodVllmCommandPlanner();
+        var pod = new PodDefinition
+        {
+            Id = "gpu-1",
+            SshHost = "host.example.com",
+            Gpus = [new PodGpuInfo(0, "NVIDIA H100", "80000 MiB")]
+        };
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            planner.PlanServe(pod, new PodVllmServeOptions("org/model", RequestedGpuCount: 1)));
+
+        Assert.Contains("--gpus can only be used with predefined models", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void PlanServe_KnownModelWithTooManyRequestedGpusThrows()
+    {
+        var planner = new PodVllmCommandPlanner();
+        var pod = new PodDefinition
+        {
+            Id = "gpu-1",
+            SshHost = "host.example.com",
+            Gpus = [new PodGpuInfo(0, "NVIDIA H100", "80000 MiB")]
+        };
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            planner.PlanServe(pod, new PodVllmServeOptions("openai/gpt-oss-120b", RequestedGpuCount: 2)));
+
+        Assert.Contains("Requested 2 GPUs but pod only has 1", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void PlanServe_UnknownModelDefaultsToSingleGpuWhenPodHasGpuInventory()
+    {
+        var planner = new PodVllmCommandPlanner();
+        var pod = new PodDefinition
+        {
+            Id = "gpu-1",
+            SshHost = "host.example.com",
+            Gpus =
+            [
+                new PodGpuInfo(7, "NVIDIA H100", "80000 MiB"),
+                new PodGpuInfo(8, "NVIDIA H100", "80000 MiB")
+            ]
+        };
+
+        var plan = planner.PlanServe(pod, new PodVllmServeOptions("org/model"));
+
+        Assert.Equal(new[] { 7 }, plan.SelectedGpuIds!);
+        Assert.Contains("CUDA_VISIBLE_DEVICES='7'", plan.ServeCommand, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -138,11 +240,23 @@ public sealed class PodVllmCommandPlannerTests
 
         var plan = planner.PlanServe(
             pod,
-            new PodVllmServeOptions("openai/gpt-oss-20b", ExtraArgs: ["--manual-arg"]));
+            new PodVllmServeOptions(
+                "openai/gpt-oss-20b",
+                ExtraArgs: ["--manual-arg"],
+                RequestedGpuCount: 1,
+                Memory: "50%",
+                Context: "32k"));
 
         Assert.Null(plan.KnownModelName);
+        Assert.Null(plan.SelectedGpuIds);
+        Assert.Null(plan.RequestedGpuCount);
+        Assert.Null(plan.MemoryOverride);
+        Assert.Null(plan.ContextOverride);
         Assert.Contains("'--manual-arg'", plan.ServeCommand, StringComparison.Ordinal);
         Assert.DoesNotContain("VLLM_USE_TRTLLM_ATTENTION", plan.ServeCommand, StringComparison.Ordinal);
+        Assert.DoesNotContain("CUDA_VISIBLE_DEVICES", plan.ServeCommand, StringComparison.Ordinal);
+        Assert.DoesNotContain("gpu-memory-utilization", plan.ServeCommand, StringComparison.Ordinal);
+        Assert.DoesNotContain("max-model-len", plan.ServeCommand, StringComparison.Ordinal);
     }
 
     [Fact]

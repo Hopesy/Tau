@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using Tau.Ai.Observability;
@@ -863,7 +864,7 @@ public static class PodsCli
     {
         if (args.Length < 2)
         {
-            Console.Error.WriteLine("Usage: vllm <plan|preflight|deploy|status|health|stop|rollback> [--json] [--config path] [--pod pod-id] <model-id|deployment-name> [--name deployment-name] [--revision rev] [--snapshot rev] [--prefetch] [--vllm <args...>]");
+            Console.Error.WriteLine("Usage: vllm <plan|preflight|deploy|status|health|stop|rollback> [--json] [--config path] [--pod pod-id] <model-id|deployment-name> [--name deployment-name] [--revision rev] [--snapshot rev] [--gpus n] [--memory percent] [--context size] [--prefetch] [--vllm <args...>]");
             return 1;
         }
 
@@ -872,7 +873,7 @@ public static class PodsCli
         {
             "plan" => VllmPlan(args, store, validator, planner),
             "preflight" => await VllmPreflight(args, store, validator, service).ConfigureAwait(false),
-            "deploy" => await VllmDeploy(args, store, validator, service).ConfigureAwait(false),
+            "deploy" => await VllmDeploy(args, store, validator, planner, service).ConfigureAwait(false),
             "status" => await VllmStatus(args, store, validator, service).ConfigureAwait(false),
             "health" => await VllmHealth(args, store, validator, service).ConfigureAwait(false),
             "stop" => await VllmStop(args, store, validator, service).ConfigureAwait(false),
@@ -887,7 +888,7 @@ public static class PodsCli
         PodsConfigValidator validator,
         PodVllmCommandPlanner planner)
     {
-        const string usage = "Usage: vllm plan [--json] [--config path] [--pod pod-id] <model-id> [--name deployment-name] [--revision rev] [--snapshot rev] [--vllm <args...>]";
+        const string usage = "Usage: vllm plan [--json] [--config path] [--pod pod-id] <model-id> [--name deployment-name] [--revision rev] [--snapshot rev] [--gpus n] [--memory percent] [--context size] [--vllm <args...>]";
         if (!TrySplitVllmExtraArgs(args, usage, out var cliArgs, out var extraArgs))
         {
             return 1;
@@ -902,15 +903,26 @@ public static class PodsCli
         var pod = LoadPodOrActiveReport(parsed.ConfigPath, parsed.PodId, store, validator, out var exitCode);
         if (pod is null) return exitCode;
 
-        var plan = planner.PlanServe(pod, new PodVllmServeOptions(parsed.ModelId, parsed.DeploymentName, ExtraArgs: extraArgs, Revision: parsed.Revision));
+        var options = new PodVllmServeOptions(
+            parsed.ModelId,
+            parsed.DeploymentName,
+            ExtraArgs: extraArgs,
+            Revision: parsed.Revision,
+            RequestedGpuCount: parsed.RequestedGpuCount,
+            Memory: parsed.Memory,
+            Context: parsed.Context);
+        if (!TryPlanVllmServe(planner, pod, options, out var plan))
+        {
+            return 1;
+        }
 
         if (jsonOutput)
         {
-            PrintVllmPlanJson(pod, plan);
+            PrintVllmPlanJson(pod, plan!);
             return 0;
         }
 
-        PrintVllmPlanText(pod, plan);
+        PrintVllmPlanText(pod, plan!);
         return 0;
     }
 
@@ -946,9 +958,10 @@ public static class PodsCli
         string[] args,
         PodsConfigStore store,
         PodsConfigValidator validator,
+        PodVllmCommandPlanner planner,
         PodVllmOrchestrationService service)
     {
-        const string usage = "Usage: vllm deploy [--json] [--no-health] [--prefetch] [--health-attempts n] [--health-backoff-ms n] [--config path] [--pod pod-id] <model-id> [--name deployment-name] [--revision rev] [--snapshot rev] [--vllm <args...>]";
+        const string usage = "Usage: vllm deploy [--json] [--no-health] [--prefetch] [--health-attempts n] [--health-backoff-ms n] [--config path] [--pod pod-id] <model-id> [--name deployment-name] [--revision rev] [--snapshot rev] [--gpus n] [--memory percent] [--context size] [--vllm <args...>]";
         if (!TrySplitVllmExtraArgs(args, usage, out var cliArgs, out var extraArgs))
         {
             return 1;
@@ -979,17 +992,24 @@ public static class PodsCli
         var pod = LoadPodOrActiveReport(parsed.ConfigPath, parsed.PodId, store, validator, out var exitCode);
         if (pod is null) return exitCode;
 
-        var result = await service.DeployAsync(
-            pod,
-            new PodVllmServeOptions(
-                parsed.ModelId,
-                parsed.DeploymentName,
-                ExtraArgs: extraArgs,
-                Revision: parsed.Revision,
-                WaitForHealth: !skipHealth,
-                HealthAttempts: healthAttempts,
-                HealthBackoffMilliseconds: healthBackoffMs,
-                Prefetch: prefetch)).ConfigureAwait(false);
+        var options = new PodVllmServeOptions(
+            parsed.ModelId,
+            parsed.DeploymentName,
+            ExtraArgs: extraArgs,
+            Revision: parsed.Revision,
+            WaitForHealth: !skipHealth,
+            HealthAttempts: healthAttempts,
+            HealthBackoffMilliseconds: healthBackoffMs,
+            Prefetch: prefetch,
+            RequestedGpuCount: parsed.RequestedGpuCount,
+            Memory: parsed.Memory,
+            Context: parsed.Context);
+        if (!TryPlanVllmServe(planner, pod, options, out _))
+        {
+            return 1;
+        }
+
+        var result = await service.DeployAsync(pod, options).ConfigureAwait(false);
         if (jsonOutput)
         {
             PrintVllmOperationJson(result);
@@ -1145,6 +1165,24 @@ public static class PodsCli
         Console.WriteLine($"modelPath={plan.ModelPath}");
         Console.WriteLine($"port={plan.Port}");
         Console.WriteLine($"servedModel={plan.ServedModelName}");
+        if (plan.RequestedGpuCount is not null)
+        {
+            Console.WriteLine($"requestedGpuCount={plan.RequestedGpuCount}");
+        }
+        if (plan.SelectedGpuIds is not null)
+        {
+            Console.WriteLine($"selectedGpus={(plan.SelectedGpuIds.Count == 0 ? "none" : string.Join(",", plan.SelectedGpuIds))}");
+        }
+        if (!string.IsNullOrWhiteSpace(plan.MemoryOverride))
+        {
+            Console.WriteLine($"memory={plan.MemoryOverride}");
+            Console.WriteLine($"memoryUtilization={plan.MemoryUtilization?.ToString("0.###############", CultureInfo.InvariantCulture)}");
+        }
+        if (!string.IsNullOrWhiteSpace(plan.ContextOverride))
+        {
+            Console.WriteLine($"context={plan.ContextOverride}");
+            Console.WriteLine($"contextTokens={plan.ContextTokens}");
+        }
         if (!string.IsNullOrWhiteSpace(plan.KnownModelName))
         {
             Console.WriteLine($"knownModel={plan.KnownModelName}");
@@ -1714,6 +1752,7 @@ public static class PodsCli
             writer.WriteBoolean("usesSnapshotDiscovery", plan.UsesSnapshotDiscovery);
             writer.WriteNumber("port", plan.Port);
             writer.WriteString("servedModel", plan.ServedModelName);
+            WriteVllmPlanOptionFields(writer, plan);
             WriteKnownModelObject(writer, plan);
             writer.WriteString("unit", plan.UnitName);
             writer.WriteString("serveCommand", plan.ServeCommand);
@@ -1942,6 +1981,7 @@ public static class PodsCli
         writer.WriteBoolean("usesSnapshotDiscovery", plan.UsesSnapshotDiscovery);
         writer.WriteNumber("port", plan.Port);
         writer.WriteString("servedModel", plan.ServedModelName);
+        WriteVllmPlanOptionFields(writer, plan);
         WriteKnownModelObject(writer, plan);
         writer.WriteString("unit", plan.UnitName);
         writer.WriteString("serveCommand", plan.ServeCommand);
@@ -1951,6 +1991,53 @@ public static class PodsCli
         writer.WriteString("metadataJson", plan.MetadataJson);
         writer.WriteString("planRemoteCommand", plan.RemoteCommand);
         writer.WriteEndObject();
+    }
+
+    private static void WriteVllmPlanOptionFields(Utf8JsonWriter writer, PodVllmServePlan plan)
+    {
+        if (plan.RequestedGpuCount is null)
+        {
+            writer.WriteNull("requestedGpuCount");
+        }
+        else
+        {
+            writer.WriteNumber("requestedGpuCount", plan.RequestedGpuCount.Value);
+        }
+
+        writer.WritePropertyName("selectedGpus");
+        if (plan.SelectedGpuIds is null)
+        {
+            writer.WriteNullValue();
+        }
+        else
+        {
+            writer.WriteStartArray();
+            foreach (var gpuId in plan.SelectedGpuIds)
+            {
+                writer.WriteNumberValue(gpuId);
+            }
+            writer.WriteEndArray();
+        }
+
+        writer.WriteString("memory", plan.MemoryOverride);
+        if (plan.MemoryUtilization is null)
+        {
+            writer.WriteNull("memoryUtilization");
+        }
+        else
+        {
+            writer.WriteNumber("memoryUtilization", plan.MemoryUtilization.Value);
+        }
+
+        writer.WriteString("context", plan.ContextOverride);
+        if (plan.ContextTokens is null)
+        {
+            writer.WriteNull("contextTokens");
+        }
+        else
+        {
+            writer.WriteNumber("contextTokens", plan.ContextTokens.Value);
+        }
     }
 
     private static void WriteKnownModelObject(Utf8JsonWriter writer, PodVllmServePlan plan)
@@ -2445,7 +2532,7 @@ public static class PodsCli
     private static int UnknownVllmSubcommand(string subcommand)
     {
         Console.Error.WriteLine($"Unknown vllm subcommand: {subcommand}");
-        Console.Error.WriteLine("Usage: vllm <plan|preflight|deploy|status|health|stop|rollback> [--json] [--config path] [--pod pod-id] <model-id|deployment-name> [--name deployment-name] [--vllm <args...>]");
+        Console.Error.WriteLine("Usage: vllm <plan|preflight|deploy|status|health|stop|rollback> [--json] [--config path] [--pod pod-id] <model-id|deployment-name> [--name deployment-name] [--gpus n] [--memory percent] [--context size] [--vllm <args...>]");
         return 1;
     }
 
@@ -2619,12 +2706,37 @@ public static class PodsCli
         return false;
     }
 
+    private static bool TryPlanVllmServe(
+        PodVllmCommandPlanner planner,
+        PodDefinition pod,
+        PodVllmServeOptions options,
+        out PodVllmServePlan? plan)
+    {
+        try
+        {
+            plan = planner.PlanServe(pod, options);
+            return true;
+        }
+        catch (InvalidOperationException ex)
+        {
+            Console.Error.WriteLine(ex.Message);
+            plan = null;
+            return false;
+        }
+        catch (ArgumentException ex)
+        {
+            Console.Error.WriteLine(ex.Message);
+            plan = null;
+            return false;
+        }
+    }
+
     private static bool TryParseVllmServeCommand(
         string[] args,
         string usage,
         out VllmServeCommandArguments parsed)
     {
-        parsed = new VllmServeCommandArguments(DefaultConfigPath, null, string.Empty, null, null);
+        parsed = new VllmServeCommandArguments(DefaultConfigPath, null, string.Empty, null, null, null, null, null);
         var configPath = ConsumeStringOption(args, "--config", startIndex: 2, out var podArgs, out var optionError);
         var hasExplicitConfig = configPath is not null;
         if (optionError is not null)
@@ -2647,7 +2759,28 @@ public static class PodsCli
             return false;
         }
 
-        var revision = ConsumeStringOptionAny(deploymentArgs, ["--revision", "--snapshot"], startIndex: 2, out var positionalArgs, out optionError);
+        var revision = ConsumeStringOptionAny(deploymentArgs, ["--revision", "--snapshot"], startIndex: 2, out var revisionArgs, out optionError);
+        if (optionError is not null)
+        {
+            Console.Error.WriteLine(optionError);
+            return false;
+        }
+
+        var memory = ConsumeStringOption(revisionArgs, "--memory", startIndex: 2, out var memoryArgs, out optionError);
+        if (optionError is not null)
+        {
+            Console.Error.WriteLine(optionError);
+            return false;
+        }
+
+        var context = ConsumeStringOption(memoryArgs, "--context", startIndex: 2, out var contextArgs, out optionError);
+        if (optionError is not null)
+        {
+            Console.Error.WriteLine(optionError);
+            return false;
+        }
+
+        var requestedGpuCount = ConsumePositiveIntOption(contextArgs, "--gpus", startIndex: 2, out var positionalArgs, out optionError);
         if (optionError is not null)
         {
             Console.Error.WriteLine(optionError);
@@ -2678,20 +2811,23 @@ public static class PodsCli
                 podId,
                 values[0],
                 deploymentName ?? (values.Length > 1 ? values[1] : null),
-                revision);
+                revision,
+                requestedGpuCount,
+                memory,
+                context);
             return true;
         }
 
         switch (values.Length)
         {
             case 1:
-                parsed = new VllmServeCommandArguments(configPath, null, values[0], deploymentName, revision);
+                parsed = new VllmServeCommandArguments(configPath, null, values[0], deploymentName, revision, requestedGpuCount, memory, context);
                 return true;
             case 2:
-                parsed = new VllmServeCommandArguments(configPath, values[0], values[1], deploymentName, revision);
+                parsed = new VllmServeCommandArguments(configPath, values[0], values[1], deploymentName, revision, requestedGpuCount, memory, context);
                 return true;
             case 3 when deploymentName is null:
-                parsed = new VllmServeCommandArguments(configPath, values[0], values[1], values[2], revision);
+                parsed = new VllmServeCommandArguments(configPath, values[0], values[1], values[2], revision, requestedGpuCount, memory, context);
                 return true;
             default:
                 Console.Error.WriteLine(usage);
@@ -3109,6 +3245,41 @@ public static class PodsCli
         return value;
     }
 
+    private static int? ConsumePositiveIntOption(
+        string[] args,
+        string option,
+        int startIndex,
+        out string[] positionalArgs,
+        out string? error)
+    {
+        error = null;
+        int? value = null;
+        var values = new List<string>(args.Length);
+        for (var i = 0; i < args.Length; i++)
+        {
+            if (i >= startIndex && args[i].Equals(option, StringComparison.OrdinalIgnoreCase))
+            {
+                if (i + 1 >= args.Length ||
+                    !int.TryParse(args[i + 1], System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var parsed) ||
+                    parsed <= 0)
+                {
+                    error = $"Invalid {option} value.";
+                    positionalArgs = args;
+                    return null;
+                }
+
+                value = parsed;
+                i++;
+                continue;
+            }
+
+            values.Add(args[i]);
+        }
+
+        positionalArgs = values.ToArray();
+        return value;
+    }
+
     private static bool TryParseTargetCommand(
         string[] args,
         int minValueCount,
@@ -3381,9 +3552,9 @@ public static class PodsCli
         Console.WriteLine("  model pull [--json] [--config path] [--pod id] [--revision rev] [--snapshot rev] <model> Pull a Hugging Face model on an ssh pod");
         Console.WriteLine("  model remove [--json] [--config path] [--pod id] <model> Remove a cached model from an ssh pod");
         Console.WriteLine("  model status [--json] [--config path] [--pod id] <model> Check whether a model is cached");
-        Console.WriteLine("  vllm plan [--json] [--config path] [--pod id] <model> [--name name] [--revision rev] [--snapshot rev] [--vllm <args...>] Print a plan-only vLLM serve command");
+        Console.WriteLine("  vllm plan [--json] [--config path] [--pod id] <model> [--name name] [--revision rev] [--snapshot rev] [--gpus n] [--memory percent] [--context size] [--vllm <args...>] Print a plan-only vLLM serve command");
         Console.WriteLine("  vllm preflight [--json] [--config path] [--pod id] <model> [--name name] [--revision rev] [--snapshot rev] Resolve remote HF snapshot path and vLLM availability");
-        Console.WriteLine("  vllm deploy [--json] [--no-health] [--prefetch] [--health-attempts n] [--health-backoff-ms n] [--config path] [--pod id] <model> [--name name] [--revision rev] [--snapshot rev] [--vllm <args...>] Execute a vLLM deploy plan on an ssh pod");
+        Console.WriteLine("  vllm deploy [--json] [--no-health] [--prefetch] [--health-attempts n] [--health-backoff-ms n] [--config path] [--pod id] <model> [--name name] [--revision rev] [--snapshot rev] [--gpus n] [--memory percent] [--context size] [--vllm <args...>] Execute a vLLM deploy plan on an ssh pod");
         Console.WriteLine("  vllm status [--json] [--config path] [--pod id] <name> Fetch remote vLLM deployment status");
         Console.WriteLine("  vllm health [--json] [--health-attempts n] [--health-backoff-ms n] [--config path] [--pod id] <name> Check remote vLLM /health readiness");
         Console.WriteLine("  vllm stop [--json] [--config path] [--pod id] <name> Stop a remote vLLM deployment");
@@ -3396,7 +3567,15 @@ public static class PodsCli
 
     private sealed record ExecCommandArguments(string ConfigPath, string? PodId, IReadOnlyList<string> CommandParts);
 
-    private sealed record VllmServeCommandArguments(string ConfigPath, string? PodId, string ModelId, string? DeploymentName, string? Revision);
+    private sealed record VllmServeCommandArguments(
+        string ConfigPath,
+        string? PodId,
+        string ModelId,
+        string? DeploymentName,
+        string? Revision,
+        int? RequestedGpuCount,
+        string? Memory,
+        string? Context);
 
     private sealed record SetupRegistrationArguments(string ConfigPath, string PodId, string SshCommand);
 
