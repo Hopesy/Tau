@@ -1,5 +1,7 @@
 # Tau 100% pi-mono parity 多 Agent 移植计划
 
+> 当前优先级说明（2026-06-07）：本计划恢复为当前优先执行线。`docs/exec-plans/completed/2026-06-07-tau-agent-platform-baseline.md` 已完成 Tau Agent 应用底座本地验收，现在作为 Phase 2 shared Agent foundation 和后续产品移植前置能力；它不代表 100% pi-mono product parity 完成。后续推进从 `docs/exec-plans/active/2026-05-28-pi-mono-parity-matrix.md` 的 `Phase 2 Candidate Queue` 分派 implementation/e2e worker 切片，不重开 broad inventory。
+
 ## 目标
 
 把 Tau 从当前多面 baseline 推进到 `C:\Users\zhouh\Desktop\pi-mono-main` 的 100% 可审计移植状态。这里的 100% 不按聊天里的主观完成度计算，而按上游 inventory、行为合同、真实运行验证、发布产物和文档闭环共同判定：
@@ -8,6 +10,13 @@
 - Tau 对应模块在 `.NET` 实现里通过 targeted tests、项目级 gate、运行态 smoke 和必要的真实外部 e2e。
 - `next.md` 中 parity 缺口清零；不能清零的项目必须变成显式非目标并有用户确认，不允许用“后续优化”掩盖。
 - release/CI 能产出真实 Tau 可执行交付件，且 Windows PowerShell 验证链是权威本地链路。
+
+## 当前 checkpoint（2026-06-07）
+
+- Agent platform baseline 已完成并归档：`src/Tau.Agent/Platform/**`、Console/HTTP examples、platform smoke、provider run + tool execution runtime log、全仓 `verify-dotnet.ps1 -SkipRestore` 与 `-RunSmoke` 本地验收已有当前证据。该能力降低后续 Agent/WebUi/Mom/CodingAgent host 类切片风险，但不关闭真实 provider/OAuth/e2e、release registry/signing/provenance 或完整 product parity。
+- Phase 1 inventory freeze 已完成：matrix 已冻结 capability、file-level、surface、root scripts/manifests 三层 mapping；上游 package directory set 已确认，没有未知 package 目录。后续实现只在具体切片中补充 finer rows，不重新做 broad inventory。
+- 当前工作树仍有未提交 WIP：Agent platform baseline WIP 与 CodingAgent `/settings select` `TuiSettingsList` adoption WIP。主控在进入下一轮实现前必须先确认 diff 和验证证据，并按独立提交边界收口；不能把 SDK/API、UI parity 与 docs-only pivot 混成一个提交。
+- 当前恢复路线：先处理 dirty WIP 边界，再从 matrix `Phase 2 Candidate Queue` 选择高价值 implementation/e2e 切片。优先级按阻塞程度排列：critical contracts、真实外部 e2e、product runtime parity、release/package final parity。
 
 ## 范围
 
@@ -455,6 +464,7 @@ git diff --check
 
 ## 决策记录
 
+- 2026-06-07：继续 CodingAgent `/settings select` product-level SettingsList adoption，对照上游 `packages/coding-agent/src/modes/interactive/components/settings-selector.ts` 与 `packages/tui/src/components/settings-list.ts`，把生产 settings selector 从 Tau-native 7 项 `TuiSelectList` 主菜单切到 `TuiSettingsList` 主设置面。当前可直接写回 auto-compaction、terminal show images / clear on shrink、image auto-resize / block images、show hardware cursor、editor padding、autocomplete max visible、steering/follow-up mode、tree filter、thinking level、quiet startup、collapse changelog、install telemetry，并从同一列表进入 scoped models / theme 既有子 selector；同时新增 `TuiSettingsListSession` 和 composition overlay runner，保留旧 action-id selector payload 兼容路径。已通过 focused settings selector/router 验证 9/9、`Tau.Tui.Tests` 251/251、`Tau.CodingAgent.Tests` 438/438；完整 settings submenus、package/transport/shell path/npm settings、部分 persisted terminal/editor/image/changelog 字段真实 runtime wiring、完整 focus stack/theme rendering 和真实 TTY/PTY smoke 仍保留为后续缺口。
 - 2026-06-06：继续 Tau.Tui settings-list component parity，对照上游 `packages/tui/src/components/settings-list.ts` 新增 `TuiSettingsList`、`TuiSettingItem`、`TuiSettingsListTheme` 和 `TuiSettingsListOptions`。Tau 版本覆盖 label/value 对齐、description wrapping、可选搜索、Enter/Space value cycle、submenu delegate / done callback、Esc/Ctrl-C cancel、滚动提示和宽度截断；`dotnet test tests\Tau.Tui.Tests\Tau.Tui.Tests.csproj --no-restore --verbosity minimal` 通过 249/249；`powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-dotnet.ps1 -SkipRestore` 通过，计数为 `Tau.Ai.Tests` 280、`Tau.Agent.Tests` 115、`Tau.Tui.Tests` 249、`Tau.CodingAgent.Tests` 435、`Tau.WebUi.Tests` 44、`Tau.Pods.Tests` 166。该切片关闭 `components/settings-list.ts` 的库层 foundation；完整 CodingAgent settings 产品面、images/terminal/transport/packages 等全量配置项、完整 focus stack、theme rendering 和真实 TTY/PTY smoke 仍保留为后续缺口。
 - 2026-06-06：继续 Tau.Tui box component parity，对照上游 `packages/tui/src/components/box.ts` 扩展 `TuiBox`。Tau 版本覆盖 child rendering、水平/垂直 padding、optional background formatter、`SetBackgroundFormatter(...)` 运行期切换，以及上游同款 bg-sample/child-line cache invalidation；`dotnet test tests\Tau.Tui.Tests\Tau.Tui.Tests.csproj --no-restore --verbosity minimal` 通过 244/244；`powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-dotnet.ps1 -SkipRestore` 通过，计数为 `Tau.Ai.Tests` 280、`Tau.Agent.Tests` 115、`Tau.Tui.Tests` 244、`Tau.CodingAgent.Tests` 435、`Tau.WebUi.Tests` 44、`Tau.Pods.Tests` 166。该切片关闭 `components/text.ts` / `truncated-text.ts` / `box.ts` / `spacer.ts` 组件组的本地库层 baseline；完整 TUI host/focus stack、theme rendering、硬件 cursor 和真实 TTY/PTY smoke 仍保留为后续缺口。
 - 2026-06-06：继续 Tau.Tui text/truncated-text component parity，对照上游 `packages/tui/src/components/text.ts` 与 `components/truncated-text.ts` 扩展 `TuiTextBlock` 并新增 `TuiTruncatedText`。Tau 版本覆盖 Text 的空白文本不渲染、tab-normalized wrap、水平/垂直 padding、full-line background formatter、`SetCustomBackgroundFormatter(...)` cache invalidation，以及 TruncatedText 的首行截断、padding、空文本仍输出 padded line 和 width-aware ellipsis；`dotnet test tests\Tau.Tui.Tests\Tau.Tui.Tests.csproj --no-restore --verbosity minimal` 通过 243/243；`powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-dotnet.ps1 -SkipRestore` 通过，计数为 `Tau.Ai.Tests` 280、`Tau.Agent.Tests` 115、`Tau.Tui.Tests` 243、`Tau.CodingAgent.Tests` 435、`Tau.WebUi.Tests` 44、`Tau.Pods.Tests` 166。该切片关闭 `text.ts` / `truncated-text.ts` 的库层组件 baseline；`box.ts` custom background/cache、完整 TUI host/focus stack、theme rendering、硬件 cursor 和真实 TTY/PTY smoke 仍保留为后续缺口。
