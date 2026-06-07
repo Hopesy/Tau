@@ -56,6 +56,8 @@ public static class PodsCli
             "probe" => await ProbeAsync(args, store, validator, probeService).ConfigureAwait(false),
             "exec" => await ExecAsync(args, path, store, validator, execService).ConfigureAwait(false),
             "ssh" => await SshAsync(args, path, store, validator, execService).ConfigureAwait(false),
+            "shell" => await ShellAsync(args, store, validator, execService).ConfigureAwait(false),
+            "agent" => AgentAsync(args, store, validator),
             "health" => await HealthAsync(args, store, validator, lifecycleService).ConfigureAwait(false),
             "deploy" => await DeployAsync(args, path, store, validator, lifecycleService).ConfigureAwait(false),
             "start" => await StartAsync(args, store, validator, vllmPlanner, vllmService).ConfigureAwait(false),
@@ -363,6 +365,110 @@ public static class PodsCli
         Console.WriteLine("Usage: start <model-id> --name <deployment-name> [--pod pod-id] [--memory percent] [--context size] [--gpus n] [--vllm <args...>]");
     }
 
+    private static PodAgentPromptPlan BuildAgentPromptPlan(
+        PodDefinition pod,
+        string modelName,
+        PodConfiguredModel modelConfig,
+        IReadOnlyList<string> userArgs)
+    {
+        var host = ResolveAgentHost(pod);
+        var baseUrl = $"http://{host}:{modelConfig.Port.ToString(CultureInfo.InvariantCulture)}/v1";
+        var api = modelConfig.Model.Contains("gpt-oss", StringComparison.OrdinalIgnoreCase)
+            ? "responses"
+            : "completions";
+        var apiKey = Environment.GetEnvironmentVariable("PI_API_KEY");
+        var apiKeySource = string.IsNullOrWhiteSpace(apiKey) ? "dummy" : "PI_API_KEY";
+        var systemPrompt = BuildPodAgentSystemPrompt(Environment.CurrentDirectory);
+        var agentArgs = new List<string>
+        {
+            "--base-url",
+            baseUrl,
+            "--model",
+            modelConfig.Model,
+            "--api-key",
+            string.IsNullOrWhiteSpace(apiKey) ? "dummy" : apiKey!,
+            "--api",
+            api,
+            "--system-prompt",
+            systemPrompt
+        };
+        agentArgs.AddRange(userArgs);
+
+        return new PodAgentPromptPlan(
+            pod.Id,
+            modelName,
+            modelConfig.Model,
+            modelConfig.Port,
+            baseUrl,
+            api,
+            apiKeySource,
+            systemPrompt,
+            agentArgs);
+    }
+
+    private static string ResolveAgentHost(PodDefinition pod)
+    {
+        if (!string.IsNullOrWhiteSpace(pod.SshCommand))
+        {
+            var tokens = pod.SshCommand.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            foreach (var token in tokens)
+            {
+                var atIndex = token.IndexOf('@', StringComparison.Ordinal);
+                if (atIndex >= 0 && atIndex + 1 < token.Length)
+                {
+                    return token[(atIndex + 1)..].Trim('\'', '"');
+                }
+            }
+        }
+
+        return string.IsNullOrWhiteSpace(pod.SshHost) ? "localhost" : pod.SshHost.Trim();
+    }
+
+    private static string BuildPodAgentSystemPrompt(string currentDirectory) =>
+        "You help the user understand and navigate the codebase in the current working directory.\n\n" +
+        "You can read files, list directories, and execute shell commands via the respective tools.\n\n" +
+        "Do not output file contents you read via the read_file tool directly, unless asked to.\n\n" +
+        "Do not output markdown tables as part of your responses.\n\n" +
+        "Keep your responses concise and relevant to the user's request.\n\n" +
+        "File paths you output must include line numbers where possible, e.g. \"src/index.ts:10-20\" for lines 10 to 20 in src/index.ts.\n\n" +
+        $"Current working directory: {currentDirectory}";
+
+    private static void PrintAgentPromptPlan(PodAgentPromptPlan plan)
+    {
+        var redactedArgs = RedactAgentArguments(plan.AgentArgs);
+        Console.WriteLine($"pod={plan.PodId} | ok=False | operation=agent | model={plan.ModelName} | upstreamModel={plan.UpstreamModel} | baseUrl={plan.BaseUrl} | api={plan.Api} | apiKeySource={plan.ApiKeySource} | summary=agent prompt execution is not implemented");
+        Console.WriteLine("[agent-args]");
+        Console.WriteLine(string.Join(' ', redactedArgs.Select(QuoteArgumentForDisplay)));
+    }
+
+    private static IReadOnlyList<string> RedactAgentArguments(IReadOnlyList<string> args)
+    {
+        var redacted = new string[args.Count];
+        for (var i = 0; i < args.Count; i++)
+        {
+            redacted[i] = i > 0 && args[i - 1].Equals("--api-key", StringComparison.OrdinalIgnoreCase)
+                ? "[redacted]"
+                : args[i];
+        }
+
+        return redacted;
+    }
+
+    private static string QuoteArgumentForDisplay(string value)
+    {
+        if (value.Length == 0)
+        {
+            return "\"\"";
+        }
+
+        if (!value.Any(char.IsWhiteSpace) && !value.Contains('"', StringComparison.Ordinal))
+        {
+            return value;
+        }
+
+        return "\"" + value.Replace("\\", "\\\\", StringComparison.Ordinal).Replace("\"", "\\\"", StringComparison.Ordinal).ReplaceLineEndings("\\n") + "\"";
+    }
+
     private static string GetDefaultConfigPath()
     {
         return ResolveDefaultConfigPath(Environment.GetEnvironmentVariable(UpstreamConfigDirectoryEnvVar), GetUserHomeDirectory());
@@ -619,6 +725,74 @@ public static class PodsCli
             validator,
             execService,
             "Usage: ssh [--json] [--config path] [--pod pod-id] <command> or ssh [--json] [path] <pod-id> <command>").ConfigureAwait(false);
+    }
+
+    private static async Task<int> ShellAsync(string[] args, PodsConfigStore store, PodsConfigValidator validator, PodExecService execService)
+    {
+        const string usage = "Usage: shell [--json] [--config path] [--pod pod-id] [pod-id]";
+        var jsonOutput = TryConsumeFlag(args, "--json", startIndex: 1, out var shellArgs);
+        if (!TryParseShellCommand(shellArgs, usage, out var parsed))
+        {
+            return 1;
+        }
+
+        var pod = LoadPodOrActiveReport(parsed.ConfigPath, parsed.PodId, store, validator, out var exitCode);
+        if (pod is null) return exitCode;
+
+        if (!jsonOutput)
+        {
+            Console.WriteLine($"Connecting to pod '{pod.Id}'...");
+        }
+
+        var result = await execService.OpenShellAsync(pod).ConfigureAwait(false);
+        if (jsonOutput)
+        {
+            PrintExecJson(result);
+            return result.Success ? 0 : 1;
+        }
+
+        Console.WriteLine($"{result.PodId} | ok={result.Success} | operation=shell | transport={result.Transport} | target={result.Target} | exit={result.ExitCode} | {result.Summary}");
+        if (!string.IsNullOrWhiteSpace(result.StdOut))
+        {
+            Console.WriteLine("[stdout]");
+            Console.WriteLine(result.StdOut.TrimEnd());
+        }
+        if (!string.IsNullOrWhiteSpace(result.StdErr))
+        {
+            Console.WriteLine("[stderr]");
+            Console.WriteLine(result.StdErr.TrimEnd());
+        }
+
+        return result.Success ? 0 : 1;
+    }
+
+    private static int AgentAsync(string[] args, PodsConfigStore store, PodsConfigValidator validator)
+    {
+        const string usage = "Usage: agent [--config path] [--pod pod-id] <model-name> [message/options...]";
+        if (!TryParseAgentCommand(args, usage, out var parsed))
+        {
+            return 1;
+        }
+
+        var pod = LoadPodOrActiveReport(parsed.ConfigPath, parsed.PodId, store, validator, out var exitCode);
+        if (pod is null) return exitCode;
+
+        if (!pod.Models.TryGetValue(parsed.ModelName, out var modelConfig))
+        {
+            Console.Error.WriteLine($"Model '{parsed.ModelName}' not found on pod '{pod.Id}'");
+            return 1;
+        }
+
+        if (modelConfig.Port <= 0)
+        {
+            Console.Error.WriteLine($"Model '{parsed.ModelName}' on pod '{pod.Id}' does not have a valid port.");
+            return 1;
+        }
+
+        var plan = BuildAgentPromptPlan(pod, parsed.ModelName, modelConfig, parsed.UserArgs);
+        PrintAgentPromptPlan(plan);
+        Console.Error.WriteLine("Agent prompt execution is not implemented in Tau.Pods yet.");
+        return 1;
     }
 
     private static async Task<int> RunRemoteCommandAsync(
@@ -3476,6 +3650,96 @@ public static class PodsCli
         return false;
     }
 
+    private static bool TryParseShellCommand(
+        string[] args,
+        string usage,
+        out ShellCommandArguments parsed)
+    {
+        parsed = new ShellCommandArguments(GetDefaultConfigPath(), null);
+        if (args.Length < 1)
+        {
+            Console.Error.WriteLine(usage);
+            return false;
+        }
+
+        if (!TryConsumeConfigAndPodOptions(args, 1, usage, out var positionalArgs, out var configPath, out var podId, out var hasExplicitConfig))
+        {
+            return false;
+        }
+
+        var valueStart = 1;
+        if (!hasExplicitConfig &&
+            positionalArgs.Length > valueStart &&
+            LooksLikeConfigPath(positionalArgs[valueStart]))
+        {
+            configPath = positionalArgs[valueStart];
+            valueStart++;
+        }
+
+        var remaining = positionalArgs.Skip(valueStart).ToArray();
+        if (!string.IsNullOrWhiteSpace(podId))
+        {
+            if (remaining.Length != 0)
+            {
+                Console.Error.WriteLine(usage);
+                return false;
+            }
+
+            parsed = new ShellCommandArguments(configPath, podId);
+            return true;
+        }
+
+        switch (remaining.Length)
+        {
+            case 0:
+                parsed = new ShellCommandArguments(configPath, null);
+                return true;
+            case 1:
+                parsed = new ShellCommandArguments(configPath, remaining[0]);
+                return true;
+            default:
+                Console.Error.WriteLine(usage);
+                return false;
+        }
+    }
+
+    private static bool TryParseAgentCommand(
+        string[] args,
+        string usage,
+        out AgentCommandArguments parsed)
+    {
+        parsed = new AgentCommandArguments(GetDefaultConfigPath(), null, string.Empty, []);
+        if (args.Length < 2)
+        {
+            Console.Error.WriteLine(usage);
+            return false;
+        }
+
+        if (!TryConsumeConfigAndPodOptions(args, 1, usage, out var positionalArgs, out var configPath, out var podId, out var hasExplicitConfig))
+        {
+            return false;
+        }
+
+        var valueStart = 1;
+        if (!hasExplicitConfig &&
+            positionalArgs.Length > valueStart &&
+            LooksLikeConfigPath(positionalArgs[valueStart]))
+        {
+            configPath = positionalArgs[valueStart];
+            valueStart++;
+        }
+
+        var remaining = positionalArgs.Skip(valueStart).ToArray();
+        if (remaining.Length < 1)
+        {
+            Console.Error.WriteLine(usage);
+            return false;
+        }
+
+        parsed = new AgentCommandArguments(configPath, podId, remaining[0], remaining.Skip(1).ToArray());
+        return true;
+    }
+
     private static bool TryResolveLogsTarget(
         PodsConfig config,
         ModelCommandArguments parsed,
@@ -3907,11 +4171,13 @@ public static class PodsCli
         Console.WriteLine("  health [--json] [path]         Check health of all enabled pods");
         Console.WriteLine("  exec [--json] [--config path] [--pod id] <command> Execute a remote command on the active or specified ssh pod");
         Console.WriteLine("  ssh [--json] [--config path] [--pod id] <command> Alias for exec");
+        Console.WriteLine("  shell [--json] [--config path] [--pod id] [pod-id] Open an SSH shell on the active or specified pod");
         Console.WriteLine("  start <model> --name <name> [--json] [--config path] [--pod id] [--memory percent] [--context size] [--gpus n] [--vllm <args...>] Start a vLLM deployment");
         Console.WriteLine("  deploy [--json] [path] <id> <model> [name] Deploy a model to a pod");
         Console.WriteLine("  stop [--json] [--config path] [--pod id] [name] Stop a vLLM deployment, or all deployments if no name is given");
         Console.WriteLine("  restart [--json] [path] <id> <name> Restart a deployment on a pod");
         Console.WriteLine("  logs [--json] [--config path] [--pod id] <name> [tail] Fetch deployment logs from the active or specified pod");
+        Console.WriteLine("  agent [--config path] [--pod id] <name> [message/options...] Build the upstream pod-agent prompt mapping; execution is still open");
         Console.WriteLine("  deployments [--json] [--config path] [--pod id] List deployments on a pod");
         Console.WriteLine("  setup plan [--json] [--mount <command>] [--models-path <path>] [--vllm release|nightly|gpt-oss] [path] <id> Print a plan-only pod setup command");
         Console.WriteLine("  setup run [--json] [--script <path>] [--mount <command>] [--models-path <path>] [--vllm release|nightly|gpt-oss] [path] <id> Execute pod setup over ssh/scp");
@@ -3947,6 +4213,21 @@ public static class PodsCli
     private sealed record StopCompatCommandArguments(string ConfigPath, string? PodId, IReadOnlyList<string> Values, bool JsonOutput);
 
     private sealed record ExecCommandArguments(string ConfigPath, string? PodId, IReadOnlyList<string> CommandParts);
+
+    private sealed record ShellCommandArguments(string ConfigPath, string? PodId);
+
+    private sealed record AgentCommandArguments(string ConfigPath, string? PodId, string ModelName, IReadOnlyList<string> UserArgs);
+
+    private sealed record PodAgentPromptPlan(
+        string PodId,
+        string ModelName,
+        string UpstreamModel,
+        int Port,
+        string BaseUrl,
+        string Api,
+        string ApiKeySource,
+        string SystemPrompt,
+        IReadOnlyList<string> AgentArgs);
 
     private sealed record VllmServeCommandArguments(
         string ConfigPath,

@@ -24,19 +24,36 @@ public sealed class PodExecService
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(command);
 
+        return await ExecuteSshAsync(pod, command.Trim(), cancellationToken, keepAlive, interactiveShell: false).ConfigureAwait(false);
+    }
+
+    public async Task<PodExecResult> OpenShellAsync(
+        PodDefinition pod,
+        CancellationToken cancellationToken = default)
+    {
+        return await ExecuteSshAsync(pod, "shell", cancellationToken, keepAlive: false, interactiveShell: true).ConfigureAwait(false);
+    }
+
+    private async Task<PodExecResult> ExecuteSshAsync(
+        PodDefinition pod,
+        string command,
+        CancellationToken cancellationToken,
+        bool keepAlive,
+        bool interactiveShell)
+    {
         if (!string.IsNullOrWhiteSpace(pod.Endpoint))
         {
             return new PodExecResult(
                 pod.Id,
                 false,
                 "http",
-                command.Trim(),
+                command,
                 pod.Endpoint!,
                 1,
                 string.Empty,
                 string.Empty,
                 TimeSpan.Zero,
-                "endpoint pods do not support remote exec yet",
+                interactiveShell ? "endpoint pods do not support interactive shell yet" : "endpoint pods do not support remote exec yet",
                 PodExecFailureKinds.UnsupportedTransport);
         }
 
@@ -50,26 +67,32 @@ public sealed class PodExecService
             var psi = new ProcessStartInfo
             {
                 FileName = "ssh",
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
+                RedirectStandardOutput = !interactiveShell,
+                RedirectStandardError = !interactiveShell,
                 UseShellExecute = false,
-                CreateNoWindow = true
+                CreateNoWindow = !interactiveShell
             };
             psi.ArgumentList.Add("-p");
             psi.ArgumentList.Add(port.ToString(CultureInfo.InvariantCulture));
-            psi.ArgumentList.Add("-o");
-            psi.ArgumentList.Add("BatchMode=yes");
-            psi.ArgumentList.Add("-o");
-            psi.ArgumentList.Add("ConnectTimeout=5");
-            if (keepAlive)
+            if (!interactiveShell)
             {
                 psi.ArgumentList.Add("-o");
-                psi.ArgumentList.Add("ServerAliveInterval=30");
+                psi.ArgumentList.Add("BatchMode=yes");
                 psi.ArgumentList.Add("-o");
-                psi.ArgumentList.Add("ServerAliveCountMax=120");
+                psi.ArgumentList.Add("ConnectTimeout=5");
+                if (keepAlive)
+                {
+                    psi.ArgumentList.Add("-o");
+                    psi.ArgumentList.Add("ServerAliveInterval=30");
+                    psi.ArgumentList.Add("-o");
+                    psi.ArgumentList.Add("ServerAliveCountMax=120");
+                }
             }
             psi.ArgumentList.Add(host);
-            psi.ArgumentList.Add(command);
+            if (!interactiveShell)
+            {
+                psi.ArgumentList.Add(command);
+            }
 
             var execution = await _executeProcessAsync(psi, cancellationToken).ConfigureAwait(false);
             watch.Stop();
@@ -79,13 +102,15 @@ public sealed class PodExecService
                     pod.Id,
                     false,
                     "ssh",
-                    command.Trim(),
+                    command,
                     target,
                     ProcessFailureExitCode,
                     execution.StdOut,
-                    string.IsNullOrWhiteSpace(execution.StdErr) ? "ssh exec cancelled before completion" : execution.StdErr,
+                    string.IsNullOrWhiteSpace(execution.StdErr)
+                        ? interactiveShell ? "ssh shell cancelled before completion" : "ssh exec cancelled before completion"
+                        : execution.StdErr,
                     watch.Elapsed,
-                    "ssh exec cancelled",
+                    interactiveShell ? "ssh shell cancelled" : "ssh exec cancelled",
                     PodExecFailureKinds.SshExecCancelled);
             }
 
@@ -95,7 +120,7 @@ public sealed class PodExecService
                     pod.Id,
                     false,
                     "ssh",
-                    command.Trim(),
+                    command,
                     target,
                     ProcessFailureExitCode,
                     execution.StdOut,
@@ -106,14 +131,16 @@ public sealed class PodExecService
             }
 
             var success = execution.ExitCode == 0;
-            var summary = success ? "ssh exec ok" : $"ssh exec failed ({execution.ExitCode})";
+            var summary = success
+                ? interactiveShell ? "ssh shell closed" : "ssh exec ok"
+                : interactiveShell ? $"ssh shell failed ({execution.ExitCode})" : $"ssh exec failed ({execution.ExitCode})";
             var failureKind = success ? PodExecFailureKinds.None : ClassifySshExitFailure(execution);
 
             return new PodExecResult(
                 pod.Id,
                 success,
                 "ssh",
-                command.Trim(),
+                command,
                 target,
                 execution.ExitCode,
                 execution.StdOut,
@@ -129,13 +156,13 @@ public sealed class PodExecService
                 pod.Id,
                 false,
                 "ssh",
-                command.Trim(),
+                command,
                 target,
                 ProcessFailureExitCode,
                 string.Empty,
-                "ssh exec cancelled before completion",
+                interactiveShell ? "ssh shell cancelled before completion" : "ssh exec cancelled before completion",
                 watch.Elapsed,
-                "ssh exec cancelled",
+                interactiveShell ? "ssh shell cancelled" : "ssh exec cancelled",
                 PodExecFailureKinds.SshExecCancelled);
         }
         catch (Exception ex) when (IsProcessStartException(ex))
@@ -145,7 +172,7 @@ public sealed class PodExecService
                 pod.Id,
                 false,
                 "ssh",
-                command.Trim(),
+                command,
                 target,
                 ProcessFailureExitCode,
                 string.Empty,
@@ -161,7 +188,7 @@ public sealed class PodExecService
                 pod.Id,
                 false,
                 "ssh",
-                command.Trim(),
+                command,
                 target,
                 ProcessFailureExitCode,
                 string.Empty,
@@ -190,8 +217,12 @@ public sealed class PodExecService
             return ProcessExecutionResult.StartFailed("ssh process start failed: Process.Start returned null");
         }
 
-        var stdoutTask = process.StandardOutput.ReadToEndAsync();
-        var stderrTask = process.StandardError.ReadToEndAsync();
+        var stdoutTask = psi.RedirectStandardOutput
+            ? process.StandardOutput.ReadToEndAsync()
+            : Task.FromResult(string.Empty);
+        var stderrTask = psi.RedirectStandardError
+            ? process.StandardError.ReadToEndAsync()
+            : Task.FromResult(string.Empty);
 
         try
         {

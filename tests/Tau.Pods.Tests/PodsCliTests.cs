@@ -632,6 +632,128 @@ public class PodsCliTests
     }
 
     [Fact]
+    public async Task Shell_WithoutPodId_UsesActivePodAndOpensSshProcess()
+    {
+        var tempDir = Directory.CreateTempSubdirectory("tau-pods-cli-shell-active-");
+        var configPath = Path.Combine(tempDir.FullName, "custom-pods.json");
+        var stdout = new StringWriter();
+        var previousOut = Console.Out;
+        System.Diagnostics.ProcessStartInfo? captured = null;
+        var execService = new PodExecService((psi, _) =>
+        {
+            captured = psi;
+            return Task.FromResult(new PodExecService.ProcessExecutionResult(0, string.Empty, string.Empty));
+        });
+
+        try
+        {
+            Console.SetOut(stdout);
+            var config = ConfigWithSshPod();
+            config.ActivePodId = "ssh-pod";
+            new PodsConfigStore().Save(configPath, config);
+
+            var exitCode = await PodsCli.RunAsync(["shell", "--json", "--config", configPath], execService);
+
+            Assert.Equal(0, exitCode);
+            Assert.NotNull(captured);
+            Assert.Equal("ssh", captured!.FileName);
+            Assert.Equal(["-p", "2222", "pods.example.internal"], captured.ArgumentList.ToArray());
+            Assert.False(captured.RedirectStandardOutput);
+            Assert.False(captured.RedirectStandardError);
+            using var document = JsonDocument.Parse(stdout.ToString());
+            var root = document.RootElement;
+            Assert.Equal("ssh-pod", root.GetProperty("podId").GetString());
+            Assert.True(root.GetProperty("success").GetBoolean());
+            Assert.Equal("shell", root.GetProperty("command").GetString());
+            Assert.Equal("pods.example.internal:2222", root.GetProperty("target").GetString());
+            Assert.Equal("none", root.GetProperty("failureKind").GetString());
+        }
+        finally
+        {
+            Console.SetOut(previousOut);
+            tempDir.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Agent_BuildsUpstreamPromptArgsAndKeepsJsonAsPassthrough()
+    {
+        var tempDir = Directory.CreateTempSubdirectory("tau-pods-cli-agent-plan-");
+        var configPath = Path.Combine(tempDir.FullName, "custom-pods.json");
+        var stdout = new StringWriter();
+        var stderr = new StringWriter();
+        var previousOut = Console.Out;
+        var previousError = Console.Error;
+        var previousApiKey = Environment.GetEnvironmentVariable("PI_API_KEY");
+
+        try
+        {
+            Environment.SetEnvironmentVariable("PI_API_KEY", "secret-pods-key");
+            Console.SetOut(stdout);
+            Console.SetError(stderr);
+            var config = ConfigWithSshPod();
+            config.ActivePodId = "ssh-pod";
+            config.Pods[0].Models["served"] = new PodConfiguredModel
+            {
+                Model = "meta/llama-3",
+                Port = 8123,
+                Gpu = [0],
+                Pid = 123
+            };
+            new PodsConfigStore().Save(configPath, config);
+
+            var exitCode = await PodsCli.RunAsync(["agent", "--config", configPath, "served", "hello", "--json"]);
+
+            var output = stdout.ToString();
+            Assert.Equal(1, exitCode);
+            Assert.Contains("operation=agent", output, StringComparison.Ordinal);
+            Assert.Contains("baseUrl=http://pods.example.internal:8123/v1", output, StringComparison.Ordinal);
+            Assert.Contains("api=completions", output, StringComparison.Ordinal);
+            Assert.Contains("apiKeySource=PI_API_KEY", output, StringComparison.Ordinal);
+            Assert.Contains("--base-url http://pods.example.internal:8123/v1", output, StringComparison.Ordinal);
+            Assert.Contains("--model meta/llama-3", output, StringComparison.Ordinal);
+            Assert.Contains("--api-key [redacted]", output, StringComparison.Ordinal);
+            Assert.Contains("hello --json", output, StringComparison.Ordinal);
+            Assert.DoesNotContain("secret-pods-key", output, StringComparison.Ordinal);
+            Assert.Contains("Agent prompt execution is not implemented", stderr.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("PI_API_KEY", previousApiKey);
+            Console.SetOut(previousOut);
+            Console.SetError(previousError);
+            tempDir.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Agent_UnknownConfiguredModelReportsPromptMappingGap()
+    {
+        var tempDir = Directory.CreateTempSubdirectory("tau-pods-cli-agent-missing-");
+        var configPath = Path.Combine(tempDir.FullName, "custom-pods.json");
+        var stderr = new StringWriter();
+        var previousError = Console.Error;
+
+        try
+        {
+            Console.SetError(stderr);
+            var config = ConfigWithSshPod();
+            config.ActivePodId = "ssh-pod";
+            new PodsConfigStore().Save(configPath, config);
+
+            var exitCode = await PodsCli.RunAsync(["agent", "--config", configPath, "missing"]);
+
+            Assert.Equal(1, exitCode);
+            Assert.Contains("Model 'missing' not found on pod 'ssh-pod'", stderr.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            Console.SetError(previousError);
+            tempDir.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task Deployments_WithoutConfigPath_RejectsNonSshPod()
     {
         await CurrentDirectoryGate.WaitAsync();
