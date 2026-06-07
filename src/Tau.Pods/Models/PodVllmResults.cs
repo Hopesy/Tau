@@ -15,7 +15,8 @@ public sealed record PodVllmOperationResult(
     PodVllmRollbackResult? Rollback = null,
     PodVllmPreflightResult? Preflight = null,
     PodModelOperationResult? Prefetch = null,
-    string? PrefetchTriggerFailureKind = null);
+    string? PrefetchTriggerFailureKind = null,
+    int? ProcessId = null);
 
 public sealed record PodVllmPreflightResult(
     string PodId,

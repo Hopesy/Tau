@@ -219,7 +219,8 @@ public sealed class PodVllmOrchestrationService
             rollback,
             preflight,
             prefetch,
-            prefetchTriggerFailureKind);
+            prefetchTriggerFailureKind,
+            ProcessId: ExtractProcessId(exec.StdOut));
         LogVllmEnd(
             "deploy",
             finalResult.PodId,
@@ -775,23 +776,50 @@ public sealed class PodVllmOrchestrationService
     {
         var unitBaseName = StripServiceSuffix(plan.UnitName);
         var logPath = $"~/.tau_pods/{plan.DeploymentName}.log";
+        var pidPath = $"~/.tau_pods/{plan.DeploymentName}.pid";
         var fallbackCommand =
             $"nohup /usr/bin/env bash -lc {ShellSingleQuote(plan.ServeCommand)} > {logPath} 2>&1 < /dev/null & " +
-            $"echo $! > ~/.tau_pods/{plan.DeploymentName}.pid";
+            $"echo $! > {pidPath}; pid=$(cat {pidPath}); echo \"pid=$pid\"";
         var systemdCommand =
             $"mkdir -p ~/.config/systemd/user && " +
             $"cp ~/.tau_pods/{plan.DeploymentName}.service ~/.config/systemd/user/{plan.UnitName} && " +
             "systemctl --user daemon-reload && " +
             $"systemctl --user enable --now {ShellSingleQuote(plan.UnitName)}";
+        var systemdPidCommand =
+            $"pid=$(systemctl --user show {ShellSingleQuote(plan.UnitName)} --property=MainPID --value 2>/dev/null || true); " +
+            "if [ -n \"$pid\" ] && [ \"$pid\" != \"0\" ]; then echo \"pid=$pid\"; fi";
 
         return
             $"mkdir -p ~/.tau_pods && " +
             $"cat > ~/.tau_pods/{plan.DeploymentName}.service <<'EOF'\n{plan.SystemdUnit}\nEOF\n" +
             $"cat > ~/.tau_pods/{plan.DeploymentName}.json <<'EOF'\n{plan.MetadataJson}\nEOF\n" +
             $"if command -v systemctl >/dev/null 2>&1; then " +
-            $"if {systemdCommand}; then echo {ShellSingleQuote($"started {unitBaseName}")}; " +
+            $"if {systemdCommand}; then echo {ShellSingleQuote($"started {unitBaseName}")}; {systemdPidCommand}; " +
             $"else {fallbackCommand} && echo {ShellSingleQuote($"started {plan.DeploymentName}")}; fi; " +
             $"else {fallbackCommand} && echo {ShellSingleQuote($"started {plan.DeploymentName}")}; fi";
+    }
+
+    private static int? ExtractProcessId(string stdout)
+    {
+        foreach (var line in stdout.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
+        {
+            var trimmed = line.Trim();
+            if (!trimmed.StartsWith("pid=", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (int.TryParse(
+                trimmed["pid=".Length..],
+                System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out var pid) && pid > 0)
+            {
+                return pid;
+            }
+        }
+
+        return null;
     }
 
     private static string BuildPreflightCommand(string modelCachePath, string? revision)

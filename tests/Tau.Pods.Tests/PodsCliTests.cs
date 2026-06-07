@@ -2967,7 +2967,7 @@ public class PodsCliTests
                 return Task.FromResult(new PodExecService.ProcessExecutionResult(0, PreflightOk("/mnt/models/models--org--model"), ""));
             }
 
-            return Task.FromResult(new PodExecService.ProcessExecutionResult(0, "started\n", ""));
+            return Task.FromResult(new PodExecService.ProcessExecutionResult(0, "started\npid=4567\n", ""));
         });
 
         try
@@ -2998,13 +2998,14 @@ public class PodsCliTests
             var selected = document.RootElement.GetProperty("plan").GetProperty("selectedGpus");
             Assert.Equal(1, selected.GetArrayLength());
             Assert.Equal(1, selected[0].GetInt32());
+            Assert.Equal(4567, document.RootElement.GetProperty("processId").GetInt32());
 
             var saved = store.Load(configPath);
             var savedModel = saved.Pods[0].Models["served-model"];
             Assert.Equal("org/model", savedModel.Model);
             Assert.Equal(8000, savedModel.Port);
             Assert.Equal([1], savedModel.Gpu);
-            Assert.Equal(0, savedModel.Pid);
+            Assert.Equal(4567, savedModel.Pid);
             Assert.True(saved.Pods[0].Models.ContainsKey("busy"));
         }
         finally

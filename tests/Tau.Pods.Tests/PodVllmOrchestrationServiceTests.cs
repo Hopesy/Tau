@@ -27,7 +27,7 @@ public sealed class PodVllmOrchestrationServiceTests
 
             return command.Contains("/health", StringComparison.Ordinal)
                 ? Task.FromResult(new PodExecService.ProcessExecutionResult(0, "ready\n", ""))
-                : Task.FromResult(new PodExecService.ProcessExecutionResult(0, "started tau-pod-llama-8b\n", ""));
+                : Task.FromResult(new PodExecService.ProcessExecutionResult(0, "started tau-pod-llama-8b\npid=4321\n", ""));
         });
         var service = new PodVllmOrchestrationService(exec);
         var pod = new PodDefinition
@@ -45,6 +45,7 @@ public sealed class PodVllmOrchestrationServiceTests
         Assert.Equal("deploy", result.Operation);
         Assert.Equal("llama-8b", result.DeploymentName);
         Assert.Equal(0, result.ExitCode);
+        Assert.Equal(4321, result.ProcessId);
         Assert.NotNull(result.Plan);
         Assert.NotNull(result.Preflight);
         Assert.True(result.Preflight.Success);
@@ -63,11 +64,13 @@ public sealed class PodVllmOrchestrationServiceTests
         Assert.Contains("cat > ~/.tau_pods/llama-8b.json <<'EOF'", command, StringComparison.Ordinal);
         Assert.Contains("if mkdir -p ~/.config/systemd/user", command, StringComparison.Ordinal);
         Assert.Contains("systemctl --user enable --now 'tau-pod-llama-8b.service'", command, StringComparison.Ordinal);
+        Assert.Contains("systemctl --user show 'tau-pod-llama-8b.service' --property=MainPID --value", command, StringComparison.Ordinal);
         Assert.Contains("WantedBy=default.target", command, StringComparison.Ordinal);
         Assert.Contains("else nohup /usr/bin/env bash -lc", command, StringComparison.Ordinal);
         Assert.Contains("nohup /usr/bin/env bash -lc", command, StringComparison.Ordinal);
         Assert.Contains("> ~/.tau_pods/llama-8b.log 2>&1", command, StringComparison.Ordinal);
         Assert.Contains("echo $! > ~/.tau_pods/llama-8b.pid", command, StringComparison.Ordinal);
+        Assert.Contains("echo \"pid=$pid\"", command, StringComparison.Ordinal);
         Assert.Contains("vLLM deployment 'llama-8b' started and is ready", result.Summary, StringComparison.Ordinal);
         Assert.Contains("curl -fsS --max-time 2 \"http://127.0.0.1:$port/health\"", RemoteCommand(captured[2]), StringComparison.Ordinal);
     }

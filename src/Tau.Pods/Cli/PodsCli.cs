@@ -2457,6 +2457,7 @@ public static class PodsCli
         writer.WriteNumber("exitCode", result.ExitCode);
         writer.WriteString("stdout", result.StdOut);
         writer.WriteString("stderr", result.StdErr);
+        WriteNullableNumber(writer, "processId", result.ProcessId);
         if (result.Prefetch is not null)
         {
             writer.WritePropertyName("prefetch");

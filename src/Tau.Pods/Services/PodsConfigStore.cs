@@ -65,7 +65,7 @@ public sealed class PodsConfigStore
             Model = result.Plan.ModelId,
             Port = result.Plan.Port,
             Gpu = result.Plan.SelectedGpuIds?.ToList() ?? [],
-            Pid = 0
+            Pid = result.ProcessId ?? 0
         };
     }
 
