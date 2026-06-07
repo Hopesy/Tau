@@ -1,9 +1,11 @@
 using System.Text.Json;
+using Tau.Agent.Platform;
 using Tau.Agent.Proxy;
 using Tau.Agent.Runtime;
 using Tau.Ai;
 using Tau.Ai.Observability;
 using Tau.Ai.Providers;
+using Tau.Ai.Providers.Faux;
 using Tau.Ai.Streaming;
 
 namespace Tau.Agent.Tests;
@@ -109,6 +111,40 @@ public sealed class AgentPublicApiCompileSampleTests
         };
         Assert.Equal(ProxyStreamProvider.DefaultApi, proxyProvider.Api);
         Assert.Equal("/api/stream", proxyOptions.StreamPath);
+
+        var platformRegistry = new ProviderRegistry();
+        var faux = Faux.Register(platformRegistry);
+        faux.SetResponses([
+            Faux.AssistantMessage(
+                [Faux.ToolCall("echo", new Dictionary<string, object?> { ["text"] = "platform hello" }, "platform-call")],
+                stopReason: StopReason.ToolUse),
+            Faux.AssistantMessage("platform done")
+        ]);
+        var sessions = new InMemoryAgentSessionStore();
+        var platformApp = AgentApplication.CreateBuilder()
+            .UseProviderRegistry(platformRegistry)
+            .UseModel(faux.GetModel())
+            .UseSystemPrompt("platform system")
+            .UseSessionId("platform-session")
+            .UseSessionStore(sessions)
+            .UseLogSink(NullTauLogSink.Instance)
+            .AddTool(
+                "echo",
+                "Echo",
+                "Echoes text.",
+                CreateEchoSchema(),
+                (context, _) => new ToolResult([
+                    new TextContent(context.Arguments.GetProperty("text").GetString() ?? string.Empty)
+                ]))
+            .Build();
+
+        var platformResult = await platformApp.PromptAsync("run platform").WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.True(platformResult.IsSuccess);
+        Assert.True(platformResult.SavedSession);
+        Assert.Equal("platform done", platformResult.AssistantText);
+        Assert.Equal("platform-session", platformResult.LogContext.SessionId);
+        Assert.Equal("platform-session", sessions.Load("platform-session")?.SessionId);
     }
 
     private static string ReadText(IReadOnlyList<ContentBlock> content) =>
@@ -123,6 +159,21 @@ public sealed class AgentPublicApiCompileSampleTests
         }
 
         return collected;
+    }
+
+    private static JsonElement CreateEchoSchema()
+    {
+        using var document = JsonDocument.Parse(
+            """
+            {
+                "type": "object",
+                "properties": {
+                    "text": { "type": "string" }
+                },
+                "required": ["text"]
+            }
+            """);
+        return document.RootElement.Clone();
     }
 
     private sealed class SampleProvider(params AssistantMessage[] messages) : IStreamProvider

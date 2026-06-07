@@ -9,6 +9,10 @@
     <Project Path="src/Tau.Tui/Tau.Tui.csproj" />
     <Project Path="src/Tau.WebUi/Tau.WebUi.csproj" />
   </Folder>
+  <Folder Name="/examples/">
+    <Project Path="examples/Tau.Agent.ConsoleExample/Tau.Agent.ConsoleExample.csproj" />
+    <Project Path="examples/Tau.Agent.HttpExample/Tau.Agent.HttpExample.csproj" />
+  </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Tau.Agent.Tests/Tau.Agent.Tests.csproj" />
     <Project Path="tests/Tau.Ai.Tests/Tau.Ai.Tests.csproj" />

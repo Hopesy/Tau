@@ -73,6 +73,13 @@ function Invoke-AiCliSmoke {
     }
 }
 
+function Invoke-AgentPlatformExamplesSmoke {
+    powershell -NoProfile -ExecutionPolicy Bypass -File '.\scripts\verify-agent-platform-examples.ps1' -SkipRestore
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+}
+
 function Invoke-WebUiSmoke {
     $smokeRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("tau-webui-smoke-" + [Guid]::NewGuid().ToString("N"))
     $sessionsPath = Join-Path $smokeRoot 'webui-sessions.json'
@@ -284,6 +291,8 @@ foreach ($project in $testProjects) {
 if ($RunSmoke) {
     Write-Host '==> smoke tau-ai'
     Invoke-AiCliSmoke
+    Write-Host '==> smoke agent platform examples'
+    Invoke-AgentPlatformExamplesSmoke
     Write-Host '==> smoke webui'
     Invoke-WebUiSmoke
     Write-Host '==> smoke mom'

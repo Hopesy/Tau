@@ -1,7 +1,10 @@
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Threading.Channels;
 using Tau.Ai;
+using Tau.Ai.Observability;
 using Tau.Ai.Providers;
+using Tau.Ai.Registry;
 using Tau.Ai.Streaming;
 
 namespace Tau.Agent.Runtime;
@@ -137,11 +140,38 @@ public sealed class AgentRuntime
                         yield break;
                     }
 
-                    var stream = StreamFunctions.StreamSimple(
+                    var streamOptions = config.StreamOptions ?? new SimpleStreamOptions();
+                    var providerRunStartedAt = LogProviderRunStart(config, context, streamOptions);
+                    var providerRunEnded = false;
+                    void LogProviderEnd(
+                        bool success,
+                        string failureKind,
+                        AssistantMessage? message,
+                        string? exceptionType = null)
+                    {
+                        if (providerRunEnded)
+                        {
+                            return;
+                        }
+
+                        providerRunEnded = true;
+                        LogProviderRunEnd(
+                            config,
+                            context,
+                            streamOptions,
+                            providerRunStartedAt,
+                            success,
+                            failureKind,
+                            message,
+                            exceptionType);
+                    }
+
+                    var stream = StartProviderStream(
                         config.ProviderRegistry,
                         config.Model,
                         context,
-                        config.StreamOptions ?? new SimpleStreamOptions());
+                        streamOptions,
+                        ex => LogProviderEnd(false, "exception", State.StreamingMessage, ex.GetType().Name));
 
                     AssistantMessage? assistantMessage = null;
                     var assistantStarted = false;
@@ -150,11 +180,16 @@ public sealed class AgentRuntime
                     await using var streamEnumerator = stream.GetAsyncEnumerator(token);
                     while (true)
                     {
-                        var streamRead = await MoveNextStreamAsync(streamEnumerator, token).ConfigureAwait(false);
+                        var streamRead = await MoveNextStreamAsync(
+                            streamEnumerator,
+                            token,
+                            ex => LogProviderEnd(false, "exception", State.StreamingMessage, ex.GetType().Name))
+                            .ConfigureAwait(false);
                         if (streamRead.Cancelled)
                         {
                             const string error = "Operation canceled.";
                             assistantMessage = CreateFailureMessage(error, StopReason.Aborted, config.Model, State.StreamingMessage);
+                            LogProviderEnd(false, "cancelled", assistantMessage);
                             State.SetStreaming(false);
                             State.SetError(error);
                             if (!assistantStarted)
@@ -183,6 +218,8 @@ public sealed class AgentRuntime
                         else if (evt is DoneEvent done)
                         {
                             assistantMessage = done.Message;
+                            var success = IsSuccessfulProviderMessage(done.Message);
+                            LogProviderEnd(success, success ? "none" : GetProviderFailureKind(done.Message), done.Message);
                             State.SetStreaming(false);
                             if (!assistantStarted)
                             {
@@ -198,6 +235,7 @@ public sealed class AgentRuntime
                                 ErrorMessage = error.Error,
                                 StopReason = error.Message?.StopReason ?? error.Partial?.StopReason ?? StopReason.Error
                             };
+                            LogProviderEnd(false, "stream-error", assistantMessage);
                             State.SetStreaming(false);
                             State.SetError(error.Error);
                             if (!assistantStarted)
@@ -220,6 +258,7 @@ public sealed class AgentRuntime
                     {
                         const string error = "Stream ended without a message.";
                         assistantMessage = CreateFailureMessage(error, StopReason.Error, config.Model);
+                        LogProviderEnd(false, "stream-ended-without-message", assistantMessage);
                         State.SetError(error);
                         if (!assistantStarted)
                         {
@@ -298,7 +337,8 @@ public sealed class AgentRuntime
 
     private static async Task<StreamReadResult> MoveNextStreamAsync(
         IAsyncEnumerator<StreamEvent> enumerator,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Action<Exception>? onException = null)
     {
         try
         {
@@ -313,7 +353,151 @@ public sealed class AgentRuntime
         {
             return new StreamReadResult(false, true, null);
         }
+        catch (Exception ex)
+        {
+            onException?.Invoke(ex);
+            throw;
+        }
     }
+
+    private static long LogProviderRunStart(
+        AgentLoopConfig config,
+        LlmContext context,
+        SimpleStreamOptions streamOptions)
+    {
+        var startedAt = Stopwatch.GetTimestamp();
+        var fields = CreateProviderRunFields(config, context, streamOptions);
+        config.LogContext?.AddTo(fields);
+        config.LogSink.Log(new TauLogEvent("provider", "run.start", DateTimeOffset.UtcNow, fields));
+        return startedAt;
+    }
+
+    private static AssistantMessageStream StartProviderStream(
+        ProviderRegistry providerRegistry,
+        Model model,
+        LlmContext context,
+        SimpleStreamOptions streamOptions,
+        Action<Exception> onException)
+    {
+        try
+        {
+            return StreamFunctions.StreamSimple(providerRegistry, model, context, streamOptions);
+        }
+        catch (Exception ex)
+        {
+            onException(ex);
+            throw;
+        }
+    }
+
+    private static void LogProviderRunEnd(
+        AgentLoopConfig config,
+        LlmContext context,
+        SimpleStreamOptions streamOptions,
+        long startedAt,
+        bool success,
+        string failureKind,
+        AssistantMessage? message,
+        string? exceptionType = null)
+    {
+        var fields = CreateProviderRunFields(config, context, streamOptions);
+        fields["success"] = success ? "true" : "false";
+        fields["failureKind"] = failureKind;
+        fields["durationMs"] = Stopwatch.GetElapsedTime(startedAt)
+            .TotalMilliseconds
+            .ToString("F0", System.Globalization.CultureInfo.InvariantCulture);
+
+        if (message?.StopReason is { } stopReason)
+        {
+            fields["stopReason"] = FormatEnum(stopReason);
+        }
+
+        if (message?.Usage is { } usage)
+        {
+            AddUsageFields(fields, config.Model, usage);
+        }
+
+        if (!string.IsNullOrWhiteSpace(exceptionType))
+        {
+            fields["exceptionType"] = exceptionType.Trim();
+        }
+
+        config.LogContext?.AddTo(fields);
+        config.LogSink.Log(new TauLogEvent("provider", "run.end", DateTimeOffset.UtcNow, fields));
+    }
+
+    private static Dictionary<string, string?> CreateProviderRunFields(
+        AgentLoopConfig config,
+        LlmContext context,
+        SimpleStreamOptions streamOptions)
+    {
+        var fields = new Dictionary<string, string?>
+        {
+            ["provider"] = config.Model.Provider,
+            ["model"] = config.Model.Id,
+            ["api"] = config.Model.Api,
+            ["messageCount"] = context.Messages.Count.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            ["toolCount"] = (context.Tools?.Count ?? 0).ToString(System.Globalization.CultureInfo.InvariantCulture),
+            ["transport"] = FormatEnum(streamOptions.Transport),
+            ["cacheRetention"] = FormatEnum(streamOptions.CacheRetention)
+        };
+
+        AddOptionalField(fields, "providerSessionId", streamOptions.SessionId);
+        if (streamOptions.Reasoning is { } reasoning)
+        {
+            fields["reasoning"] = FormatEnum(reasoning);
+        }
+
+        return fields;
+    }
+
+    private static void AddUsageFields(
+        IDictionary<string, string?> fields,
+        Model model,
+        Usage usage)
+    {
+        fields["inputTokens"] = usage.InputTokens.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        fields["outputTokens"] = usage.OutputTokens.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        AddOptionalInt(fields, "cacheReadTokens", usage.CacheReadTokens);
+        AddOptionalInt(fields, "cacheWriteTokens", usage.CacheWriteTokens);
+        AddOptionalField(fields, "serviceTier", usage.ServiceTier);
+
+        if (model.Cost is not null)
+        {
+            var cost = ModelCatalog.CalculateCost(model, usage);
+            fields["inputCost"] = cost.Input.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            fields["outputCost"] = cost.Output.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            fields["cacheReadCost"] = cost.CacheRead.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            fields["cacheWriteCost"] = cost.CacheWrite.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            fields["totalCost"] = cost.Total.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        }
+    }
+
+    private static void AddOptionalInt(IDictionary<string, string?> fields, string name, int? value)
+    {
+        if (value.HasValue)
+        {
+            fields[name] = value.Value.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        }
+    }
+
+    private static void AddOptionalField(IDictionary<string, string?> fields, string name, string? value)
+    {
+        if (!string.IsNullOrWhiteSpace(value))
+        {
+            fields[name] = value.Trim();
+        }
+    }
+
+    private static bool IsSuccessfulProviderMessage(AssistantMessage message) =>
+        string.IsNullOrWhiteSpace(message.ErrorMessage) &&
+        message.StopReason is not StopReason.Error and not StopReason.Aborted;
+
+    private static string GetProviderFailureKind(AssistantMessage message) =>
+        message.StopReason == StopReason.Aborted ? "cancelled" : "error";
+
+    private static string FormatEnum<T>(T value) where T : struct, Enum =>
+        value.ToString().ToLowerInvariant();
 
     private static AssistantMessage CreateFailureMessage(
         string error,
