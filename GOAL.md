@@ -35,6 +35,38 @@
 - release/CI 产出真实 Tau executable/package artifacts；不能只保留 dry-run、fake runner 或占位 wrapper。
 - 每个实质变更都有 `docs/histories/YYYY-MM/**` 记录；active plan、matrix、`next.md`、`docs/QUALITY_SCORE.md` 和必要架构/安全/可靠性文档同步。
 
+## Current audit snapshot
+
+本节是 2026-06-07 重新审视后的当前事实面，用来防止把 baseline、fake tests 或局部 planning 误写成 100% 完成。
+
+- 上游 package directory set 当前仍是 `agent`、`ai`、`coding-agent`、`mom`、`pods`、`tui`、`web-ui`，与 Phase 1 inventory freeze 匹配；本轮没有发现新的未知上游 package。
+- 上游 root scripts 当前仍包括 `build-binaries.sh`、`release.mjs`、`check-browser-smoke.mjs`、`browser-smoke-entry.ts`、`session-transcripts.ts`、`profile-coding-agent-node.mjs`、`edit-tool-stats.mjs`、`cost.ts`、`sync-versions.js`；这些 release/test/audit surfaces 仍不能用普通 `dotnet test` 替代最终验收。
+- 当前 matrix 表格行粗略状态统计为 `partial=188`、`external-e2e-needed=31`、`ported=30`、`missing=12`、`non-goal-proposed=1`、`verified=0`。这说明当前仓库是高覆盖 baseline + 大量局部合同测试状态，不是 100% 移植完成状态。
+- 当前本地工作树审视时存在 `.github/workflows/tau-ci.yml` 删除状态；该删除不属于本轮 100% plan 证据，不得在没有单独 CI 审计时顺手 stage 或用于完成声明。
+- `docs/QUALITY_SCORE.md` 当前仍把关键产品面、测试、CI/CD、可观测性、安全配置标为 `C` 风险；只要这些风险仍指向 parity 缺口，Final audit 就不能关闭。
+
+## 100% acceptance ledger
+
+| Gate | Current state | Work required before 100% |
+| --- | --- | --- |
+| Inventory coverage | Phase 1 grouped inventory 已覆盖 7 个上游 package 和 root scripts；但 matrix 行仍主要是 `partial` / `ported` / `external-e2e-needed`。 | 每个 file/surface/root-script row 必须最终转成 `verified`，或有用户明确确认的 `non-goal`；不得保留 `partial`、`missing`、`ported`、`external-e2e-needed`。 |
+| Contract parity | AI/Agent/CodingAgent/Tui/WebUi/Mom/Pods 都有多条 local contract baseline。 | 关闭 public API/bin/export、CLI/RPC/HTTP、config/env、persisted schema、runtime log、failureKind/error shape、session/tree/schema 和 operation result schema 的剩余缺口。 |
+| Product runtime parity | CodingAgent/Tui、WebUi、Mom、Pods 已有本地可运行产品切片。 | 补真实 terminal host、branch/tree persistence、artifact/runtime bridge、Slack/Docker runtime、Pods setup/deploy/log/startup/rollback/allocation 等用户会实际碰到的路径。 |
+| External e2e | 当前大多是 fake/stub/contract tests；matrix 仍保留 provider/OAuth/AWS/Slack/Docker/Pods/WebUi/release external e2e。 | 用真实凭证、真实服务、真实容器或真实远端 pod 跑脱敏 smoke；没有环境时保持 open，最终只能由用户确认 `non-goal` 关闭。 |
+| Release/package/install | 已有 PowerShell-first gate、artifact baseline、release dry-run/apply helpers、package publish/sign/provenance dry-run contracts。 | 完成真实 registry publish rehearsal、package consumer smoke、signing/provenance rehearsal、non-host executable smoke、global alias/install parity、release/static browser smoke。 |
+| Documentation and history | `GOAL.md`、active plan、matrix、`next.md`、quality/history 已建立协作闭环。 | 每个实质切片同轮同步 matrix/active plan/next/quality/history；最终 `next.md` 不得隐藏任何 product parity backlog。 |
+| Final validation | 本地 PowerShell gate 曾多次通过，但这只是当前 baseline 证据。 | 最终必须重新通过 `verify-dotnet.ps1 -SkipRestore`、`verify-dotnet.ps1 -SkipRestore -RunSmoke`、release/package gates 和 external e2e gates，再归档 active plan。 |
+
+## Gap classification plan
+
+后续每个 `/goal` 执行切片必须先归入一个 blocker class，再领取对应 matrix row；同一提交不能混合多个无关 class。
+
+- `contract`：先收口 AI public API/bin/export、Agent facade/export/proxy、CodingAgent CLI/RPC/session/config、Tui host/component contracts、WebUi session/artifact API、Mom channel/session/log schema、Pods command/config/schema。验收以 source 对照、targeted tests、compile/API sample、CLI/RPC/HTTP shape 为准。
+- `runtime`：再收口真实产品路径。重点是 CodingAgent/Tui terminal host 和 settings/runtime wiring、WebUi branch/tree + artifact sandbox、Mom Slack-compatible delegation + Docker sandbox、Pods top-level operation compatibility + setup/start/log/rollback/allocation。
+- `external-e2e`：把 AI provider/OAuth/AWS、Slack、Docker、Pods SSH/HF/GPU/vLLM、WebUi packaged/browser、release/static smoke 从 fake/stub 证据推进到真实环境证据；没有真实环境时不得降级为完成。
+- `release-package`：关闭 root scripts/manifests、no-env/pi-test shell parity、build/release/finalize/publish/sign/provenance、NuGet/package consumer、global alias/install、non-host executable smoke。
+- `final-audit`：只在 matrix 清零、`next.md` parity backlog 清零、quality 不再标出影响 parity 的 `C` 风险、两条 PowerShell gate 和所有 release/e2e gate 通过后执行。
+
 ## Current 100% gap map
 
 本节是当前审视后的 100% 移植缺口地图。它不替代 matrix，但为后续 `/goal` 执行提供主控分派顺序。所有条目最终只能以 `verified` 或用户明确确认的 `non-goal` 关闭；`ported`、`partial`、`missing`、`external-e2e-needed` 都不是完成状态。
