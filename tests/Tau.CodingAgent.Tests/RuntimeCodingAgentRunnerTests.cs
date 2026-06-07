@@ -236,7 +236,7 @@ public class RuntimeCodingAgentRunnerTests
             events.Add(evt);
         }
 
-        var startEvent = Assert.Single(sink.Events, e => e.Event == "run.start");
+        var startEvent = Assert.Single(sink.Events, e => e.Category == "agent" && e.Event == "run.start");
         Assert.Equal("agent", startEvent.Category);
         Assert.Equal("test-provider", startEvent.Fields["provider"]);
         Assert.Equal("test-model", startEvent.Fields["model"]);
@@ -245,14 +245,14 @@ public class RuntimeCodingAgentRunnerTests
         Assert.Equal("session-1", startEvent.Fields["sessionId"]);
         Assert.Equal("message-1", startEvent.Fields["messageId"]);
 
-        var endEvent = Assert.Single(sink.Events, e => e.Event == "run.end");
+        var endEvent = Assert.Single(sink.Events, e => e.Category == "agent" && e.Event == "run.end");
         Assert.Equal("agent", endEvent.Category);
         Assert.True(int.Parse(endEvent.Fields["elapsedMs"]!, System.Globalization.CultureInfo.InvariantCulture) >= 0);
         Assert.Equal(startEvent.Fields["correlationId"], endEvent.Fields["correlationId"]);
         Assert.Equal("session-1", endEvent.Fields["sessionId"]);
         Assert.Equal("message-1", endEvent.Fields["messageId"]);
 
-        Assert.DoesNotContain(sink.Events, e => e.Event == "run.error" || e.Event == "run.cancel");
+        Assert.DoesNotContain(sink.Events, e => e.Category == "agent" && (e.Event == "run.error" || e.Event == "run.cancel"));
     }
 
     [Fact]
@@ -275,12 +275,12 @@ public class RuntimeCodingAgentRunnerTests
 
         await foreach (var _ in runner.RunAsync("hello", runContext)) { }
 
-        var startEvent = Assert.Single(sink.Events, e => e.Event == "run.start");
+        var startEvent = Assert.Single(sink.Events, e => e.Category == "agent" && e.Event == "run.start");
         Assert.Equal("run-correlation", startEvent.Fields["correlationId"]);
         Assert.Equal("run-session", startEvent.Fields["sessionId"]);
         Assert.Equal("run-message", startEvent.Fields["messageId"]);
 
-        var endEvent = Assert.Single(sink.Events, e => e.Event == "run.end");
+        var endEvent = Assert.Single(sink.Events, e => e.Category == "agent" && e.Event == "run.end");
         Assert.Equal("run-correlation", endEvent.Fields["correlationId"]);
         Assert.Equal("run-session", endEvent.Fields["sessionId"]);
         Assert.Equal("run-message", endEvent.Fields["messageId"]);
@@ -297,14 +297,18 @@ public class RuntimeCodingAgentRunnerTests
             await foreach (var _ in runner.RunAsync("hi")) { }
         });
 
-        Assert.Contains(sink.Events, e => e.Event == "run.start");
-        var errorEvent = Assert.Single(sink.Events, e => e.Event == "run.error");
+        Assert.Contains(sink.Events, e => e.Category == "agent" && e.Event == "run.start");
+        var errorEvent = Assert.Single(sink.Events, e => e.Category == "agent" && e.Event == "run.error");
         Assert.Equal("InvalidOperationException", errorEvent.Fields["error"]);
         Assert.Equal("boom", errorEvent.Fields["message"]);
-        var startEvent = Assert.Single(sink.Events, e => e.Event == "run.start");
+        var startEvent = Assert.Single(sink.Events, e => e.Category == "agent" && e.Event == "run.start");
         Assert.False(string.IsNullOrWhiteSpace(startEvent.Fields["correlationId"]));
         Assert.Equal(startEvent.Fields["correlationId"], errorEvent.Fields["correlationId"]);
-        Assert.DoesNotContain(sink.Events, e => e.Event == "run.end");
+        Assert.DoesNotContain(sink.Events, e => e.Category == "agent" && e.Event == "run.end");
+        var providerEnd = Assert.Single(sink.Events, e => e.Category == "provider" && e.Event == "run.end");
+        Assert.Equal("false", providerEnd.Fields["success"]);
+        Assert.Equal("exception", providerEnd.Fields["failureKind"]);
+        Assert.Equal("InvalidOperationException", providerEnd.Fields["exceptionType"]);
     }
 
     [Fact]

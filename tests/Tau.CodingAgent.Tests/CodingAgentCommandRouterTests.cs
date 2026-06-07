@@ -528,6 +528,112 @@ public class CodingAgentCommandRouterTests
     }
 
     [Fact]
+    public async Task TryHandleAsync_SettingsCommand_AppliesSettingsListValuePayloads()
+    {
+        var settingsPath = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-settings-list-values-{Guid.NewGuid():N}.json");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var settingsStore = new CodingAgentSettingsStore(settingsPath);
+        var selections = new Queue<string?>(
+        [
+            CodingAgentSettingsSelector.FormatSelection(CodingAgentSettingsSelector.TerminalShowImagesAction, "false"),
+            CodingAgentSettingsSelector.FormatSelection(CodingAgentSettingsSelector.ImagesAutoResizeAction, "false"),
+            CodingAgentSettingsSelector.FormatSelection(CodingAgentSettingsSelector.ImagesBlockImagesAction, "true"),
+            CodingAgentSettingsSelector.FormatSelection(CodingAgentSettingsSelector.ShowHardwareCursorAction, "true"),
+            CodingAgentSettingsSelector.FormatSelection(CodingAgentSettingsSelector.EditorPaddingAction, "3"),
+            CodingAgentSettingsSelector.FormatSelection(CodingAgentSettingsSelector.AutocompleteMaxVisibleAction, "15"),
+            CodingAgentSettingsSelector.FormatSelection(CodingAgentSettingsSelector.TerminalClearOnShrinkAction, "true"),
+            CodingAgentSettingsSelector.FormatSelection(CodingAgentSettingsSelector.QuietStartupAction, "true"),
+            CodingAgentSettingsSelector.FormatSelection(CodingAgentSettingsSelector.CollapseChangelogAction, "true"),
+            CodingAgentSettingsSelector.FormatSelection(CodingAgentSettingsSelector.InstallTelemetryAction, "false"),
+            CodingAgentSettingsSelector.FormatSelection(CodingAgentSettingsSelector.SteeringModeAction, "all"),
+            CodingAgentSettingsSelector.FormatSelection(CodingAgentSettingsSelector.FollowUpModeAction, "all"),
+            CodingAgentSettingsSelector.FormatSelection(CodingAgentSettingsSelector.TreeFilterModeAction, "labeled-only"),
+            CodingAgentSettingsSelector.FormatSelection(CodingAgentSettingsSelector.ThinkingLevelAction, "high"),
+            CodingAgentSettingsSelector.FormatSelection(CodingAgentSettingsSelector.AutoCompactionAction, "true")
+        ]);
+        bool? autoCompactionChanged = null;
+        var router = new CodingAgentCommandRouter(
+            runner,
+            settingsStore,
+            autoCompactionChanged: enabled => autoCompactionChanged = enabled,
+            settingsSelector: (_, _) => Task.FromResult(selections.Dequeue()));
+
+        try
+        {
+            settingsStore.Save(new CodingAgentSettingsSnapshot(
+                "openai",
+                "gpt-5.4",
+                RetryMaxAttempts: 4,
+                RetryBaseDelayMilliseconds: 125,
+                EnabledModels: ["google/gemini-2.5-pro"]));
+
+            var results = new List<CodingAgentCommandResult>();
+            while (selections.Count > 0)
+            {
+                results.Add(await router.TryHandleAsync("/settings select"));
+            }
+
+            var saved = settingsStore.Load();
+
+            Assert.All(
+                results,
+                result =>
+                {
+                    Assert.True(result.Handled);
+                    Assert.False(result.IsError);
+                });
+            Assert.Contains(results, result => result.Message == "show images: disabled");
+            Assert.Contains(results, result => result.Message == "auto-resize images: disabled");
+            Assert.Contains(results, result => result.Message == "block images: enabled");
+            Assert.Contains(results, result => result.Message == "show hardware cursor: enabled");
+            Assert.Contains(results, result => result.Message == "editor padding: 3");
+            Assert.Contains(results, result => result.Message == "autocomplete max items: 15");
+            Assert.Contains(results, result => result.Message == "clear on shrink: enabled");
+            Assert.Contains(results, result => result.Message == "quiet startup: enabled");
+            Assert.Contains(results, result => result.Message == "collapse changelog: enabled");
+            Assert.Contains(results, result => result.Message == "install telemetry: disabled");
+            Assert.Contains(results, result => result.Message == "steering mode: all");
+            Assert.Contains(results, result => result.Message == "follow-up mode: all");
+            Assert.Contains(results, result => result.Message == "tree filter: labeled-only");
+            Assert.Contains(results, result => result.Message == "thinking: high");
+            Assert.Contains(results, result => result.Message == "auto compaction: enabled");
+
+            Assert.False(saved.TerminalShowImages);
+            Assert.False(saved.ImagesAutoResize);
+            Assert.True(saved.ImagesBlockImages);
+            Assert.True(saved.ShowHardwareCursor);
+            Assert.Equal(3, saved.EditorPaddingX);
+            Assert.Equal(15, saved.AutocompleteMaxVisible);
+            Assert.True(saved.TerminalClearOnShrink);
+            Assert.True(saved.QuietStartup);
+            Assert.True(saved.CollapseChangelog);
+            Assert.False(saved.EnableInstallTelemetry);
+            Assert.Equal("all", saved.SteeringMode);
+            Assert.Equal("all", saved.FollowUpMode);
+            Assert.Equal("labeled-only", saved.TreeFilterMode);
+            Assert.Equal("high", saved.DefaultThinkingLevel);
+            Assert.True(saved.AutoCompactionEnabled);
+            Assert.Equal(AgentQueueMode.All, runner.SteeringMode);
+            Assert.Equal(AgentQueueMode.All, runner.FollowUpMode);
+            Assert.Equal(ThinkingLevel.High, runner.ThinkingLevel);
+            Assert.True(autoCompactionChanged);
+            Assert.Equal("openai", saved.DefaultProvider);
+            Assert.Equal("gpt-5.4", saved.DefaultModel);
+            Assert.Equal(4, saved.RetryMaxAttempts);
+            Assert.Equal(125, saved.RetryBaseDelayMilliseconds);
+            Assert.Equal(["google/gemini-2.5-pro"], saved.EnabledModels);
+            Assert.Empty(runner.Inputs);
+        }
+        finally
+        {
+            if (File.Exists(settingsPath))
+            {
+                File.Delete(settingsPath);
+            }
+        }
+    }
+
+    [Fact]
     public async Task TryHandleAsync_SettingsCommand_ThemeSelectionUsesThemeSelector()
     {
         var directory = Path.Combine(Path.GetTempPath(), "tau-settings-theme-select-" + Guid.NewGuid().ToString("N"));

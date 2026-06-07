@@ -465,6 +465,58 @@ public sealed class TuiComponentTests
     }
 
     [Fact]
+    public async Task SettingsListSession_ReturnsChangedValue()
+    {
+        var list = new TuiSettingsList(
+            [
+                new TuiSettingItem(
+                    "auto-compaction",
+                    "Auto compaction",
+                    "false",
+                    values: ["false", "true"])
+            ],
+            maxVisible: 5);
+        var keyReader = new ScriptedKeyReader(Key(ConsoleKey.Enter));
+        var surface = new CapturingRenderSurface(width: 40, height: 10);
+        var session = new TuiSettingsListSession(list, keyReader, surface);
+
+        var result = await session.RunAsync();
+
+        Assert.True(result.HasChange);
+        Assert.False(result.IsCancelled);
+        Assert.Equal("auto-compaction", result.Id);
+        Assert.Equal("true", result.Value);
+        Assert.Equal("true", list.SelectedItem?.CurrentValue);
+        Assert.Equal(2, surface.Diffs.Count);
+        Assert.True(surface.Diffs[0].RequiresFullRedraw);
+        Assert.StartsWith("> Auto compaction", surface.Diffs[0].Operations[0].Text, StringComparison.Ordinal);
+        Assert.False(surface.Diffs[1].RequiresFullRedraw);
+        Assert.Contains("true", surface.Diffs[1].Operations[0].Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task SettingsListSession_ReturnsCancelledOnEscape()
+    {
+        var list = new TuiSettingsList(
+            [
+                new TuiSettingItem("theme", "Theme", "dark")
+            ],
+            maxVisible: 5);
+        var keyReader = new ScriptedKeyReader(Key(ConsoleKey.Escape));
+        var surface = new CapturingRenderSurface(width: 40, height: 10);
+        var session = new TuiSettingsListSession(list, keyReader, surface);
+
+        var result = await session.RunAsync();
+
+        Assert.True(result.IsCancelled);
+        Assert.False(result.HasChange);
+        Assert.Null(result.Id);
+        Assert.Null(result.Value);
+        Assert.Single(surface.Diffs);
+        Assert.True(surface.Diffs[0].RequiresFullRedraw);
+    }
+
+    [Fact]
     public void OverlayHost_UsesFullRedrawWhenSurfaceDimensionsChange()
     {
         var list = new TuiSelectList(

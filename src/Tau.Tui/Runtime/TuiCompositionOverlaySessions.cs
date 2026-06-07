@@ -94,6 +94,57 @@ public static class TuiCompositionOverlaySessions
         }
     }
 
+    public static async Task<TuiSettingsListSessionResult> RunSettingsListAsync(
+        TuiSettingsList selector,
+        TuiCompositionSession session,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(selector);
+        ArgumentNullException.ThrowIfNull(session);
+
+        string? changedId = null;
+        string? changedValue = null;
+        var cancelled = false;
+
+        void OnChanged(string id, string value)
+        {
+            changedId = id;
+            changedValue = value;
+        }
+
+        void OnCancelled() => cancelled = true;
+
+        selector.Changed += OnChanged;
+        selector.Cancelled += OnCancelled;
+        var handle = session.OpenOverlay(selector, CreateDefaultOptions(session, preferredWidth: 96));
+        try
+        {
+            if (!session.IsStarted)
+            {
+                session.Start();
+            }
+            else
+            {
+                session.Render(force: true);
+            }
+
+            while (changedId is null && !cancelled)
+            {
+                await session.ReadInputAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            return cancelled || changedId is null
+                ? TuiSettingsListSessionResult.Cancelled
+                : TuiSettingsListSessionResult.Changed(changedId, changedValue ?? string.Empty);
+        }
+        finally
+        {
+            session.CloseOverlay(handle);
+            selector.Changed -= OnChanged;
+            selector.Cancelled -= OnCancelled;
+        }
+    }
+
     private static TuiTranscriptOverlayOptions CreateDefaultOptions(
         TuiCompositionSession session,
         int preferredWidth = 80)

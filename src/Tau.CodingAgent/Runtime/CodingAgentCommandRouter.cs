@@ -355,6 +355,12 @@ public sealed class CodingAgentCommandRouter
         CancellationToken cancellationToken)
     {
         var current = _settingsStore?.Load() ?? snapshot;
+        if (CodingAgentSettingsSelector.TryParseSelection(selection, out var settingId, out var settingValue))
+        {
+            return await ApplySettingsValueAsync(current, settingId, settingValue, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
         var normalized = selection.Trim().ToLowerInvariant();
 
         return normalized switch
@@ -367,6 +373,53 @@ public sealed class CodingAgentCommandRouter
             CodingAgentSettingsSelector.ScopedModelsAction => await SelectScopedModelsFromSettingsAsync(current, cancellationToken).ConfigureAwait(false),
             CodingAgentSettingsSelector.ThemeAction => await SelectThemeAsync(current, cancellationToken).ConfigureAwait(false),
             _ => CodingAgentCommandResult.Error($"settings selector returned unsupported action '{selection}'")
+        };
+    }
+
+    private async Task<CodingAgentCommandResult> ApplySettingsValueAsync(
+        CodingAgentSettingsSnapshot current,
+        string settingId,
+        string settingValue,
+        CancellationToken cancellationToken)
+    {
+        var normalizedId = settingId.Trim().ToLowerInvariant();
+        return normalizedId switch
+        {
+            CodingAgentSettingsSelector.AutoCompactionAction =>
+                SaveAutoCompactionValue(current, settingValue),
+            CodingAgentSettingsSelector.TerminalShowImagesAction =>
+                SaveBooleanSetting(current, settingValue, "show images", value => current with { TerminalShowImages = value }),
+            CodingAgentSettingsSelector.ImagesAutoResizeAction =>
+                SaveBooleanSetting(current, settingValue, "auto-resize images", value => current with { ImagesAutoResize = value }),
+            CodingAgentSettingsSelector.ImagesBlockImagesAction =>
+                SaveBooleanSetting(current, settingValue, "block images", value => current with { ImagesBlockImages = value }),
+            CodingAgentSettingsSelector.ShowHardwareCursorAction =>
+                SaveBooleanSetting(current, settingValue, "show hardware cursor", value => current with { ShowHardwareCursor = value }),
+            CodingAgentSettingsSelector.EditorPaddingAction =>
+                SaveBoundedIntSetting(current, settingValue, "editor padding", 0, 3, value => current with { EditorPaddingX = value }),
+            CodingAgentSettingsSelector.AutocompleteMaxVisibleAction =>
+                SaveBoundedIntSetting(current, settingValue, "autocomplete max items", 3, 20, value => current with { AutocompleteMaxVisible = value }),
+            CodingAgentSettingsSelector.TerminalClearOnShrinkAction =>
+                SaveBooleanSetting(current, settingValue, "clear on shrink", value => current with { TerminalClearOnShrink = value }),
+            CodingAgentSettingsSelector.SteeringModeAction =>
+                SaveSteeringModeValue(current, settingValue),
+            CodingAgentSettingsSelector.FollowUpModeAction =>
+                SaveFollowUpModeValue(current, settingValue),
+            CodingAgentSettingsSelector.TreeFilterModeAction =>
+                SaveTreeFilterModeValue(current, settingValue),
+            CodingAgentSettingsSelector.ThinkingLevelAction =>
+                SaveThinkingLevelValue(settingValue),
+            CodingAgentSettingsSelector.QuietStartupAction =>
+                SaveBooleanSetting(current, settingValue, "quiet startup", value => current with { QuietStartup = value }),
+            CodingAgentSettingsSelector.CollapseChangelogAction =>
+                SaveBooleanSetting(current, settingValue, "collapse changelog", value => current with { CollapseChangelog = value }),
+            CodingAgentSettingsSelector.InstallTelemetryAction =>
+                SaveBooleanSetting(current, settingValue, "install telemetry", value => current with { EnableInstallTelemetry = value }),
+            CodingAgentSettingsSelector.ScopedModelsAction =>
+                await SelectScopedModelsFromSettingsAsync(current, cancellationToken).ConfigureAwait(false),
+            CodingAgentSettingsSelector.ThemeAction =>
+                await SelectThemeAsync(current, cancellationToken).ConfigureAwait(false),
+            _ => CodingAgentCommandResult.Error($"settings selector returned unsupported action '{settingId}'")
         };
     }
 
@@ -391,12 +444,36 @@ public sealed class CodingAgentCommandRouter
         return CodingAgentCommandResult.Status($"auto compaction: {FormatSettingsAutoCompaction(next)}");
     }
 
+    private CodingAgentCommandResult SaveAutoCompactionValue(CodingAgentSettingsSnapshot current, string value)
+    {
+        if (!TryParseSettingsBoolean(value, out var enabled))
+        {
+            return CodingAgentCommandResult.Error($"settings selector returned unsupported boolean '{value}'");
+        }
+
+        _settingsStore?.Save(current with { AutoCompactionEnabled = enabled });
+        _autoCompactionChanged?.Invoke(enabled);
+        return CodingAgentCommandResult.Status($"auto compaction: {FormatSettingsAutoCompaction(enabled)}");
+    }
+
     private CodingAgentCommandResult SaveSteeringModeSelection(CodingAgentSettingsSnapshot current)
     {
         var next = ToggleQueueMode(current.SteeringMode);
         _runner.SteeringMode = CodingAgentQueueModes.ToAgentQueueMode(next);
         _settingsStore?.Save(current with { SteeringMode = next });
         return CodingAgentCommandResult.Status($"steering mode: {next}");
+    }
+
+    private CodingAgentCommandResult SaveSteeringModeValue(CodingAgentSettingsSnapshot current, string value)
+    {
+        if (!CodingAgentQueueModes.TryNormalize(value, out var mode))
+        {
+            return CodingAgentCommandResult.Error($"settings selector returned unsupported steering mode '{value}'");
+        }
+
+        _runner.SteeringMode = CodingAgentQueueModes.ToAgentQueueMode(mode);
+        _settingsStore?.Save(current with { SteeringMode = mode });
+        return CodingAgentCommandResult.Status($"steering mode: {mode}");
     }
 
     private CodingAgentCommandResult SaveFollowUpModeSelection(CodingAgentSettingsSnapshot current)
@@ -407,9 +484,33 @@ public sealed class CodingAgentCommandRouter
         return CodingAgentCommandResult.Status($"follow-up mode: {next}");
     }
 
+    private CodingAgentCommandResult SaveFollowUpModeValue(CodingAgentSettingsSnapshot current, string value)
+    {
+        if (!CodingAgentQueueModes.TryNormalize(value, out var mode))
+        {
+            return CodingAgentCommandResult.Error($"settings selector returned unsupported follow-up mode '{value}'");
+        }
+
+        _runner.FollowUpMode = CodingAgentQueueModes.ToAgentQueueMode(mode);
+        _settingsStore?.Save(current with { FollowUpMode = mode });
+        return CodingAgentCommandResult.Status($"follow-up mode: {mode}");
+    }
+
     private CodingAgentCommandResult SaveTreeFilterModeSelection(CodingAgentSettingsSnapshot current)
     {
         var next = CycleTreeFilterMode(current.TreeFilterMode);
+        _settingsStore?.Save(current with { TreeFilterMode = IsDefaultTreeFilterMode(next) ? null : next });
+        return CodingAgentCommandResult.Status($"tree filter: {next}");
+    }
+
+    private CodingAgentCommandResult SaveTreeFilterModeValue(CodingAgentSettingsSnapshot current, string value)
+    {
+        if (!TryParseTreeFilterMode(value, out var mode))
+        {
+            return CodingAgentCommandResult.Error($"settings selector returned unsupported tree filter '{value}'");
+        }
+
+        var next = FormatTreeFilterModeRaw(mode);
         _settingsStore?.Save(current with { TreeFilterMode = IsDefaultTreeFilterMode(next) ? null : next });
         return CodingAgentCommandResult.Status($"tree filter: {next}");
     }
@@ -420,6 +521,49 @@ public sealed class CodingAgentCommandRouter
         var next = FormatThinkingLevelRaw(_runner.ThinkingLevel);
         _settingsStore?.Save(current with { DefaultThinkingLevel = next });
         return CodingAgentCommandResult.Status($"thinking: {FormatThinkingLevel(_runner.ThinkingLevel)}");
+    }
+
+    private CodingAgentCommandResult SaveThinkingLevelValue(string value)
+    {
+        if (!CodingAgentThinkingLevels.TryParse(value, out var requested))
+        {
+            return CodingAgentCommandResult.Error($"settings selector returned unsupported thinking level '{value}'");
+        }
+
+        var effective = SetAndSaveThinkingLevel(requested);
+        return CodingAgentCommandResult.Status($"thinking: {FormatThinkingLevel(effective)}");
+    }
+
+    private CodingAgentCommandResult SaveBooleanSetting(
+        CodingAgentSettingsSnapshot current,
+        string value,
+        string label,
+        Func<bool, CodingAgentSettingsSnapshot> update)
+    {
+        if (!TryParseSettingsBoolean(value, out var enabled))
+        {
+            return CodingAgentCommandResult.Error($"settings selector returned unsupported boolean '{value}'");
+        }
+
+        _settingsStore?.Save(update(enabled));
+        return CodingAgentCommandResult.Status($"{label}: {FormatSettingsBoolean(enabled)}");
+    }
+
+    private CodingAgentCommandResult SaveBoundedIntSetting(
+        CodingAgentSettingsSnapshot current,
+        string value,
+        string label,
+        int min,
+        int max,
+        Func<int, CodingAgentSettingsSnapshot> update)
+    {
+        if (!int.TryParse(value, out var parsed) || parsed < min || parsed > max)
+        {
+            return CodingAgentCommandResult.Error($"settings selector returned unsupported {label} value '{value}'");
+        }
+
+        _settingsStore?.Save(update(parsed));
+        return CodingAgentCommandResult.Status($"{label}: {parsed}");
     }
 
     private async Task<CodingAgentCommandResult> SelectThemeAsync(
@@ -2734,6 +2878,38 @@ public sealed class CodingAgentCommandRouter
         null => "default"
     };
 
+    private static bool TryParseSettingsBoolean(string value, out bool parsed)
+    {
+        parsed = false;
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return false;
+        }
+
+        switch (value.Trim().ToLowerInvariant())
+        {
+            case "true":
+            case "enabled":
+            case "enable":
+            case "yes":
+            case "on":
+                parsed = true;
+                return true;
+            case "false":
+            case "disabled":
+            case "disable":
+            case "no":
+            case "off":
+                parsed = false;
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    private static string FormatSettingsBoolean(bool enabled) =>
+        enabled ? "enabled" : "disabled";
+
     private bool ResolveAutoCompactionEnabled(bool? setting) =>
         setting ?? _autoCompaction.IsEnabled;
 
@@ -2757,6 +2933,15 @@ public sealed class CodingAgentCommandRouter
 
     private static bool IsDefaultTreeFilterMode(string value) =>
         value.Equals("default", StringComparison.OrdinalIgnoreCase);
+
+    private static string FormatTreeFilterModeRaw(CodingAgentTreeFilterMode mode) => mode switch
+    {
+        CodingAgentTreeFilterMode.NoTools => "no-tools",
+        CodingAgentTreeFilterMode.UserOnly => "user-only",
+        CodingAgentTreeFilterMode.LabeledOnly => "labeled-only",
+        CodingAgentTreeFilterMode.All => "all",
+        _ => "default"
+    };
 
     private static CodingAgentTreeFilterMode NormalizeTreeFilterMode(string? treeFilterMode)
     {
