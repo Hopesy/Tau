@@ -42,6 +42,7 @@
 - 上游 package directory set 当前仍是 `agent`、`ai`、`coding-agent`、`mom`、`pods`、`tui`、`web-ui`，与 Phase 1 inventory freeze 匹配；本轮没有发现新的未知上游 package。
 - 上游 root scripts 当前仍包括 `build-binaries.sh`、`release.mjs`、`check-browser-smoke.mjs`、`browser-smoke-entry.ts`、`session-transcripts.ts`、`profile-coding-agent-node.mjs`、`edit-tool-stats.mjs`、`cost.ts`、`sync-versions.js`；这些 release/test/audit surfaces 仍不能用普通 `dotnet test` 替代最终验收。
 - 当前 matrix 表格行粗略状态统计为 `partial=188`、`external-e2e-needed=31`、`ported=30`、`missing=12`、`non-goal-proposed=1`、`verified=0`。这说明当前仓库是高覆盖 baseline + 大量局部合同测试状态，不是 100% 移植完成状态。
+- 当前领取的实现切片是 `Tau.Pods` config path/env contract：对照上游 `packages/pods/src/config.ts`，Tau 已补 `PI_CONFIG_DIR` 存在时默认读取/写入 `<PI_CONFIG_DIR>/pods.json`，且显式 `--config path` / positional config path 继续优先；但无 env 时仍保留 Tau 默认 `tau.pods.json`，missing config 语义仍不同于上游 `{ pods: {} }`，所以该项仍是 `partial`。
 - 当前本地工作树审视时存在 `.github/workflows/tau-ci.yml` 删除状态；该删除不属于本轮 100% plan 证据，不得在没有单独 CI 审计时顺手 stage 或用于完成声明。
 - `docs/QUALITY_SCORE.md` 当前仍把关键产品面、测试、CI/CD、可观测性、安全配置标为 `C` 风险；只要这些风险仍指向 parity 缺口，Final audit 就不能关闭。
 
@@ -125,7 +126,7 @@
 
 - 真实 remote e2e 未关闭：SSH/SCP、HF download、setup run、GPU detect、vLLM startup/health、systemd user/fallback pid/log path、remote logs/status/deployments 都需要真实 pod smoke。
 - Upstream operation compatibility 未关闭：`pods` / `shell` / `ssh` / `start` / `stop` / `list` / `logs` / `agent` top-level compatibility、direct PID/log-tail/startup streaming flow、pod prompt command mapping 仍需实现或非目标确认。
-- Config/schema 未关闭：`PI_CONFIG_DIR` / `~/.pi/pods.json` path/env compatibility、upstream `pods: Record<string, Pod>` / `models: Record<string, Model>` schema migration、active pod compatibility 和 state migration 仍需最终审计。
+- Config/schema 未关闭：`PI_CONFIG_DIR -> pods.json` env default 已有 Tau baseline，但无 env 时仍未切到上游 `~/.pi/pods.json`，missing config 返回空对象、upstream `pods: Record<string, Pod>` / `models: Record<string, Model>` schema migration、active pod compatibility 和 state migration 仍需最终审计。
 - GPU/model allocation 未关闭：已完成本地 `--gpus` / `--memory` / `--context` planning baseline，但 usage-aware round-robin `pod.models[*].gpu` allocation state、多版本 rollout/rollback、long-running remote transport hardening 和 real ops smoke 仍缺。
 - `pod_setup.sh` 未作为 Tau script vendored 并做真实远端验证；`model_run.sh` 与 systemd/nohup 差异需要真实 smoke 后决定实现、映射或非目标。
 

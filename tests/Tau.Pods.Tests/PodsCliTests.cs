@@ -80,6 +80,130 @@ public class PodsCliTests
     }
 
     [Fact]
+    public async Task List_UsesPiConfigDirPodsJsonWhenNoConfigPath()
+    {
+        await CurrentDirectoryGate.WaitAsync();
+        var previousDirectory = Environment.CurrentDirectory;
+        var previousConfigDir = Environment.GetEnvironmentVariable("PI_CONFIG_DIR");
+        var tempDir = Directory.CreateTempSubdirectory("tau-pods-cli-pi-config-list-");
+        var configDir = Path.Combine(tempDir.FullName, "pi-config");
+        var envConfigPath = Path.Combine(configDir, "pods.json");
+        var stdout = new StringWriter();
+        var stderr = new StringWriter();
+        var previousOut = Console.Out;
+        var previousError = Console.Error;
+
+        try
+        {
+            Environment.CurrentDirectory = tempDir.FullName;
+            Environment.SetEnvironmentVariable("PI_CONFIG_DIR", configDir);
+            Console.SetOut(stdout);
+            Console.SetError(stderr);
+            new PodsConfigStore().Save(envConfigPath, ConfigWithHttpPod("env-pod"));
+            new PodsConfigStore().Save("tau.pods.json", ConfigWithHttpPod("local-pod"));
+
+            var exitCode = await PodsCli.RunAsync(["list"]);
+
+            var output = stdout.ToString();
+            Assert.Equal(0, exitCode);
+            Assert.Contains("env-pod", output, StringComparison.Ordinal);
+            Assert.DoesNotContain("local-pod", output, StringComparison.Ordinal);
+            Assert.DoesNotContain("Config not found", stderr.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            Console.SetOut(previousOut);
+            Console.SetError(previousError);
+            Environment.SetEnvironmentVariable("PI_CONFIG_DIR", previousConfigDir);
+            Environment.CurrentDirectory = previousDirectory;
+            tempDir.Delete(recursive: true);
+            CurrentDirectoryGate.Release();
+        }
+    }
+
+    [Fact]
+    public async Task Init_UsesPiConfigDirPodsJsonWhenNoConfigPath()
+    {
+        await CurrentDirectoryGate.WaitAsync();
+        var previousDirectory = Environment.CurrentDirectory;
+        var previousConfigDir = Environment.GetEnvironmentVariable("PI_CONFIG_DIR");
+        var tempDir = Directory.CreateTempSubdirectory("tau-pods-cli-pi-config-init-");
+        var configDir = Path.Combine(tempDir.FullName, "pi-config");
+        var envConfigPath = Path.Combine(configDir, "pods.json");
+        var stdout = new StringWriter();
+        var stderr = new StringWriter();
+        var previousOut = Console.Out;
+        var previousError = Console.Error;
+
+        try
+        {
+            Environment.CurrentDirectory = tempDir.FullName;
+            Environment.SetEnvironmentVariable("PI_CONFIG_DIR", configDir);
+            Console.SetOut(stdout);
+            Console.SetError(stderr);
+
+            var exitCode = await PodsCli.RunAsync(["init", "--json"]);
+
+            Assert.Equal(0, exitCode);
+            Assert.True(File.Exists(envConfigPath));
+            Assert.False(File.Exists(Path.Combine(tempDir.FullName, "tau.pods.json")));
+            Assert.Equal(string.Empty, stderr.ToString());
+            using var document = JsonDocument.Parse(stdout.ToString());
+            Assert.Equal(Path.GetFullPath(envConfigPath), document.RootElement.GetProperty("path").GetString());
+        }
+        finally
+        {
+            Console.SetOut(previousOut);
+            Console.SetError(previousError);
+            Environment.SetEnvironmentVariable("PI_CONFIG_DIR", previousConfigDir);
+            Environment.CurrentDirectory = previousDirectory;
+            tempDir.Delete(recursive: true);
+            CurrentDirectoryGate.Release();
+        }
+    }
+
+    [Fact]
+    public async Task VllmPlan_ConfigOptionOverridesPiConfigDir()
+    {
+        await CurrentDirectoryGate.WaitAsync();
+        var previousConfigDir = Environment.GetEnvironmentVariable("PI_CONFIG_DIR");
+        var tempDir = Directory.CreateTempSubdirectory("tau-pods-cli-pi-config-explicit-");
+        var configDir = Path.Combine(tempDir.FullName, "pi-config");
+        var envConfigPath = Path.Combine(configDir, "pods.json");
+        var explicitConfigPath = Path.Combine(tempDir.FullName, "explicit-pods.json");
+        var stdout = new StringWriter();
+        var stderr = new StringWriter();
+        var previousOut = Console.Out;
+        var previousError = Console.Error;
+
+        try
+        {
+            Environment.SetEnvironmentVariable("PI_CONFIG_DIR", configDir);
+            Console.SetOut(stdout);
+            Console.SetError(stderr);
+            new PodsConfigStore().Save(envConfigPath, ConfigWithHttpPod("env-pod"));
+            new PodsConfigStore().Save(explicitConfigPath, ConfigWithSshPod());
+
+            var exitCode = await PodsCli.RunAsync(
+                ["vllm", "plan", "--json", "--config", explicitConfigPath, "--pod", "ssh-pod", "org/model"]);
+
+            Assert.Equal(0, exitCode);
+            Assert.DoesNotContain("Config not found", stderr.ToString(), StringComparison.Ordinal);
+            using var document = JsonDocument.Parse(stdout.ToString());
+            Assert.Equal("ssh-pod", document.RootElement.GetProperty("pod").GetString());
+            Assert.Equal("org/model", document.RootElement.GetProperty("model").GetString());
+        }
+        finally
+        {
+            Console.SetOut(previousOut);
+            Console.SetError(previousError);
+            Environment.SetEnvironmentVariable("PI_CONFIG_DIR", previousConfigDir);
+            tempDir.Delete(recursive: true);
+            CurrentDirectoryGate.Release();
+        }
+    }
+
+    [Fact]
     public async Task Logs_WithoutConfigPath_RejectsNonSshPod()
     {
         await CurrentDirectoryGate.WaitAsync();
@@ -3165,13 +3289,13 @@ public class PodsCliTests
         }
     }
 
-    private static PodsConfig ConfigWithHttpPod() => new()
+    private static PodsConfig ConfigWithHttpPod(string id = "http-pod") => new()
     {
         Pods =
         [
             new PodDefinition
             {
-                Id = "http-pod",
+                Id = id,
                 Provider = "vllm",
                 Model = "llama",
                 Region = "local",

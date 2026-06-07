@@ -11,6 +11,8 @@ namespace Tau.Pods.Cli;
 public static class PodsCli
 {
     private const string DefaultConfigPath = "tau.pods.json";
+    private const string UpstreamConfigDirectoryEnvVar = "PI_CONFIG_DIR";
+    private const string UpstreamConfigFileName = "pods.json";
     private const string VllmExtraArgsSentinel = "--vllm";
 
     public static async Task<int> RunAsync(
@@ -40,7 +42,7 @@ public static class PodsCli
         }
 
         var command = args[0].ToLowerInvariant();
-        var path = args.Length > 1 ? args[1] : DefaultConfigPath;
+        var path = args.Length > 1 ? args[1] : GetDefaultConfigPath();
 
         return command switch
         {
@@ -76,6 +78,14 @@ public static class PodsCli
         {
             return null;
         }
+    }
+
+    private static string GetDefaultConfigPath()
+    {
+        var configDir = Environment.GetEnvironmentVariable(UpstreamConfigDirectoryEnvVar);
+        return string.IsNullOrWhiteSpace(configDir)
+            ? DefaultConfigPath
+            : Path.Combine(configDir, UpstreamConfigFileName);
     }
 
     private static int Init(string[] args, PodsConfigStore store)
@@ -2652,7 +2662,7 @@ public static class PodsCli
             Console.Error.WriteLine(optionError);
             Console.Error.WriteLine(usage);
             positionalArgs = args;
-            configPath = DefaultConfigPath;
+            configPath = GetDefaultConfigPath();
             podId = null;
             return false;
         }
@@ -2663,11 +2673,11 @@ public static class PodsCli
             Console.Error.WriteLine(optionError);
             Console.Error.WriteLine(usage);
             positionalArgs = configArgs;
-            configPath = DefaultConfigPath;
+            configPath = GetDefaultConfigPath();
             return false;
         }
 
-        configPath = explicitConfigPath ?? DefaultConfigPath;
+        configPath = explicitConfigPath ?? GetDefaultConfigPath();
         return true;
     }
 
@@ -2736,7 +2746,8 @@ public static class PodsCli
         string usage,
         out VllmServeCommandArguments parsed)
     {
-        parsed = new VllmServeCommandArguments(DefaultConfigPath, null, string.Empty, null, null, null, null, null);
+        var defaultConfigPath = GetDefaultConfigPath();
+        parsed = new VllmServeCommandArguments(defaultConfigPath, null, string.Empty, null, null, null, null, null);
         var configPath = ConsumeStringOption(args, "--config", startIndex: 2, out var podArgs, out var optionError);
         var hasExplicitConfig = configPath is not null;
         if (optionError is not null)
@@ -2787,7 +2798,7 @@ public static class PodsCli
             return false;
         }
 
-        configPath ??= DefaultConfigPath;
+        configPath ??= defaultConfigPath;
         var values = positionalArgs.Skip(2).ToArray();
         if (!hasExplicitConfig &&
             values.Length >= 3 &&
@@ -2840,7 +2851,8 @@ public static class PodsCli
         string usage,
         out SetupRegistrationArguments parsed)
     {
-        parsed = new SetupRegistrationArguments(DefaultConfigPath, string.Empty, string.Empty);
+        var defaultConfigPath = GetDefaultConfigPath();
+        parsed = new SetupRegistrationArguments(defaultConfigPath, string.Empty, string.Empty);
         if (args.Length is < 3 or > 4)
         {
             Console.Error.WriteLine(usage);
@@ -2848,7 +2860,7 @@ public static class PodsCli
         }
 
         var targetIndex = 1;
-        var configPath = DefaultConfigPath;
+        var configPath = defaultConfigPath;
         if (args.Length == 4 && LooksLikeConfigPath(args[1]))
         {
             configPath = args[1];
@@ -3001,7 +3013,7 @@ public static class PodsCli
         string usage,
         out ModelCommandArguments parsed)
     {
-        parsed = new ModelCommandArguments(DefaultConfigPath, null, []);
+        parsed = new ModelCommandArguments(GetDefaultConfigPath(), null, []);
         if (args.Length < 2)
         {
             Console.Error.WriteLine(usage);
@@ -3046,7 +3058,7 @@ public static class PodsCli
         string usage,
         out ExecCommandArguments parsed)
     {
-        parsed = new ExecCommandArguments(DefaultConfigPath, null, []);
+        parsed = new ExecCommandArguments(GetDefaultConfigPath(), null, []);
         if (args.Length < 2)
         {
             Console.Error.WriteLine(usage);
@@ -3286,7 +3298,8 @@ public static class PodsCli
         string usage,
         out TargetCommandArguments parsed)
     {
-        parsed = new TargetCommandArguments(DefaultConfigPath, string.Empty, []);
+        var defaultConfigPath = GetDefaultConfigPath();
+        parsed = new TargetCommandArguments(defaultConfigPath, string.Empty, []);
         if (args.Length < 2 + minValueCount)
         {
             Console.Error.WriteLine(usage);
@@ -3294,7 +3307,7 @@ public static class PodsCli
         }
 
         var targetIndex = 1;
-        var configPath = DefaultConfigPath;
+        var configPath = defaultConfigPath;
         if (args.Length >= 3 + minValueCount && LooksLikeConfigPath(args[1]))
         {
             configPath = args[1];
@@ -3318,7 +3331,8 @@ public static class PodsCli
         string usage,
         out TargetCommandArguments parsed)
     {
-        parsed = new TargetCommandArguments(DefaultConfigPath, string.Empty, []);
+        var defaultConfigPath = GetDefaultConfigPath();
+        parsed = new TargetCommandArguments(defaultConfigPath, string.Empty, []);
         if (args.Length < 3 + minValueCount)
         {
             Console.Error.WriteLine(usage);
@@ -3326,7 +3340,7 @@ public static class PodsCli
         }
 
         var targetIndex = 2;
-        var configPath = DefaultConfigPath;
+        var configPath = defaultConfigPath;
         if (args.Length >= 4 + minValueCount && LooksLikeConfigPath(args[2]))
         {
             configPath = args[2];
@@ -3350,7 +3364,7 @@ public static class PodsCli
         string usage,
         out ModelCommandArguments parsed)
     {
-        parsed = new ModelCommandArguments(DefaultConfigPath, null, []);
+        parsed = new ModelCommandArguments(GetDefaultConfigPath(), null, []);
         if (args.Length < 2)
         {
             Console.Error.WriteLine(usage);
@@ -3424,7 +3438,7 @@ public static class PodsCli
         string usage,
         out ModelCommandArguments parsed)
     {
-        parsed = new ModelCommandArguments(DefaultConfigPath, null, []);
+        parsed = new ModelCommandArguments(GetDefaultConfigPath(), null, []);
         if (args.Length < valueStart)
         {
             Console.Error.WriteLine(usage);
@@ -3492,7 +3506,7 @@ public static class PodsCli
 
     private static bool TryParseConfigCommand(string[] args, string usage, out string configPath)
     {
-        configPath = DefaultConfigPath;
+        configPath = GetDefaultConfigPath();
         if (args.Length == 1)
         {
             return true;
@@ -3533,7 +3547,7 @@ public static class PodsCli
     private static void PrintHelp()
     {
         Console.WriteLine("Tau.Pods commands:");
-        Console.WriteLine("  init [--json] [path]           Create a sample tau.pods.json");
+        Console.WriteLine("  init [--json] [path]           Create a sample pod config");
         Console.WriteLine("  list [--json] [path]           List configured pods");
         Console.WriteLine("  validate [--json] [path]       Validate pod config");
         Console.WriteLine("  status [--json] [path]         Print enabled/disabled and transport summary");
@@ -3559,6 +3573,9 @@ public static class PodsCli
         Console.WriteLine("  vllm health [--json] [--health-attempts n] [--health-backoff-ms n] [--config path] [--pod id] <name> Check remote vLLM /health readiness");
         Console.WriteLine("  vllm stop [--json] [--config path] [--pod id] <name> Stop a remote vLLM deployment");
         Console.WriteLine("  vllm rollback [--json] [--config path] [--pod id] <name> Roll back a remote vLLM deployment");
+        Console.WriteLine("Environment:");
+        Console.WriteLine("  PI_CONFIG_DIR                  Default config directory; uses pods.json when set");
+        Console.WriteLine("  Default config                 tau.pods.json when PI_CONFIG_DIR is not set");
     }
 
     private sealed record TargetCommandArguments(string ConfigPath, string PodId, IReadOnlyList<string> Values);
