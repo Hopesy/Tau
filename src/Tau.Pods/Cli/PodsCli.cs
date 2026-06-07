@@ -156,7 +156,77 @@ public static class PodsCli
             return await StopAsync(args, path, store, validator, lifecycleService).ConfigureAwait(false);
         }
 
-        return await VllmStop(RewriteCommand(args, "vllm", "stop", startIndex: 1), store, validator, vllmService).ConfigureAwait(false);
+        const string usage = "Usage: stop [--json] [--config path] [--pod pod-id] [<deployment-name>]";
+        if (!TryParseStopCompatCommand(args, usage, out var parsed))
+        {
+            return 1;
+        }
+
+        if (parsed.Values.Count == 0)
+        {
+            return await StopAllCompatAsync(parsed, store, validator, lifecycleService, vllmService).ConfigureAwait(false);
+        }
+
+        var pod = LoadPodOrActiveReport(parsed.ConfigPath, parsed.PodId, store, validator, out var exitCode);
+        if (pod is null) return exitCode;
+
+        var result = await vllmService.StopAsync(pod, parsed.Values[0]).ConfigureAwait(false);
+        if (parsed.JsonOutput)
+        {
+            PrintVllmOperationJson(result);
+        }
+        else
+        {
+            PrintVllmOperationText(result);
+        }
+
+        return result.Success ? 0 : 1;
+    }
+
+    private static async Task<int> StopAllCompatAsync(
+        StopCompatCommandArguments parsed,
+        PodsConfigStore store,
+        PodsConfigValidator validator,
+        PodLifecycleService lifecycleService,
+        PodVllmOrchestrationService vllmService)
+    {
+        var pod = LoadPodOrActiveReport(parsed.ConfigPath, parsed.PodId, store, validator, out var exitCode);
+        if (pod is null) return exitCode;
+
+        var deployments = await lifecycleService.ListDeploymentsAsync(pod).ConfigureAwait(false);
+        var names = deployments.Deployments
+            .Select(deployment => deployment.Name)
+            .Where(name => !string.IsNullOrWhiteSpace(name))
+            .ToArray();
+
+        var results = new List<PodVllmOperationResult>(names.Length);
+        if (deployments.Success)
+        {
+            foreach (var name in names)
+            {
+                results.Add(await vllmService.StopAsync(pod, name).ConfigureAwait(false));
+            }
+        }
+
+        var success = deployments.Success && results.All(result => result.Success);
+        var summary = !deployments.Success
+            ? $"Could not list deployments on {pod.Id}: {deployments.Summary}"
+            : names.Length == 0
+                ? $"No deployments running on {pod.Id}."
+                : success
+                    ? $"Stopped {results.Count} deployment(s) on {pod.Id}: {string.Join(", ", results.Select(result => result.DeploymentName))}."
+                    : $"Stopped {results.Count(result => result.Success)}/{results.Count} deployment(s) on {pod.Id}.";
+
+        if (parsed.JsonOutput)
+        {
+            PrintVllmStopAllJson(pod, deployments, results, success, summary);
+        }
+        else
+        {
+            PrintVllmStopAllText(pod, deployments, results, success, summary);
+        }
+
+        return success ? 0 : 1;
     }
 
     private static string[] RewriteCommand(string[] args, string command, int startIndex)
@@ -212,6 +282,74 @@ public static class PodsCli
         TryConsumeTargetJsonFlag(args, out var positionalArgs);
         var values = positionalArgs.Skip(1).ToArray();
         return values.Length >= 2;
+    }
+
+    private static bool TryParseStopCompatCommand(
+        string[] args,
+        string usage,
+        out StopCompatCommandArguments parsed)
+    {
+        parsed = new StopCompatCommandArguments(GetDefaultConfigPath(), null, [], JsonOutput: false);
+        var jsonOutput = TryConsumeFlag(args, "--json", startIndex: 1, out var jsonArgs);
+        var configPath = ConsumeStringOption(jsonArgs, "--config", startIndex: 1, out var podArgs, out var optionError);
+        var hasExplicitConfig = configPath is not null;
+        if (optionError is not null)
+        {
+            Console.Error.WriteLine(optionError);
+            Console.Error.WriteLine(usage);
+            return false;
+        }
+
+        var podId = ConsumeStringOption(podArgs, "--pod", startIndex: 1, out var positionalArgs, out optionError);
+        if (optionError is not null)
+        {
+            Console.Error.WriteLine(optionError);
+            Console.Error.WriteLine(usage);
+            return false;
+        }
+
+        configPath ??= GetDefaultConfigPath();
+        var valueStart = 1;
+        if (!hasExplicitConfig &&
+            positionalArgs.Length > valueStart &&
+            LooksLikeConfigPath(positionalArgs[valueStart]))
+        {
+            configPath = positionalArgs[valueStart];
+            valueStart++;
+        }
+
+        var remaining = positionalArgs.Skip(valueStart).ToArray();
+        IReadOnlyList<string> values;
+        if (podId is not null)
+        {
+            if (remaining.Length > 1)
+            {
+                Console.Error.WriteLine(usage);
+                return false;
+            }
+
+            values = remaining;
+        }
+        else
+        {
+            switch (remaining.Length)
+            {
+                case 0:
+                case 1:
+                    values = remaining;
+                    break;
+                case 2:
+                    podId = remaining[0];
+                    values = [remaining[1]];
+                    break;
+                default:
+                    Console.Error.WriteLine(usage);
+                    return false;
+            }
+        }
+
+        parsed = new StopCompatCommandArguments(configPath, podId, values, jsonOutput);
+        return true;
     }
 
     private static void PrintKnownModels()
@@ -2018,45 +2156,96 @@ public static class PodsCli
         using var output = new MemoryStream();
         using (var writer = new Utf8JsonWriter(output, new JsonWriterOptions { Indented = true }))
         {
+            WriteVllmOperationObject(writer, result);
+        }
+
+        Console.WriteLine(Encoding.UTF8.GetString(output.ToArray()));
+    }
+
+    private static void PrintVllmStopAllJson(
+        PodDefinition pod,
+        PodDeploymentsResult deployments,
+        IReadOnlyList<PodVllmOperationResult> results,
+        bool success,
+        string summary)
+    {
+        using var output = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(output, new JsonWriterOptions { Indented = true }))
+        {
             writer.WriteStartObject();
-            writer.WriteString("pod", result.PodId);
-            writer.WriteBoolean("ok", result.Success);
-            writer.WriteString("operation", result.Operation);
-            writer.WriteString("deployment", result.DeploymentName);
-            writer.WriteString("summary", result.Summary);
-            writer.WriteString("remoteCommand", result.Command);
-            writer.WriteNumber("exitCode", result.ExitCode);
-            writer.WriteString("stdout", result.StdOut);
-            writer.WriteString("stderr", result.StdErr);
-            if (result.Prefetch is not null)
+            writer.WriteString("pod", pod.Id);
+            writer.WriteBoolean("ok", success);
+            writer.WriteString("operation", "stop-all");
+            writer.WriteString("summary", summary);
+            writer.WriteNumber("deploymentCount", deployments.Deployments.Count);
+            writer.WriteNumber("stoppedCount", results.Count(result => result.Success));
+            writer.WriteString("listSummary", deployments.Summary);
+            writer.WritePropertyName("deployments");
+            writer.WriteStartArray();
+            foreach (var result in results)
             {
-                writer.WritePropertyName("prefetch");
-                WriteModelOperationObject(writer, result.Prefetch, result.PrefetchTriggerFailureKind);
+                WriteVllmOperationObject(writer, result);
             }
-            if (result.Plan is not null)
-            {
-                writer.WritePropertyName("plan");
-                WriteVllmPlanObject(writer, result.Plan);
-            }
-            if (result.Preflight is not null)
-            {
-                writer.WritePropertyName("preflight");
-                WriteVllmPreflightObject(writer, result.Preflight);
-            }
-            if (result.Health is not null)
-            {
-                writer.WritePropertyName("health");
-                WriteVllmHealthObject(writer, result.Health);
-            }
-            if (result.Rollback is not null)
-            {
-                writer.WritePropertyName("rollback");
-                WriteVllmRollbackObject(writer, result.Rollback);
-            }
+
+            writer.WriteEndArray();
             writer.WriteEndObject();
         }
 
         Console.WriteLine(Encoding.UTF8.GetString(output.ToArray()));
+    }
+
+    private static void PrintVllmStopAllText(
+        PodDefinition pod,
+        PodDeploymentsResult deployments,
+        IReadOnlyList<PodVllmOperationResult> results,
+        bool success,
+        string summary)
+    {
+        Console.WriteLine($"{pod.Id} | ok={success} | operation=stop-all | deployments={deployments.Deployments.Count} | stopped={results.Count(result => result.Success)} | {summary}");
+        foreach (var result in results)
+        {
+            Console.WriteLine($"- {result.DeploymentName} | ok={result.Success} | exit={result.ExitCode} | {result.Summary}");
+        }
+    }
+
+    private static void WriteVllmOperationObject(Utf8JsonWriter writer, PodVllmOperationResult result)
+    {
+        writer.WriteStartObject();
+        writer.WriteString("pod", result.PodId);
+        writer.WriteBoolean("ok", result.Success);
+        writer.WriteString("operation", result.Operation);
+        writer.WriteString("deployment", result.DeploymentName);
+        writer.WriteString("summary", result.Summary);
+        writer.WriteString("remoteCommand", result.Command);
+        writer.WriteNumber("exitCode", result.ExitCode);
+        writer.WriteString("stdout", result.StdOut);
+        writer.WriteString("stderr", result.StdErr);
+        if (result.Prefetch is not null)
+        {
+            writer.WritePropertyName("prefetch");
+            WriteModelOperationObject(writer, result.Prefetch, result.PrefetchTriggerFailureKind);
+        }
+        if (result.Plan is not null)
+        {
+            writer.WritePropertyName("plan");
+            WriteVllmPlanObject(writer, result.Plan);
+        }
+        if (result.Preflight is not null)
+        {
+            writer.WritePropertyName("preflight");
+            WriteVllmPreflightObject(writer, result.Preflight);
+        }
+        if (result.Health is not null)
+        {
+            writer.WritePropertyName("health");
+            WriteVllmHealthObject(writer, result.Health);
+        }
+        if (result.Rollback is not null)
+        {
+            writer.WritePropertyName("rollback");
+            WriteVllmRollbackObject(writer, result.Rollback);
+        }
+        writer.WriteEndObject();
     }
 
     private static void PrintVllmRollbackJson(PodVllmRollbackResult result)
@@ -3720,7 +3909,7 @@ public static class PodsCli
         Console.WriteLine("  ssh [--json] [--config path] [--pod id] <command> Alias for exec");
         Console.WriteLine("  start <model> --name <name> [--json] [--config path] [--pod id] [--memory percent] [--context size] [--gpus n] [--vllm <args...>] Start a vLLM deployment");
         Console.WriteLine("  deploy [--json] [path] <id> <model> [name] Deploy a model to a pod");
-        Console.WriteLine("  stop [--json] [--config path] [--pod id] <name> Stop a vLLM deployment on the active or specified pod");
+        Console.WriteLine("  stop [--json] [--config path] [--pod id] [name] Stop a vLLM deployment, or all deployments if no name is given");
         Console.WriteLine("  restart [--json] [path] <id> <name> Restart a deployment on a pod");
         Console.WriteLine("  logs [--json] [--config path] [--pod id] <name> [tail] Fetch deployment logs from the active or specified pod");
         Console.WriteLine("  deployments [--json] [--config path] [--pod id] List deployments on a pod");
@@ -3754,6 +3943,8 @@ public static class PodsCli
     private sealed record TargetCommandArguments(string ConfigPath, string PodId, IReadOnlyList<string> Values);
 
     private sealed record ModelCommandArguments(string ConfigPath, string? PodId, IReadOnlyList<string> Values);
+
+    private sealed record StopCompatCommandArguments(string ConfigPath, string? PodId, IReadOnlyList<string> Values, bool JsonOutput);
 
     private sealed record ExecCommandArguments(string ConfigPath, string? PodId, IReadOnlyList<string> CommandParts);
 

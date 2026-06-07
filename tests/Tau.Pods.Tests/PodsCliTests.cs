@@ -3463,6 +3463,74 @@ public class PodsCliTests
     }
 
     [Fact]
+    public async Task Stop_WithoutDeploymentName_StopsAllUpstreamDeploymentsOnActivePod()
+    {
+        var tempDir = Directory.CreateTempSubdirectory("tau-pods-cli-stop-all-upstream-");
+        var configPath = Path.Combine(tempDir.FullName, "custom-pods.json");
+        var stdout = new StringWriter();
+        var previousOut = Console.Out;
+        var commands = new List<string>();
+        var execService = new PodExecService((psi, _) =>
+        {
+            var command = RemoteCommand(psi);
+            commands.Add(command);
+            if (command.Contains("for f in ~/.tau_pods/*.json", StringComparison.Ordinal))
+            {
+                return Task.FromResult(new PodExecService.ProcessExecutionResult(
+                    0,
+                    "{\"name\":\"alpha\",\"model\":\"org/alpha\",\"status\":\"running\",\"ts\":\"2026-06-08T00:00:00Z\"}\n" +
+                    "{\"name\":\"beta\",\"model\":\"org/beta\",\"status\":\"running\",\"ts\":\"2026-06-08T00:00:01Z\"}\n",
+                    string.Empty));
+            }
+
+            if (command.Contains("tau-pod-alpha.service", StringComparison.Ordinal))
+            {
+                return Task.FromResult(new PodExecService.ProcessExecutionResult(0, "stopped alpha\n", string.Empty));
+            }
+
+            if (command.Contains("tau-pod-beta.service", StringComparison.Ordinal))
+            {
+                return Task.FromResult(new PodExecService.ProcessExecutionResult(0, "stopped beta\n", string.Empty));
+            }
+
+            return Task.FromResult(new PodExecService.ProcessExecutionResult(1, string.Empty, "unexpected command"));
+        });
+
+        try
+        {
+            Console.SetOut(stdout);
+            var config = ConfigWithSshPod();
+            config.ActivePodId = "ssh-pod";
+            new PodsConfigStore().Save(configPath, config);
+
+            var exitCode = await PodsCli.RunAsync(["stop", "--json", "--config", configPath], execService);
+
+            Assert.Equal(0, exitCode);
+            using var document = JsonDocument.Parse(stdout.ToString());
+            var root = document.RootElement;
+            Assert.True(root.GetProperty("ok").GetBoolean());
+            Assert.Equal("stop-all", root.GetProperty("operation").GetString());
+            Assert.Equal("ssh-pod", root.GetProperty("pod").GetString());
+            Assert.Equal(2, root.GetProperty("deploymentCount").GetInt32());
+            Assert.Equal(2, root.GetProperty("stoppedCount").GetInt32());
+            var deployments = root.GetProperty("deployments");
+            Assert.Equal(2, deployments.GetArrayLength());
+            Assert.Equal("alpha", deployments[0].GetProperty("deployment").GetString());
+            Assert.Equal("stopped alpha\n", deployments[0].GetProperty("stdout").GetString());
+            Assert.Equal("beta", deployments[1].GetProperty("deployment").GetString());
+            Assert.Equal(3, commands.Count);
+            Assert.Contains("for f in ~/.tau_pods/*.json", commands[0], StringComparison.Ordinal);
+            Assert.Contains("systemctl --user disable --now 'tau-pod-alpha.service'", commands[1], StringComparison.Ordinal);
+            Assert.Contains("systemctl --user disable --now 'tau-pod-beta.service'", commands[2], StringComparison.Ordinal);
+        }
+        finally
+        {
+            Console.SetOut(previousOut);
+            tempDir.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task VllmStatus_WithJsonOutput_PrintsRemoteStdout()
     {
         var tempDir = Directory.CreateTempSubdirectory("tau-pods-cli-vllm-status-json-");
