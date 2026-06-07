@@ -886,10 +886,16 @@ public sealed class PodVllmOrchestrationService
     {
         var unitName = $"tau-pod-{deploymentName}.service";
         var unitBaseName = StripServiceSuffix(unitName);
+        var vllmLogPath = $"~/.vllm_logs/{deploymentName}.log";
+        var tauLogPath = $"~/.tau_pods/{deploymentName}.log";
+        var failurePattern = ShellSingleQuote(HealthFailurePattern());
+        var startupCompletePattern = ShellSingleQuote(HealthStartupCompletePattern());
         return
             BuildPortProbePrefix(deploymentName) +
             "if curl -fsS --max-time 2 \"http://127.0.0.1:$port/health\" >/dev/null 2>&1; then echo ready; " +
-            $"elif test -f ~/.tau_pods/{deploymentName}.log && tail -n 40 ~/.tau_pods/{deploymentName}.log 2>/dev/null | grep -Eiq {ShellSingleQuote(HealthFailurePattern())}; then echo unhealthy; " +
+            $"elif test -f {vllmLogPath} && tail -n 80 {vllmLogPath} 2>/dev/null | grep -Eiq {failurePattern}; then echo unhealthy; " +
+            $"elif test -f {vllmLogPath} && tail -n 80 {vllmLogPath} 2>/dev/null | grep -Fq {startupCompletePattern}; then echo ready; " +
+            $"elif test -f {tauLogPath} && tail -n 40 {tauLogPath} 2>/dev/null | grep -Eiq {failurePattern}; then echo unhealthy; " +
             $"elif command -v systemctl >/dev/null 2>&1 && systemctl --user list-unit-files {ShellSingleQuote(unitName)} >/dev/null 2>&1; then " +
             $"state=$(systemctl --user is-active {ShellSingleQuote(unitName)} 2>/dev/null || true); " +
             "if [ \"$state\" = active ]; then echo starting; elif [ \"$state\" = failed ]; then echo unhealthy; else echo \"${state:-starting}\"; fi; " +
@@ -900,17 +906,24 @@ public sealed class PodVllmOrchestrationService
             $"else echo {ShellSingleQuote($"not found {unitBaseName}")}; exit 1; fi; " +
             $"if command -v systemctl >/dev/null 2>&1 && systemctl --user list-unit-files {ShellSingleQuote(unitName)} >/dev/null 2>&1; then " +
             $"systemctl --user status {ShellSingleQuote(unitName)} --no-pager -l 2>&1 | tail -n 40; " +
-            $"elif test -f ~/.tau_pods/{deploymentName}.log; then tail -n 40 ~/.tau_pods/{deploymentName}.log 2>/dev/null || true; fi";
+            $"elif test -f {vllmLogPath}; then tail -n 40 {vllmLogPath} 2>/dev/null || true; " +
+            $"elif test -f {tauLogPath}; then tail -n 40 {tauLogPath} 2>/dev/null || true; fi";
     }
 
     private static string BuildHealthCommand(string deploymentName)
     {
         var unitName = $"tau-pod-{deploymentName}.service";
         var unitBaseName = StripServiceSuffix(unitName);
+        var vllmLogPath = $"~/.vllm_logs/{deploymentName}.log";
+        var tauLogPath = $"~/.tau_pods/{deploymentName}.log";
+        var failurePattern = ShellSingleQuote(HealthFailurePattern());
+        var startupCompletePattern = ShellSingleQuote(HealthStartupCompletePattern());
         return
             BuildPortProbePrefix(deploymentName) +
             "if curl -fsS --max-time 2 \"http://127.0.0.1:$port/health\" >/dev/null 2>&1; then echo ready; exit 0; fi; " +
-            $"if test -f ~/.tau_pods/{deploymentName}.log && tail -n 40 ~/.tau_pods/{deploymentName}.log 2>/dev/null | grep -Eiq {ShellSingleQuote(HealthFailurePattern())}; then echo unhealthy; exit 2; fi; " +
+            $"if test -f {vllmLogPath} && tail -n 80 {vllmLogPath} 2>/dev/null | grep -Eiq {failurePattern}; then echo unhealthy; exit 2; fi; " +
+            $"if test -f {vllmLogPath} && tail -n 80 {vllmLogPath} 2>/dev/null | grep -Fq {startupCompletePattern}; then echo ready; exit 0; fi; " +
+            $"if test -f {tauLogPath} && tail -n 40 {tauLogPath} 2>/dev/null | grep -Eiq {failurePattern}; then echo unhealthy; exit 2; fi; " +
             $"if command -v systemctl >/dev/null 2>&1 && systemctl --user list-unit-files {ShellSingleQuote(unitName)} >/dev/null 2>&1; then " +
             $"state=$(systemctl --user is-active {ShellSingleQuote(unitName)} 2>/dev/null || true); " +
             "if [ \"$state\" = failed ]; then echo unhealthy; exit 2; fi; " +
@@ -994,7 +1007,9 @@ public sealed class PodVllmOrchestrationService
         "if [ -z \"$port\" ]; then port=8000; fi; ";
 
     private static string HealthFailurePattern() =>
-        "ERROR|Failed|Cuda error|CUDA out of memory|OutOfMemory|Engine core initialization failed|Traceback|died";
+        "ERROR|Failed|Cuda error|CUDA out of memory|torch\\.OutOfMemoryError|OutOfMemory|RuntimeError: Engine core initialization failed|Engine core initialization failed|Model runner exiting with code [1-9]|Script exited with code [1-9]|Traceback|died";
+
+    private static string HealthStartupCompletePattern() => "Application startup complete";
 
     private static string BuildHealthSummary(string podId, string deploymentName, VllmState state, int attempts, int maxAttempts) =>
         state.State switch
@@ -1098,9 +1113,15 @@ public sealed class PodVllmOrchestrationService
             return new VllmState("ready", Ready: true, Unhealthy: false, FailureKind: "none");
         }
 
+        if (text.Contains(HealthStartupCompletePattern(), StringComparison.OrdinalIgnoreCase))
+        {
+            return new VllmState("ready", Ready: true, Unhealthy: false, FailureKind: "none");
+        }
+
         if (ContainsStateToken(text, "unhealthy") ||
             ContainsStateToken(text, "crashed") ||
-            ContainsStateToken(text, "failed"))
+            ContainsStateToken(text, "failed") ||
+            ContainsStartupFailureMarker(text))
         {
             return new VllmState("unhealthy", Ready: false, Unhealthy: true, FailureKind: "startup-failed");
         }
@@ -1126,6 +1147,14 @@ public sealed class PodVllmOrchestrationService
 
         return new VllmState("unknown", Ready: false, Unhealthy: false, FailureKind: "unknown");
     }
+
+    private static bool ContainsStartupFailureMarker(string text) =>
+        text.Contains("Model runner exiting with code", StringComparison.OrdinalIgnoreCase) ||
+        text.Contains("Script exited with code", StringComparison.OrdinalIgnoreCase) ||
+        text.Contains("torch.OutOfMemoryError", StringComparison.OrdinalIgnoreCase) ||
+        text.Contains("CUDA out of memory", StringComparison.OrdinalIgnoreCase) ||
+        text.Contains("RuntimeError: Engine core initialization failed", StringComparison.OrdinalIgnoreCase) ||
+        text.Contains("Engine core initialization failed", StringComparison.OrdinalIgnoreCase);
 
     private static string GetHealthFailureKind(VllmState state, PodExecResult exec)
     {

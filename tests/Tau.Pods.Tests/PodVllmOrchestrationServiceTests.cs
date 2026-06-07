@@ -777,6 +777,8 @@ public sealed class PodVllmOrchestrationServiceTests
         var command = RemoteCommand(captured!);
         Assert.Equal(result.Command, command);
         Assert.Contains("curl -fsS --max-time 2 \"http://127.0.0.1:$port/health\"", command, StringComparison.Ordinal);
+        Assert.Contains("tail -n 80 ~/.vllm_logs/llama-8b.log", command, StringComparison.Ordinal);
+        Assert.Contains("Application startup complete", command, StringComparison.Ordinal);
         Assert.Contains("systemctl --user is-active 'tau-pod-llama-8b.service'", command, StringComparison.Ordinal);
         Assert.Contains("systemctl --user status 'tau-pod-llama-8b.service' --no-pager -l", command, StringComparison.Ordinal);
         Assert.Contains("~/.tau_pods/llama-8b.pid", command, StringComparison.Ordinal);
@@ -787,7 +789,7 @@ public sealed class PodVllmOrchestrationServiceTests
     public async Task StatusAsync_ParsesReadyAndUnhealthyOutput()
     {
         var exec = new PodExecService((_, _) =>
-            Task.FromResult(new PodExecService.ProcessExecutionResult(0, "ready\nApplication startup complete\n", "")));
+            Task.FromResult(new PodExecService.ProcessExecutionResult(0, "Application startup complete\n", "")));
         var service = new PodVllmOrchestrationService(exec);
         var pod = new PodDefinition { Id = "gpu-1", SshHost = "host.example.com" };
 
@@ -798,7 +800,7 @@ public sealed class PodVllmOrchestrationServiceTests
         Assert.Equal("ready", ready.State);
 
         exec = new PodExecService((_, _) =>
-            Task.FromResult(new PodExecService.ProcessExecutionResult(0, "unhealthy\nCUDA out of memory\n", "")));
+            Task.FromResult(new PodExecService.ProcessExecutionResult(0, "Model runner exiting with code 1\n", "")));
         service = new PodVllmOrchestrationService(exec);
 
         var unhealthy = await service.StatusAsync(pod, "llama");
@@ -830,8 +832,38 @@ public sealed class PodVllmOrchestrationServiceTests
         Assert.NotNull(captured);
         var command = RemoteCommand(captured!);
         Assert.Contains("curl -fsS --max-time 2 \"http://127.0.0.1:$port/health\"", command, StringComparison.Ordinal);
+        Assert.Contains("tail -n 80 ~/.vllm_logs/llama-8b.log", command, StringComparison.Ordinal);
+        Assert.Contains("Application startup complete", command, StringComparison.Ordinal);
         Assert.Contains("tail -n 40 ~/.tau_pods/llama-8b.log", command, StringComparison.Ordinal);
         Assert.Contains("echo unhealthy; exit 2", command, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task HealthAsync_ParsesStartupLogMarkers()
+    {
+        var exec = new PodExecService((_, _) =>
+            Task.FromResult(new PodExecService.ProcessExecutionResult(0, "Application startup complete\n", "")));
+        var service = new PodVllmOrchestrationService(exec);
+        var pod = new PodDefinition { Id = "gpu-1", SshHost = "host.example.com" };
+
+        var ready = await service.HealthAsync(pod, "llama");
+
+        Assert.True(ready.Success);
+        Assert.True(ready.Ready);
+        Assert.Equal("ready", ready.State);
+        Assert.Equal("none", ready.FailureKind);
+
+        exec = new PodExecService((_, _) =>
+            Task.FromResult(new PodExecService.ProcessExecutionResult(2, "Script exited with code 1\n", "")));
+        service = new PodVllmOrchestrationService(exec);
+
+        var unhealthy = await service.HealthAsync(pod, "llama");
+
+        Assert.False(unhealthy.Success);
+        Assert.False(unhealthy.Ready);
+        Assert.True(unhealthy.Unhealthy);
+        Assert.Equal("unhealthy", unhealthy.State);
+        Assert.Equal("startup-failed", unhealthy.FailureKind);
     }
 
     [Fact]
