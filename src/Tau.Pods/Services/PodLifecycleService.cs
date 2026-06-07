@@ -166,11 +166,16 @@ public sealed class PodLifecycleService
         }
 
         var unitName = $"tau-pod-{deployName}";
+        var vllmLogPath = $"~/.vllm_logs/{deployName}.log";
+        var tauLogPath = $"~/.tau_pods/{deployName}.log";
+        var tailValue = tail.ToString(System.Globalization.CultureInfo.InvariantCulture);
         var command =
-            $"if command -v journalctl >/dev/null 2>&1; then " +
-            $"journalctl -u {ShellSingleQuote(unitName)} -n {tail.ToString(System.Globalization.CultureInfo.InvariantCulture)} --no-pager 2>&1; " +
-            $"elif test -f ~/.tau_pods/{deployName}.log; then " +
-            $"tail -n {tail.ToString(System.Globalization.CultureInfo.InvariantCulture)} ~/.tau_pods/{deployName}.log; " +
+            $"if test -f {vllmLogPath}; then " +
+            $"tail -n {tailValue} {vllmLogPath}; " +
+            $"elif command -v journalctl >/dev/null 2>&1; then " +
+            $"journalctl -u {ShellSingleQuote(unitName)} -n {tailValue} --no-pager 2>&1; " +
+            $"elif test -f {tauLogPath}; then " +
+            $"tail -n {tailValue} {tauLogPath}; " +
             "else echo 'no logs available' && exit 1; fi";
 
         var execResult = await _execService.ExecuteAsync(pod, command, cancellationToken).ConfigureAwait(false);

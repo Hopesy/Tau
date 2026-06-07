@@ -2299,6 +2299,7 @@ public static class PodsCli
             WriteVllmPlanOptionFields(writer, plan);
             WriteKnownModelObject(writer, plan);
             writer.WriteString("unit", plan.UnitName);
+            writer.WriteString("logPath", plan.LogPath);
             writer.WriteString("serveCommand", plan.ServeCommand);
             writer.WriteString("systemdUnit", plan.SystemdUnit);
             writer.WritePropertyName("metadata");
@@ -2580,6 +2581,7 @@ public static class PodsCli
         WriteVllmPlanOptionFields(writer, plan);
         WriteKnownModelObject(writer, plan);
         writer.WriteString("unit", plan.UnitName);
+        writer.WriteString("logPath", plan.LogPath);
         writer.WriteString("serveCommand", plan.ServeCommand);
         writer.WriteString("systemdUnit", plan.SystemdUnit);
         writer.WritePropertyName("metadata");

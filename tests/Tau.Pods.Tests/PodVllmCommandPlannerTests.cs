@@ -34,6 +34,7 @@ public sealed class PodVllmCommandPlannerTests
         Assert.Equal("llama-8b--rm", plan.DeploymentName);
         Assert.Equal("/srv/hf cache/models--meta-llama--Llama-3.1-8B-Instruct", plan.ModelPath);
         Assert.Equal("tau-pod-llama-8b--rm.service", plan.UnitName);
+        Assert.Equal("~/.vllm_logs/llama-8b--rm.log", plan.LogPath);
         Assert.Contains("CUDA_VISIBLE_DEVICES='0'", plan.ServeCommand, StringComparison.Ordinal);
         Assert.Contains("bad_key='value with spaces'", plan.ServeCommand, StringComparison.Ordinal);
         Assert.Contains("model_cache_path='/srv/hf cache/models--meta-llama--Llama-3.1-8B-Instruct'", plan.ServeCommand, StringComparison.Ordinal);
@@ -41,7 +42,10 @@ public sealed class PodVllmCommandPlannerTests
         Assert.Contains("--port 8081", plan.ServeCommand, StringComparison.Ordinal);
         Assert.Contains("--served-model-name 'llama-8b'", plan.ServeCommand, StringComparison.Ordinal);
         Assert.Contains("'--tensor-parallel-size' '2'", plan.ServeCommand, StringComparison.Ordinal);
+        Assert.Contains("ExecStartPre=/usr/bin/env mkdir -p %h/.vllm_logs", plan.SystemdUnit, StringComparison.Ordinal);
         Assert.Contains("ExecStart=/usr/bin/env bash -lc", plan.SystemdUnit, StringComparison.Ordinal);
+        Assert.Contains("StandardOutput=append:%h/.vllm_logs/llama-8b--rm.log", plan.SystemdUnit, StringComparison.Ordinal);
+        Assert.Contains("StandardError=append:%h/.vllm_logs/llama-8b--rm.log", plan.SystemdUnit, StringComparison.Ordinal);
         Assert.Contains("WantedBy=default.target", plan.SystemdUnit, StringComparison.Ordinal);
         Assert.Contains("cat > ~/.tau_pods/llama-8b--rm.service <<'EOF'", plan.RemoteCommand, StringComparison.Ordinal);
         Assert.Contains("planned llama-8b--rm", plan.RemoteCommand, StringComparison.Ordinal);
@@ -50,6 +54,7 @@ public sealed class PodVllmCommandPlannerTests
         Assert.Equal("planned-vllm", metadata.RootElement.GetProperty("status").GetString());
         Assert.Equal("/srv/hf cache/models--meta-llama--Llama-3.1-8B-Instruct", metadata.RootElement.GetProperty("modelPath").GetString());
         Assert.Equal(8081, metadata.RootElement.GetProperty("port").GetInt32());
+        Assert.Equal("~/.vllm_logs/llama-8b--rm.log", metadata.RootElement.GetProperty("logPath").GetString());
     }
 
     [Fact]

@@ -54,7 +54,8 @@ public sealed class PodVllmCommandPlanner
         var serveCommand = hasResolvedModelPath
             ? BuildServeCommand(modelPath, port, servedModelName, environment, extraArgs)
             : BuildSnapshotDiscoveryServeCommand(modelCachePath, port, servedModelName, environment, extraArgs, revision);
-        var unit = BuildSystemdUnit(unitName, serveCommand);
+        var logPath = $"~/.vllm_logs/{deploymentName}.log";
+        var unit = BuildSystemdUnit(unitName, serveCommand, deploymentName);
         var metadata = BuildMetadataJson(
             options.ModelId.Trim(),
             deploymentName,
@@ -63,6 +64,7 @@ public sealed class PodVllmCommandPlanner
             port,
             servedModelName,
             unitName,
+            logPath,
             revision,
             knownConfig,
             requestedGpuCount,
@@ -100,7 +102,8 @@ public sealed class PodVllmCommandPlanner
             MemoryOverride: memoryOverride,
             MemoryUtilization: memoryUtilization,
             ContextOverride: contextOverride,
-            ContextTokens: contextTokens);
+            ContextTokens: contextTokens,
+            LogPath: logPath);
     }
 
     public string BuildModelCachePath(PodDefinition pod, string modelId)
@@ -477,13 +480,16 @@ public sealed class PodVllmCommandPlanner
         return builder.ToString();
     }
 
-    private static string BuildSystemdUnit(string unitName, string serveCommand) =>
+    private static string BuildSystemdUnit(string unitName, string serveCommand, string deploymentName) =>
         "[Unit]\n" +
         $"Description=Tau Pods vLLM runner {unitName}\n" +
         "After=network-online.target\n\n" +
         "[Service]\n" +
         "Type=simple\n" +
+        "ExecStartPre=/usr/bin/env mkdir -p %h/.vllm_logs\n" +
         $"ExecStart=/usr/bin/env bash -lc {ShellSingleQuote(serveCommand)}\n" +
+        $"StandardOutput=append:%h/.vllm_logs/{deploymentName}.log\n" +
+        $"StandardError=append:%h/.vllm_logs/{deploymentName}.log\n" +
         "Restart=on-failure\n" +
         "RestartSec=5\n\n" +
         "[Install]\n" +
@@ -497,6 +503,7 @@ public sealed class PodVllmCommandPlanner
         int port,
         string servedModelName,
         string unitName,
+        string logPath,
         string? revision,
         PodKnownModelConfig? knownConfig,
         int? requestedGpuCount,
@@ -515,6 +522,7 @@ public sealed class PodVllmCommandPlanner
             .Append(",\"port\":").Append(port.ToString(System.Globalization.CultureInfo.InvariantCulture))
             .Append(",\"servedModelName\":\"").Append(EscapeJsonString(servedModelName))
             .Append("\",\"unit\":\"").Append(EscapeJsonString(unitName))
+            .Append("\",\"logPath\":\"").Append(EscapeJsonString(logPath))
             .Append("\"")
             .Append(revision is null ? string.Empty : ",\"revision\":\"" + EscapeJsonString(revision) + "\"");
 

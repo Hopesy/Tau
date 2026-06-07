@@ -775,7 +775,9 @@ public sealed class PodVllmOrchestrationService
     private static string BuildDeployCommand(PodVllmServePlan plan)
     {
         var unitBaseName = StripServiceSuffix(plan.UnitName);
-        var logPath = $"~/.tau_pods/{plan.DeploymentName}.log";
+        var logPath = string.IsNullOrWhiteSpace(plan.LogPath)
+            ? $"~/.vllm_logs/{plan.DeploymentName}.log"
+            : plan.LogPath;
         var pidPath = $"~/.tau_pods/{plan.DeploymentName}.pid";
         var fallbackCommand =
             $"nohup /usr/bin/env bash -lc {ShellSingleQuote(plan.ServeCommand)} > {logPath} 2>&1 < /dev/null & " +
@@ -790,7 +792,7 @@ public sealed class PodVllmOrchestrationService
             "if [ -n \"$pid\" ] && [ \"$pid\" != \"0\" ]; then echo \"pid=$pid\"; fi";
 
         return
-            $"mkdir -p ~/.tau_pods && " +
+            $"mkdir -p ~/.tau_pods ~/.vllm_logs && " +
             $"cat > ~/.tau_pods/{plan.DeploymentName}.service <<'EOF'\n{plan.SystemdUnit}\nEOF\n" +
             $"cat > ~/.tau_pods/{plan.DeploymentName}.json <<'EOF'\n{plan.MetadataJson}\nEOF\n" +
             $"if command -v systemctl >/dev/null 2>&1; then " +

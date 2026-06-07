@@ -40,4 +40,5 @@ public sealed record PodVllmServePlan(
     string? MemoryOverride = null,
     double? MemoryUtilization = null,
     string? ContextOverride = null,
-    int? ContextTokens = null);
+    int? ContextTokens = null,
+    string LogPath = "");

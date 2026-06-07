@@ -413,6 +413,11 @@ public class PodsCliTests
             Assert.Equal(100, root.GetProperty("tail").GetInt32());
             Assert.Equal("none", root.GetProperty("failureKind").GetString());
             Assert.Equal("line-1\nline-2\n", root.GetProperty("stdout").GetString());
+            Assert.Contains("test -f ~/.vllm_logs/served-model.log", capturedCommand!, StringComparison.Ordinal);
+            Assert.Contains("tail -n 100 ~/.vllm_logs/served-model.log", capturedCommand!, StringComparison.Ordinal);
+            Assert.True(
+                capturedCommand!.IndexOf("~/.vllm_logs/served-model.log", StringComparison.Ordinal) <
+                capturedCommand!.IndexOf("journalctl", StringComparison.Ordinal));
         }
         finally
         {
@@ -444,6 +449,8 @@ public class PodsCliTests
 
             Assert.Equal(0, exitCode);
             Assert.NotNull(capturedCommand);
+            Assert.Contains("test -f ~/.vllm_logs/served-model.log", capturedCommand!, StringComparison.Ordinal);
+            Assert.Contains("tail -n 42 ~/.vllm_logs/served-model.log", capturedCommand!, StringComparison.Ordinal);
             Assert.Contains("journalctl -u 'tau-pod-served-model' -n 42", capturedCommand!, StringComparison.Ordinal);
             using var document = JsonDocument.Parse(stdout.ToString());
             var root = document.RootElement;
@@ -2141,12 +2148,16 @@ public class PodsCliTests
             Assert.Equal(8000, root.GetProperty("port").GetInt32());
             Assert.Equal("served-model", root.GetProperty("servedModel").GetString());
             Assert.Equal("tau-pod-served-model.service", root.GetProperty("unit").GetString());
+            Assert.Equal("~/.vllm_logs/served-model.log", root.GetProperty("logPath").GetString());
             var serveCommand = root.GetProperty("serveCommand").GetString()!;
             var systemdUnit = root.GetProperty("systemdUnit").GetString()!;
             var remoteCommand = root.GetProperty("remoteCommand").GetString()!;
             Assert.Contains("model_cache_path='/mnt/models/models--org--model'", serveCommand, StringComparison.Ordinal);
             Assert.Contains("vllm serve \"$resolved_model_path\"", serveCommand, StringComparison.Ordinal);
+            Assert.Contains("ExecStartPre=/usr/bin/env mkdir -p %h/.vllm_logs", systemdUnit, StringComparison.Ordinal);
             Assert.Contains("ExecStart=/usr/bin/env bash -lc", systemdUnit, StringComparison.Ordinal);
+            Assert.Contains("StandardOutput=append:%h/.vllm_logs/served-model.log", systemdUnit, StringComparison.Ordinal);
+            Assert.Contains("StandardError=append:%h/.vllm_logs/served-model.log", systemdUnit, StringComparison.Ordinal);
             Assert.Contains("cat > ~/.tau_pods/served-model.service <<'EOF'", remoteCommand, StringComparison.Ordinal);
             Assert.DoesNotContain("ssh ", remoteCommand, StringComparison.OrdinalIgnoreCase);
             Assert.DoesNotContain("systemctl start", remoteCommand, StringComparison.OrdinalIgnoreCase);
@@ -2157,6 +2168,7 @@ public class PodsCliTests
             Assert.Equal("/mnt/models/models--org--model", metadata.GetProperty("modelPath").GetString());
             Assert.Equal(8000, metadata.GetProperty("port").GetInt32());
             Assert.Equal("tau-pod-served-model.service", metadata.GetProperty("unit").GetString());
+            Assert.Equal("~/.vllm_logs/served-model.log", metadata.GetProperty("logPath").GetString());
 
             using var metadataJson = JsonDocument.Parse(root.GetProperty("metadataJson").GetString()!);
             Assert.Equal(metadata.GetProperty("ts").GetString(), metadataJson.RootElement.GetProperty("ts").GetString());
