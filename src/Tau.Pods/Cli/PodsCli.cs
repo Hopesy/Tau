@@ -977,8 +977,22 @@ public static class PodsCli
 
     private static async Task<int> LogsAsync(string[] args, PodsConfigStore store, PodsConfigValidator validator, PodLifecycleService lifecycleService)
     {
-        var jsonOutput = TryConsumeFlag(args, "--json", startIndex: 1, out var positionalArgs);
-        if (!TryParseLogsCommand(positionalArgs, "Usage: logs [--json] [--config path] [--pod pod-id] <deployment-name> [tail] or logs [--json] [path] <pod-id> <deployment-name> [tail]", out var parsed))
+        const string usage = "Usage: logs [--json] [--follow|-f] [--config path] [--pod pod-id] <deployment-name> [tail] or logs [--json] [--follow|-f] [path] <pod-id> <deployment-name> [tail]";
+        var jsonOutput = TryConsumeFlag(args, "--json", startIndex: 1, out var jsonArgs);
+        var follow = TryConsumeFlag(jsonArgs, "--follow", startIndex: 1, out var followArgs);
+        if (TryConsumeFlag(followArgs, "-f", startIndex: 1, out var positionalArgs))
+        {
+            follow = true;
+        }
+
+        if (jsonOutput && follow)
+        {
+            Console.Error.WriteLine("logs --follow cannot be combined with --json because the log stream inherits stdout/stderr.");
+            Console.Error.WriteLine(usage);
+            return 1;
+        }
+
+        if (!TryParseLogsCommand(positionalArgs, usage, out var parsed))
         {
             return 1;
         }
@@ -986,8 +1000,15 @@ public static class PodsCli
         var config = LoadOrReport(parsed.ConfigPath, store, validator, out var exitCode);
         if (config is null) return exitCode;
 
-        if (!TryResolveLogsTarget(config, parsed, out var podId, out var deploymentName, out var tail))
+        if (!TryResolveLogsTarget(config, parsed, out var podId, out var deploymentName, out var tail, out var tailSpecified))
         {
+            return 1;
+        }
+
+        if (follow && tailSpecified)
+        {
+            Console.Error.WriteLine("Tail value is not supported with logs --follow; it streams the upstream tail -f log file.");
+            Console.Error.WriteLine(usage);
             return 1;
         }
 
@@ -996,6 +1017,26 @@ public static class PodsCli
         {
             Console.Error.WriteLine($"Pod not found: {podId}");
             return 1;
+        }
+
+        if (follow)
+        {
+            Console.WriteLine($"Streaming logs for '{deploymentName}' on pod '{pod.Id}'...");
+            Console.WriteLine("Press Ctrl+C to stop");
+            Console.WriteLine();
+
+            var streamResult = await lifecycleService.FollowLogsAsync(pod, deploymentName).ConfigureAwait(false);
+            if (!streamResult.Success)
+            {
+                Console.WriteLine($"{streamResult.PodId} | ok=False | {streamResult.Summary}");
+                if (!string.IsNullOrWhiteSpace(streamResult.StdErr))
+                {
+                    Console.WriteLine("[stderr]");
+                    Console.WriteLine(streamResult.StdErr.TrimEnd());
+                }
+            }
+
+            return streamResult.Success ? 0 : 1;
         }
 
         var result = await lifecycleService.LogsAsync(pod, deploymentName, tail).ConfigureAwait(false);
@@ -2129,6 +2170,7 @@ public static class PodsCli
             writer.WriteString("summary", result.Summary);
             writer.WriteString("deploymentName", result.DeploymentName ?? deploymentName);
             writer.WriteNumber("tail", result.Tail ?? tail);
+            writer.WriteBoolean("follow", result.Follow);
             writer.WriteString("failureKind", result.FailureKind);
             writer.WriteString("stdout", result.Output ?? string.Empty);
             writer.WriteString("stderr", result.StdErr);
@@ -3844,17 +3886,19 @@ public static class PodsCli
         ModelCommandArguments parsed,
         out string podId,
         out string deploymentName,
-        out int tail)
+        out int tail,
+        out bool tailSpecified)
     {
         podId = string.Empty;
         deploymentName = string.Empty;
         tail = 100;
+        tailSpecified = false;
 
         if (!string.IsNullOrWhiteSpace(parsed.PodId))
         {
             podId = parsed.PodId;
             deploymentName = parsed.Values[0];
-            if (!TryParseTail(parsed.Values, 1, out tail))
+            if (!TryParseTail(parsed.Values, 1, out tail, out tailSpecified))
             {
                 return false;
             }
@@ -3891,9 +3935,10 @@ public static class PodsCli
                     return false;
                 }
 
+                tailSpecified = true;
                 return true;
             default:
-                Console.Error.WriteLine("Usage: logs [--json] [--config path] [--pod pod-id] <deployment-name> [tail] or logs [--json] [path] <pod-id> <deployment-name> [tail]");
+                Console.Error.WriteLine("Usage: logs [--json] [--follow|-f] [--config path] [--pod pod-id] <deployment-name> [tail] or logs [--json] [--follow|-f] [path] <pod-id> <deployment-name> [tail]");
                 return false;
         }
     }
@@ -3924,14 +3969,16 @@ public static class PodsCli
         return true;
     }
 
-    private static bool TryParseTail(IReadOnlyList<string> values, int index, out int tail)
+    private static bool TryParseTail(IReadOnlyList<string> values, int index, out int tail, out bool tailSpecified)
     {
         tail = 100;
+        tailSpecified = false;
         if (values.Count <= index)
         {
             return true;
         }
 
+        tailSpecified = true;
         return TryParseTailValue(values[index], out tail);
     }
 
@@ -4275,7 +4322,7 @@ public static class PodsCli
         Console.WriteLine("  deploy [--json] [path] <id> <model> [name] Deploy a model to a pod");
         Console.WriteLine("  stop [--json] [--config path] [--pod id] [name] Stop a vLLM deployment, or all deployments if no name is given");
         Console.WriteLine("  restart [--json] [path] <id> <name> Restart a deployment on a pod");
-        Console.WriteLine("  logs [--json] [--config path] [--pod id] <name> [tail] Fetch deployment logs from the active or specified pod");
+        Console.WriteLine("  logs [--json] [--follow|-f] [--config path] [--pod id] <name> [tail] Fetch or stream deployment logs from the active or specified pod");
         Console.WriteLine("  agent [--config path] [--pod id] <name> [message/options...] Build the upstream pod-agent prompt mapping; execution is still open");
         Console.WriteLine("  deployments [--json] [--config path] [--pod id] List deployments on a pod");
         Console.WriteLine("  setup plan [--json] [--mount <command>] [--models-path <path>] [--vllm release|nightly|gpt-oss] [path] <id> Print a plan-only pod setup command");

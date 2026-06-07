@@ -188,10 +188,10 @@ public sealed class PodLifecycleService
                 string.IsNullOrEmpty(execResult.StdOut) ? null : execResult.StdOut,
                 deployName,
                 tail,
-                command,
-                execResult.ExitCode,
-                string.IsNullOrEmpty(execResult.StdErr) ? null : execResult.StdErr,
-                GetExecutionFailureKind(execResult));
+                Command: command,
+                ExitCode: execResult.ExitCode,
+                StdErr: string.IsNullOrEmpty(execResult.StdErr) ? null : execResult.StdErr,
+                FailureKind: GetExecutionFailureKind(execResult));
             LogLogsEnd(failureResult, GetExecutionFailureKind(execResult));
             return failureResult;
         }
@@ -204,10 +204,84 @@ public sealed class PodLifecycleService
             output,
             deployName,
             tail,
-            command,
-            execResult.ExitCode,
-            string.IsNullOrEmpty(execResult.StdErr) ? null : execResult.StdErr,
-            PodExecFailureKinds.None);
+            Command: command,
+            ExitCode: execResult.ExitCode,
+            StdErr: string.IsNullOrEmpty(execResult.StdErr) ? null : execResult.StdErr,
+            FailureKind: PodExecFailureKinds.None);
+        LogLogsEnd(finalResult);
+        return finalResult;
+    }
+
+    public async Task<PodLogsResult> FollowLogsAsync(
+        PodDefinition pod,
+        string deploymentName,
+        CancellationToken cancellationToken = default)
+    {
+        var deployName = NormalizeDeploymentName(deploymentName);
+        LogLifecycleStart(
+            "logs.follow",
+            pod.Id,
+            deployName,
+            transport: GetLifecycleTransport(pod),
+            extraFields: new Dictionary<string, string?>
+            {
+                ["follow"] = "true"
+            });
+
+        if (string.IsNullOrWhiteSpace(pod.SshHost))
+        {
+            var unsupportedResult = new PodLogsResult(
+                pod.Id,
+                false,
+                "Log streaming requires SSH-based pod.",
+                DeploymentName: deployName,
+                Follow: true,
+                FailureKind: PodExecFailureKinds.UnsupportedTransport);
+            LogLogsEnd(unsupportedResult, PodExecFailureKinds.UnsupportedTransport);
+            return unsupportedResult;
+        }
+
+        if (!pod.Models.ContainsKey(deployName))
+        {
+            var missingResult = new PodLogsResult(
+                pod.Id,
+                false,
+                $"Model '{deployName}' not found on pod '{pod.Id}'.",
+                DeploymentName: deployName,
+                Follow: true,
+                FailureKind: PodExecFailureKinds.ModelNotFound);
+            LogLogsEnd(missingResult, PodExecFailureKinds.ModelNotFound);
+            return missingResult;
+        }
+
+        var command = $"tail -f ~/.vllm_logs/{deployName}.log";
+        var execResult = await _execService.OpenCommandAsync(pod, command, cancellationToken, keepAlive: true).ConfigureAwait(false);
+        if (!execResult.Success)
+        {
+            var failureResult = new PodLogsResult(
+                pod.Id,
+                false,
+                $"Log streaming failed: {execResult.Summary}",
+                DeploymentName: deployName,
+                Follow: true,
+                Command: command,
+                ExitCode: execResult.ExitCode,
+                StdErr: string.IsNullOrEmpty(execResult.StdErr) ? null : execResult.StdErr,
+                FailureKind: GetExecutionFailureKind(execResult));
+            LogLogsEnd(failureResult, GetExecutionFailureKind(execResult));
+            return failureResult;
+        }
+
+        var finalResult = new PodLogsResult(
+            pod.Id,
+            true,
+            $"Streamed logs for '{deployName}' on {pod.Id}.",
+            DeploymentName: deployName,
+            Follow: true,
+            Command: command,
+            ExitCode: execResult.ExitCode,
+            StdErr: string.IsNullOrEmpty(execResult.StdErr) ? null : execResult.StdErr,
+            FailureKind: PodExecFailureKinds.None);
         LogLogsEnd(finalResult);
         return finalResult;
     }
@@ -305,6 +379,7 @@ public sealed class PodLifecycleService
             extraFields: new Dictionary<string, string?>
             {
                 ["tail"] = result.Tail?.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                ["follow"] = result.Follow ? "true" : "false",
                 ["lineCount"] = result.Output is null ? null : LineCount(result.Output).ToString(System.Globalization.CultureInfo.InvariantCulture),
                 ["exitCode"] = result.ExitCode?.ToString(System.Globalization.CultureInfo.InvariantCulture),
                 ["failureKind"] = failureKind ?? result.FailureKind

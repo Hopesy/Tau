@@ -204,6 +204,37 @@ public class PodExecServiceTests
         Assert.Equal("pods.example.internal:22", result.Target);
     }
 
+    [Fact]
+    public async Task OpenCommandAsync_WithSshPod_InheritsStdIoAndPassesRemoteCommand()
+    {
+        const string command = "tail -f ~/.vllm_logs/served.log";
+        var service = new PodExecService((psi, _) =>
+        {
+            Assert.Equal("ssh", psi.FileName, ignoreCase: true);
+            Assert.Equal(
+                new[]
+                {
+                    "-p",
+                    "2222",
+                    "pods.example.internal",
+                    command
+                },
+                psi.ArgumentList);
+            Assert.False(psi.RedirectStandardOutput);
+            Assert.False(psi.RedirectStandardError);
+            Assert.False(psi.CreateNoWindow);
+            Assert.Equal("1", psi.Environment["FORCE_COLOR"]);
+            return Task.FromResult(new PodExecService.ProcessExecutionResult(0, string.Empty, string.Empty));
+        });
+
+        var result = await service.OpenCommandAsync(SshPod(), command, keepAlive: true);
+
+        Assert.True(result.Success);
+        Assert.Equal(command, result.Command);
+        Assert.Equal("ssh command stream closed", result.Summary);
+        Assert.Equal(PodExecFailureKinds.None, result.FailureKind);
+    }
+
     private static PodDefinition SshPod() => new()
     {
         Id = "ssh-pod",

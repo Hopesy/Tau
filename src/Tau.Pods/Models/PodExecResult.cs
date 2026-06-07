@@ -18,6 +18,7 @@ public static class PodExecFailureKinds
     public const string None = "none";
     public const string Unknown = "unknown";
     public const string UnsupportedTransport = "unsupported-transport";
+    public const string ModelNotFound = "model-not-found";
     public const string SshProcessStartFailed = "ssh-process-start-failed";
     public const string SshProcessRunnerFailed = "ssh-process-runner-failed";
     public const string SshExecCancelled = "ssh-exec-cancelled";

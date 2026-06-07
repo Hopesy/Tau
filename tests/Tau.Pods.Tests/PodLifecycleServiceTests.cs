@@ -349,6 +349,54 @@ public class PodLifecycleServiceTests
     }
 
     [Fact]
+    public async Task FollowLogsAsync_SshPod_StreamsUpstreamVllmLogWithInheritedStdIo()
+    {
+        System.Diagnostics.ProcessStartInfo? captured = null;
+        var exec = new PodExecService((psi, _) =>
+        {
+            captured = psi;
+            return Task.FromResult(new PodExecService.ProcessExecutionResult(0, string.Empty, string.Empty));
+        });
+        var service = new PodLifecycleService(exec);
+        var pod = new PodDefinition { Id = "gpu-1", SshHost = "host.example.com" };
+        pod.Models["served-model"] = new PodConfiguredModel { Model = "org/model", Port = 8000, Gpu = [0], Pid = 1234 };
+
+        var result = await service.FollowLogsAsync(pod, "served model");
+
+        Assert.True(result.Success);
+        Assert.True(result.Follow);
+        Assert.Null(result.Tail);
+        Assert.Equal("served-model", result.DeploymentName);
+        Assert.Equal("tail -f ~/.vllm_logs/served-model.log", result.Command);
+        Assert.NotNull(captured);
+        Assert.Equal("tail -f ~/.vllm_logs/served-model.log", captured!.ArgumentList[^1]);
+        Assert.False(captured.RedirectStandardOutput);
+        Assert.False(captured.RedirectStandardError);
+    }
+
+    [Fact]
+    public async Task FollowLogsAsync_MissingConfiguredModel_RejectsBeforeRemoteExecution()
+    {
+        var execCalled = false;
+        var exec = new PodExecService((_, _) =>
+        {
+            execCalled = true;
+            return Task.FromResult(new PodExecService.ProcessExecutionResult(0, string.Empty, string.Empty));
+        });
+        var service = new PodLifecycleService(exec);
+        var pod = new PodDefinition { Id = "gpu-1", SshHost = "host.example.com" };
+
+        var result = await service.FollowLogsAsync(pod, "served model");
+
+        Assert.False(result.Success);
+        Assert.True(result.Follow);
+        Assert.Equal("served-model", result.DeploymentName);
+        Assert.Equal(PodExecFailureKinds.ModelNotFound, result.FailureKind);
+        Assert.Contains("not found", result.Summary, StringComparison.OrdinalIgnoreCase);
+        Assert.False(execCalled);
+    }
+
+    [Fact]
     public async Task ListDeploymentsAsync_NonSshPod_RejectsRequest()
     {
         var exec = CreateFakeExecService();

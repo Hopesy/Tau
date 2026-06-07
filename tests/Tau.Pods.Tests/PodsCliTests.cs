@@ -468,6 +468,73 @@ public class PodsCliTests
     }
 
     [Fact]
+    public async Task Logs_Follow_UsesActivePodAndStreamsUpstreamVllmLog()
+    {
+        var tempDir = Directory.CreateTempSubdirectory("tau-pods-cli-logs-follow-");
+        var configPath = Path.Combine(tempDir.FullName, "custom-pods.json");
+        var stdout = new StringWriter();
+        var previousOut = Console.Out;
+        System.Diagnostics.ProcessStartInfo? captured = null;
+        var execService = new PodExecService((psi, _) =>
+        {
+            captured = psi;
+            return Task.FromResult(new PodExecService.ProcessExecutionResult(0, string.Empty, string.Empty));
+        });
+
+        try
+        {
+            Console.SetOut(stdout);
+            var config = ConfigWithSshPod();
+            config.ActivePodId = "ssh-pod";
+            config.Pods[0].Models["served-model"] = new PodConfiguredModel { Model = "org/model", Port = 8000, Gpu = [0], Pid = 1234 };
+            new PodsConfigStore().Save(configPath, config);
+
+            var exitCode = await PodsCli.RunAsync(["logs", "--follow", "--config", configPath, "served model"], execService);
+
+            Assert.Equal(0, exitCode);
+            Assert.NotNull(captured);
+            Assert.Equal(["-p", "2222", "pods.example.internal", "tail -f ~/.vllm_logs/served-model.log"], captured!.ArgumentList.ToArray());
+            Assert.False(captured.RedirectStandardOutput);
+            Assert.False(captured.RedirectStandardError);
+            Assert.Contains("Streaming logs for 'served model' on pod 'ssh-pod'...", stdout.ToString(), StringComparison.Ordinal);
+            Assert.Contains("Press Ctrl+C to stop", stdout.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            Console.SetOut(previousOut);
+            tempDir.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Logs_FollowWithJson_RejectsBeforeRemoteExecution()
+    {
+        var stderr = new StringWriter();
+        var previousError = Console.Error;
+        var execCalled = false;
+        var execService = new PodExecService((_, _) =>
+        {
+            execCalled = true;
+            return Task.FromResult(new PodExecService.ProcessExecutionResult(0, string.Empty, string.Empty));
+        });
+
+        try
+        {
+            Console.SetError(stderr);
+
+            var exitCode = await PodsCli.RunAsync(["logs", "--json", "--follow", "served-model"], execService);
+
+            Assert.Equal(1, exitCode);
+            Assert.False(execCalled);
+            Assert.Contains("logs --follow cannot be combined with --json", stderr.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            Console.SetError(previousError);
+        }
+    }
+
+    [Fact]
     public async Task Logs_WithoutPodIdAndNoActive_ReportsNoActivePod()
     {
         var tempDir = Directory.CreateTempSubdirectory("tau-pods-cli-logs-no-active-");

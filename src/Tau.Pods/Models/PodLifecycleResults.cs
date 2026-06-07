@@ -29,6 +29,7 @@ public sealed record PodLogsResult(
     string? Output = null,
     string? DeploymentName = null,
     int? Tail = null,
+    bool Follow = false,
     string? Command = null,
     int? ExitCode = null,
     string? StdErr = null,

@@ -34,12 +34,24 @@ public sealed class PodExecService
         return await ExecuteSshAsync(pod, "shell", cancellationToken, keepAlive: false, interactiveShell: true).ConfigureAwait(false);
     }
 
+    public async Task<PodExecResult> OpenCommandAsync(
+        PodDefinition pod,
+        string command,
+        CancellationToken cancellationToken = default,
+        bool keepAlive = false)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(command);
+
+        return await ExecuteSshAsync(pod, command.Trim(), cancellationToken, keepAlive, interactiveShell: false, inheritStdIo: true).ConfigureAwait(false);
+    }
+
     private async Task<PodExecResult> ExecuteSshAsync(
         PodDefinition pod,
         string command,
         CancellationToken cancellationToken,
         bool keepAlive,
-        bool interactiveShell)
+        bool interactiveShell,
+        bool inheritStdIo = false)
     {
         if (!string.IsNullOrWhiteSpace(pod.Endpoint))
         {
@@ -53,7 +65,9 @@ public sealed class PodExecService
                 string.Empty,
                 string.Empty,
                 TimeSpan.Zero,
-                interactiveShell ? "endpoint pods do not support interactive shell yet" : "endpoint pods do not support remote exec yet",
+                interactiveShell
+                    ? "endpoint pods do not support interactive shell yet"
+                    : inheritStdIo ? "endpoint pods do not support interactive remote commands yet" : "endpoint pods do not support remote exec yet",
                 PodExecFailureKinds.UnsupportedTransport);
         }
 
@@ -61,20 +75,26 @@ public sealed class PodExecService
         var port = pod.SshPort ?? 22;
         var target = $"{host}:{port}";
         var watch = Stopwatch.StartNew();
+        var redirectStreams = !interactiveShell && !inheritStdIo;
 
         try
         {
             var psi = new ProcessStartInfo
             {
                 FileName = "ssh",
-                RedirectStandardOutput = !interactiveShell,
-                RedirectStandardError = !interactiveShell,
+                RedirectStandardOutput = redirectStreams,
+                RedirectStandardError = redirectStreams,
                 UseShellExecute = false,
-                CreateNoWindow = !interactiveShell
+                CreateNoWindow = redirectStreams
             };
+            if (inheritStdIo)
+            {
+                psi.Environment["FORCE_COLOR"] = "1";
+            }
+
             psi.ArgumentList.Add("-p");
             psi.ArgumentList.Add(port.ToString(CultureInfo.InvariantCulture));
-            if (!interactiveShell)
+            if (redirectStreams)
             {
                 psi.ArgumentList.Add("-o");
                 psi.ArgumentList.Add("BatchMode=yes");
@@ -132,8 +152,8 @@ public sealed class PodExecService
 
             var success = execution.ExitCode == 0;
             var summary = success
-                ? interactiveShell ? "ssh shell closed" : "ssh exec ok"
-                : interactiveShell ? $"ssh shell failed ({execution.ExitCode})" : $"ssh exec failed ({execution.ExitCode})";
+                ? interactiveShell ? "ssh shell closed" : inheritStdIo ? "ssh command stream closed" : "ssh exec ok"
+                : interactiveShell ? $"ssh shell failed ({execution.ExitCode})" : inheritStdIo ? $"ssh command stream failed ({execution.ExitCode})" : $"ssh exec failed ({execution.ExitCode})";
             var failureKind = success ? PodExecFailureKinds.None : ClassifySshExitFailure(execution);
 
             return new PodExecResult(
