@@ -39,13 +39,13 @@
 
 本节是 2026-06-08 基于当前 HEAD、上游目录、active matrix 和本地工作树重新审视后的事实面，用来防止把 baseline、fake tests 或局部 planning 误写成 100% 完成。
 
-- 本轮实现前 committed baseline 到 `f3e5bf2 docs: refresh 100 percent migration goal`，`main` 与 `origin/main` 对齐；当前工作树包含本轮 Pods config WIP，并仍有既有 `.github/workflows/tau-ci.yml` 删除状态。该删除不属于本轮 100% plan 证据，不得在没有单独 CI 审计时顺手 stage 或用于完成声明。
+- 本轮审视时 committed baseline 已到 `41f1ec6 feat(pods): align default config loading with upstream`，`main` 与 `origin/main` 对齐；当前没有本轮待提交实现 WIP，仅保留既有 `.github/workflows/tau-ci.yml` 删除状态。该删除不属于本轮 100% plan 证据，不得在没有单独 CI 审计时顺手 stage 或用于完成声明。
 - 上游 package directory set 当前仍是 `agent`、`ai`、`coding-agent`、`mom`、`pods`、`tui`、`web-ui`，与 Phase 1 inventory freeze 匹配；本轮没有发现新的未知上游 package。
 - 上游 root scripts 当前仍包括 `browser-smoke-entry.ts`、`build-binaries.sh`、`check-browser-smoke.mjs`、`cost.ts`、`edit-tool-stats.mjs`、`profile-coding-agent-node.mjs`、`release.mjs`、`session-transcripts.ts`、`sync-versions.js`；这些 release/test/audit surfaces 仍不能用普通 `dotnet test` 替代最终验收。
 - 按当前 matrix 全表 status 列机器计数为 `partial=187`、`external-e2e-needed=31`、`ported=31`、`missing=12`、`non-goal-proposed=1`、`verified=0`。这说明当前仓库是高覆盖 baseline + 大量局部合同测试状态，不是 100% 移植完成状态；`ported` 也只是“已有本地证据但未达到最终验收”，不能当完成。
 - 当前 `missing` 行集中在 package manager/install telemetry/changelog、RPC extension UI protocol、image/attachment ingestion、WebUi sandbox/tool/artifact runtime/prompt constants、Pods prompt/agent/pod-model user command、root release/scripts parity。任何一个 `missing` 未关闭，100% 验收都不能通过。
 - 当前 `external-e2e-needed` 行集中在真实 AI provider/OAuth/AWS、live terminal/TTY、WebUi browser/release/static、Slack receive/respond/file/history、Docker sandbox、Pods SSH/SCP/setup/GPU/vLLM。没有真实环境证据时只能保持 open，不能用 fake/stub tests 降级为完成。
-- 最新 Pods config path/env 切片已关闭上游 path/env 与 missing-file 子合同：对照上游 `packages/pods/src/config.ts`，Tau 未显式传 config path 时会读取/写入 `PI_CONFIG_DIR/pods.json` 或无 env 默认 `~/.pi/pods.json`；`PodsConfigStore.Load` 对缺失文件返回空 `PodsConfig`，`list --json` 和 `validate --json` 已覆盖 missing default config；显式 `--config path` / positional config path 继续优先。该能力仍不关闭 upstream `pods: Record<string, Pod>` / `models: Record<string, Model>` schema migration、真实 remote e2e 或 Pods final `verified` 状态。
+- 最新 Pods config path/env 切片已关闭上游 path/env 与 missing-file 子合同：对照上游 `packages/pods/src/config.ts`，Tau 未显式传 config path 时会读取/写入 `PI_CONFIG_DIR/pods.json` 或无 env 默认 `~/.pi/pods.json`；`PodsConfigStore.Load` 对缺失文件返回空 `PodsConfig`，`list --json` 和 `validate --json` 已覆盖 missing default config；显式 `--config path` / positional config path 继续优先。该能力仍不关闭上游 `packages/pods/src/types.ts` 的 `pods: Record<string, Pod>` / `models: Record<string, Model>` schema migration、active/model state round-trip、真实 remote e2e 或 Pods final `verified` 状态；Tau 当前 `PodsConfig.Pods` 仍是 `List<PodDefinition>`。
 - `docs/QUALITY_SCORE.md` 当前仍把关键产品面、测试、CI/CD、可观测性、安全配置标为 `C` 风险；只要这些风险仍指向 parity 缺口，Final audit 就不能关闭。
 
 ## 100% acceptance ledger
@@ -59,6 +59,21 @@
 | Release/package/install | 已有 PowerShell-first gate、artifact baseline、release dry-run/apply helpers、package publish/sign/provenance dry-run contracts；root release/scripts parity 仍有 `missing`/`partial`。 | 完成真实 registry publish rehearsal、package consumer smoke、signing/provenance rehearsal、non-host executable smoke、global alias/install parity、release/static browser smoke。 |
 | Documentation and history | `GOAL.md`、active plan、matrix、`next.md`、quality/history 已建立协作闭环。 | 每个实质切片同轮同步 matrix/active plan/next/quality/history；最终 `next.md` 不得隐藏任何 product parity backlog。 |
 | Final validation | 本地 PowerShell gate 曾多次通过，但这只是当前 baseline 证据。 | 最终必须重新通过 `verify-dotnet.ps1 -SkipRestore`、`verify-dotnet.ps1 -SkipRestore -RunSmoke`、release/package gates 和 external e2e gates，再归档 active plan。 |
+
+## Current incomplete surface ledger
+
+本轮窄源复核确认：上游仍存在 `packages/coding-agent/src/package-manager-cli.ts`、`packages/coding-agent/src/core/package-manager.ts`、`packages/coding-agent/src/modes/rpc/rpc-types.ts`、`packages/web-ui/src/components/sandbox/**`、`packages/pods/src/commands/prompt.ts`、root `scripts/release.mjs` / `build-binaries.sh` / `check-browser-smoke.mjs` 等未完全闭合 surfaces。下面表格是当前 100% 移植不能通过的主要阻塞面；最终以 matrix row 逐项 `verified` 或用户确认 `non-goal` 为准。
+
+| Area | Still incomplete before 100% | Required closure evidence |
+| --- | --- | --- |
+| Global scripts / release | `package.json` workspace/install 行为、`test.sh`/`pi-test.sh` exact shell wrapper、`build-binaries.sh`、`release.mjs` publish/push/version flow、browser/static smoke、session transcript analyze、startup profiling、edit stats、cost persistence、version sync。 | 真实 release artifacts、non-host executable smoke、registry publish rehearsal、signing/provenance rehearsal、package/global install alias、release/static browser smoke；不能只用 dry-run 或 fake runner。 |
+| Tau.Ai | 真实 provider/OAuth/AWS e2e、exact `pi-ai` package/bin/export/subpath、KnownApi 名称差异、`onPayload`/`onResponse` callback、TypeBox/AJV keyword parity、full generated model catalog、非标准 secret pattern。 | provider/auth external smoke、public API/package consumer sample、CLI/bin alias smoke、model catalog audit、redaction sample audit。 |
+| Tau.Agent | 高层 facade option pass-through、public export shape、package consumer boundary、real proxy/server e2e。 | public compile sample、package consumer smoke、real proxy/e2e 或用户确认 Tau-native non-goal。 |
+| Tau.CodingAgent | package manager/install telemetry/startup changelog、top-level CLI flags、full TreeSelector/session schema、RPC extension UI protocol、custom tool/extension runtime、image/clipboard ingestion、full settings runtime wiring、usage cost/share/export transcript parity。 | CLI/RPC/schema targeted tests、extension UI headless contract tests、image/file/clipboard smoke、session tree migration/import/export tests、real provider vision/share e2e。 |
+| Tau.Tui | live `ProcessTerminal` host 接管、real TTY/PTY smoke、hardware cursor、complete overlay compositor、theme rendering、terminal image real Kitty/iTerm/Windows smoke、TUI first-frame/CPU profile。 | live terminal transcript/smoke、component/host tests、theme/render regression、startup profile evidence。 |
+| Tau.WebUi | CodingAgent branch/tree true persistence、semantic import/navigation、sandbox/artifact runtime bridge、JavaScript REPL/tool runtime、IndexedDB/provider-key/custom-provider UI、component package/release/static browser parity。 | API/browser tests、artifact sandbox browser smoke、release/static packaged smoke、session tree persistence evidence。 |
+| Tau.Mom | real Slack Socket Mode/Web API/file/history/stop smoke、Slack session sync/schema、real Docker container sandbox/tool smoke、fs-watch/higher-level delegation、trace/correlation unification。 | real Slack workspace smoke、real Docker validation/tool smoke、session/log/schema tests、external e2e evidence or confirmed non-goal。 |
+| Tau.Pods | upstream record-shaped config/schema/model state、top-level `pods/shell/ssh/start/stop/list/logs/agent` compatibility、prompt/agent mapping、usage-aware GPU allocation state、real SSH/SCP/HF/setup/GPU/vLLM smoke、startup log streaming、multi-version rollback/transport hardening。 | config schema migration tests, CLI alias/operation tests, real remote pod smoke, vLLM startup/health/log evidence, model allocation state tests. |
 
 ## Gap classification plan
 
@@ -140,7 +155,7 @@
 
 - 重新读取当前 `git status`、matrix、active plan、`next.md`、`QUALITY_SCORE` 和上游 package manifests，确认没有未知上游目录或 root script。
 - 每轮开始重新机器计数 matrix 状态，当前全表校准值为 `partial=187`、`external-e2e-needed=31`、`ported=31`、`missing=12`、`non-goal-proposed=1`、`verified=0`；如果 matrix、GOAL、next、quality 对同一缺口有矛盾，先修文档事实再实现。
-- 清理 matrix 中与最近实现不一致的 stale 文字，尤其是 Pods 本地 `--gpus` / `--memory` / `--context` planning、`PI_CONFIG_DIR` / no-env `~/.pi/pods.json` / missing config 空对象语义已完成但 final config/schema/e2e 仍 open 的状态表达。
+- 清理 matrix 中与最近实现不一致的 stale 文字，尤其是 Pods 本地 `--gpus` / `--memory` / `--context` planning、`PI_CONFIG_DIR` / no-env `~/.pi/pods.json` / missing config 空对象语义已完成但 final record-shaped config/schema/state/e2e 仍 open 的状态表达。
 - 将 backlog 重新归类为 `contract`、`runtime`、`external-e2e`、`release/package`、`non-goal-proposed` 五类，避免把本地测试完成误写成 final acceptance。
 - 验收：`git diff --check` 通过，matrix/goal/next 对同一缺口没有互相矛盾的完成声明。
 
