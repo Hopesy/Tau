@@ -8,6 +8,11 @@ public sealed class PodsConfigStore
 {
     public PodsConfig Load(string path)
     {
+        if (!File.Exists(path))
+        {
+            return new PodsConfig();
+        }
+
         var json = File.ReadAllText(path);
         return JsonSerializer.Deserialize(json, PodsJsonContext.Default.PodsConfig) ?? new PodsConfig();
     }

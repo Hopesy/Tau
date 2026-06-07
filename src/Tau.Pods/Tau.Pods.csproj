@@ -12,6 +12,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="Tau.Pods.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <Content Include="Models\models.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 

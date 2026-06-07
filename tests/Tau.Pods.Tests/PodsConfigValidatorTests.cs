@@ -82,4 +82,16 @@ public class PodsConfigValidatorTests
             if (File.Exists(path)) File.Delete(path);
         }
     }
+
+    [Fact]
+    public void Load_MissingPathReturnsEmptyConfig()
+    {
+        var store = new PodsConfigStore();
+        var path = Path.Combine(Path.GetTempPath(), $"tau-pods-missing-{Guid.NewGuid():N}.json");
+
+        var loaded = store.Load(path);
+
+        Assert.Null(loaded.ActivePodId);
+        Assert.Empty(loaded.Pods);
+    }
 }

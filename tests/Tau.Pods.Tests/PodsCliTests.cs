@@ -7,7 +7,17 @@ namespace Tau.Pods.Tests;
 
 public class PodsCliTests
 {
+    private const string PiConfigDirEnvVar = "PI_CONFIG_DIR";
     private static readonly SemaphoreSlim CurrentDirectoryGate = new(1, 1);
+
+    private static string SavePiDefaultConfig(string rootDirectory, PodsConfig config)
+    {
+        var configDir = Path.Combine(rootDirectory, "pi-config");
+        var configPath = Path.Combine(configDir, "pods.json");
+        Environment.SetEnvironmentVariable(PiConfigDirEnvVar, configDir);
+        new PodsConfigStore().Save(configPath, config);
+        return configPath;
+    }
 
     private static string RemoteCommand(System.Diagnostics.ProcessStartInfo psi)
     {
@@ -16,10 +26,31 @@ public class PodsCliTests
     }
 
     [Fact]
+    public void ResolveDefaultConfigPath_UsesUserPiPodsJsonWhenPiConfigDirMissing()
+    {
+        var homeDirectory = Path.Combine(Path.GetTempPath(), "tau-home");
+
+        var path = PodsCli.ResolveDefaultConfigPath(null, homeDirectory);
+
+        Assert.Equal(Path.Combine(homeDirectory, ".pi", "pods.json"), path);
+    }
+
+    [Fact]
+    public void ResolveDefaultConfigPath_UsesPiConfigDirWhenSet()
+    {
+        var configDir = Path.Combine(Path.GetTempPath(), "tau-pi-config");
+
+        var path = PodsCli.ResolveDefaultConfigPath(configDir, Path.Combine(Path.GetTempPath(), "tau-home"));
+
+        Assert.Equal(Path.Combine(configDir, "pods.json"), path);
+    }
+
+    [Fact]
     public async Task Deploy_WithoutConfigPath_UsesDefaultConfig()
     {
         await CurrentDirectoryGate.WaitAsync();
         var previousDirectory = Environment.CurrentDirectory;
+        var previousConfigDir = Environment.GetEnvironmentVariable(PiConfigDirEnvVar);
         var tempDir = Directory.CreateTempSubdirectory("tau-pods-cli-");
         var stdout = new StringWriter();
         var stderr = new StringWriter();
@@ -31,7 +62,7 @@ public class PodsCliTests
             Environment.CurrentDirectory = tempDir.FullName;
             Console.SetOut(stdout);
             Console.SetError(stderr);
-            new PodsConfigStore().Save("tau.pods.json", ConfigWithHttpPod());
+            SavePiDefaultConfig(tempDir.FullName, ConfigWithHttpPod());
 
             var exitCode = await PodsCli.RunAsync(["deploy", "http-pod", "meta/llama-3"]);
 
@@ -43,6 +74,7 @@ public class PodsCliTests
         {
             Console.SetOut(previousOut);
             Console.SetError(previousError);
+            Environment.SetEnvironmentVariable(PiConfigDirEnvVar, previousConfigDir);
             Environment.CurrentDirectory = previousDirectory;
             tempDir.Delete(recursive: true);
             CurrentDirectoryGate.Release();
@@ -84,7 +116,7 @@ public class PodsCliTests
     {
         await CurrentDirectoryGate.WaitAsync();
         var previousDirectory = Environment.CurrentDirectory;
-        var previousConfigDir = Environment.GetEnvironmentVariable("PI_CONFIG_DIR");
+        var previousConfigDir = Environment.GetEnvironmentVariable(PiConfigDirEnvVar);
         var tempDir = Directory.CreateTempSubdirectory("tau-pods-cli-pi-config-list-");
         var configDir = Path.Combine(tempDir.FullName, "pi-config");
         var envConfigPath = Path.Combine(configDir, "pods.json");
@@ -96,7 +128,7 @@ public class PodsCliTests
         try
         {
             Environment.CurrentDirectory = tempDir.FullName;
-            Environment.SetEnvironmentVariable("PI_CONFIG_DIR", configDir);
+            Environment.SetEnvironmentVariable(PiConfigDirEnvVar, configDir);
             Console.SetOut(stdout);
             Console.SetError(stderr);
             new PodsConfigStore().Save(envConfigPath, ConfigWithHttpPod("env-pod"));
@@ -114,7 +146,7 @@ public class PodsCliTests
         {
             Console.SetOut(previousOut);
             Console.SetError(previousError);
-            Environment.SetEnvironmentVariable("PI_CONFIG_DIR", previousConfigDir);
+            Environment.SetEnvironmentVariable(PiConfigDirEnvVar, previousConfigDir);
             Environment.CurrentDirectory = previousDirectory;
             tempDir.Delete(recursive: true);
             CurrentDirectoryGate.Release();
@@ -126,7 +158,7 @@ public class PodsCliTests
     {
         await CurrentDirectoryGate.WaitAsync();
         var previousDirectory = Environment.CurrentDirectory;
-        var previousConfigDir = Environment.GetEnvironmentVariable("PI_CONFIG_DIR");
+        var previousConfigDir = Environment.GetEnvironmentVariable(PiConfigDirEnvVar);
         var tempDir = Directory.CreateTempSubdirectory("tau-pods-cli-pi-config-init-");
         var configDir = Path.Combine(tempDir.FullName, "pi-config");
         var envConfigPath = Path.Combine(configDir, "pods.json");
@@ -138,7 +170,7 @@ public class PodsCliTests
         try
         {
             Environment.CurrentDirectory = tempDir.FullName;
-            Environment.SetEnvironmentVariable("PI_CONFIG_DIR", configDir);
+            Environment.SetEnvironmentVariable(PiConfigDirEnvVar, configDir);
             Console.SetOut(stdout);
             Console.SetError(stderr);
 
@@ -155,8 +187,82 @@ public class PodsCliTests
         {
             Console.SetOut(previousOut);
             Console.SetError(previousError);
-            Environment.SetEnvironmentVariable("PI_CONFIG_DIR", previousConfigDir);
+            Environment.SetEnvironmentVariable(PiConfigDirEnvVar, previousConfigDir);
             Environment.CurrentDirectory = previousDirectory;
+            tempDir.Delete(recursive: true);
+            CurrentDirectoryGate.Release();
+        }
+    }
+
+    [Fact]
+    public async Task List_MissingDefaultConfigReturnsEmptyConfig()
+    {
+        await CurrentDirectoryGate.WaitAsync();
+        var previousConfigDir = Environment.GetEnvironmentVariable(PiConfigDirEnvVar);
+        var tempDir = Directory.CreateTempSubdirectory("tau-pods-cli-missing-list-");
+        var configDir = Path.Combine(tempDir.FullName, "pi-config");
+        var stdout = new StringWriter();
+        var stderr = new StringWriter();
+        var previousOut = Console.Out;
+        var previousError = Console.Error;
+
+        try
+        {
+            Environment.SetEnvironmentVariable(PiConfigDirEnvVar, configDir);
+            Console.SetOut(stdout);
+            Console.SetError(stderr);
+
+            var exitCode = await PodsCli.RunAsync(["list", "--json"]);
+
+            Assert.Equal(0, exitCode);
+            Assert.DoesNotContain("Config not found", stderr.ToString(), StringComparison.Ordinal);
+            using var document = JsonDocument.Parse(stdout.ToString());
+            Assert.Equal(0, document.RootElement.GetProperty("podCount").GetInt32());
+            Assert.Equal(JsonValueKind.Null, document.RootElement.GetProperty("activePodId").ValueKind);
+            Assert.Empty(document.RootElement.GetProperty("pods").EnumerateArray());
+        }
+        finally
+        {
+            Console.SetOut(previousOut);
+            Console.SetError(previousError);
+            Environment.SetEnvironmentVariable(PiConfigDirEnvVar, previousConfigDir);
+            tempDir.Delete(recursive: true);
+            CurrentDirectoryGate.Release();
+        }
+    }
+
+    [Fact]
+    public async Task Validate_MissingDefaultConfigReturnsValid()
+    {
+        await CurrentDirectoryGate.WaitAsync();
+        var previousConfigDir = Environment.GetEnvironmentVariable(PiConfigDirEnvVar);
+        var tempDir = Directory.CreateTempSubdirectory("tau-pods-cli-missing-validate-");
+        var configDir = Path.Combine(tempDir.FullName, "pi-config");
+        var stdout = new StringWriter();
+        var stderr = new StringWriter();
+        var previousOut = Console.Out;
+        var previousError = Console.Error;
+
+        try
+        {
+            Environment.SetEnvironmentVariable(PiConfigDirEnvVar, configDir);
+            Console.SetOut(stdout);
+            Console.SetError(stderr);
+
+            var exitCode = await PodsCli.RunAsync(["validate", "--json"]);
+
+            Assert.Equal(0, exitCode);
+            Assert.DoesNotContain("Config not found", stderr.ToString(), StringComparison.Ordinal);
+            using var document = JsonDocument.Parse(stdout.ToString());
+            Assert.True(document.RootElement.GetProperty("success").GetBoolean());
+            Assert.Equal("Config is valid.", document.RootElement.GetProperty("summary").GetString());
+            Assert.Empty(document.RootElement.GetProperty("errors").EnumerateArray());
+        }
+        finally
+        {
+            Console.SetOut(previousOut);
+            Console.SetError(previousError);
+            Environment.SetEnvironmentVariable(PiConfigDirEnvVar, previousConfigDir);
             tempDir.Delete(recursive: true);
             CurrentDirectoryGate.Release();
         }
@@ -166,7 +272,7 @@ public class PodsCliTests
     public async Task VllmPlan_ConfigOptionOverridesPiConfigDir()
     {
         await CurrentDirectoryGate.WaitAsync();
-        var previousConfigDir = Environment.GetEnvironmentVariable("PI_CONFIG_DIR");
+        var previousConfigDir = Environment.GetEnvironmentVariable(PiConfigDirEnvVar);
         var tempDir = Directory.CreateTempSubdirectory("tau-pods-cli-pi-config-explicit-");
         var configDir = Path.Combine(tempDir.FullName, "pi-config");
         var envConfigPath = Path.Combine(configDir, "pods.json");
@@ -178,7 +284,7 @@ public class PodsCliTests
 
         try
         {
-            Environment.SetEnvironmentVariable("PI_CONFIG_DIR", configDir);
+            Environment.SetEnvironmentVariable(PiConfigDirEnvVar, configDir);
             Console.SetOut(stdout);
             Console.SetError(stderr);
             new PodsConfigStore().Save(envConfigPath, ConfigWithHttpPod("env-pod"));
@@ -197,7 +303,7 @@ public class PodsCliTests
         {
             Console.SetOut(previousOut);
             Console.SetError(previousError);
-            Environment.SetEnvironmentVariable("PI_CONFIG_DIR", previousConfigDir);
+            Environment.SetEnvironmentVariable(PiConfigDirEnvVar, previousConfigDir);
             tempDir.Delete(recursive: true);
             CurrentDirectoryGate.Release();
         }
@@ -208,6 +314,7 @@ public class PodsCliTests
     {
         await CurrentDirectoryGate.WaitAsync();
         var previousDirectory = Environment.CurrentDirectory;
+        var previousConfigDir = Environment.GetEnvironmentVariable(PiConfigDirEnvVar);
         var tempDir = Directory.CreateTempSubdirectory("tau-pods-cli-logs-");
         var stdout = new StringWriter();
         var stderr = new StringWriter();
@@ -219,7 +326,7 @@ public class PodsCliTests
             Environment.CurrentDirectory = tempDir.FullName;
             Console.SetOut(stdout);
             Console.SetError(stderr);
-            new PodsConfigStore().Save("tau.pods.json", ConfigWithHttpPod());
+            SavePiDefaultConfig(tempDir.FullName, ConfigWithHttpPod());
 
             var exitCode = await PodsCli.RunAsync(["logs", "http-pod", "demo"]);
 
@@ -230,6 +337,7 @@ public class PodsCliTests
         {
             Console.SetOut(previousOut);
             Console.SetError(previousError);
+            Environment.SetEnvironmentVariable(PiConfigDirEnvVar, previousConfigDir);
             Environment.CurrentDirectory = previousDirectory;
             tempDir.Delete(recursive: true);
             CurrentDirectoryGate.Release();
@@ -241,6 +349,7 @@ public class PodsCliTests
     {
         await CurrentDirectoryGate.WaitAsync();
         var previousDirectory = Environment.CurrentDirectory;
+        var previousConfigDir = Environment.GetEnvironmentVariable(PiConfigDirEnvVar);
         var tempDir = Directory.CreateTempSubdirectory("tau-pods-cli-logs-tail-");
         var stdout = new StringWriter();
         var stderr = new StringWriter();
@@ -252,7 +361,7 @@ public class PodsCliTests
             Environment.CurrentDirectory = tempDir.FullName;
             Console.SetOut(stdout);
             Console.SetError(stderr);
-            new PodsConfigStore().Save("tau.pods.json", ConfigWithHttpPod());
+            SavePiDefaultConfig(tempDir.FullName, ConfigWithHttpPod());
 
             var exitCode = await PodsCli.RunAsync(["logs", "http-pod", "demo", "notanumber"]);
 
@@ -263,6 +372,7 @@ public class PodsCliTests
         {
             Console.SetOut(previousOut);
             Console.SetError(previousError);
+            Environment.SetEnvironmentVariable(PiConfigDirEnvVar, previousConfigDir);
             Environment.CurrentDirectory = previousDirectory;
             tempDir.Delete(recursive: true);
             CurrentDirectoryGate.Release();
@@ -526,6 +636,7 @@ public class PodsCliTests
     {
         await CurrentDirectoryGate.WaitAsync();
         var previousDirectory = Environment.CurrentDirectory;
+        var previousConfigDir = Environment.GetEnvironmentVariable(PiConfigDirEnvVar);
         var tempDir = Directory.CreateTempSubdirectory("tau-pods-cli-deployments-");
         var stdout = new StringWriter();
         var stderr = new StringWriter();
@@ -537,7 +648,7 @@ public class PodsCliTests
             Environment.CurrentDirectory = tempDir.FullName;
             Console.SetOut(stdout);
             Console.SetError(stderr);
-            new PodsConfigStore().Save("tau.pods.json", ConfigWithHttpPod());
+            SavePiDefaultConfig(tempDir.FullName, ConfigWithHttpPod());
 
             var exitCode = await PodsCli.RunAsync(["deployments", "http-pod"]);
 
@@ -548,6 +659,7 @@ public class PodsCliTests
         {
             Console.SetOut(previousOut);
             Console.SetError(previousError);
+            Environment.SetEnvironmentVariable(PiConfigDirEnvVar, previousConfigDir);
             Environment.CurrentDirectory = previousDirectory;
             tempDir.Delete(recursive: true);
             CurrentDirectoryGate.Release();
@@ -654,6 +766,7 @@ public class PodsCliTests
     {
         await CurrentDirectoryGate.WaitAsync();
         var previousDirectory = Environment.CurrentDirectory;
+        var previousConfigDir = Environment.GetEnvironmentVariable(PiConfigDirEnvVar);
         var tempDir = Directory.CreateTempSubdirectory("tau-pods-cli-deployments-unknown-");
         var stderr = new StringWriter();
         var previousError = Console.Error;
@@ -662,7 +775,7 @@ public class PodsCliTests
         {
             Environment.CurrentDirectory = tempDir.FullName;
             Console.SetError(stderr);
-            new PodsConfigStore().Save("tau.pods.json", ConfigWithHttpPod());
+            SavePiDefaultConfig(tempDir.FullName, ConfigWithHttpPod());
 
             var exitCode = await PodsCli.RunAsync(["deployments", "missing-pod"]);
 
@@ -672,6 +785,7 @@ public class PodsCliTests
         finally
         {
             Console.SetError(previousError);
+            Environment.SetEnvironmentVariable(PiConfigDirEnvVar, previousConfigDir);
             Environment.CurrentDirectory = previousDirectory;
             tempDir.Delete(recursive: true);
             CurrentDirectoryGate.Release();
@@ -792,6 +906,7 @@ public class PodsCliTests
     {
         await CurrentDirectoryGate.WaitAsync();
         var previousDirectory = Environment.CurrentDirectory;
+        var previousConfigDir = Environment.GetEnvironmentVariable(PiConfigDirEnvVar);
         var tempDir = Directory.CreateTempSubdirectory("tau-pods-cli-model-list-");
         var stdout = new StringWriter();
         var stderr = new StringWriter();
@@ -803,7 +918,7 @@ public class PodsCliTests
             Environment.CurrentDirectory = tempDir.FullName;
             Console.SetOut(stdout);
             Console.SetError(stderr);
-            new PodsConfigStore().Save("tau.pods.json", ConfigWithHttpPod());
+            SavePiDefaultConfig(tempDir.FullName, ConfigWithHttpPod());
 
             var exitCode = await PodsCli.RunAsync(["model", "list", "http-pod"]);
 
@@ -815,6 +930,7 @@ public class PodsCliTests
         {
             Console.SetOut(previousOut);
             Console.SetError(previousError);
+            Environment.SetEnvironmentVariable(PiConfigDirEnvVar, previousConfigDir);
             Environment.CurrentDirectory = previousDirectory;
             tempDir.Delete(recursive: true);
             CurrentDirectoryGate.Release();
@@ -1135,6 +1251,7 @@ public class PodsCliTests
     {
         await CurrentDirectoryGate.WaitAsync();
         var previousDirectory = Environment.CurrentDirectory;
+        var previousConfigDir = Environment.GetEnvironmentVariable(PiConfigDirEnvVar);
         var tempDir = Directory.CreateTempSubdirectory("tau-pods-cli-model-status-unknown-");
         var stderr = new StringWriter();
         var previousError = Console.Error;
@@ -1143,7 +1260,7 @@ public class PodsCliTests
         {
             Environment.CurrentDirectory = tempDir.FullName;
             Console.SetError(stderr);
-            new PodsConfigStore().Save("tau.pods.json", ConfigWithHttpPod());
+            SavePiDefaultConfig(tempDir.FullName, ConfigWithHttpPod());
 
             var exitCode = await PodsCli.RunAsync(["model", "status", "missing-pod", "model"]);
 
@@ -1153,6 +1270,7 @@ public class PodsCliTests
         finally
         {
             Console.SetError(previousError);
+            Environment.SetEnvironmentVariable(PiConfigDirEnvVar, previousConfigDir);
             Environment.CurrentDirectory = previousDirectory;
             tempDir.Delete(recursive: true);
             CurrentDirectoryGate.Release();
@@ -1694,6 +1812,7 @@ public class PodsCliTests
     {
         await CurrentDirectoryGate.WaitAsync();
         var previousDirectory = Environment.CurrentDirectory;
+        var previousConfigDir = Environment.GetEnvironmentVariable(PiConfigDirEnvVar);
         var tempDir = Directory.CreateTempSubdirectory("tau-pods-cli-vllm-plan-");
         var stdout = new StringWriter();
         var stderr = new StringWriter();
@@ -1705,7 +1824,7 @@ public class PodsCliTests
             Environment.CurrentDirectory = tempDir.FullName;
             Console.SetOut(stdout);
             Console.SetError(stderr);
-            new PodsConfigStore().Save("tau.pods.json", ConfigWithSshPod());
+            SavePiDefaultConfig(tempDir.FullName, ConfigWithSshPod());
 
             var exitCode = await PodsCli.RunAsync(["vllm", "plan", "ssh-pod", "meta-llama/Llama-3.1-8B", "llama-8b"]);
 
@@ -1730,6 +1849,7 @@ public class PodsCliTests
         {
             Console.SetOut(previousOut);
             Console.SetError(previousError);
+            Environment.SetEnvironmentVariable(PiConfigDirEnvVar, previousConfigDir);
             Environment.CurrentDirectory = previousDirectory;
             tempDir.Delete(recursive: true);
             CurrentDirectoryGate.Release();
@@ -2055,6 +2175,7 @@ public class PodsCliTests
     {
         await CurrentDirectoryGate.WaitAsync();
         var previousDirectory = Environment.CurrentDirectory;
+        var previousConfigDir = Environment.GetEnvironmentVariable(PiConfigDirEnvVar);
         var tempDir = Directory.CreateTempSubdirectory("tau-pods-cli-vllm-plan-unknown-");
         var stderr = new StringWriter();
         var previousError = Console.Error;
@@ -2063,7 +2184,7 @@ public class PodsCliTests
         {
             Environment.CurrentDirectory = tempDir.FullName;
             Console.SetError(stderr);
-            new PodsConfigStore().Save("tau.pods.json", ConfigWithSshPod());
+            SavePiDefaultConfig(tempDir.FullName, ConfigWithSshPod());
 
             var exitCode = await PodsCli.RunAsync(["vllm", "plan", "missing-pod", "org/model"]);
 
@@ -2073,6 +2194,7 @@ public class PodsCliTests
         finally
         {
             Console.SetError(previousError);
+            Environment.SetEnvironmentVariable(PiConfigDirEnvVar, previousConfigDir);
             Environment.CurrentDirectory = previousDirectory;
             tempDir.Delete(recursive: true);
             CurrentDirectoryGate.Release();

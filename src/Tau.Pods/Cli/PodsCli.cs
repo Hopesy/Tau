@@ -10,8 +10,8 @@ namespace Tau.Pods.Cli;
 
 public static class PodsCli
 {
-    private const string DefaultConfigPath = "tau.pods.json";
     private const string UpstreamConfigDirectoryEnvVar = "PI_CONFIG_DIR";
+    private const string UpstreamDefaultConfigDirectoryName = ".pi";
     private const string UpstreamConfigFileName = "pods.json";
     private const string VllmExtraArgsSentinel = "--vllm";
 
@@ -82,10 +82,35 @@ public static class PodsCli
 
     private static string GetDefaultConfigPath()
     {
-        var configDir = Environment.GetEnvironmentVariable(UpstreamConfigDirectoryEnvVar);
-        return string.IsNullOrWhiteSpace(configDir)
-            ? DefaultConfigPath
-            : Path.Combine(configDir, UpstreamConfigFileName);
+        return ResolveDefaultConfigPath(Environment.GetEnvironmentVariable(UpstreamConfigDirectoryEnvVar), GetUserHomeDirectory());
+    }
+
+    internal static string ResolveDefaultConfigPath(string? configDir, string homeDirectory)
+    {
+        if (string.IsNullOrWhiteSpace(configDir))
+        {
+            configDir = Path.Combine(homeDirectory, UpstreamDefaultConfigDirectoryName);
+        }
+
+        return Path.Combine(configDir, UpstreamConfigFileName);
+    }
+
+    private static string GetUserHomeDirectory()
+    {
+        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        if (!string.IsNullOrWhiteSpace(home))
+        {
+            return home;
+        }
+
+        home = Environment.GetEnvironmentVariable("USERPROFILE");
+        if (!string.IsNullOrWhiteSpace(home))
+        {
+            return home;
+        }
+
+        home = Environment.GetEnvironmentVariable("HOME");
+        return string.IsNullOrWhiteSpace(home) ? "." : home;
     }
 
     private static int Init(string[] args, PodsConfigStore store)
@@ -139,18 +164,6 @@ public static class PodsCli
         var jsonOutput = TryConsumeFlag(args, "--json", startIndex: 1, out var positionalArgs);
         if (!TryParseConfigCommand(positionalArgs, "Usage: validate [--json] [path]", out var path))
         {
-            return 1;
-        }
-
-        if (!File.Exists(path))
-        {
-            if (jsonOutput)
-            {
-                PrintValidateJson(false, ["Config not found: " + Path.GetFullPath(path)]);
-                return 1;
-            }
-
-            Console.Error.WriteLine($"Config not found: {Path.GetFullPath(path)}");
             return 1;
         }
 
@@ -2446,13 +2459,6 @@ public static class PodsCli
     private static PodsConfig? LoadOrReport(string path, PodsConfigStore store, PodsConfigValidator validator, out int exitCode)
     {
         exitCode = 0;
-        if (!File.Exists(path))
-        {
-            Console.Error.WriteLine($"Config not found: {Path.GetFullPath(path)}");
-            exitCode = 1;
-            return null;
-        }
-
         var config = store.Load(path);
         var errors = validator.Validate(config);
         if (errors.Count > 0)
@@ -3574,8 +3580,8 @@ public static class PodsCli
         Console.WriteLine("  vllm stop [--json] [--config path] [--pod id] <name> Stop a remote vLLM deployment");
         Console.WriteLine("  vllm rollback [--json] [--config path] [--pod id] <name> Roll back a remote vLLM deployment");
         Console.WriteLine("Environment:");
-        Console.WriteLine("  PI_CONFIG_DIR                  Default config directory; uses pods.json when set");
-        Console.WriteLine("  Default config                 tau.pods.json when PI_CONFIG_DIR is not set");
+        Console.WriteLine("  PI_CONFIG_DIR                  Config directory; default is ~/.pi");
+        Console.WriteLine("  Default config                 <config-dir>/pods.json");
     }
 
     private sealed record TargetCommandArguments(string ConfigPath, string PodId, IReadOnlyList<string> Values);
