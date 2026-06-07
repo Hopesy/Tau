@@ -239,7 +239,32 @@ public sealed class PodVllmCommandPlanner
             throw new InvalidOperationException($"Error: Requested {count} GPUs but pod only has {pod.Gpus.Count}.");
         }
 
-        return pod.Gpus.Take(count).Select(static gpu => gpu.Id).ToArray();
+        if (count == pod.Gpus.Count)
+        {
+            return pod.Gpus.Select(static gpu => gpu.Id).ToArray();
+        }
+
+        var gpuUsage = new Dictionary<int, int>();
+        foreach (var gpu in pod.Gpus)
+        {
+            gpuUsage[gpu.Id] = 0;
+        }
+
+        foreach (var model in pod.Models.Values)
+        {
+            foreach (var gpuId in model.Gpu)
+            {
+                gpuUsage[gpuId] = gpuUsage.TryGetValue(gpuId, out var countForGpu)
+                    ? countForGpu + 1
+                    : 1;
+            }
+        }
+
+        return gpuUsage
+            .OrderBy(static pair => pair.Value)
+            .Select(static pair => pair.Key)
+            .Take(count)
+            .ToArray();
     }
 
     private static IReadOnlyDictionary<string, string>? BuildGpuEnvironment(IReadOnlyList<int>? selectedGpuIds)

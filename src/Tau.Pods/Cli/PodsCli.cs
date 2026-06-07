@@ -173,6 +173,7 @@ public static class PodsCli
         if (pod is null) return exitCode;
 
         var result = await vllmService.StopAsync(pod, parsed.Values[0]).ConfigureAwait(false);
+        RemoveConfiguredDeploymentOnSuccess(store, parsed.ConfigPath, pod.Id, result);
         if (parsed.JsonOutput)
         {
             PrintVllmOperationJson(result);
@@ -209,6 +210,8 @@ public static class PodsCli
                 results.Add(await vllmService.StopAsync(pod, name).ConfigureAwait(false));
             }
         }
+
+        RemoveSuccessfulConfiguredDeployments(store, parsed.ConfigPath, pod.Id, results);
 
         var success = deployments.Success && results.All(result => result.Success);
         var summary = !deployments.Success
@@ -1491,6 +1494,7 @@ public static class PodsCli
         }
 
         var result = await service.DeployAsync(pod, options).ConfigureAwait(false);
+        SaveConfiguredDeploymentOnSuccess(store, parsed.ConfigPath, pod.Id, result);
         if (jsonOutput)
         {
             PrintVllmOperationJson(result);
@@ -1594,6 +1598,7 @@ public static class PodsCli
         if (pod is null) return exitCode;
 
         var result = await service.StopAsync(pod, parsed.Values[0]).ConfigureAwait(false);
+        RemoveConfiguredDeploymentOnSuccess(store, parsed.ConfigPath, pod.Id, result);
         if (jsonOutput)
         {
             PrintVllmOperationJson(result);
@@ -1604,6 +1609,64 @@ public static class PodsCli
         }
 
         return result.Success ? 0 : 1;
+    }
+
+    private static void SaveConfiguredDeploymentOnSuccess(
+        PodsConfigStore store,
+        string configPath,
+        string podId,
+        PodVllmOperationResult result)
+    {
+        if (!result.Success || result.Plan is null)
+        {
+            return;
+        }
+
+        var config = store.Load(configPath);
+        store.ApplyVllmDeploymentResult(config, podId, result);
+        store.Save(configPath, config);
+    }
+
+    private static void RemoveConfiguredDeploymentOnSuccess(
+        PodsConfigStore store,
+        string configPath,
+        string podId,
+        PodVllmOperationResult result)
+    {
+        if (!result.Success)
+        {
+            return;
+        }
+
+        var config = store.Load(configPath);
+        if (store.RemoveConfiguredModel(config, podId, result.DeploymentName))
+        {
+            store.Save(configPath, config);
+        }
+    }
+
+    private static void RemoveSuccessfulConfiguredDeployments(
+        PodsConfigStore store,
+        string configPath,
+        string podId,
+        IReadOnlyList<PodVllmOperationResult> results)
+    {
+        if (results.Count == 0 || !results.Any(static result => result.Success))
+        {
+            return;
+        }
+
+        var config = store.Load(configPath);
+        var changed = false;
+        foreach (var result in results.Where(static result => result.Success))
+        {
+            changed |= store.RemoveConfiguredModel(config, podId, result.DeploymentName);
+        }
+
+        if (changed)
+        {
+            store.Save(configPath, config);
+        }
     }
 
     private static async Task<int> VllmRollback(

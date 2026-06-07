@@ -173,6 +173,72 @@ public sealed class PodVllmCommandPlannerTests
     }
 
     [Fact]
+    public void PlanServe_UsesLeastUsedGpuFromConfiguredModelState()
+    {
+        var planner = new PodVllmCommandPlanner();
+        var pod = new PodDefinition
+        {
+            Id = "gpu-1",
+            SshHost = "host.example.com",
+            Gpus =
+            [
+                new PodGpuInfo(7, "NVIDIA H100", "80000 MiB"),
+                new PodGpuInfo(8, "NVIDIA H100", "80000 MiB"),
+                new PodGpuInfo(9, "NVIDIA H100", "80000 MiB")
+            ],
+            Models =
+            {
+                ["alpha"] = new PodConfiguredModel { Model = "org/alpha", Port = 8001, Gpu = [7], Pid = 101 },
+                ["beta"] = new PodConfiguredModel { Model = "org/beta", Port = 8002, Gpu = [7], Pid = 102 },
+                ["gamma"] = new PodConfiguredModel { Model = "org/gamma", Port = 8003, Gpu = [8], Pid = 103 }
+            }
+        };
+
+        var plan = planner.PlanServe(pod, new PodVllmServeOptions("org/model"));
+
+        Assert.Equal(new[] { 9 }, plan.SelectedGpuIds!);
+        Assert.Contains("CUDA_VISIBLE_DEVICES='9'", plan.ServeCommand, StringComparison.Ordinal);
+        using var metadata = JsonDocument.Parse(plan.MetadataJson);
+        var selected = metadata.RootElement.GetProperty("selectedGpus");
+        Assert.Equal(1, selected.GetArrayLength());
+        Assert.Equal(9, selected[0].GetInt32());
+    }
+
+    [Fact]
+    public void PlanServe_KnownModelGpuCountUsesLeastUsedGpuSet()
+    {
+        var planner = new PodVllmCommandPlanner();
+        var pod = new PodDefinition
+        {
+            Id = "gpu-1",
+            SshHost = "host.example.com",
+            Gpus =
+            [
+                new PodGpuInfo(0, "NVIDIA H100", "80000 MiB"),
+                new PodGpuInfo(1, "NVIDIA H100", "80000 MiB"),
+                new PodGpuInfo(2, "NVIDIA H100", "80000 MiB")
+            ],
+            Models =
+            {
+                ["alpha"] = new PodConfiguredModel { Model = "org/alpha", Port = 8001, Gpu = [0], Pid = 101 },
+                ["beta"] = new PodConfiguredModel { Model = "org/beta", Port = 8002, Gpu = [0], Pid = 102 }
+            }
+        };
+
+        var plan = planner.PlanServe(
+            pod,
+            new PodVllmServeOptions("openai/gpt-oss-120b", RequestedGpuCount: 2));
+
+        Assert.Equal(new[] { 1, 2 }, plan.SelectedGpuIds!);
+        Assert.Equal(2, plan.RequestedGpuCount);
+        Assert.DoesNotContain("CUDA_VISIBLE_DEVICES", plan.ServeCommand, StringComparison.Ordinal);
+        using var metadata = JsonDocument.Parse(plan.MetadataJson);
+        var selected = metadata.RootElement.GetProperty("selectedGpus");
+        Assert.Equal(1, selected[0].GetInt32());
+        Assert.Equal(2, selected[1].GetInt32());
+    }
+
+    [Fact]
     public void PlanServe_UnknownModelWithGpuCountThrows()
     {
         var planner = new PodVllmCommandPlanner();

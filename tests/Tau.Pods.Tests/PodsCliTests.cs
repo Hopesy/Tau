@@ -2952,6 +2952,69 @@ public class PodsCliTests
     }
 
     [Fact]
+    public async Task VllmDeploy_Success_UpdatesConfiguredModelStateForGpuAllocation()
+    {
+        var tempDir = Directory.CreateTempSubdirectory("tau-pods-cli-vllm-deploy-state-");
+        var configPath = Path.Combine(tempDir.FullName, "custom-pods.json");
+        var stdout = new StringWriter();
+        var previousOut = Console.Out;
+        var store = new PodsConfigStore();
+        var execService = new PodExecService((psi, _) =>
+        {
+            var command = RemoteCommand(psi);
+            if (IsPreflightCommand(command))
+            {
+                return Task.FromResult(new PodExecService.ProcessExecutionResult(0, PreflightOk("/mnt/models/models--org--model"), ""));
+            }
+
+            return Task.FromResult(new PodExecService.ProcessExecutionResult(0, "started\n", ""));
+        });
+
+        try
+        {
+            Console.SetOut(stdout);
+            var config = ConfigWithSshPod();
+            var pod = config.Pods[0];
+            pod.Gpus =
+            [
+                new PodGpuInfo(0, "NVIDIA H100", "80000 MiB"),
+                new PodGpuInfo(1, "NVIDIA H100", "80000 MiB")
+            ];
+            pod.Models["busy"] = new PodConfiguredModel
+            {
+                Model = "org/busy",
+                Port = 8001,
+                Gpu = [0],
+                Pid = 42
+            };
+            store.Save(configPath, config);
+
+            var exitCode = await PodsCli.RunAsync(
+                ["vllm", "deploy", "--json", "--no-health", "--config", configPath, "--pod", "ssh-pod", "org/model", "--name", "served model"],
+                execService);
+
+            Assert.Equal(0, exitCode);
+            using var document = JsonDocument.Parse(stdout.ToString());
+            var selected = document.RootElement.GetProperty("plan").GetProperty("selectedGpus");
+            Assert.Equal(1, selected.GetArrayLength());
+            Assert.Equal(1, selected[0].GetInt32());
+
+            var saved = store.Load(configPath);
+            var savedModel = saved.Pods[0].Models["served-model"];
+            Assert.Equal("org/model", savedModel.Model);
+            Assert.Equal(8000, savedModel.Port);
+            Assert.Equal([1], savedModel.Gpu);
+            Assert.Equal(0, savedModel.Pid);
+            Assert.True(saved.Pods[0].Models.ContainsKey("busy"));
+        }
+        finally
+        {
+            Console.SetOut(previousOut);
+            tempDir.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task VllmDeploy_WithRevisionOption_UsesResolvedSnapshot()
     {
         var tempDir = Directory.CreateTempSubdirectory("tau-pods-cli-vllm-deploy-revision-");
@@ -3543,6 +3606,7 @@ public class PodsCliTests
         var stdout = new StringWriter();
         var previousOut = Console.Out;
         var commands = new List<string>();
+        var store = new PodsConfigStore();
         var execService = new PodExecService((psi, _) =>
         {
             var command = RemoteCommand(psi);
@@ -3563,7 +3627,14 @@ public class PodsCliTests
             Console.SetOut(stdout);
             var config = ConfigWithSshPod();
             config.ActivePodId = "ssh-pod";
-            new PodsConfigStore().Save(configPath, config);
+            config.Pods[0].Models["served-model"] = new PodConfiguredModel
+            {
+                Model = "org/model",
+                Port = 8000,
+                Gpu = [0],
+                Pid = 123
+            };
+            store.Save(configPath, config);
 
             var exitCode = await PodsCli.RunAsync(["stop", "--json", "--config", configPath, "served model"], execService);
 
@@ -3576,6 +3647,7 @@ public class PodsCliTests
             Assert.Equal("stopped\n", root.GetProperty("stdout").GetString());
             Assert.Single(commands);
             Assert.Contains("systemctl --user disable --now 'tau-pod-served-model.service'", commands[0], StringComparison.Ordinal);
+            Assert.False(store.Load(configPath).Pods[0].Models.ContainsKey("served-model"));
         }
         finally
         {
@@ -3592,6 +3664,7 @@ public class PodsCliTests
         var stdout = new StringWriter();
         var previousOut = Console.Out;
         var commands = new List<string>();
+        var store = new PodsConfigStore();
         var execService = new PodExecService((psi, _) =>
         {
             var command = RemoteCommand(psi);
@@ -3623,7 +3696,10 @@ public class PodsCliTests
             Console.SetOut(stdout);
             var config = ConfigWithSshPod();
             config.ActivePodId = "ssh-pod";
-            new PodsConfigStore().Save(configPath, config);
+            config.Pods[0].Models["alpha"] = new PodConfiguredModel { Model = "org/alpha", Port = 8001, Gpu = [0], Pid = 101 };
+            config.Pods[0].Models["beta"] = new PodConfiguredModel { Model = "org/beta", Port = 8002, Gpu = [1], Pid = 102 };
+            config.Pods[0].Models["gamma"] = new PodConfiguredModel { Model = "org/gamma", Port = 8003, Gpu = [2], Pid = 103 };
+            store.Save(configPath, config);
 
             var exitCode = await PodsCli.RunAsync(["stop", "--json", "--config", configPath], execService);
 
@@ -3644,6 +3720,10 @@ public class PodsCliTests
             Assert.Contains("for f in ~/.tau_pods/*.json", commands[0], StringComparison.Ordinal);
             Assert.Contains("systemctl --user disable --now 'tau-pod-alpha.service'", commands[1], StringComparison.Ordinal);
             Assert.Contains("systemctl --user disable --now 'tau-pod-beta.service'", commands[2], StringComparison.Ordinal);
+            var savedModels = store.Load(configPath).Pods[0].Models;
+            Assert.False(savedModels.ContainsKey("alpha"));
+            Assert.False(savedModels.ContainsKey("beta"));
+            Assert.True(savedModels.ContainsKey("gamma"));
         }
         finally
         {

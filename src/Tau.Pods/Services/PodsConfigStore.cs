@@ -47,6 +47,37 @@ public sealed class PodsConfigStore
         pod.Gpus = result.Gpus.Select(gpu => new PodGpuInfo(gpu.Id, gpu.Name, gpu.Memory)).ToList();
     }
 
+    public void ApplyVllmDeploymentResult(PodsConfig config, string podId, PodVllmOperationResult result)
+    {
+        ArgumentNullException.ThrowIfNull(config);
+        ArgumentNullException.ThrowIfNull(result);
+
+        if (!result.Success || result.Plan is null)
+        {
+            return;
+        }
+
+        var pod = config.Pods.FirstOrDefault(candidate => candidate.Id.Equals(podId, StringComparison.OrdinalIgnoreCase))
+            ?? throw new InvalidOperationException($"Pod not found: {podId}");
+
+        pod.Models[result.DeploymentName] = new PodConfiguredModel
+        {
+            Model = result.Plan.ModelId,
+            Port = result.Plan.Port,
+            Gpu = result.Plan.SelectedGpuIds?.ToList() ?? [],
+            Pid = 0
+        };
+    }
+
+    public bool RemoveConfiguredModel(PodsConfig config, string podId, string deploymentName)
+    {
+        ArgumentNullException.ThrowIfNull(config);
+        ArgumentException.ThrowIfNullOrWhiteSpace(deploymentName);
+
+        var pod = config.Pods.FirstOrDefault(candidate => candidate.Id.Equals(podId, StringComparison.OrdinalIgnoreCase));
+        return pod is not null && pod.Models.Remove(deploymentName);
+    }
+
     public void AddOrUpdatePod(PodsConfig config, PodDefinition pod)
     {
         ArgumentNullException.ThrowIfNull(config);
