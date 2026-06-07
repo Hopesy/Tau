@@ -15,8 +15,8 @@
 
 - Agent platform baseline 已完成并归档：`src/Tau.Agent/Platform/**`、Console/HTTP examples、platform smoke、provider run + tool execution runtime log、全仓 `verify-dotnet.ps1 -SkipRestore` 与 `-RunSmoke` 本地验收已有当前证据。该能力降低后续 Agent/WebUi/Mom/CodingAgent host 类切片风险，但不关闭真实 provider/OAuth/e2e、release registry/signing/provenance 或完整 product parity。
 - Phase 1 inventory freeze 已完成：matrix 已冻结 capability、file-level、surface、root scripts/manifests 三层 mapping；上游 package directory set 已确认，没有未知 package 目录。后续实现只在具体切片中补充 finer rows，不重新做 broad inventory。
-- 当前工作树仍有未提交 WIP：Agent platform baseline WIP 与 CodingAgent `/settings select` `TuiSettingsList` adoption WIP。主控在进入下一轮实现前必须先确认 diff 和验证证据，并按独立提交边界收口；不能把 SDK/API、UI parity 与 docs-only pivot 混成一个提交。
-- 当前恢复路线：先处理 dirty WIP 边界，再从 matrix `Phase 2 Candidate Queue` 选择高价值 implementation/e2e 切片。优先级按阻塞程度排列：critical contracts、真实外部 e2e、product runtime parity、release/package final parity。
+- 当前旧 dirty WIP 边界已经关闭：Agent platform baseline、CodingAgent `/settings select` `TuiSettingsList` adoption、100% parity goal restore 和 100% gap-map/acceptance-plan docs 都已作为独立 checkpoint 提交并推送；继续前仍必须重新读取 `git status --short --branch` 和当前 diff。
+- 当前恢复路线：先执行 `GOAL.md` Pass 0 状态校准，清理 matrix/next/quality/plan 中与最新 HEAD 证据不一致的 stale 描述；然后再从 matrix `Phase 2 Candidate Queue` 选择高价值 implementation/e2e 切片。优先级按阻塞程度排列：critical contracts、真实外部 e2e、product runtime parity、release/package final parity。
 
 ## 范围
 

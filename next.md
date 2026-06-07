@@ -18,7 +18,7 @@ Tau Agent 应用底座的首版已完成本地验收：API、tool/session/observ
 
 当前直接执行入口：
 
-1. 先收口当前 dirty WIP 边界：Agent platform baseline 与 `/settings select` UI parity 必须拆成独立 checkpoint/commit，不能混成一个不可审查提交。
+1. 先执行 `GOAL.md` Pass 0 状态校准：清理 matrix、active plan、`next.md`、`docs/QUALITY_SCORE.md` 中与最新 HEAD 证据冲突的 stale 描述，尤其不能把 fake-only、本地 planning baseline 或已关闭旧 WIP 误写成 final parity。
 2. 再从 `docs/exec-plans/active/2026-05-28-pi-mono-parity-matrix.md` 的 `Phase 2 Candidate Queue` 选择下一条可验证切片。
 3. 优先选择 critical contract 或真实 e2e blocker：AI provider/OAuth、CodingAgent CLI/RPC/session/config、Tui live terminal/settings runtime、WebUi branch/tree/artifact runtime、Mom Slack/Docker、Pods SSH/HF/GPU/vLLM、release/package final parity。
 
@@ -33,13 +33,13 @@ Tau Agent 应用底座的首版已完成本地验收：API、tool/session/observ
 - `examples/Tau.Agent.ConsoleExample` 和 `examples/Tau.Agent.HttpExample` 已提供两个最小 Agent 应用示例；`scripts/verify-agent-platform-examples.ps1` 已能 build/smoke 两个示例，并已接入 `scripts/verify-dotnet.ps1 -RunSmoke`。
 - 本地验收已经完成：targeted Agent platform tests 5/5、example smoke、`Tau.Agent.Tests` 119/119、`Tau.Ai.Tests` 280/280、仓库级 `verify-dotnet.ps1 -SkipRestore` 和 `verify-dotnet.ps1 -SkipRestore -RunSmoke` 均已通过。
 - 真实 provider/OAuth e2e、真实 NuGet/package registry 发布演练、真实 signing/provenance rehearsal 和后续 product parity 接回仍是后续边界；它们不被 fake provider/platform smoke 误标为完成。
-- `/settings select` UI WIP 仍保持独立，不混入 Agent SDK/API 或 docs-only goal pivot；当前如继续 UI/TUI parity，应按 100% parity plan 与 matrix 独立分派。
+- `/settings select` UI parity 已作为独立切片关闭，不再作为当前未提交 WIP；当前如继续 UI/TUI parity，应按 100% parity plan 与 matrix 独立分派剩余 settings submenus、runtime wiring、theme/terminal host 和真实 TTY/PTY smoke。
 
 后续默认路线：
 
 1. Agent platform 作为 shared foundation 被后续 parity 切片复用，不重新实现。
 2. 真实 provider/OAuth e2e、真实 package registry 发布演练、真实 signing/provenance rehearsal 或 NuGet 消费者项目 smoke 继续作为 100% parity 的 release/e2e 缺口管理。
-3. `/settings select` UI parity WIP 保持独立提交边界，不混入 Agent SDK/API 或 docs-only goal pivot。
+3. `/settings select` UI parity 已保持独立提交边界；后续 UI/TUI parity 不混入 Agent SDK/API 或 docs-only goal pivot。
 
 ### Platform API / SDK boundary
 
