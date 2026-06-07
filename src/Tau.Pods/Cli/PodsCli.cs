@@ -2415,6 +2415,12 @@ public static class PodsCli
         }
 
         PrintStdStreams(result.StdOut, result.StdErr);
+        if (result.StartupWatch is not null)
+        {
+            Console.WriteLine("[startup-watch]");
+            PrintVllmStartupWatchText(result.StartupWatch, includeCommand: true, streamPrefix: "startup-watch-");
+        }
+
         if (result.Health is not null)
         {
             Console.WriteLine("[health]");
@@ -2457,6 +2463,22 @@ public static class PodsCli
         if (includeCommand)
         {
             Console.WriteLine("[health-command]");
+            Console.WriteLine(result.Command);
+        }
+
+        PrintStdStreams(result.StdOut, result.StdErr, prefix: streamPrefix);
+    }
+
+    private static void PrintVllmStartupWatchText(
+        PodVllmStartupWatchResult result,
+        bool includeCommand = true,
+        string prefix = "",
+        string streamPrefix = "")
+    {
+        Console.WriteLine($"{prefix}{result.PodId} | ok={result.Success} | operation=startup-watch | deployment={result.DeploymentName} | state={result.State} | ready={result.Ready} | unhealthy={result.Unhealthy} | failure={result.FailureKind} | attempts={result.Attempts}/{result.MaxAttempts} | exit={result.ExitCode} | {result.Summary}");
+        if (includeCommand)
+        {
+            Console.WriteLine("[startup-watch-command]");
             Console.WriteLine(result.Command);
         }
 
@@ -2548,6 +2570,11 @@ public static class PodsCli
         {
             writer.WritePropertyName("preflight");
             WriteVllmPreflightObject(writer, result.Preflight);
+        }
+        if (result.StartupWatch is not null)
+        {
+            writer.WritePropertyName("startupWatch");
+            WriteVllmStartupWatchObject(writer, result.StartupWatch);
         }
         if (result.Health is not null)
         {
@@ -2823,6 +2850,27 @@ public static class PodsCli
         writer.WritePropertyName("metadata");
         WriteNullableJsonObject(writer, result.MetadataJson);
         writer.WriteString("metadataJson", result.MetadataJson);
+        writer.WriteString("stdout", result.StdOut);
+        writer.WriteString("stderr", result.StdErr);
+        writer.WriteEndObject();
+    }
+
+    private static void WriteVllmStartupWatchObject(Utf8JsonWriter writer, PodVllmStartupWatchResult result)
+    {
+        writer.WriteStartObject();
+        writer.WriteString("pod", result.PodId);
+        writer.WriteBoolean("ok", result.Success);
+        writer.WriteString("operation", "startup-watch");
+        writer.WriteString("deployment", result.DeploymentName);
+        writer.WriteString("summary", result.Summary);
+        writer.WriteString("remoteCommand", result.Command);
+        writer.WriteNumber("exitCode", result.ExitCode);
+        writer.WriteString("state", result.State);
+        writer.WriteBoolean("ready", result.Ready);
+        writer.WriteBoolean("unhealthy", result.Unhealthy);
+        writer.WriteString("failureKind", result.FailureKind);
+        writer.WriteNumber("attempts", result.Attempts);
+        writer.WriteNumber("maxAttempts", result.MaxAttempts);
         writer.WriteString("stdout", result.StdOut);
         writer.WriteString("stderr", result.StdErr);
         writer.WriteEndObject();

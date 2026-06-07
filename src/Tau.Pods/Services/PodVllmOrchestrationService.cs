@@ -175,6 +175,7 @@ public sealed class PodVllmOrchestrationService
         var plan = _planner.PlanServe(pod, options with { ResolvedModelPath = preflight.ResolvedModelPath });
         var command = BuildDeployCommand(plan);
         var exec = await _execService.ExecuteAsync(pod, command, cancellationToken).ConfigureAwait(false);
+        PodVllmStartupWatchResult? startupWatch = null;
         PodVllmHealthResult? health = null;
         PodVllmRollbackResult? rollback = null;
         var success = exec.Success;
@@ -184,21 +185,38 @@ public sealed class PodVllmOrchestrationService
 
         if (exec.Success && options.WaitForHealth)
         {
-            health = await HealthAsync(
+            var maxAttempts = NormalizeHealthAttempts(options.HealthAttempts);
+            var backoffMilliseconds = NormalizeHealthBackoff(options.HealthBackoffMilliseconds);
+            startupWatch = await WatchStartupAsync(
                 pod,
                 plan.DeploymentName,
-                NormalizeHealthAttempts(options.HealthAttempts),
-                NormalizeHealthBackoff(options.HealthBackoffMilliseconds),
+                maxAttempts,
+                backoffMilliseconds,
                 cancellationToken).ConfigureAwait(false);
-            if (health.Ready)
+            if (startupWatch.Ready)
             {
-                summary = $"vLLM deployment '{plan.DeploymentName}' started and is ready on {pod.Id} after {health.Attempts} health attempt(s).";
+                health = await HealthAsync(
+                    pod,
+                    plan.DeploymentName,
+                    maxAttempts,
+                    backoffMilliseconds,
+                    cancellationToken).ConfigureAwait(false);
+                if (health.Ready)
+                {
+                    summary = $"vLLM deployment '{plan.DeploymentName}' started, startup log is ready, and /health is ready on {pod.Id} after {health.Attempts} health attempt(s).";
+                }
+                else
+                {
+                    rollback = await RollbackAsync(pod, plan.DeploymentName, cancellationToken).ConfigureAwait(false);
+                    success = false;
+                    summary = $"vLLM deploy health check failed ({health.FailureKind}): {health.Summary}; rollback {(rollback.Success ? "completed" : "failed")}.";
+                }
             }
             else
             {
                 rollback = await RollbackAsync(pod, plan.DeploymentName, cancellationToken).ConfigureAwait(false);
                 success = false;
-                summary = $"vLLM deploy health check failed ({health.FailureKind}): {health.Summary}; rollback {(rollback.Success ? "completed" : "failed")}.";
+                summary = $"vLLM deploy startup watcher failed ({startupWatch.FailureKind}): {startupWatch.Summary}; rollback {(rollback.Success ? "completed" : "failed")}.";
             }
         }
         else if (!exec.Success)
@@ -206,7 +224,7 @@ public sealed class PodVllmOrchestrationService
             rollback = await RollbackAsync(pod, plan.DeploymentName, cancellationToken).ConfigureAwait(false);
         }
 
-        var failureKind = GetDeployFailureKind(success, exec, health);
+        var failureKind = GetDeployFailureKind(success, exec, startupWatch, health);
         var finalResult = new PodVllmOperationResult(
             pod.Id,
             success,
@@ -224,7 +242,8 @@ public sealed class PodVllmOrchestrationService
             prefetch,
             prefetchTriggerFailureKind,
             ProcessId: ExtractProcessId(exec.StdOut),
-            FailureKind: failureKind);
+            FailureKind: failureKind,
+            StartupWatch: startupWatch);
         LogVllmEnd(
             "deploy",
             finalResult.PodId,
@@ -240,6 +259,8 @@ public sealed class PodVllmOrchestrationService
                 ["prefetchRequested"] = BoolString(options.Prefetch),
                 ["prefetchAttempted"] = BoolString(finalResult.Prefetch is not null),
                 ["prefetchSuccess"] = finalResult.Prefetch is null ? null : BoolString(finalResult.Prefetch.Success),
+                ["startupWatchReady"] = startupWatch is null ? null : BoolString(startupWatch.Ready),
+                ["startupWatchAttempts"] = startupWatch is null ? null : Invariant(startupWatch.Attempts),
                 ["healthReady"] = health is null ? null : BoolString(health.Ready),
                 ["healthAttempts"] = health is null ? null : Invariant(health.Attempts),
                 ["maxHealthAttempts"] = health is null ? null : Invariant(health.MaxAttempts)
@@ -530,6 +551,103 @@ public sealed class PodVllmOrchestrationService
         return finalResult;
     }
 
+    public async Task<PodVllmStartupWatchResult> WatchStartupAsync(
+        PodDefinition pod,
+        string deploymentName,
+        int maxAttempts = DefaultHealthAttempts,
+        int backoffMilliseconds = DefaultHealthBackoffMilliseconds,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(pod);
+        ArgumentException.ThrowIfNullOrWhiteSpace(deploymentName);
+
+        var name = NormalizeDeploymentName(deploymentName);
+        maxAttempts = NormalizeHealthAttempts(maxAttempts);
+        backoffMilliseconds = NormalizeHealthBackoff(backoffMilliseconds);
+        LogVllmStart(
+            "startup-watch",
+            pod.Id,
+            name,
+            extraFields: new Dictionary<string, string?>
+            {
+                ["maxAttempts"] = Invariant(maxAttempts),
+                ["backoffMs"] = Invariant(backoffMilliseconds)
+            });
+
+        if (string.IsNullOrWhiteSpace(pod.SshHost))
+        {
+            var result = new PodVllmStartupWatchResult(
+                pod.Id,
+                false,
+                name,
+                false,
+                "unknown",
+                false,
+                "unsupported-transport",
+                0,
+                maxAttempts,
+                "vLLM startup watcher requires SSH-based pod.",
+                string.Empty,
+                -1,
+                string.Empty,
+                string.Empty);
+            LogStartupWatchEnd(result);
+            return result;
+        }
+
+        var command = BuildStartupWatchCommand(name);
+        PodExecResult? exec = null;
+        var state = new VllmState("unknown", Ready: false, Unhealthy: false, FailureKind: "unknown");
+        var attempts = 0;
+        for (var attempt = 1; attempt <= maxAttempts; attempt++)
+        {
+            attempts = attempt;
+            exec = await _execService.ExecuteAsync(pod, command, cancellationToken, keepAlive: true).ConfigureAwait(false);
+            state = ParseState(exec.StdOut, exec.StdErr);
+            if (state.Ready || IsTerminalStartupWatchFailure(state, exec))
+            {
+                break;
+            }
+
+            if (attempt < maxAttempts && backoffMilliseconds > 0)
+            {
+                await _delayAsync(TimeSpan.FromMilliseconds(backoffMilliseconds), cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        exec ??= new PodExecResult(
+            pod.Id,
+            false,
+            "ssh",
+            command,
+            $"{pod.SshHost}:{pod.SshPort ?? 22}",
+            -1,
+            string.Empty,
+            string.Empty,
+            TimeSpan.Zero,
+            "ssh exec not attempted",
+            PodExecFailureKinds.SshExecNotAttempted);
+
+        var failureKind = GetStartupWatchFailureKind(state, exec);
+        var finalResult = new PodVllmStartupWatchResult(
+            pod.Id,
+            exec.Success && state.Ready,
+            name,
+            state.Ready,
+            state.State,
+            state.Unhealthy,
+            failureKind,
+            attempts,
+            maxAttempts,
+            BuildStartupWatchSummary(pod.Id, name, state, attempts, maxAttempts),
+            command,
+            exec.ExitCode,
+            exec.StdOut,
+            exec.StdErr);
+        LogStartupWatchEnd(finalResult);
+        return finalResult;
+    }
+
     public async Task<PodVllmOperationResult> StopAsync(
         PodDefinition pod,
         string deploymentName,
@@ -697,6 +815,26 @@ public sealed class PodVllmOrchestrationService
             });
     }
 
+    private void LogStartupWatchEnd(PodVllmStartupWatchResult result)
+    {
+        LogVllmEnd(
+            "startup-watch",
+            result.PodId,
+            result.DeploymentName,
+            result.Success,
+            result.ExitCode,
+            result.Summary,
+            extraFields: new Dictionary<string, string?>
+            {
+                ["ready"] = BoolString(result.Ready),
+                ["state"] = result.State,
+                ["unhealthy"] = BoolString(result.Unhealthy),
+                ["failureKind"] = result.FailureKind,
+                ["attempts"] = Invariant(result.Attempts),
+                ["maxAttempts"] = Invariant(result.MaxAttempts)
+            });
+    }
+
     private void LogVllmStart(
         string operation,
         string podId,
@@ -762,11 +900,17 @@ public sealed class PodVllmOrchestrationService
     private static string GetDeployFailureKind(
         bool success,
         PodExecResult exec,
+        PodVllmStartupWatchResult? startupWatch,
         PodVllmHealthResult? health)
     {
         if (success)
         {
             return PodExecFailureKinds.None;
+        }
+
+        if (startupWatch is not null && !startupWatch.Success)
+        {
+            return startupWatch.FailureKind;
         }
 
         if (health is not null)
@@ -916,6 +1060,20 @@ public sealed class PodVllmOrchestrationService
             $"elif test -f {tauLogPath}; then tail -n 40 {tauLogPath} 2>/dev/null || true; fi";
     }
 
+    private static string BuildStartupWatchCommand(string deploymentName)
+    {
+        var vllmLogPath = $"$HOME/.vllm_logs/{deploymentName}.log";
+        var failurePattern = ShellSingleQuote(HealthFailurePattern());
+        var startupCompletePattern = ShellSingleQuote(HealthStartupCompletePattern());
+        return
+            $"log=\"{vllmLogPath}\"; " +
+            "if [ ! -f \"$log\" ]; then echo starting; echo startup_status=waiting-for-log; exit 3; fi; " +
+            "tail -n 80 \"$log\" 2>/dev/null || true; " +
+            $"if tail -n 80 \"$log\" 2>/dev/null | grep -Eiq {failurePattern}; then echo startup_status=failed; exit 2; fi; " +
+            $"if tail -n 80 \"$log\" 2>/dev/null | grep -Fq {startupCompletePattern}; then echo startup_status=ready; exit 0; fi; " +
+            "echo starting; echo startup_status=waiting-for-marker; exit 3";
+    }
+
     private static string BuildHealthCommand(string deploymentName)
     {
         var unitName = $"tau-pod-{deploymentName}.service";
@@ -1025,6 +1183,16 @@ public sealed class PodVllmOrchestrationService
             "dead" => $"vLLM deployment '{deploymentName}' is dead on {podId} after {attempts} health attempt(s).",
             "not-found" => $"vLLM deployment '{deploymentName}' was not found on {podId} after {attempts} health attempt(s).",
             _ => $"vLLM deployment '{deploymentName}' is {state.State} on {podId} after {attempts}/{maxAttempts} health attempt(s)."
+        };
+
+    private static string BuildStartupWatchSummary(string podId, string deploymentName, VllmState state, int attempts, int maxAttempts) =>
+        state.State switch
+        {
+            "ready" => $"vLLM startup log for '{deploymentName}' reached ready marker on {podId} after {attempts} watch attempt(s).",
+            "unhealthy" => $"vLLM startup log for '{deploymentName}' reported failure on {podId} after {attempts} watch attempt(s).",
+            "dead" => $"vLLM startup log for '{deploymentName}' reported a dead process on {podId} after {attempts} watch attempt(s).",
+            "not-found" => $"vLLM startup log for '{deploymentName}' was not found on {podId} after {attempts} watch attempt(s).",
+            _ => $"vLLM startup log for '{deploymentName}' is {state.State} on {podId} after {attempts}/{maxAttempts} watch attempt(s)."
         };
 
     private static string BuildPreflightSummary(
@@ -1178,6 +1346,22 @@ public sealed class PodVllmOrchestrationService
         return IsTerminalTransportFailure(execFailureKind) ? execFailureKind : state.FailureKind;
     }
 
+    private static string GetStartupWatchFailureKind(VllmState state, PodExecResult exec)
+    {
+        if (state.Ready)
+        {
+            return PodExecFailureKinds.None;
+        }
+
+        var execFailureKind = PodExecFailureKinds.FromResult(exec);
+        if (IsTerminalTransportFailure(execFailureKind))
+        {
+            return execFailureKind;
+        }
+
+        return state.FailureKind == "unknown" ? execFailureKind : state.FailureKind;
+    }
+
     private static bool IsTerminalHealthFailure(VllmState state, PodExecResult exec)
     {
         var execFailureKind = PodExecFailureKinds.FromResult(exec);
@@ -1185,6 +1369,16 @@ public sealed class PodVllmOrchestrationService
             state.FailureKind is "not-found" ||
             exec.ExitCode is 1 or 2 or 4 ||
             (state.FailureKind == "unknown" && exec.ExitCode != 0) ||
+            IsTerminalTransportFailure(execFailureKind);
+    }
+
+    private static bool IsTerminalStartupWatchFailure(VllmState state, PodExecResult exec)
+    {
+        var execFailureKind = PodExecFailureKinds.FromResult(exec);
+        return state.Unhealthy ||
+            state.FailureKind is "not-found" ||
+            exec.ExitCode is 1 or 2 or 4 ||
+            (state.FailureKind == "unknown" && exec.ExitCode != 3 && exec.ExitCode != 0) ||
             IsTerminalTransportFailure(execFailureKind);
     }
 

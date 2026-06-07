@@ -2917,6 +2917,11 @@ public class PodsCliTests
                 return Task.FromResult(new PodExecService.ProcessExecutionResult(0, PreflightOk("/mnt/models/models--meta-llama--Llama-3.1-8B"), ""));
             }
 
+            if (IsStartupWatchCommand(command))
+            {
+                return Task.FromResult(new PodExecService.ProcessExecutionResult(0, "Application startup complete\nstartup_status=ready\n", ""));
+            }
+
             return command.Contains("/health", StringComparison.Ordinal)
                 ? Task.FromResult(new PodExecService.ProcessExecutionResult(0, "ready\n", ""))
                 : Task.FromResult(new PodExecService.ProcessExecutionResult(0, "started tau-pod-llama-8b\n", ""));
@@ -2943,12 +2948,15 @@ public class PodsCliTests
             Assert.Contains("preflight-resolvedModelPath=/mnt/models/models--meta-llama--Llama-3.1-8B/snapshots/main", output, StringComparison.Ordinal);
             Assert.Contains("[stdout]", output, StringComparison.Ordinal);
             Assert.Contains("started tau-pod-llama-8b", output, StringComparison.Ordinal);
+            Assert.Contains("[startup-watch]", output, StringComparison.Ordinal);
+            Assert.Contains("operation=startup-watch | deployment=llama-8b | state=ready", output, StringComparison.Ordinal);
             Assert.Contains("[health]", output, StringComparison.Ordinal);
             Assert.Contains("operation=health | deployment=llama-8b | state=ready | ready=True | unhealthy=False | failure=none | attempts=1/12 | exit=0", output, StringComparison.Ordinal);
-            Assert.Equal(3, captured.Count);
+            Assert.Equal(4, captured.Count);
             Assert.Contains("vllm_available", RemoteCommand(captured[0]), StringComparison.Ordinal);
             Assert.Contains("cat > ~/.tau_pods/llama-8b.service <<'EOF'", RemoteCommand(captured[1]), StringComparison.Ordinal);
-            Assert.Contains("curl -fsS --max-time 2 \"http://127.0.0.1:$port/health\"", RemoteCommand(captured[2]), StringComparison.Ordinal);
+            Assert.Contains("startup_status=ready", RemoteCommand(captured[2]), StringComparison.Ordinal);
+            Assert.Contains("curl -fsS --max-time 2 \"http://127.0.0.1:$port/health\"", RemoteCommand(captured[3]), StringComparison.Ordinal);
         }
         finally
         {
@@ -2970,6 +2978,11 @@ public class PodsCliTests
             if (IsPreflightCommand(command))
             {
                 return Task.FromResult(new PodExecService.ProcessExecutionResult(0, PreflightOk("/mnt/models/models--org--model"), ""));
+            }
+
+            if (IsStartupWatchCommand(command))
+            {
+                return Task.FromResult(new PodExecService.ProcessExecutionResult(0, "Application startup complete\nstartup_status=ready\n", ""));
             }
 
             return command.Contains("/health", StringComparison.Ordinal)
@@ -3011,6 +3024,14 @@ public class PodsCliTests
             Assert.Equal("/mnt/models/models--org--model/snapshots/main", preflight.GetProperty("resolvedModelPath").GetString());
             Assert.True(preflight.GetProperty("vllmAvailable").GetBoolean());
             Assert.Contains("command -v vllm", preflight.GetProperty("remoteCommand").GetString(), StringComparison.Ordinal);
+
+            var startupWatch = root.GetProperty("startupWatch");
+            Assert.True(startupWatch.GetProperty("ok").GetBoolean());
+            Assert.Equal("startup-watch", startupWatch.GetProperty("operation").GetString());
+            Assert.Equal("ready", startupWatch.GetProperty("state").GetString());
+            Assert.True(startupWatch.GetProperty("ready").GetBoolean());
+            Assert.Equal("none", startupWatch.GetProperty("failureKind").GetString());
+            Assert.Contains("tail -n 80 \"$log\"", startupWatch.GetProperty("remoteCommand").GetString(), StringComparison.Ordinal);
 
             var health = root.GetProperty("health");
             Assert.True(health.GetProperty("ok").GetBoolean());
@@ -3379,6 +3400,11 @@ public class PodsCliTests
                 return Task.FromResult(new PodExecService.ProcessExecutionResult(0, PreflightOk("/mnt/models/models--org--model"), ""));
             }
 
+            if (IsStartupWatchCommand(command))
+            {
+                return Task.FromResult(new PodExecService.ProcessExecutionResult(0, "Application startup complete\nstartup_status=ready\n", ""));
+            }
+
             if (command.Contains("/health", StringComparison.Ordinal))
             {
                 return Task.FromResult(new PodExecService.ProcessExecutionResult(2, "unhealthy\nCUDA out of memory\n", ""));
@@ -3412,6 +3438,10 @@ public class PodsCliTests
             Assert.True(preflight.GetProperty("ok").GetBoolean());
             Assert.Equal("none", preflight.GetProperty("failureKind").GetString());
 
+            var startupWatch = root.GetProperty("startupWatch");
+            Assert.True(startupWatch.GetProperty("ok").GetBoolean());
+            Assert.Equal("ready", startupWatch.GetProperty("state").GetString());
+
             var health = root.GetProperty("health");
             Assert.False(health.GetProperty("ok").GetBoolean());
             Assert.Equal("unhealthy", health.GetProperty("state").GetString());
@@ -3437,6 +3467,74 @@ public class PodsCliTests
     }
 
     [Fact]
+    public async Task VllmDeploy_WhenStartupWatcherFails_PrintsRollbackAndDoesNotSaveConfiguredModel()
+    {
+        var tempDir = Directory.CreateTempSubdirectory("tau-pods-cli-vllm-deploy-startup-watch-fail-");
+        var configPath = Path.Combine(tempDir.FullName, "custom-pods.json");
+        var stdout = new StringWriter();
+        var previousOut = Console.Out;
+        var store = new PodsConfigStore();
+        var execService = new PodExecService((psi, _) =>
+        {
+            var command = RemoteCommand(psi);
+            if (IsPreflightCommand(command))
+            {
+                return Task.FromResult(new PodExecService.ProcessExecutionResult(0, PreflightOk("/mnt/models/models--org--model"), ""));
+            }
+
+            if (IsStartupWatchCommand(command))
+            {
+                return Task.FromResult(new PodExecService.ProcessExecutionResult(2, "Script exited with code 1\nstartup_status=failed\n", ""));
+            }
+
+            if (command.Contains("rolled back", StringComparison.Ordinal))
+            {
+                return Task.FromResult(new PodExecService.ProcessExecutionResult(0, "rolled back tau-pod-served-model\n", ""));
+            }
+
+            return Task.FromResult(new PodExecService.ProcessExecutionResult(0, "started\npid=9876\n", ""));
+        });
+
+        try
+        {
+            Console.SetOut(stdout);
+            store.Save(configPath, ConfigWithSshPod());
+
+            var exitCode = await PodsCli.RunAsync(
+                ["vllm", "deploy", "--json", "--config", configPath, "--pod", "ssh-pod", "org/model", "--name", "served model"],
+                execService);
+
+            Assert.Equal(1, exitCode);
+            using var document = JsonDocument.Parse(stdout.ToString());
+            var root = document.RootElement;
+            Assert.False(root.GetProperty("ok").GetBoolean());
+            Assert.Equal("startup-failed", root.GetProperty("failureKind").GetString());
+            Assert.Contains("startup watcher failed", root.GetProperty("summary").GetString(), StringComparison.Ordinal);
+            Assert.False(root.TryGetProperty("health", out _));
+
+            var startupWatch = root.GetProperty("startupWatch");
+            Assert.False(startupWatch.GetProperty("ok").GetBoolean());
+            Assert.Equal("startup-watch", startupWatch.GetProperty("operation").GetString());
+            Assert.Equal("unhealthy", startupWatch.GetProperty("state").GetString());
+            Assert.Equal("startup-failed", startupWatch.GetProperty("failureKind").GetString());
+            Assert.Contains("Script exited with code 1", startupWatch.GetProperty("stdout").GetString(), StringComparison.Ordinal);
+
+            var rollback = root.GetProperty("rollback");
+            Assert.True(rollback.GetProperty("ok").GetBoolean());
+            Assert.Equal("rollback", rollback.GetProperty("operation").GetString());
+            Assert.Equal("served-model", rollback.GetProperty("deployment").GetString());
+            Assert.Equal("none", rollback.GetProperty("failureKind").GetString());
+
+            Assert.False(store.Load(configPath).Pods[0].Models.ContainsKey("served-model"));
+        }
+        finally
+        {
+            Console.SetOut(previousOut);
+            tempDir.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task VllmDeploy_WithHealthRetryOptions_RetriesUntilReadyAndPrintsJsonAttempts()
     {
         var tempDir = Directory.CreateTempSubdirectory("tau-pods-cli-vllm-deploy-retry-");
@@ -3450,6 +3548,11 @@ public class PodsCliTests
             if (IsPreflightCommand(command))
             {
                 return Task.FromResult(new PodExecService.ProcessExecutionResult(0, PreflightOk("/mnt/models/models--org--model"), ""));
+            }
+
+            if (IsStartupWatchCommand(command))
+            {
+                return Task.FromResult(new PodExecService.ProcessExecutionResult(0, "Application startup complete\nstartup_status=ready\n", ""));
             }
 
             if (!command.Contains("/health", StringComparison.Ordinal))
@@ -4133,6 +4236,10 @@ public class PodsCliTests
     private static bool IsPreflightCommand(string command) =>
         command.Contains("vllm_available", StringComparison.Ordinal) &&
         command.Contains("resolved_model_path", StringComparison.Ordinal);
+
+    private static bool IsStartupWatchCommand(string command) =>
+        command.Contains("startup_status", StringComparison.Ordinal) &&
+        command.Contains(".vllm_logs", StringComparison.Ordinal);
 
     private static string PreflightOk(string modelCachePath, string snapshot = "main") =>
         $"model_cache_path={modelCachePath}\n" +
