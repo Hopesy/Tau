@@ -16,7 +16,8 @@ public sealed record PodVllmOperationResult(
     PodVllmPreflightResult? Preflight = null,
     PodModelOperationResult? Prefetch = null,
     string? PrefetchTriggerFailureKind = null,
-    int? ProcessId = null);
+    int? ProcessId = null,
+    string FailureKind = PodExecFailureKinds.None);
 
 public sealed record PodVllmPreflightResult(
     string PodId,

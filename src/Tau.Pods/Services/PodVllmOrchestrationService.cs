@@ -110,7 +110,8 @@ public sealed class PodVllmOrchestrationService
                         preflight.StdErr,
                         Preflight: preflight,
                         Prefetch: prefetch,
-                        PrefetchTriggerFailureKind: prefetchTriggerFailureKind);
+                        PrefetchTriggerFailureKind: prefetchTriggerFailureKind,
+                        FailureKind: preflight.FailureKind);
                     LogVllmEnd(
                         "deploy",
                         result.PodId,
@@ -148,7 +149,8 @@ public sealed class PodVllmOrchestrationService
                     preflight.StdErr,
                     Preflight: preflight,
                     Prefetch: prefetch,
-                    PrefetchTriggerFailureKind: prefetchTriggerFailureKind);
+                    PrefetchTriggerFailureKind: prefetchTriggerFailureKind,
+                    FailureKind: preflight.FailureKind);
                 LogVllmEnd(
                     "deploy",
                     result.PodId,
@@ -204,6 +206,7 @@ public sealed class PodVllmOrchestrationService
             rollback = await RollbackAsync(pod, plan.DeploymentName, cancellationToken).ConfigureAwait(false);
         }
 
+        var failureKind = GetDeployFailureKind(success, exec, health);
         var finalResult = new PodVllmOperationResult(
             pod.Id,
             success,
@@ -220,7 +223,8 @@ public sealed class PodVllmOrchestrationService
             preflight,
             prefetch,
             prefetchTriggerFailureKind,
-            ProcessId: ExtractProcessId(exec.StdOut));
+            ProcessId: ExtractProcessId(exec.StdOut),
+            FailureKind: failureKind);
         LogVllmEnd(
             "deploy",
             finalResult.PodId,
@@ -231,7 +235,7 @@ public sealed class PodVllmOrchestrationService
             modelId,
             new Dictionary<string, string?>
             {
-                ["failureKind"] = GetDeployFailureKind(finalResult, exec, health),
+                ["failureKind"] = failureKind,
                 ["hasRollback"] = BoolString(rollback is not null),
                 ["prefetchRequested"] = BoolString(options.Prefetch),
                 ["prefetchAttempted"] = BoolString(finalResult.Prefetch is not null),
@@ -564,6 +568,7 @@ public sealed class PodVllmOrchestrationService
 
         var command = BuildStopCommand(name);
         var exec = await _execService.ExecuteAsync(pod, command, cancellationToken).ConfigureAwait(false);
+        var failureKind = exec.Success ? PodExecFailureKinds.None : PodExecFailureKinds.FromResult(exec);
         var finalResult = new PodVllmOperationResult(
             pod.Id,
             exec.Success,
@@ -575,7 +580,8 @@ public sealed class PodVllmOrchestrationService
             command,
             exec.ExitCode,
             exec.StdOut,
-            exec.StdErr);
+            exec.StdErr,
+            FailureKind: failureKind);
         LogVllmEnd(
             "stop",
             finalResult.PodId,
@@ -754,11 +760,11 @@ public sealed class PodVllmOrchestrationService
         value.ToString(System.Globalization.CultureInfo.InvariantCulture);
 
     private static string GetDeployFailureKind(
-        PodVllmOperationResult result,
+        bool success,
         PodExecResult exec,
         PodVllmHealthResult? health)
     {
-        if (result.Success)
+        if (success)
         {
             return PodExecFailureKinds.None;
         }

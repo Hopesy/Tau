@@ -1488,8 +1488,27 @@ public static class PodsCli
             RequestedGpuCount: parsed.RequestedGpuCount,
             Memory: parsed.Memory,
             Context: parsed.Context);
-        if (!TryPlanVllmServe(planner, pod, options, out _))
+        if (!TryPlanVllmServe(planner, pod, options, out var plan))
         {
+            return 1;
+        }
+        if (plan is null)
+        {
+            return 1;
+        }
+
+        if (pod.Models.ContainsKey(plan.DeploymentName))
+        {
+            var duplicate = CreateDuplicateDeploymentResult(pod.Id, plan.DeploymentName);
+            if (jsonOutput)
+            {
+                PrintVllmOperationJson(duplicate);
+            }
+            else
+            {
+                Console.Error.WriteLine(duplicate.Summary);
+            }
+
             return 1;
         }
 
@@ -1626,6 +1645,19 @@ public static class PodsCli
         store.ApplyVllmDeploymentResult(config, podId, result);
         store.Save(configPath, config);
     }
+
+    private static PodVllmOperationResult CreateDuplicateDeploymentResult(string podId, string deploymentName) =>
+        new(
+            podId,
+            false,
+            "deploy",
+            deploymentName,
+            $"Model '{deploymentName}' already exists on pod '{podId}'.",
+            string.Empty,
+            -1,
+            string.Empty,
+            string.Empty,
+            FailureKind: "model-already-exists");
 
     private static void RemoveConfiguredDeploymentOnSuccess(
         PodsConfigStore store,
@@ -2314,7 +2346,7 @@ public static class PodsCli
 
     private static void PrintVllmOperationText(PodVllmOperationResult result)
     {
-        Console.WriteLine($"{result.PodId} | ok={result.Success} | operation={result.Operation} | deployment={result.DeploymentName} | exit={result.ExitCode} | {result.Summary}");
+        Console.WriteLine($"{result.PodId} | ok={result.Success} | operation={result.Operation} | deployment={result.DeploymentName} | failure={result.FailureKind} | exit={result.ExitCode} | {result.Summary}");
         Console.WriteLine("[remote-command]");
         Console.WriteLine(result.Command);
         if (result.Prefetch is not null)
@@ -2454,6 +2486,7 @@ public static class PodsCli
         writer.WriteString("operation", result.Operation);
         writer.WriteString("deployment", result.DeploymentName);
         writer.WriteString("summary", result.Summary);
+        writer.WriteString("failureKind", result.FailureKind);
         writer.WriteString("remoteCommand", result.Command);
         writer.WriteNumber("exitCode", result.ExitCode);
         writer.WriteString("stdout", result.StdOut);

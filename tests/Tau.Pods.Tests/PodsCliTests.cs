@@ -2866,7 +2866,7 @@ public class PodsCliTests
 
             var output = stdout.ToString();
             Assert.Equal(0, exitCode);
-            Assert.Contains("ssh-pod | ok=True | operation=deploy | deployment=llama-8b | exit=0", output, StringComparison.Ordinal);
+            Assert.Contains("ssh-pod | ok=True | operation=deploy | deployment=llama-8b | failure=none | exit=0", output, StringComparison.Ordinal);
             Assert.Contains("[remote-command]", output, StringComparison.Ordinal);
             Assert.Contains("systemctl --user enable --now 'tau-pod-llama-8b.service'", output, StringComparison.Ordinal);
             Assert.Contains("[serve-command]", output, StringComparison.Ordinal);
@@ -3019,6 +3019,62 @@ public class PodsCliTests
             Assert.Equal([1], savedModel.Gpu);
             Assert.Equal(4567, savedModel.Pid);
             Assert.True(saved.Pods[0].Models.ContainsKey("busy"));
+        }
+        finally
+        {
+            Console.SetOut(previousOut);
+            tempDir.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task VllmDeploy_WithExistingDeploymentName_RejectsBeforeRemoteExecution()
+    {
+        var tempDir = Directory.CreateTempSubdirectory("tau-pods-cli-vllm-deploy-duplicate-");
+        var configPath = Path.Combine(tempDir.FullName, "custom-pods.json");
+        var stdout = new StringWriter();
+        var previousOut = Console.Out;
+        var commands = new List<string>();
+        var store = new PodsConfigStore();
+        var execService = new PodExecService((psi, _) =>
+        {
+            commands.Add(RemoteCommand(psi));
+            return Task.FromResult(new PodExecService.ProcessExecutionResult(0, "unexpected\n", ""));
+        });
+
+        try
+        {
+            Console.SetOut(stdout);
+            var config = ConfigWithSshPod();
+            var pod = config.Pods[0];
+            pod.Models["served-model"] = new PodConfiguredModel
+            {
+                Model = "org/old-model",
+                Port = 8000,
+                Gpu = [0],
+                Pid = 42
+            };
+            store.Save(configPath, config);
+
+            var exitCode = await PodsCli.RunAsync(
+                ["vllm", "deploy", "--json", "--no-health", "--config", configPath, "--pod", "ssh-pod", "org/model", "--name", "served model"],
+                execService);
+
+            Assert.Equal(1, exitCode);
+            Assert.Empty(commands);
+            using var document = JsonDocument.Parse(stdout.ToString());
+            var root = document.RootElement;
+            Assert.False(root.GetProperty("ok").GetBoolean());
+            Assert.Equal("deploy", root.GetProperty("operation").GetString());
+            Assert.Equal("served-model", root.GetProperty("deployment").GetString());
+            Assert.Equal("model-already-exists", root.GetProperty("failureKind").GetString());
+            Assert.Contains("already exists", root.GetProperty("summary").GetString(), StringComparison.Ordinal);
+
+            var savedModel = store.Load(configPath).Pods[0].Models["served-model"];
+            Assert.Equal("org/old-model", savedModel.Model);
+            Assert.Equal(8000, savedModel.Port);
+            Assert.Equal([0], savedModel.Gpu);
+            Assert.Equal(42, savedModel.Pid);
         }
         finally
         {
@@ -3591,6 +3647,55 @@ public class PodsCliTests
     }
 
     [Fact]
+    public async Task Start_WithExistingDeploymentName_RejectsBeforeRemoteExecution()
+    {
+        var tempDir = Directory.CreateTempSubdirectory("tau-pods-cli-start-duplicate-");
+        var configPath = Path.Combine(tempDir.FullName, "custom-pods.json");
+        var stdout = new StringWriter();
+        var previousOut = Console.Out;
+        var commands = new List<string>();
+        var store = new PodsConfigStore();
+        var execService = new PodExecService((psi, _) =>
+        {
+            commands.Add(RemoteCommand(psi));
+            return Task.FromResult(new PodExecService.ProcessExecutionResult(0, "unexpected\n", ""));
+        });
+
+        try
+        {
+            Console.SetOut(stdout);
+            var config = ConfigWithSshPod();
+            config.ActivePodId = "ssh-pod";
+            config.Pods[0].Models["served-model"] = new PodConfiguredModel
+            {
+                Model = "org/old-model",
+                Port = 8000,
+                Gpu = [0],
+                Pid = 42
+            };
+            store.Save(configPath, config);
+
+            var exitCode = await PodsCli.RunAsync(
+                ["start", "org/model", "--json", "--no-health", "--config", configPath, "--name", "served model"],
+                execService);
+
+            Assert.Equal(1, exitCode);
+            Assert.Empty(commands);
+            using var document = JsonDocument.Parse(stdout.ToString());
+            var root = document.RootElement;
+            Assert.False(root.GetProperty("ok").GetBoolean());
+            Assert.Equal("deploy", root.GetProperty("operation").GetString());
+            Assert.Equal("served-model", root.GetProperty("deployment").GetString());
+            Assert.Equal("model-already-exists", root.GetProperty("failureKind").GetString());
+        }
+        finally
+        {
+            Console.SetOut(previousOut);
+            tempDir.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task Start_WithoutName_ReportsUpstreamNameRequirement()
     {
         var stderr = new StringWriter();
@@ -3869,7 +3974,7 @@ public class PodsCliTests
 
             var output = stdout.ToString();
             Assert.Equal(1, exitCode);
-            Assert.Contains("ssh-pod | ok=False | operation=stop | deployment=served-model | exit=255", output, StringComparison.Ordinal);
+            Assert.Contains("ssh-pod | ok=False | operation=stop | deployment=served-model | failure=ssh-auth-failed | exit=255", output, StringComparison.Ordinal);
             Assert.Contains("vLLM stop failed: ssh exec failed (255)", output, StringComparison.Ordinal);
             Assert.Contains("systemctl --user disable --now 'tau-pod-served-model.service'", output, StringComparison.Ordinal);
             Assert.Contains("[stderr]", output, StringComparison.Ordinal);
