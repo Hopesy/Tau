@@ -6,6 +6,12 @@ namespace Tau.Pods.Services;
 public sealed class PodVllmCommandPlanner
 {
     private const string DefaultModelsPath = "$HOME/.cache/huggingface/hub";
+    private readonly PodKnownModelRegistry _knownModels;
+
+    public PodVllmCommandPlanner(PodKnownModelRegistry? knownModels = null)
+    {
+        _knownModels = knownModels ?? new PodKnownModelRegistry();
+    }
 
     public PodVllmServePlan PlanServe(PodDefinition pod, PodVllmServeOptions options)
     {
@@ -19,16 +25,21 @@ public sealed class PodVllmCommandPlanner
             ? deploymentName
             : options.ServedModelName.Trim();
         var revision = NormalizeRevision(options.Revision);
+        var knownConfig = ResolveKnownModelConfig(pod, options);
+        var environment = MergeEnvironment(knownConfig?.Environment, options.Environment);
+        var extraArgs = options.ExtraArgs is { Count: > 0 }
+            ? options.ExtraArgs
+            : knownConfig?.Args;
         var modelCachePath = BuildModelCachePath(pod, options.ModelId);
         var hasResolvedModelPath = !string.IsNullOrWhiteSpace(options.ResolvedModelPath);
         var usesSnapshotDiscovery = !hasResolvedModelPath;
         var modelPath = hasResolvedModelPath ? options.ResolvedModelPath!.Trim() : modelCachePath;
         var unitName = $"tau-pod-{deploymentName}.service";
         var serveCommand = hasResolvedModelPath
-            ? BuildServeCommand(modelPath, port, servedModelName, options.Environment, options.ExtraArgs)
-            : BuildSnapshotDiscoveryServeCommand(modelCachePath, port, servedModelName, options.Environment, options.ExtraArgs, revision);
+            ? BuildServeCommand(modelPath, port, servedModelName, environment, extraArgs)
+            : BuildSnapshotDiscoveryServeCommand(modelCachePath, port, servedModelName, environment, extraArgs, revision);
         var unit = BuildSystemdUnit(unitName, serveCommand);
-        var metadata = BuildMetadataJson(options.ModelId.Trim(), deploymentName, modelPath, usesSnapshotDiscovery, port, servedModelName, unitName, revision);
+        var metadata = BuildMetadataJson(options.ModelId.Trim(), deploymentName, modelPath, usesSnapshotDiscovery, port, servedModelName, unitName, revision, knownConfig);
         var remoteCommand =
             $"mkdir -p ~/.tau_pods && " +
             $"cat > ~/.tau_pods/{deploymentName}.service <<'EOF'\n{unit}\nEOF\n" +
@@ -47,7 +58,12 @@ public sealed class PodVllmCommandPlanner
             metadata,
             remoteCommand,
             UsesSnapshotDiscovery: usesSnapshotDiscovery,
-            Revision: revision);
+            Revision: revision,
+            KnownModelName: knownConfig?.Name,
+            KnownModelGpuCount: knownConfig?.GpuCount,
+            KnownModelArgs: knownConfig?.Args,
+            KnownModelEnvironment: knownConfig?.Environment,
+            KnownModelNotes: knownConfig?.Notes);
     }
 
     public string BuildModelCachePath(PodDefinition pod, string modelId)
@@ -103,6 +119,45 @@ public sealed class PodVllmCommandPlanner
         }
 
         return builder.ToString();
+    }
+
+    private PodKnownModelConfig? ResolveKnownModelConfig(PodDefinition pod, PodVllmServeOptions options)
+    {
+        if (options.ExtraArgs is { Count: > 0 })
+        {
+            return null;
+        }
+
+        return _knownModels.GetBestConfig(options.ModelId, pod.Gpus);
+    }
+
+    private static IReadOnlyDictionary<string, string>? MergeEnvironment(
+        IReadOnlyDictionary<string, string>? knownEnvironment,
+        IReadOnlyDictionary<string, string>? explicitEnvironment)
+    {
+        if (knownEnvironment is null && explicitEnvironment is null)
+        {
+            return null;
+        }
+
+        var merged = new Dictionary<string, string>(StringComparer.Ordinal);
+        if (knownEnvironment is not null)
+        {
+            foreach (var pair in knownEnvironment)
+            {
+                merged[pair.Key] = pair.Value;
+            }
+        }
+
+        if (explicitEnvironment is not null)
+        {
+            foreach (var pair in explicitEnvironment)
+            {
+                merged[pair.Key] = pair.Value;
+            }
+        }
+
+        return merged;
     }
 
     private static string BuildVllmServeCommand(
@@ -200,8 +255,10 @@ public sealed class PodVllmCommandPlanner
         int port,
         string servedModelName,
         string unitName,
-        string? revision) =>
-        new StringBuilder()
+        string? revision,
+        PodKnownModelConfig? knownConfig)
+    {
+        var builder = new StringBuilder()
             .Append("{\"model\":\"").Append(EscapeJsonString(modelId))
             .Append("\",\"name\":\"").Append(EscapeJsonString(deploymentName))
             .Append("\",\"status\":\"planned-vllm\"")
@@ -211,9 +268,66 @@ public sealed class PodVllmCommandPlanner
             .Append(",\"servedModelName\":\"").Append(EscapeJsonString(servedModelName))
             .Append("\",\"unit\":\"").Append(EscapeJsonString(unitName))
             .Append("\"")
-            .Append(revision is null ? string.Empty : ",\"revision\":\"" + EscapeJsonString(revision) + "\"")
+            .Append(revision is null ? string.Empty : ",\"revision\":\"" + EscapeJsonString(revision) + "\"");
+
+        if (knownConfig is not null)
+        {
+            builder
+                .Append(",\"knownModel\":{\"name\":\"").Append(EscapeJsonString(knownConfig.Name))
+                .Append("\",\"gpuCount\":").Append(knownConfig.GpuCount.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                .Append(",\"args\":").Append(JsonStringArray(knownConfig.Args));
+            if (knownConfig.Environment is not null)
+            {
+                builder.Append(",\"env\":").Append(JsonStringObject(knownConfig.Environment));
+            }
+            if (!string.IsNullOrWhiteSpace(knownConfig.Notes))
+            {
+                builder.Append(",\"notes\":\"").Append(EscapeJsonString(knownConfig.Notes)).Append("\"");
+            }
+
+            builder.Append('}');
+        }
+
+        return builder
             .Append(",\"ts\":\"").Append(EscapeJsonString(DateTimeOffset.UtcNow.ToString("O"))).Append("\"}")
             .ToString();
+    }
+
+    private static string JsonStringArray(IReadOnlyList<string> values)
+    {
+        var builder = new StringBuilder("[");
+        for (var i = 0; i < values.Count; i++)
+        {
+            if (i > 0)
+            {
+                builder.Append(',');
+            }
+
+            builder.Append('"').Append(EscapeJsonString(values[i])).Append('"');
+        }
+
+        return builder.Append(']').ToString();
+    }
+
+    private static string JsonStringObject(IReadOnlyDictionary<string, string> values)
+    {
+        var builder = new StringBuilder("{");
+        var first = true;
+        foreach (var pair in values.OrderBy(static pair => pair.Key, StringComparer.Ordinal))
+        {
+            if (!first)
+            {
+                builder.Append(',');
+            }
+
+            first = false;
+            builder
+                .Append('"').Append(EscapeJsonString(pair.Key)).Append("\":\"")
+                .Append(EscapeJsonString(pair.Value)).Append('"');
+        }
+
+        return builder.Append('}').ToString();
+    }
 
     private static string GetModelsPath(PodDefinition pod) =>
         string.IsNullOrWhiteSpace(pod.ModelsPath) ? DefaultModelsPath : pod.ModelsPath.Trim();

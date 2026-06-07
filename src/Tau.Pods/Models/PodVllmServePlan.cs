@@ -26,4 +26,9 @@ public sealed record PodVllmServePlan(
     string MetadataJson,
     string RemoteCommand,
     bool UsesSnapshotDiscovery = false,
-    string? Revision = null);
+    string? Revision = null,
+    string? KnownModelName = null,
+    int? KnownModelGpuCount = null,
+    IReadOnlyList<string>? KnownModelArgs = null,
+    IReadOnlyDictionary<string, string>? KnownModelEnvironment = null,
+    string? KnownModelNotes = null);

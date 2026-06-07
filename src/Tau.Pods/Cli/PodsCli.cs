@@ -1145,6 +1145,15 @@ public static class PodsCli
         Console.WriteLine($"modelPath={plan.ModelPath}");
         Console.WriteLine($"port={plan.Port}");
         Console.WriteLine($"servedModel={plan.ServedModelName}");
+        if (!string.IsNullOrWhiteSpace(plan.KnownModelName))
+        {
+            Console.WriteLine($"knownModel={plan.KnownModelName}");
+            Console.WriteLine($"knownModelGpuCount={plan.KnownModelGpuCount}");
+            if (!string.IsNullOrWhiteSpace(plan.KnownModelNotes))
+            {
+                Console.WriteLine($"knownModelNotes={plan.KnownModelNotes}");
+            }
+        }
         Console.WriteLine($"unit={plan.UnitName}");
         Console.WriteLine("[serve-command]");
         Console.WriteLine(plan.ServeCommand);
@@ -1705,6 +1714,7 @@ public static class PodsCli
             writer.WriteBoolean("usesSnapshotDiscovery", plan.UsesSnapshotDiscovery);
             writer.WriteNumber("port", plan.Port);
             writer.WriteString("servedModel", plan.ServedModelName);
+            WriteKnownModelObject(writer, plan);
             writer.WriteString("unit", plan.UnitName);
             writer.WriteString("serveCommand", plan.ServeCommand);
             writer.WriteString("systemdUnit", plan.SystemdUnit);
@@ -1932,6 +1942,7 @@ public static class PodsCli
         writer.WriteBoolean("usesSnapshotDiscovery", plan.UsesSnapshotDiscovery);
         writer.WriteNumber("port", plan.Port);
         writer.WriteString("servedModel", plan.ServedModelName);
+        WriteKnownModelObject(writer, plan);
         writer.WriteString("unit", plan.UnitName);
         writer.WriteString("serveCommand", plan.ServeCommand);
         writer.WriteString("systemdUnit", plan.SystemdUnit);
@@ -1939,6 +1950,49 @@ public static class PodsCli
         WriteVllmPlanMetadataObject(writer, plan);
         writer.WriteString("metadataJson", plan.MetadataJson);
         writer.WriteString("planRemoteCommand", plan.RemoteCommand);
+        writer.WriteEndObject();
+    }
+
+    private static void WriteKnownModelObject(Utf8JsonWriter writer, PodVllmServePlan plan)
+    {
+        writer.WritePropertyName("knownModel");
+        if (string.IsNullOrWhiteSpace(plan.KnownModelName))
+        {
+            writer.WriteNullValue();
+            return;
+        }
+
+        writer.WriteStartObject();
+        writer.WriteString("name", plan.KnownModelName);
+        if (plan.KnownModelGpuCount is not null)
+        {
+            writer.WriteNumber("gpuCount", plan.KnownModelGpuCount.Value);
+        }
+
+        writer.WritePropertyName("args");
+        writer.WriteStartArray();
+        foreach (var arg in plan.KnownModelArgs ?? [])
+        {
+            writer.WriteStringValue(arg);
+        }
+        writer.WriteEndArray();
+
+        writer.WritePropertyName("env");
+        if (plan.KnownModelEnvironment is null)
+        {
+            writer.WriteNullValue();
+        }
+        else
+        {
+            writer.WriteStartObject();
+            foreach (var pair in plan.KnownModelEnvironment.OrderBy(static pair => pair.Key, StringComparer.Ordinal))
+            {
+                writer.WriteString(pair.Key, pair.Value);
+            }
+            writer.WriteEndObject();
+        }
+
+        writer.WriteString("notes", plan.KnownModelNotes);
         writer.WriteEndObject();
     }
 

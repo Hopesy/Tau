@@ -100,6 +100,52 @@ public sealed class PodVllmCommandPlannerTests
     }
 
     [Fact]
+    public void PlanServe_UsesKnownModelConfigWhenExtraArgsAreNotExplicit()
+    {
+        var planner = new PodVllmCommandPlanner();
+        var pod = new PodDefinition
+        {
+            Id = "gpu-1",
+            SshHost = "host.example.com",
+            Gpus = [new PodGpuInfo(0, "NVIDIA B200", "180000 MiB")]
+        };
+
+        var plan = planner.PlanServe(pod, new PodVllmServeOptions("openai/gpt-oss-20b"));
+
+        Assert.Equal("GPT-OSS-20B", plan.KnownModelName);
+        Assert.Equal(1, plan.KnownModelGpuCount);
+        Assert.Contains("--async-scheduling", plan.ServeCommand, StringComparison.Ordinal);
+        Assert.Contains("VLLM_USE_TRTLLM_ATTENTION='1'", plan.ServeCommand, StringComparison.Ordinal);
+        Assert.NotNull(plan.KnownModelEnvironment);
+        Assert.Equal("1", plan.KnownModelEnvironment["VLLM_USE_FLASHINFER_MXFP4_MOE"]);
+        using var metadata = JsonDocument.Parse(plan.MetadataJson);
+        var knownModel = metadata.RootElement.GetProperty("knownModel");
+        Assert.Equal("GPT-OSS-20B", knownModel.GetProperty("name").GetString());
+        Assert.Equal(1, knownModel.GetProperty("gpuCount").GetInt32());
+        Assert.Equal("1", knownModel.GetProperty("env").GetProperty("VLLM_USE_TRTLLM_ATTENTION").GetString());
+    }
+
+    [Fact]
+    public void PlanServe_ExplicitVllmArgsOverrideKnownModelConfig()
+    {
+        var planner = new PodVllmCommandPlanner();
+        var pod = new PodDefinition
+        {
+            Id = "gpu-1",
+            SshHost = "host.example.com",
+            Gpus = [new PodGpuInfo(0, "NVIDIA B200", "180000 MiB")]
+        };
+
+        var plan = planner.PlanServe(
+            pod,
+            new PodVllmServeOptions("openai/gpt-oss-20b", ExtraArgs: ["--manual-arg"]));
+
+        Assert.Null(plan.KnownModelName);
+        Assert.Contains("'--manual-arg'", plan.ServeCommand, StringComparison.Ordinal);
+        Assert.DoesNotContain("VLLM_USE_TRTLLM_ATTENTION", plan.ServeCommand, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void PlanServe_NormalizesEnvironmentKeysToShellAssignments()
     {
         var planner = new PodVllmCommandPlanner();

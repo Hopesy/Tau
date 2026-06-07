@@ -1988,6 +1988,44 @@ public class PodsCliTests
     }
 
     [Fact]
+    public async Task VllmPlan_ForKnownModel_PrintsKnownModelContract()
+    {
+        var tempDir = Directory.CreateTempSubdirectory("tau-pods-cli-vllm-plan-known-model-");
+        var configPath = Path.Combine(tempDir.FullName, "custom-pods.json");
+        var stdout = new StringWriter();
+        var previousOut = Console.Out;
+
+        try
+        {
+            Console.SetOut(stdout);
+            var config = ConfigWithSshPod();
+            config.Pods[0].Gpus.Add(new PodGpuInfo(0, "NVIDIA H100 80GB HBM3", "81559 MiB"));
+            config.Pods[0].Gpus.Add(new PodGpuInfo(1, "NVIDIA H100 80GB HBM3", "81559 MiB"));
+            new PodsConfigStore().Save(configPath, config);
+
+            var exitCode = await PodsCli.RunAsync(
+                ["vllm", "plan", "--json", "--config", configPath, "--pod", "ssh-pod", "openai/gpt-oss-120b"]);
+
+            Assert.Equal(0, exitCode);
+            using var document = JsonDocument.Parse(stdout.ToString());
+            var root = document.RootElement;
+            var knownModel = root.GetProperty("knownModel");
+            Assert.Equal("GPT-OSS-120B", knownModel.GetProperty("name").GetString());
+            Assert.Equal(2, knownModel.GetProperty("gpuCount").GetInt32());
+            Assert.Contains(
+                knownModel.GetProperty("args").EnumerateArray(),
+                arg => arg.GetString() == "--tensor-parallel-size");
+            Assert.Contains("--tensor-parallel-size", root.GetProperty("serveCommand").GetString(), StringComparison.Ordinal);
+            Assert.Equal("GPT-OSS-120B", root.GetProperty("metadata").GetProperty("knownModel").GetProperty("name").GetString());
+        }
+        finally
+        {
+            Console.SetOut(previousOut);
+            tempDir.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task VllmPreflight_WithTextOutput_PrintsStructuredContract()
     {
         var tempDir = Directory.CreateTempSubdirectory("tau-pods-cli-vllm-preflight-");

@@ -14,7 +14,7 @@
 
 - [x] Agent platform baseline completed：`src/Tau.Agent/Platform/**`、Console/HTTP examples、`verify-agent-platform-examples.ps1`、provider run + tool execution runtime log 和本地验收已完成，当前作为全量移植的 shared Agent foundation。
 - [x] Phase 1 inventory freeze completed：`docs/exec-plans/active/2026-05-28-pi-mono-parity-matrix.md` 已冻结 capability、file-level、surface 和 root scripts/manifests 三层 inventory；不重开 broad package scan。
-- [ ] Dirty WIP boundary closure：当前工作树仍有 Agent platform baseline WIP 和 CodingAgent `/settings select` UI parity WIP；后续提交必须拆成清晰边界，不能把 SDK/API、UI parity 和 docs-only pivot 混成一个不可审查提交。
+- [x] Dirty WIP boundary closure：Agent platform baseline、CodingAgent `/settings select` UI parity 和 100% parity goal restore 已拆成独立提交并推送；后续实现继续从 Phase 2 Candidate Queue 领取窄切片，不能把 SDK/API、UI parity、Pods runtime 和 docs-only pivot 混成一个不可审查提交。
 - [ ] Phase 2 critical contract closure：provider/auth、Agent/tool/session/runtime log、CodingAgent RPC/session/settings、Tui terminal/selector、WebUi session/artifact、Mom Slack/sandbox、Pods operation schema 等跨模块合同继续按 matrix 收口。
 - [ ] Phase 3 product runtime parity：CodingAgent + Tui、WebUi、Mom、Pods 的用户可见 runtime 行为继续补齐，不能用 fake-only tests 替代产品行为。
 - [ ] Phase 4 external e2e closure：真实 provider/OAuth/AWS/Slack/Docker/Pods/WebUi/browser/release 等 e2e 要通过；没有环境时保持 `external-e2e-needed`，不能标成完成。
@@ -37,11 +37,11 @@
 
 ## Current worktree boundary
 
-当前工作树不是 clean。继续实现或提交前必须重新读取 `git status --short --branch` 和相关 diff，并保持以下边界：
+继续实现或提交前必须重新读取 `git status --short --branch` 和相关 diff，并保持以下边界：
 
-- Agent platform baseline WIP：`src/Tau.Agent/Platform/**`、examples、platform smoke、provider run observability、相关 tests/docs/history。该切片已本地验收，但仍需作为独立 commit/checkpoint 处理。
-- CodingAgent `/settings select` UI parity WIP：`TuiSettingsList` adoption、`Tau.CodingAgent` / `Tau.Tui` 相关 runtime 和 tests。该切片已本地验证，但不能混入 Agent SDK/API 或 docs-only pivot。
-- 本轮目标切换是 docs/plan 层变更，不启动新的实现 worker，不顺手改源码，不回滚用户或既有 WIP。
+- 已关闭的旧 dirty WIP：Agent platform baseline、CodingAgent `/settings select` UI parity 和 docs-only goal restore 已分别提交并推送，不再作为当前未提交边界处理。
+- 当前实现切片必须来自 `Phase 2 Candidate Queue` 或 active plan 的明确缺口；每个切片都要同时对照上游源码、Tau 当前 source/tests、targeted validation、plan/next/quality/history。
+- Main Integrator 独占 shared docs/history/scripts/solution 与最终验证；module worker 只改自己的模块和相邻测试，不把 unrelated parity lane 混入同一 commit。
 
 ## Source of truth
 

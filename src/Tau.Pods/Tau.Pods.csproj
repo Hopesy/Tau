@@ -11,4 +11,8 @@
     <ProjectReference Include="..\Tau.Ai\Tau.Ai.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Content Include="Models\models.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>
