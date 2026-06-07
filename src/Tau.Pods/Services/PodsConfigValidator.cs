@@ -23,7 +23,7 @@ public sealed class PodsConfigValidator
             if (string.IsNullOrWhiteSpace(pod.Provider)) errors.Add($"Pod {pod.Id}: provider is required.");
             if (string.IsNullOrWhiteSpace(pod.Model)) errors.Add($"Pod {pod.Id}: model is required.");
             if (string.IsNullOrWhiteSpace(pod.Region)) errors.Add($"Pod {pod.Id}: region is required.");
-            if (string.IsNullOrWhiteSpace(pod.Endpoint) && string.IsNullOrWhiteSpace(pod.SshHost)) errors.Add($"Pod {pod.Id}: either endpoint or sshHost must be configured.");
+            if (string.IsNullOrWhiteSpace(pod.Endpoint) && string.IsNullOrWhiteSpace(pod.SshHost) && string.IsNullOrWhiteSpace(pod.SshCommand)) errors.Add($"Pod {pod.Id}: either endpoint, sshHost, or sshCommand must be configured.");
             if (pod.SshPort is < 1 or > 65535) errors.Add($"Pod {pod.Id}: sshPort must be between 1 and 65535.");
             if (!PodSetupPlanner.IsSupportedVllmVersion(pod.VllmVersion))
             {

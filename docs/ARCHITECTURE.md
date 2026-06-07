@@ -297,7 +297,7 @@ tests/
 
 - `health` 对 HTTP pod 调 `/health`，对 SSH pod 执行 `echo ok`
 - `deploy / stop / restart` 当前基于 SSH pod 的 `~/.tau_pods/<deployment>.json` metadata 管理
-- target command 支持上游默认 `~/.pi/pods.json`、`PI_CONFIG_DIR` 指向的 `pods.json` 或显式 config path；missing config 会按空配置处理
+- target command 支持上游默认 `~/.pi/pods.json`、`PI_CONFIG_DIR` 指向的 `pods.json` 或显式 config path；missing config 会按空配置处理；配置读写使用上游 record-shaped `pods` / `models` 对象形状，旧 Tau list-shaped config 仍可读取并在保存时迁移
 - deployment name 会先规范化再作为远端 metadata 文件名，metadata 内容会 shell quote 后再交给 SSH
 - SSH exec 进程参数使用 `ProcessStartInfo.ArgumentList` 构造，`-p`、`-o`、host 和 remote command 均作为独立 argv 传给系统 `ssh`，避免本地命令行拼接和 quoting 漂移
 - `model list/pull/remove/status` 基于 SSH pod 的 Hugging Face cache 管理：默认 remote cache 路径为 `$HOME/.cache/huggingface/hub`，pod 可用 `modelsPath` 覆盖；`pull` 优先用 `huggingface-cli download`，缺 CLI 时回退 `python -m huggingface_hub.commands.huggingface_cli download`；长耗时 pull 会打开 SSH keepalive 参数

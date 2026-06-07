@@ -701,6 +701,7 @@ public static class PodsCli
             Provider = "ssh",
             Model = "unassigned",
             Region = "registered",
+            SshCommand = parsed.SshCommand,
             SshHost = sshTarget.Host,
             SshPort = sshTarget.Port,
             ModelsPath = resolvedModelsPath,
