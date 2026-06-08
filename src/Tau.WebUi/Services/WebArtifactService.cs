@@ -102,7 +102,7 @@ public sealed class WebArtifactService
             "console" => CreateRuntimeResponse(message, success: true),
             "file-returned" => CreateRuntimeResponse(message, success: true, result: new
             {
-                fileName = message.Filename,
+                fileName = RuntimeFileName(message),
                 mimeType = message.MimeType
             }),
             "execution-complete" => CreateRuntimeResponse(message, success: true),
@@ -135,41 +135,44 @@ public sealed class WebArtifactService
 
     private IDictionary<string, object?> HandleRuntimeGet(string sessionId, WebRuntimeMessageRequest message)
     {
-        if (string.IsNullOrWhiteSpace(message.Filename))
+        var fileName = RuntimeFileName(message);
+        if (string.IsNullOrWhiteSpace(fileName))
         {
             return CreateRuntimeResponse(message, success: false, error: "Artifact filename is required.");
         }
 
-        var artifact = GetArtifact(sessionId, message.Filename);
+        var artifact = GetArtifact(sessionId, fileName);
         return artifact is null
-            ? CreateRuntimeResponse(message, success: false, error: $"Artifact not found: {message.Filename}")
+            ? CreateRuntimeResponse(message, success: false, error: $"Artifact not found: {fileName}")
             : CreateRuntimeResponse(message, success: true, result: artifact.Content);
     }
 
     private IDictionary<string, object?> HandleRuntimeCreateOrUpdate(string sessionId, WebRuntimeMessageRequest message)
     {
-        if (string.IsNullOrWhiteSpace(message.Filename))
+        var fileName = RuntimeFileName(message);
+        if (string.IsNullOrWhiteSpace(fileName))
         {
             return CreateRuntimeResponse(message, success: false, error: "Artifact filename is required.");
         }
 
         var artifact = UpsertArtifact(
             sessionId,
-            message.Filename,
+            fileName,
             new UpsertWebArtifactRequest(message.Content ?? string.Empty, message.MimeType));
         return CreateRuntimeResponse(message, success: true, result: artifact.FileName);
     }
 
     private IDictionary<string, object?> HandleRuntimeDelete(string sessionId, WebRuntimeMessageRequest message)
     {
-        if (string.IsNullOrWhiteSpace(message.Filename))
+        var fileName = RuntimeFileName(message);
+        if (string.IsNullOrWhiteSpace(fileName))
         {
             return CreateRuntimeResponse(message, success: false, error: "Artifact filename is required.");
         }
 
-        return DeleteArtifact(sessionId, message.Filename)
+        return DeleteArtifact(sessionId, fileName)
             ? CreateRuntimeResponse(message, success: true)
-            : CreateRuntimeResponse(message, success: false, error: $"Artifact not found: {message.Filename}");
+            : CreateRuntimeResponse(message, success: false, error: $"Artifact not found: {fileName}");
     }
 
     private ConcurrentDictionary<string, WebArtifactDto> GetSessionArtifacts(string sessionId) =>
@@ -203,6 +206,9 @@ public sealed class WebArtifactService
             ["result"] = result,
             ["error"] = error
         };
+
+    private static string? RuntimeFileName(WebRuntimeMessageRequest message) =>
+        message.Filename;
 
     private static string NormalizeFileName(string fileName)
     {

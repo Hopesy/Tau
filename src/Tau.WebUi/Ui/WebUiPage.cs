@@ -175,6 +175,7 @@ public static class WebUiPage
           </div>
           <script>
             let currentSessionId = null;
+            let currentSession = null;
             let catalog = { providers: [] };
             let pendingAttachments = [];
             let currentArtifacts = [];
@@ -222,7 +223,30 @@ public static class WebUiPage
               return artifact && (artifact.mimeType || '').toLowerCase().startsWith('image/');
             }
 
-            function sandboxBridgeCode(sandboxId) {
+            function sandboxSafeJson(value) {
+              return JSON.stringify(value || []).replace(/<\/script/gi, '<\\/script');
+            }
+
+            function collectSessionAttachments(session) {
+              const attachments = [];
+              for (const message of session?.messages || []) {
+                if (message.role !== 'user' || !Array.isArray(message.attachments)) continue;
+                for (const attachment of message.attachments) {
+                  attachments.push({
+                    id: attachment.id,
+                    fileName: attachment.fileName,
+                    mimeType: attachment.mimeType || 'application/octet-stream',
+                    size: Number(attachment.size || 0),
+                    content: attachment.content || '',
+                    extractedText: attachment.extractedText || null
+                  });
+                }
+              }
+              return attachments;
+            }
+
+            function sandboxBridgeCode(sandboxId, attachments) {
+              const attachmentsJson = sandboxSafeJson(attachments);
               return `<script>
                 window.__completionCallbacks = [];
                 window.sendRuntimeMessage = async (message) => {
@@ -246,6 +270,31 @@ public static class WebUiPage
                   });
                 };
                 window.onCompleted = callback => window.__completionCallbacks.push(callback);
+                window.attachments = ${attachmentsJson};
+                window.listAttachments = () => (window.attachments || []).map(attachment => ({
+                  id: attachment.id,
+                  fileName: attachment.fileName,
+                  mimeType: attachment.mimeType,
+                  size: attachment.size
+                }));
+                window.readTextAttachment = attachmentId => {
+                  const attachment = (window.attachments || []).find(item => item.id === attachmentId);
+                  if (!attachment) throw new Error('Attachment not found: ' + attachmentId);
+                  if (attachment.extractedText) return attachment.extractedText;
+                  try {
+                    return atob(attachment.content || '');
+                  } catch {
+                    throw new Error('Failed to decode text content for: ' + attachmentId);
+                  }
+                };
+                window.readBinaryAttachment = attachmentId => {
+                  const attachment = (window.attachments || []).find(item => item.id === attachmentId);
+                  if (!attachment) throw new Error('Attachment not found: ' + attachmentId);
+                  const bin = atob(attachment.content || '');
+                  const bytes = new Uint8Array(bin.length);
+                  for (let i = 0; i < bin.length; i += 1) bytes[i] = bin.charCodeAt(i);
+                  return bytes;
+                };
                 const isJsonFile = filename => String(filename || '').endsWith('.json');
                 window.listArtifacts = async () => {
                   const response = await window.sendRuntimeMessage({ type: 'artifact-operation', action: 'list' });
@@ -264,6 +313,37 @@ public static class WebUiPage
                 };
                 window.deleteArtifact = async filename => {
                   await window.sendRuntimeMessage({ type: 'artifact-operation', action: 'delete', filename });
+                };
+                const bytesToBase64 = bytes => {
+                  let binary = '';
+                  for (let i = 0; i < bytes.length; i += 1) binary += String.fromCharCode(bytes[i]);
+                  return btoa(binary);
+                };
+                window.returnDownloadableFile = async (fileName, content, mimeType) => {
+                  let finalContent;
+                  let finalMimeType;
+                  if (content instanceof Blob) {
+                    if (!mimeType && !content.type) {
+                      throw new Error("returnDownloadableFile: MIME type is required for Blob content. Please provide a mimeType parameter (e.g., 'image/png').");
+                    }
+                    finalContent = bytesToBase64(new Uint8Array(await content.arrayBuffer()));
+                    finalMimeType = mimeType || content.type || 'application/octet-stream';
+                  } else if (content instanceof Uint8Array) {
+                    if (!mimeType) {
+                      throw new Error("returnDownloadableFile: MIME type is required for Uint8Array content. Please provide a mimeType parameter (e.g., 'image/png').");
+                    }
+                    finalContent = bytesToBase64(content);
+                    finalMimeType = mimeType;
+                  } else if (typeof content === 'string') {
+                    finalContent = content;
+                    finalMimeType = mimeType || 'text/plain';
+                  } else {
+                    finalContent = JSON.stringify(content, null, 2);
+                    finalMimeType = mimeType || 'application/json';
+                  }
+                  const response = await window.sendRuntimeMessage({ type: 'file-returned', fileName, content: finalContent, mimeType: finalMimeType });
+                  if (response.error) throw new Error(response.error);
+                  return { fileName, mimeType: finalMimeType };
                 };
                 ['log', 'warn', 'error', 'info'].forEach(method => {
                   const original = console[method].bind(console);
@@ -289,7 +369,7 @@ public static class WebUiPage
 
             function artifactSandboxSrcdoc(artifact) {
               const sandboxId = artifactSandboxId(artifact);
-              return `${sandboxBridgeCode(sandboxId)}${artifact.content || ''}`;
+              return `${sandboxBridgeCode(sandboxId, collectSessionAttachments(currentSession))}${artifact.content || ''}`;
             }
 
             function formatBytes(size) {
@@ -1013,6 +1093,7 @@ public static class WebUiPage
 
             async function sendMessageStreaming(sessionId, text, attachments) {
               let session = await fetchJson(`/api/sessions/${sessionId}`);
+              currentSession = session;
               const response = await fetch(`/api/sessions/${sessionId}/messages/stream`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -1035,6 +1116,7 @@ public static class WebUiPage
                 for (const line of lines) {
                   if (!line.trim()) continue;
                   session = applyStreamEvent(session, JSON.parse(line));
+                  currentSession = session;
                   renderMessages(session);
                   applySessionSettings(session);
                 }
@@ -1043,6 +1125,7 @@ public static class WebUiPage
               buffer += decoder.decode();
               if (buffer.trim()) {
                 session = applyStreamEvent(session, JSON.parse(buffer));
+                currentSession = session;
                 renderMessages(session);
                 applySessionSettings(session);
               }
@@ -1212,6 +1295,7 @@ public static class WebUiPage
               if (!response.ok && response.status !== 404) throw new Error(await response.text());
               if (currentSessionId === sessionId) {
                 currentSessionId = null;
+                currentSession = null;
                 rememberCurrentSession(null);
                 applySessionSettings(null);
                 renderMessages(null);
@@ -1308,6 +1392,7 @@ public static class WebUiPage
                 await openSession(sessions[0].id);
               } else {
                 currentSessionId = null;
+                currentSession = null;
                 rememberCurrentSession(null);
                 applySessionSettings(null);
                 renderMessages(null);
@@ -1319,6 +1404,7 @@ public static class WebUiPage
               currentSessionId = id;
               rememberCurrentSession(id);
               const session = await fetchJson(`/api/sessions/${id}`);
+              currentSession = session;
               renderSessions(knownSessions || await fetchJson('/api/sessions'));
               applySessionSettings(session);
               renderMessages(session);
@@ -1335,6 +1421,7 @@ public static class WebUiPage
                 body: JSON.stringify({ title, provider, model })
               });
               currentSessionId = session.id;
+              currentSession = session;
               rememberCurrentSession(session.id);
               await loadStatus();
               await loadSessions();
@@ -1354,6 +1441,7 @@ public static class WebUiPage
                   model: document.getElementById('model').value
                 })
               });
+              currentSession = session;
               await loadStatus();
               await loadSessions();
               applySessionSettings(session);
@@ -1371,6 +1459,7 @@ public static class WebUiPage
               sendButton.disabled = true;
               try {
                 const session = await sendMessageStreaming(currentSessionId, text, attachments);
+                currentSession = session;
                 pendingAttachments = [];
                 document.getElementById('attachment-input').value = '';
                 renderPendingAttachments();

@@ -254,9 +254,32 @@ public sealed class WebUiEndpointTests
             Assert.Equal("{\"ok\":true}", fetchedRuntime.RootElement.GetProperty("result").GetString());
         }
 
+        var runtimeFile = await fixture.Client.PostAsync(
+            $"/api/sessions/{session.Id}/runtime/messages",
+            JsonBody(
+                new WebRuntimeMessageRequest(
+                    "file-returned",
+                    MessageId: "msg-4",
+                    SandboxId: "sandbox-1",
+                    Filename: "chart.csv",
+                    Content: "x,y\n1,2",
+                    MimeType: "text/csv"),
+                WebUiEndpointJsonContext.Default.WebRuntimeMessageRequest));
+        runtimeFile.EnsureSuccessStatusCode();
+        using (var returnedFile = JsonDocument.Parse(await runtimeFile.Content.ReadAsStringAsync()))
+        {
+            Assert.Equal("runtime-response", returnedFile.RootElement.GetProperty("type").GetString());
+            Assert.Equal("msg-4", returnedFile.RootElement.GetProperty("messageId").GetString());
+            Assert.True(returnedFile.RootElement.GetProperty("success").GetBoolean());
+            var result = returnedFile.RootElement.GetProperty("result");
+            Assert.Equal("chart.csv", result.GetProperty("fileName").GetString());
+            Assert.Equal("text/csv", result.GetProperty("mimeType").GetString());
+        }
+
         var persisted = await File.ReadAllTextAsync(fixture.ArtifactStorePath);
         Assert.Contains(session.Id, persisted, StringComparison.Ordinal);
         Assert.Contains("data.json", persisted, StringComparison.Ordinal);
+        Assert.DoesNotContain("chart.csv", persisted, StringComparison.Ordinal);
     }
 
     [Fact]

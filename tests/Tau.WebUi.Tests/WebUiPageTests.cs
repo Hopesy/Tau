@@ -34,6 +34,13 @@ public sealed class WebUiPageTests
         Assert.Contains("window.getArtifact", html, StringComparison.Ordinal);
         Assert.Contains("window.createOrUpdateArtifact", html, StringComparison.Ordinal);
         Assert.Contains("window.deleteArtifact", html, StringComparison.Ordinal);
+        Assert.Contains("window.attachments", html, StringComparison.Ordinal);
+        Assert.Contains("window.listAttachments", html, StringComparison.Ordinal);
+        Assert.Contains("window.readTextAttachment", html, StringComparison.Ordinal);
+        Assert.Contains("window.readBinaryAttachment", html, StringComparison.Ordinal);
+        Assert.Contains("window.returnDownloadableFile", html, StringComparison.Ordinal);
+        Assert.Contains("type: 'file-returned'", html, StringComparison.Ordinal);
+        Assert.Contains("fileName, content: finalContent", html, StringComparison.Ordinal);
         Assert.Contains("/runtime/messages", html, StringComparison.Ordinal);
         Assert.Contains("isKnownArtifactSandbox", html, StringComparison.Ordinal);
     }

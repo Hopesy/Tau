@@ -1,3 +1,4 @@
+using System.Text;
 using Microsoft.Playwright;
 
 namespace Tau.WebUi.Tests;
@@ -109,5 +110,82 @@ public sealed class WebUiBrowserFlowTests
 
         await Assertions.Expect(page.Locator("#artifacts-list .artifact-pill")).ToContainTextAsync("notes.txt", new() { Timeout = 5000 });
         await Assertions.Expect(page.Locator("#artifact-preview")).ToContainTextAsync("hello artifact pane", new() { Timeout = 5000 });
+    }
+
+    [Fact]
+    public async Task HtmlArtifact_CanReadSessionAttachmentsAndReturnDownloadableFile()
+    {
+        await using var context = await _fixture.NewContextAsync();
+        var page = await context.NewPageAsync();
+
+        await page.GotoAsync("/");
+        await page.WaitForFunctionAsync("document.querySelectorAll('#provider option').length > 0");
+
+        await page.FillAsync("#session-title", "Artifact attachments");
+        await page.ClickAsync("#new-session");
+        var session = page.Locator("#sessions .session.active");
+        await Assertions.Expect(session).ToBeVisibleAsync(new() { Timeout = 5000 });
+        var sessionId = await session.GetAttributeAsync("data-id");
+        Assert.False(string.IsNullOrWhiteSpace(sessionId));
+
+        var attachmentContent = Convert.ToBase64String(Encoding.UTF8.GetBytes("hello attachment"));
+        const string artifactHtml = """
+            <!doctype html>
+            <html>
+            <body>
+            <script>
+            (async () => {
+              const files = window.listAttachments();
+              const text = window.readTextAttachment(files[0].id);
+              const bytes = window.readBinaryAttachment(files[0].id);
+              const returned = await window.returnDownloadableFile('from-attachment.txt', text, 'text/plain');
+              document.body.textContent = `${files[0].fileName}|${text}|${bytes.length}|${returned.fileName}`;
+            })().catch(error => {
+              document.body.textContent = `error:${error.message || error}`;
+            });
+            </script>
+            </body>
+            </html>
+            """;
+
+        await page.EvaluateAsync(
+            """
+            async args => {
+              const message = await fetch(`/api/sessions/${encodeURIComponent(args.sessionId)}/messages`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  text: 'use attachment',
+                  attachments: [{
+                    id: 'att-1',
+                    type: 'text',
+                    fileName: 'notes.txt',
+                    mimeType: 'text/plain',
+                    size: 16,
+                    content: args.attachmentContent,
+                    extractedText: 'hello attachment'
+                  }]
+                })
+              });
+              if (!message.ok) throw new Error(await message.text());
+
+              const artifact = await fetch(`/api/sessions/${encodeURIComponent(args.sessionId)}/artifacts/attachment.html`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ content: args.artifactHtml, mimeType: 'text/html' })
+              });
+              if (!artifact.ok) throw new Error(await artifact.text());
+            }
+            """,
+            new { sessionId, attachmentContent, artifactHtml });
+
+        await page.EvaluateAsync(
+            "async sessionId => { await openSession(sessionId); await loadArtifacts(sessionId); }",
+            sessionId);
+
+        await Assertions.Expect(page.Locator("#artifacts-list .artifact-pill")).ToContainTextAsync("attachment.html", new() { Timeout = 5000 });
+        var frame = page.FrameLocator("iframe.artifact-frame");
+        await Assertions.Expect(frame.Locator("body"))
+            .ToContainTextAsync("notes.txt|hello attachment|16|from-attachment.txt", new() { Timeout = 5000 });
     }
 }

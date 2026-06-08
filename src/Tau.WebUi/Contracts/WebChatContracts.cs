@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace Tau.WebUi.Contracts;
 
 public sealed record CreateSessionRequest(
@@ -58,7 +60,7 @@ public sealed record WebRuntimeMessageRequest(
     string? MessageId = null,
     string? SandboxId = null,
     string? Action = null,
-    string? Filename = null,
+    [property: JsonPropertyName("fileName")] string? Filename = null,
     string? Content = null,
     string? MimeType = null,
     string? Method = null,
