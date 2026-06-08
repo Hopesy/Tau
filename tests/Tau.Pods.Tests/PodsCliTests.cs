@@ -2132,6 +2132,10 @@ public class PodsCliTests
             Assert.Contains("port=8000", output, StringComparison.Ordinal);
             Assert.Contains("servedModel=llama-8b", output, StringComparison.Ordinal);
             Assert.Contains("unit=tau-pod-llama-8b.service", output, StringComparison.Ordinal);
+            Assert.Contains("logPath=~/.vllm_logs/llama-8b.log", output, StringComparison.Ordinal);
+            Assert.Contains("runnerScriptPath=~/.tau_pods/model_run_llama-8b.sh", output, StringComparison.Ordinal);
+            Assert.Contains("wrapperScriptPath=~/.tau_pods/model_wrapper_llama-8b.sh", output, StringComparison.Ordinal);
+            Assert.Contains("usesPseudoTtyWrapper=True", output, StringComparison.Ordinal);
             Assert.Contains("[systemd-unit]", output, StringComparison.Ordinal);
             Assert.Contains("ExecStart=/usr/bin/env bash -lc", output, StringComparison.Ordinal);
             Assert.Contains("[metadata-json]", output, StringComparison.Ordinal);
@@ -2216,15 +2220,20 @@ public class PodsCliTests
             Assert.Equal("served-model", root.GetProperty("servedModel").GetString());
             Assert.Equal("tau-pod-served-model.service", root.GetProperty("unit").GetString());
             Assert.Equal("~/.vllm_logs/served-model.log", root.GetProperty("logPath").GetString());
+            Assert.Equal("~/.tau_pods/model_run_served-model.sh", root.GetProperty("runnerScriptPath").GetString());
+            Assert.Equal("~/.tau_pods/model_wrapper_served-model.sh", root.GetProperty("wrapperScriptPath").GetString());
+            Assert.True(root.GetProperty("usesPseudoTtyWrapper").GetBoolean());
             var serveCommand = root.GetProperty("serveCommand").GetString()!;
             var systemdUnit = root.GetProperty("systemdUnit").GetString()!;
             var remoteCommand = root.GetProperty("remoteCommand").GetString()!;
             Assert.Contains("model_cache_path='/mnt/models/models--org--model'", serveCommand, StringComparison.Ordinal);
             Assert.Contains("vllm serve \"$resolved_model_path\"", serveCommand, StringComparison.Ordinal);
             Assert.Contains("ExecStartPre=/usr/bin/env mkdir -p %h/.vllm_logs", systemdUnit, StringComparison.Ordinal);
-            Assert.Contains("ExecStart=/usr/bin/env bash -lc", systemdUnit, StringComparison.Ordinal);
-            Assert.Contains("StandardOutput=append:%h/.vllm_logs/served-model.log", systemdUnit, StringComparison.Ordinal);
-            Assert.Contains("StandardError=append:%h/.vllm_logs/served-model.log", systemdUnit, StringComparison.Ordinal);
+            Assert.Contains("ExecStart=/usr/bin/env bash -lc 'exec ~/.tau_pods/model_wrapper_served-model.sh >/dev/null 2>&1'", systemdUnit, StringComparison.Ordinal);
+            Assert.Contains("StandardOutput=null", systemdUnit, StringComparison.Ordinal);
+            Assert.Contains("StandardError=null", systemdUnit, StringComparison.Ordinal);
+            Assert.Contains("cat > ~/.tau_pods/model_run_served-model.sh <<'EOF'", remoteCommand, StringComparison.Ordinal);
+            Assert.Contains("cat > ~/.tau_pods/model_wrapper_served-model.sh <<'EOF'", remoteCommand, StringComparison.Ordinal);
             Assert.Contains("cat > ~/.tau_pods/served-model.service <<'EOF'", remoteCommand, StringComparison.Ordinal);
             Assert.DoesNotContain("ssh ", remoteCommand, StringComparison.OrdinalIgnoreCase);
             Assert.DoesNotContain("systemctl start", remoteCommand, StringComparison.OrdinalIgnoreCase);
@@ -2236,6 +2245,9 @@ public class PodsCliTests
             Assert.Equal(8000, metadata.GetProperty("port").GetInt32());
             Assert.Equal("tau-pod-served-model.service", metadata.GetProperty("unit").GetString());
             Assert.Equal("~/.vllm_logs/served-model.log", metadata.GetProperty("logPath").GetString());
+            Assert.Equal("~/.tau_pods/model_run_served-model.sh", metadata.GetProperty("runnerScriptPath").GetString());
+            Assert.Equal("~/.tau_pods/model_wrapper_served-model.sh", metadata.GetProperty("wrapperScriptPath").GetString());
+            Assert.True(metadata.GetProperty("usesPseudoTtyWrapper").GetBoolean());
 
             using var metadataJson = JsonDocument.Parse(root.GetProperty("metadataJson").GetString()!);
             Assert.Equal(metadata.GetProperty("ts").GetString(), metadataJson.RootElement.GetProperty("ts").GetString());
@@ -2943,6 +2955,9 @@ public class PodsCliTests
             Assert.Contains("systemctl --user enable --now 'tau-pod-llama-8b.service'", output, StringComparison.Ordinal);
             Assert.Contains("[serve-command]", output, StringComparison.Ordinal);
             Assert.Contains("vllm serve '/mnt/models/models--meta-llama--Llama-3.1-8B/snapshots/main'", output, StringComparison.Ordinal);
+            Assert.Contains("runnerScriptPath=~/.tau_pods/model_run_llama-8b.sh", output, StringComparison.Ordinal);
+            Assert.Contains("wrapperScriptPath=~/.tau_pods/model_wrapper_llama-8b.sh", output, StringComparison.Ordinal);
+            Assert.Contains("usesPseudoTtyWrapper=True", output, StringComparison.Ordinal);
             Assert.Contains("[preflight]", output, StringComparison.Ordinal);
             Assert.Contains("preflight-ssh-pod | ok=True | operation=preflight", output, StringComparison.Ordinal);
             Assert.Contains("preflight-resolvedModelPath=/mnt/models/models--meta-llama--Llama-3.1-8B/snapshots/main", output, StringComparison.Ordinal);
@@ -3013,7 +3028,12 @@ public class PodsCliTests
             var plan = root.GetProperty("plan");
             Assert.Equal("org/model", plan.GetProperty("model").GetString());
             Assert.Equal("/mnt/models/models--org--model/snapshots/main", plan.GetProperty("modelPath").GetString());
+            Assert.Equal("~/.tau_pods/model_run_served-model.sh", plan.GetProperty("runnerScriptPath").GetString());
+            Assert.Equal("~/.tau_pods/model_wrapper_served-model.sh", plan.GetProperty("wrapperScriptPath").GetString());
+            Assert.True(plan.GetProperty("usesPseudoTtyWrapper").GetBoolean());
             Assert.Equal("planned-vllm", plan.GetProperty("metadata").GetProperty("status").GetString());
+            Assert.Contains("cat > ~/.tau_pods/model_run_served-model.sh <<'EOF'", plan.GetProperty("planRemoteCommand").GetString(), StringComparison.Ordinal);
+            Assert.Contains("cat > ~/.tau_pods/model_wrapper_served-model.sh <<'EOF'", plan.GetProperty("planRemoteCommand").GetString(), StringComparison.Ordinal);
             Assert.Contains("cat > ~/.tau_pods/served-model.service <<'EOF'", plan.GetProperty("planRemoteCommand").GetString(), StringComparison.Ordinal);
 
             var preflight = root.GetProperty("preflight");
@@ -3746,6 +3766,7 @@ public class PodsCliTests
             var plan = root.GetProperty("plan");
             Assert.Equal("org/model", plan.GetProperty("model").GetString());
             Assert.Contains("'--tensor-parallel-size' '2'", plan.GetProperty("serveCommand").GetString(), StringComparison.Ordinal);
+            Assert.True(plan.GetProperty("usesPseudoTtyWrapper").GetBoolean());
             Assert.Contains("--tensor-parallel-size", commands[1], StringComparison.Ordinal);
         }
         finally
@@ -4183,6 +4204,7 @@ public class PodsCliTests
             Assert.Equal(0, exitCode);
             Assert.NotNull(capturedCommand);
             Assert.Contains("systemctl --user disable --now 'tau-pod-served-model.service'", capturedCommand!, StringComparison.Ordinal);
+            Assert.Contains("rm -f ~/.tau_pods/served-model.json ~/.tau_pods/served-model.service ~/.tau_pods/model_run_served-model.sh ~/.tau_pods/model_wrapper_served-model.sh", capturedCommand!, StringComparison.Ordinal);
             using var document = JsonDocument.Parse(stdout.ToString());
             var root = document.RootElement;
             Assert.Equal("ssh-pod", root.GetProperty("pod").GetString());

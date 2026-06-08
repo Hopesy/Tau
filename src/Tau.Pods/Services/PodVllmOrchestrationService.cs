@@ -925,12 +925,21 @@ public sealed class PodVllmOrchestrationService
     private static string BuildDeployCommand(PodVllmServePlan plan)
     {
         var unitBaseName = StripServiceSuffix(plan.UnitName);
-        var logPath = string.IsNullOrWhiteSpace(plan.LogPath)
-            ? $"~/.vllm_logs/{plan.DeploymentName}.log"
-            : plan.LogPath;
+        var runnerScriptPath = string.IsNullOrWhiteSpace(plan.RunnerScriptPath)
+            ? $"~/.tau_pods/model_run_{plan.DeploymentName}.sh"
+            : plan.RunnerScriptPath;
+        var wrapperScriptPath = string.IsNullOrWhiteSpace(plan.WrapperScriptPath)
+            ? $"~/.tau_pods/model_wrapper_{plan.DeploymentName}.sh"
+            : plan.WrapperScriptPath;
+        var runnerScript = string.IsNullOrWhiteSpace(plan.RunnerScript)
+            ? "#!/usr/bin/env bash\n" + plan.ServeCommand + "\n"
+            : plan.RunnerScript;
+        var wrapperScript = string.IsNullOrWhiteSpace(plan.WrapperScript)
+            ? $"#!/usr/bin/env bash\nscript -q -f -c \"$HOME/.tau_pods/model_run_{plan.DeploymentName}.sh\" \"$HOME/.vllm_logs/{plan.DeploymentName}.log\"\nexit_code=$?\necho \"Script exited with code $exit_code\" >> \"$HOME/.vllm_logs/{plan.DeploymentName}.log\"\nexit $exit_code\n"
+            : plan.WrapperScript;
         var pidPath = $"~/.tau_pods/{plan.DeploymentName}.pid";
         var fallbackCommand =
-            $"nohup /usr/bin/env bash -lc {ShellSingleQuote(plan.ServeCommand)} > {logPath} 2>&1 < /dev/null & " +
+            $"if command -v setsid >/dev/null 2>&1; then setsid {wrapperScriptPath} </dev/null >/dev/null 2>&1 & else nohup {wrapperScriptPath} >/dev/null 2>&1 < /dev/null & fi; " +
             $"echo $! > {pidPath}; pid=$(cat {pidPath}); echo \"pid=$pid\"";
         var systemdCommand =
             $"mkdir -p ~/.config/systemd/user && " +
@@ -943,6 +952,10 @@ public sealed class PodVllmOrchestrationService
 
         return
             $"mkdir -p ~/.tau_pods ~/.vllm_logs && " +
+            $"cat > {runnerScriptPath} <<'EOF'\n{runnerScript}\nEOF\n" +
+            $"chmod +x {runnerScriptPath}\n" +
+            $"cat > {wrapperScriptPath} <<'EOF'\n{wrapperScript}\nEOF\n" +
+            $"chmod +x {wrapperScriptPath}\n" +
             $"cat > ~/.tau_pods/{plan.DeploymentName}.service <<'EOF'\n{plan.SystemdUnit}\nEOF\n" +
             $"cat > ~/.tau_pods/{plan.DeploymentName}.json <<'EOF'\n{plan.MetadataJson}\nEOF\n" +
             $"if command -v systemctl >/dev/null 2>&1; then " +
@@ -1162,7 +1175,8 @@ public sealed class PodVllmOrchestrationService
             "pkill -TERM -P \"$pid\" >/dev/null 2>&1 || true; " +
             "kill \"$pid\" >/dev/null 2>&1 || true; " +
             "rm -f ~/.tau_pods/" + deploymentName + ".pid; fi; " +
-            $"rm -f ~/.tau_pods/{deploymentName}.json ~/.tau_pods/{deploymentName}.service; " +
+            $"rm -f ~/.tau_pods/{deploymentName}.json ~/.tau_pods/{deploymentName}.service " +
+            $"~/.tau_pods/model_run_{deploymentName}.sh ~/.tau_pods/model_wrapper_{deploymentName}.sh; " +
             $"echo {ShellSingleQuote($"{verb} {unitBaseName}")}";
     }
 

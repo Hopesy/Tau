@@ -55,7 +55,11 @@ public sealed class PodVllmCommandPlanner
             ? BuildServeCommand(modelPath, port, servedModelName, environment, extraArgs)
             : BuildSnapshotDiscoveryServeCommand(modelCachePath, port, servedModelName, environment, extraArgs, revision);
         var logPath = $"~/.vllm_logs/{deploymentName}.log";
-        var unit = BuildSystemdUnit(unitName, serveCommand, deploymentName);
+        var runnerScriptPath = $"~/.tau_pods/model_run_{deploymentName}.sh";
+        var wrapperScriptPath = $"~/.tau_pods/model_wrapper_{deploymentName}.sh";
+        var runnerScript = BuildModelRunScript(options.ModelId.Trim(), deploymentName, port, extraArgs, serveCommand);
+        var wrapperScript = BuildModelWrapperScript(deploymentName);
+        var unit = BuildSystemdUnit(unitName, wrapperScriptPath, deploymentName);
         var metadata = BuildMetadataJson(
             options.ModelId.Trim(),
             deploymentName,
@@ -65,6 +69,9 @@ public sealed class PodVllmCommandPlanner
             servedModelName,
             unitName,
             logPath,
+            runnerScriptPath,
+            wrapperScriptPath,
+            usesPseudoTtyWrapper: true,
             revision,
             knownConfig,
             requestedGpuCount,
@@ -74,7 +81,11 @@ public sealed class PodVllmCommandPlanner
             contextOverride,
             contextTokens);
         var remoteCommand =
-            $"mkdir -p ~/.tau_pods && " +
+            $"mkdir -p ~/.tau_pods ~/.vllm_logs && " +
+            $"cat > {runnerScriptPath} <<'EOF'\n{runnerScript}\nEOF\n" +
+            $"chmod +x {runnerScriptPath}\n" +
+            $"cat > {wrapperScriptPath} <<'EOF'\n{wrapperScript}\nEOF\n" +
+            $"chmod +x {wrapperScriptPath}\n" +
             $"cat > ~/.tau_pods/{deploymentName}.service <<'EOF'\n{unit}\nEOF\n" +
             $"cat > ~/.tau_pods/{deploymentName}.json <<'EOF'\n{metadata}\nEOF\n" +
             $"echo {ShellSingleQuote($"planned {deploymentName}")}";
@@ -91,6 +102,11 @@ public sealed class PodVllmCommandPlanner
             metadata,
             remoteCommand,
             UsesSnapshotDiscovery: usesSnapshotDiscovery,
+            RunnerScriptPath: runnerScriptPath,
+            WrapperScriptPath: wrapperScriptPath,
+            RunnerScript: runnerScript,
+            WrapperScript: wrapperScript,
+            UsesPseudoTtyWrapper: true,
             Revision: revision,
             KnownModelName: knownConfig?.Name,
             KnownModelGpuCount: knownConfig?.GpuCount,
@@ -136,6 +152,87 @@ public sealed class PodVllmCommandPlanner
         return BuildSnapshotDiscoveryCommand(modelCachePath, revision) + " " +
             BuildEnvironmentPrefix(environment) +
             BuildVllmServeCommand("\"$resolved_model_path\"", port, servedModelName, extraArgs);
+    }
+
+    private static string BuildModelRunScript(
+        string modelId,
+        string deploymentName,
+        int port,
+        IReadOnlyList<string>? extraArgs,
+        string serveCommand)
+    {
+        var vllmArgs = BuildVllmArgsText(extraArgs);
+        return
+            "#!/usr/bin/env bash\n" +
+            "# Tau Pods model runner. Keeps upstream model_run.sh markers while running the Tau-planned vLLM command.\n" +
+            "set -euo pipefail\n\n" +
+            $"MODEL_ID={ShellSingleQuote(modelId)}\n" +
+            $"NAME={ShellSingleQuote(deploymentName)}\n" +
+            $"PORT={port.ToString(CultureInfo.InvariantCulture)}\n" +
+            $"VLLM_ARGS={ShellSingleQuote(vllmArgs)}\n" +
+            $"VLLM_CMD={ShellSingleQuote(serveCommand)}\n\n" +
+            "cleanup() {\n" +
+            "    local exit_code=$?\n" +
+            "    echo \"Model runner exiting with code $exit_code\"\n" +
+            "    pkill -P $$ 2>/dev/null || true\n" +
+            "    exit $exit_code\n" +
+            "}\n" +
+            "trap cleanup EXIT TERM INT\n\n" +
+            "export FORCE_COLOR=1\n" +
+            "export PYTHONUNBUFFERED=1\n" +
+            "export TERM=xterm-256color\n" +
+            "export RICH_FORCE_TERMINAL=1\n" +
+            "export CLICOLOR_FORCE=1\n\n" +
+            "if [ -f /root/venv/bin/activate ]; then\n" +
+            "    source /root/venv/bin/activate\n" +
+            "fi\n\n" +
+            "echo \"=========================================\"\n" +
+            "echo \"Model Run: $NAME\"\n" +
+            "echo \"Model ID: $MODEL_ID\"\n" +
+            "echo \"Port: $PORT\"\n" +
+            "if [ -n \"$VLLM_ARGS\" ]; then\n" +
+            "    echo \"vLLM Args: $VLLM_ARGS\"\n" +
+            "fi\n" +
+            "echo \"=========================================\"\n" +
+            "echo \"\"\n" +
+            "echo \"Starting vLLM server...\"\n" +
+            "echo \"Command: $VLLM_CMD\"\n" +
+            "echo \"=========================================\"\n" +
+            "echo \"\"\n" +
+            "echo \"Starting vLLM process...\"\n" +
+            "bash -c \"$VLLM_CMD\" &\n" +
+            "VLLM_PID=$!\n\n" +
+            "echo \"Monitoring vLLM process (PID: $VLLM_PID)...\"\n" +
+            "wait $VLLM_PID\n" +
+            "VLLM_EXIT_CODE=$?\n\n" +
+            "if [ $VLLM_EXIT_CODE -ne 0 ]; then\n" +
+            "    echo \"ERROR: vLLM exited with code $VLLM_EXIT_CODE\" >&2\n" +
+            "    kill -TERM $$ 2>/dev/null || true\n" +
+            "    exit $VLLM_EXIT_CODE\n" +
+            "fi\n\n" +
+            "echo \"vLLM exited normally\"\n" +
+            "exit 0\n";
+    }
+
+    private static string BuildModelWrapperScript(string deploymentName) =>
+        "#!/usr/bin/env bash\n" +
+        $"script -q -f -c \"$HOME/.tau_pods/model_run_{deploymentName}.sh\" \"$HOME/.vllm_logs/{deploymentName}.log\"\n" +
+        "exit_code=$?\n" +
+        $"echo \"Script exited with code $exit_code\" >> \"$HOME/.vllm_logs/{deploymentName}.log\"\n" +
+        "exit $exit_code\n";
+
+    private static string BuildVllmArgsText(IReadOnlyList<string>? extraArgs)
+    {
+        if (extraArgs is null)
+        {
+            return string.Empty;
+        }
+
+        return string.Join(
+            " ",
+            extraArgs
+                .Where(static arg => !string.IsNullOrWhiteSpace(arg))
+                .Select(static arg => arg.Trim()));
     }
 
     private static string BuildEnvironmentPrefix(IReadOnlyDictionary<string, string>? environment)
@@ -480,16 +577,16 @@ public sealed class PodVllmCommandPlanner
         return builder.ToString();
     }
 
-    private static string BuildSystemdUnit(string unitName, string serveCommand, string deploymentName) =>
+    private static string BuildSystemdUnit(string unitName, string wrapperScriptPath, string deploymentName) =>
         "[Unit]\n" +
         $"Description=Tau Pods vLLM runner {unitName}\n" +
         "After=network-online.target\n\n" +
         "[Service]\n" +
         "Type=simple\n" +
         "ExecStartPre=/usr/bin/env mkdir -p %h/.vllm_logs\n" +
-        $"ExecStart=/usr/bin/env bash -lc {ShellSingleQuote(serveCommand)}\n" +
-        $"StandardOutput=append:%h/.vllm_logs/{deploymentName}.log\n" +
-        $"StandardError=append:%h/.vllm_logs/{deploymentName}.log\n" +
+        $"ExecStart=/usr/bin/env bash -lc {ShellSingleQuote("exec " + wrapperScriptPath + " >/dev/null 2>&1")}\n" +
+        "StandardOutput=null\n" +
+        "StandardError=null\n" +
         "Restart=on-failure\n" +
         "RestartSec=5\n\n" +
         "[Install]\n" +
@@ -504,6 +601,9 @@ public sealed class PodVllmCommandPlanner
         string servedModelName,
         string unitName,
         string logPath,
+        string runnerScriptPath,
+        string wrapperScriptPath,
+        bool usesPseudoTtyWrapper,
         string? revision,
         PodKnownModelConfig? knownConfig,
         int? requestedGpuCount,
@@ -523,7 +623,9 @@ public sealed class PodVllmCommandPlanner
             .Append(",\"servedModelName\":\"").Append(EscapeJsonString(servedModelName))
             .Append("\",\"unit\":\"").Append(EscapeJsonString(unitName))
             .Append("\",\"logPath\":\"").Append(EscapeJsonString(logPath))
-            .Append("\"")
+            .Append("\",\"runnerScriptPath\":\"").Append(EscapeJsonString(runnerScriptPath))
+            .Append("\",\"wrapperScriptPath\":\"").Append(EscapeJsonString(wrapperScriptPath))
+            .Append("\",\"usesPseudoTtyWrapper\":").Append(usesPseudoTtyWrapper ? "true" : "false")
             .Append(revision is null ? string.Empty : ",\"revision\":\"" + EscapeJsonString(revision) + "\"");
 
         if (requestedGpuCount is not null)

@@ -69,18 +69,23 @@ public sealed class PodVllmOrchestrationServiceTests
         var command = RemoteCommand(captured[1]);
         Assert.Equal(result.Command, command);
         Assert.Contains("mkdir -p ~/.tau_pods ~/.vllm_logs", command, StringComparison.Ordinal);
+        Assert.Contains("cat > ~/.tau_pods/model_run_llama-8b.sh <<'EOF'", command, StringComparison.Ordinal);
+        Assert.Contains("Model runner exiting with code", command, StringComparison.Ordinal);
+        Assert.Contains("cat > ~/.tau_pods/model_wrapper_llama-8b.sh <<'EOF'", command, StringComparison.Ordinal);
+        Assert.Contains("script -q -f -c \"$HOME/.tau_pods/model_run_llama-8b.sh\" \"$HOME/.vllm_logs/llama-8b.log\"", command, StringComparison.Ordinal);
         Assert.Contains("cat > ~/.tau_pods/llama-8b.service <<'EOF'", command, StringComparison.Ordinal);
         Assert.Contains("cat > ~/.tau_pods/llama-8b.json <<'EOF'", command, StringComparison.Ordinal);
         Assert.Contains("if mkdir -p ~/.config/systemd/user", command, StringComparison.Ordinal);
         Assert.Contains("ExecStartPre=/usr/bin/env mkdir -p %h/.vllm_logs", command, StringComparison.Ordinal);
-        Assert.Contains("StandardOutput=append:%h/.vllm_logs/llama-8b.log", command, StringComparison.Ordinal);
-        Assert.Contains("StandardError=append:%h/.vllm_logs/llama-8b.log", command, StringComparison.Ordinal);
+        Assert.Contains("ExecStart=/usr/bin/env bash -lc 'exec ~/.tau_pods/model_wrapper_llama-8b.sh >/dev/null 2>&1'", command, StringComparison.Ordinal);
+        Assert.Contains("StandardOutput=null", command, StringComparison.Ordinal);
+        Assert.Contains("StandardError=null", command, StringComparison.Ordinal);
         Assert.Contains("systemctl --user enable --now 'tau-pod-llama-8b.service'", command, StringComparison.Ordinal);
         Assert.Contains("systemctl --user show 'tau-pod-llama-8b.service' --property=MainPID --value", command, StringComparison.Ordinal);
         Assert.Contains("WantedBy=default.target", command, StringComparison.Ordinal);
-        Assert.Contains("else nohup /usr/bin/env bash -lc", command, StringComparison.Ordinal);
-        Assert.Contains("nohup /usr/bin/env bash -lc", command, StringComparison.Ordinal);
-        Assert.Contains("> ~/.vllm_logs/llama-8b.log 2>&1", command, StringComparison.Ordinal);
+        Assert.Contains("if command -v setsid >/dev/null 2>&1", command, StringComparison.Ordinal);
+        Assert.Contains("setsid ~/.tau_pods/model_wrapper_llama-8b.sh", command, StringComparison.Ordinal);
+        Assert.Contains("nohup ~/.tau_pods/model_wrapper_llama-8b.sh", command, StringComparison.Ordinal);
         Assert.Contains("echo $! > ~/.tau_pods/llama-8b.pid", command, StringComparison.Ordinal);
         Assert.Contains("echo \"pid=$pid\"", command, StringComparison.Ordinal);
         Assert.Contains("startup log is ready", result.Summary, StringComparison.Ordinal);
@@ -973,7 +978,7 @@ public sealed class PodVllmOrchestrationServiceTests
         Assert.Contains("systemctl --user daemon-reload || true; fi; if test -f ~/.tau_pods/llama-8b.pid", command, StringComparison.Ordinal);
         Assert.Contains("pkill -TERM -P \"$pid\"", command, StringComparison.Ordinal);
         Assert.Contains("kill \"$pid\"", command, StringComparison.Ordinal);
-        Assert.Contains("rm -f ~/.tau_pods/llama-8b.json ~/.tau_pods/llama-8b.service", command, StringComparison.Ordinal);
+        Assert.Contains("rm -f ~/.tau_pods/llama-8b.json ~/.tau_pods/llama-8b.service ~/.tau_pods/model_run_llama-8b.sh ~/.tau_pods/model_wrapper_llama-8b.sh", command, StringComparison.Ordinal);
         Assert.Contains("stopped tau-pod-llama-8b", command, StringComparison.Ordinal);
     }
 

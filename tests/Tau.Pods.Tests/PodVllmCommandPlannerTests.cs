@@ -35,6 +35,9 @@ public sealed class PodVllmCommandPlannerTests
         Assert.Equal("/srv/hf cache/models--meta-llama--Llama-3.1-8B-Instruct", plan.ModelPath);
         Assert.Equal("tau-pod-llama-8b--rm.service", plan.UnitName);
         Assert.Equal("~/.vllm_logs/llama-8b--rm.log", plan.LogPath);
+        Assert.Equal("~/.tau_pods/model_run_llama-8b--rm.sh", plan.RunnerScriptPath);
+        Assert.Equal("~/.tau_pods/model_wrapper_llama-8b--rm.sh", plan.WrapperScriptPath);
+        Assert.True(plan.UsesPseudoTtyWrapper);
         Assert.Contains("CUDA_VISIBLE_DEVICES='0'", plan.ServeCommand, StringComparison.Ordinal);
         Assert.Contains("bad_key='value with spaces'", plan.ServeCommand, StringComparison.Ordinal);
         Assert.Contains("model_cache_path='/srv/hf cache/models--meta-llama--Llama-3.1-8B-Instruct'", plan.ServeCommand, StringComparison.Ordinal);
@@ -42,11 +45,20 @@ public sealed class PodVllmCommandPlannerTests
         Assert.Contains("--port 8081", plan.ServeCommand, StringComparison.Ordinal);
         Assert.Contains("--served-model-name 'llama-8b'", plan.ServeCommand, StringComparison.Ordinal);
         Assert.Contains("'--tensor-parallel-size' '2'", plan.ServeCommand, StringComparison.Ordinal);
+        Assert.Contains("MODEL_ID='meta-llama/Llama-3.1-8B-Instruct'", plan.RunnerScript, StringComparison.Ordinal);
+        Assert.Contains("VLLM_ARGS='--tensor-parallel-size 2'", plan.RunnerScript, StringComparison.Ordinal);
+        Assert.Contains("VLLM_CMD=", plan.RunnerScript, StringComparison.Ordinal);
+        Assert.Contains("Model runner exiting with code", plan.RunnerScript, StringComparison.Ordinal);
+        Assert.Contains("bash -c \"$VLLM_CMD\"", plan.RunnerScript, StringComparison.Ordinal);
+        Assert.Contains("script -q -f -c \"$HOME/.tau_pods/model_run_llama-8b--rm.sh\" \"$HOME/.vllm_logs/llama-8b--rm.log\"", plan.WrapperScript, StringComparison.Ordinal);
+        Assert.Contains("Script exited with code $exit_code", plan.WrapperScript, StringComparison.Ordinal);
         Assert.Contains("ExecStartPre=/usr/bin/env mkdir -p %h/.vllm_logs", plan.SystemdUnit, StringComparison.Ordinal);
-        Assert.Contains("ExecStart=/usr/bin/env bash -lc", plan.SystemdUnit, StringComparison.Ordinal);
-        Assert.Contains("StandardOutput=append:%h/.vllm_logs/llama-8b--rm.log", plan.SystemdUnit, StringComparison.Ordinal);
-        Assert.Contains("StandardError=append:%h/.vllm_logs/llama-8b--rm.log", plan.SystemdUnit, StringComparison.Ordinal);
+        Assert.Contains("ExecStart=/usr/bin/env bash -lc 'exec ~/.tau_pods/model_wrapper_llama-8b--rm.sh >/dev/null 2>&1'", plan.SystemdUnit, StringComparison.Ordinal);
+        Assert.Contains("StandardOutput=null", plan.SystemdUnit, StringComparison.Ordinal);
+        Assert.Contains("StandardError=null", plan.SystemdUnit, StringComparison.Ordinal);
         Assert.Contains("WantedBy=default.target", plan.SystemdUnit, StringComparison.Ordinal);
+        Assert.Contains("cat > ~/.tau_pods/model_run_llama-8b--rm.sh <<'EOF'", plan.RemoteCommand, StringComparison.Ordinal);
+        Assert.Contains("cat > ~/.tau_pods/model_wrapper_llama-8b--rm.sh <<'EOF'", plan.RemoteCommand, StringComparison.Ordinal);
         Assert.Contains("cat > ~/.tau_pods/llama-8b--rm.service <<'EOF'", plan.RemoteCommand, StringComparison.Ordinal);
         Assert.Contains("planned llama-8b--rm", plan.RemoteCommand, StringComparison.Ordinal);
 
@@ -55,6 +67,9 @@ public sealed class PodVllmCommandPlannerTests
         Assert.Equal("/srv/hf cache/models--meta-llama--Llama-3.1-8B-Instruct", metadata.RootElement.GetProperty("modelPath").GetString());
         Assert.Equal(8081, metadata.RootElement.GetProperty("port").GetInt32());
         Assert.Equal("~/.vllm_logs/llama-8b--rm.log", metadata.RootElement.GetProperty("logPath").GetString());
+        Assert.Equal("~/.tau_pods/model_run_llama-8b--rm.sh", metadata.RootElement.GetProperty("runnerScriptPath").GetString());
+        Assert.Equal("~/.tau_pods/model_wrapper_llama-8b--rm.sh", metadata.RootElement.GetProperty("wrapperScriptPath").GetString());
+        Assert.True(metadata.RootElement.GetProperty("usesPseudoTtyWrapper").GetBoolean());
     }
 
     [Fact]
@@ -361,6 +376,8 @@ public sealed class PodVllmCommandPlannerTests
         Assert.DoesNotContain("ssh ", plan.RemoteCommand, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("systemctl start", plan.RemoteCommand, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("systemctl enable", plan.RemoteCommand, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("cat > ~/.tau_pods/model_run_org-model.sh <<'EOF'", plan.RemoteCommand, StringComparison.Ordinal);
+        Assert.Contains("cat > ~/.tau_pods/model_wrapper_org-model.sh <<'EOF'", plan.RemoteCommand, StringComparison.Ordinal);
         Assert.Contains("planned org-model", plan.RemoteCommand, StringComparison.Ordinal);
     }
 }

@@ -1810,6 +1810,10 @@ public static class PodsCli
             }
         }
         Console.WriteLine($"unit={plan.UnitName}");
+        Console.WriteLine($"logPath={plan.LogPath}");
+        Console.WriteLine($"runnerScriptPath={plan.RunnerScriptPath}");
+        Console.WriteLine($"wrapperScriptPath={plan.WrapperScriptPath}");
+        Console.WriteLine($"usesPseudoTtyWrapper={plan.UsesPseudoTtyWrapper}");
         Console.WriteLine("[serve-command]");
         Console.WriteLine(plan.ServeCommand);
         Console.WriteLine("[systemd-unit]");
@@ -2374,6 +2378,9 @@ public static class PodsCli
             WriteKnownModelObject(writer, plan);
             writer.WriteString("unit", plan.UnitName);
             writer.WriteString("logPath", plan.LogPath);
+            writer.WriteString("runnerScriptPath", plan.RunnerScriptPath);
+            writer.WriteString("wrapperScriptPath", plan.WrapperScriptPath);
+            writer.WriteBoolean("usesPseudoTtyWrapper", plan.UsesPseudoTtyWrapper);
             writer.WriteString("serveCommand", plan.ServeCommand);
             writer.WriteString("systemdUnit", plan.SystemdUnit);
             writer.WritePropertyName("metadata");
@@ -2404,6 +2411,10 @@ public static class PodsCli
         }
         if (result.Plan is not null)
         {
+            Console.WriteLine($"logPath={result.Plan.LogPath}");
+            Console.WriteLine($"runnerScriptPath={result.Plan.RunnerScriptPath}");
+            Console.WriteLine($"wrapperScriptPath={result.Plan.WrapperScriptPath}");
+            Console.WriteLine($"usesPseudoTtyWrapper={result.Plan.UsesPseudoTtyWrapper}");
             Console.WriteLine("[serve-command]");
             Console.WriteLine(result.Plan.ServeCommand);
         }
@@ -2684,6 +2695,9 @@ public static class PodsCli
         WriteKnownModelObject(writer, plan);
         writer.WriteString("unit", plan.UnitName);
         writer.WriteString("logPath", plan.LogPath);
+        writer.WriteString("runnerScriptPath", plan.RunnerScriptPath);
+        writer.WriteString("wrapperScriptPath", plan.WrapperScriptPath);
+        writer.WriteBoolean("usesPseudoTtyWrapper", plan.UsesPseudoTtyWrapper);
         writer.WriteString("serveCommand", plan.ServeCommand);
         writer.WriteString("systemdUnit", plan.SystemdUnit);
         writer.WritePropertyName("metadata");
