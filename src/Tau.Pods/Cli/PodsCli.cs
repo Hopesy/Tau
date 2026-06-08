@@ -1553,8 +1553,21 @@ public static class PodsCli
             return 1;
         }
 
-        var result = await service.DeployAsync(pod, options).ConfigureAwait(false);
-        SaveConfiguredDeploymentOnSuccess(store, parsed.ConfigPath, pod.Id, result);
+        var remoteStartedConfigSaved = false;
+        var result = await service.DeployAsync(
+            pod,
+            options,
+            (remoteStartedResult, cancellationToken) =>
+            {
+                SaveConfiguredDeploymentOnSuccess(store, parsed.ConfigPath, pod.Id, remoteStartedResult);
+                remoteStartedConfigSaved = true;
+                return Task.CompletedTask;
+            }).ConfigureAwait(false);
+        if (remoteStartedConfigSaved && !result.Success)
+        {
+            RemoveConfiguredDeployment(store, parsed.ConfigPath, pod.Id, result.DeploymentName);
+        }
+
         if (jsonOutput)
         {
             PrintVllmOperationJson(result);
@@ -1713,6 +1726,19 @@ public static class PodsCli
 
         var config = store.Load(configPath);
         if (store.RemoveConfiguredModel(config, podId, result.DeploymentName))
+        {
+            store.Save(configPath, config);
+        }
+    }
+
+    private static void RemoveConfiguredDeployment(
+        PodsConfigStore store,
+        string configPath,
+        string podId,
+        string deploymentName)
+    {
+        var config = store.Load(configPath);
+        if (store.RemoveConfiguredModel(config, podId, deploymentName))
         {
             store.Save(configPath, config);
         }

@@ -3412,6 +3412,9 @@ public class PodsCliTests
         var configPath = Path.Combine(tempDir.FullName, "custom-pods.json");
         var stdout = new StringWriter();
         var previousOut = Console.Out;
+        var store = new PodsConfigStore();
+        var observedConfigBeforeHealth = false;
+        int? observedPidBeforeHealth = null;
         var execService = new PodExecService((psi, _) =>
         {
             var command = RemoteCommand(psi);
@@ -3427,6 +3430,9 @@ public class PodsCliTests
 
             if (command.Contains("/health", StringComparison.Ordinal))
             {
+                var saved = store.Load(configPath);
+                observedConfigBeforeHealth = saved.Pods[0].Models.TryGetValue("served-model", out var savedModel);
+                observedPidBeforeHealth = savedModel?.Pid;
                 return Task.FromResult(new PodExecService.ProcessExecutionResult(2, "unhealthy\nCUDA out of memory\n", ""));
             }
 
@@ -3441,7 +3447,7 @@ public class PodsCliTests
         try
         {
             Console.SetOut(stdout);
-            new PodsConfigStore().Save(configPath, ConfigWithSshPod());
+            store.Save(configPath, ConfigWithSshPod());
 
             var exitCode = await PodsCli.RunAsync(
                 ["vllm", "deploy", "--json", configPath, "ssh-pod", "org/model", "served model"],
@@ -3478,6 +3484,10 @@ public class PodsCliTests
             Assert.Equal("none", rollback.GetProperty("failureKind").GetString());
             Assert.Contains("systemctl --user disable --now 'tau-pod-served-model.service'", rollback.GetProperty("remoteCommand").GetString(), StringComparison.Ordinal);
             Assert.Equal("rolled back tau-pod-served-model\n", rollback.GetProperty("stdout").GetString());
+
+            Assert.True(observedConfigBeforeHealth);
+            Assert.Equal(0, observedPidBeforeHealth);
+            Assert.False(store.Load(configPath).Pods[0].Models.ContainsKey("served-model"));
         }
         finally
         {
@@ -3487,13 +3497,15 @@ public class PodsCliTests
     }
 
     [Fact]
-    public async Task VllmDeploy_WhenStartupWatcherFails_PrintsRollbackAndDoesNotSaveConfiguredModel()
+    public async Task VllmDeploy_WhenStartupWatcherFails_SavesBeforeWatchAndDeletesConfiguredModel()
     {
         var tempDir = Directory.CreateTempSubdirectory("tau-pods-cli-vllm-deploy-startup-watch-fail-");
         var configPath = Path.Combine(tempDir.FullName, "custom-pods.json");
         var stdout = new StringWriter();
         var previousOut = Console.Out;
         var store = new PodsConfigStore();
+        var observedConfigBeforeStartupWatch = false;
+        int? observedPidBeforeStartupWatch = null;
         var execService = new PodExecService((psi, _) =>
         {
             var command = RemoteCommand(psi);
@@ -3504,6 +3516,9 @@ public class PodsCliTests
 
             if (IsStartupWatchCommand(command))
             {
+                var saved = store.Load(configPath);
+                observedConfigBeforeStartupWatch = saved.Pods[0].Models.TryGetValue("served-model", out var savedModel);
+                observedPidBeforeStartupWatch = savedModel?.Pid;
                 return Task.FromResult(new PodExecService.ProcessExecutionResult(2, "Script exited with code 1\nstartup_status=failed\n", ""));
             }
 
@@ -3545,6 +3560,8 @@ public class PodsCliTests
             Assert.Equal("served-model", rollback.GetProperty("deployment").GetString());
             Assert.Equal("none", rollback.GetProperty("failureKind").GetString());
 
+            Assert.True(observedConfigBeforeStartupWatch);
+            Assert.Equal(9876, observedPidBeforeStartupWatch);
             Assert.False(store.Load(configPath).Pods[0].Models.ContainsKey("served-model"));
         }
         finally

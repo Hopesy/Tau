@@ -35,6 +35,15 @@ public sealed class PodVllmOrchestrationService
         PodVllmServeOptions options,
         CancellationToken cancellationToken = default)
     {
+        return await DeployAsync(pod, options, onRemoteStarted: null, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<PodVllmOperationResult> DeployAsync(
+        PodDefinition pod,
+        PodVllmServeOptions options,
+        Func<PodVllmOperationResult, CancellationToken, Task>? onRemoteStarted,
+        CancellationToken cancellationToken = default)
+    {
         ArgumentNullException.ThrowIfNull(pod);
         ArgumentNullException.ThrowIfNull(options);
 
@@ -182,6 +191,28 @@ public sealed class PodVllmOrchestrationService
         var summary = exec.Success
             ? $"vLLM deployment '{plan.DeploymentName}' started on {pod.Id}."
             : $"vLLM deploy failed: {exec.Summary}";
+        var processId = ExtractProcessId(exec.StdOut);
+
+        if (exec.Success && onRemoteStarted is not null)
+        {
+            var remoteStartedResult = new PodVllmOperationResult(
+                pod.Id,
+                true,
+                "deploy",
+                plan.DeploymentName,
+                summary,
+                command,
+                exec.ExitCode,
+                exec.StdOut,
+                exec.StdErr,
+                plan,
+                Preflight: preflight,
+                Prefetch: prefetch,
+                PrefetchTriggerFailureKind: prefetchTriggerFailureKind,
+                ProcessId: processId,
+                FailureKind: PodExecFailureKinds.None);
+            await onRemoteStarted(remoteStartedResult, cancellationToken).ConfigureAwait(false);
+        }
 
         if (exec.Success && options.WaitForHealth)
         {
@@ -241,7 +272,7 @@ public sealed class PodVllmOrchestrationService
             preflight,
             prefetch,
             prefetchTriggerFailureKind,
-            ProcessId: ExtractProcessId(exec.StdOut),
+            ProcessId: processId,
             FailureKind: failureKind,
             StartupWatch: startupWatch);
         LogVllmEnd(

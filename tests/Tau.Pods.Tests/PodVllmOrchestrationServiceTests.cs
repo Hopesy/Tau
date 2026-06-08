@@ -99,6 +99,57 @@ public sealed class PodVllmOrchestrationServiceTests
     }
 
     [Fact]
+    public async Task DeployAsync_CallsRemoteStartedCallbackBeforeStartupWatch()
+    {
+        var callbackCalled = false;
+        var startupWatchSawCallback = false;
+        int? callbackProcessId = null;
+        var exec = new PodExecService((psi, _) =>
+        {
+            var command = RemoteCommand(psi);
+            if (IsPreflightCommand(command))
+            {
+                return Task.FromResult(new PodExecService.ProcessExecutionResult(0, PreflightOk("/mnt/models/models--org--model"), ""));
+            }
+
+            if (IsStartupWatchCommand(command))
+            {
+                startupWatchSawCallback = callbackCalled;
+                return Task.FromResult(new PodExecService.ProcessExecutionResult(0, "Application startup complete\nstartup_status=ready\n", ""));
+            }
+
+            return command.Contains("/health", StringComparison.Ordinal)
+                ? Task.FromResult(new PodExecService.ProcessExecutionResult(0, "ready\n", ""))
+                : Task.FromResult(new PodExecService.ProcessExecutionResult(0, "started tau-pod-served\npid=2468\n", ""));
+        });
+        var service = new PodVllmOrchestrationService(exec);
+        var pod = new PodDefinition { Id = "gpu-1", SshHost = "host.example.com", ModelsPath = "/mnt/models" };
+
+        var result = await service.DeployAsync(
+            pod,
+            new PodVllmServeOptions("org/model", DeploymentName: "served"),
+            (remoteStarted, _) =>
+            {
+                callbackCalled = true;
+                callbackProcessId = remoteStarted.ProcessId;
+                Assert.True(remoteStarted.Success);
+                Assert.Equal("served", remoteStarted.DeploymentName);
+                Assert.NotNull(remoteStarted.Plan);
+                Assert.NotNull(remoteStarted.Preflight);
+                Assert.Null(remoteStarted.StartupWatch);
+                Assert.Null(remoteStarted.Health);
+                return Task.CompletedTask;
+            });
+
+        Assert.True(result.Success);
+        Assert.True(callbackCalled);
+        Assert.True(startupWatchSawCallback);
+        Assert.Equal(2468, callbackProcessId);
+        Assert.NotNull(result.StartupWatch);
+        Assert.NotNull(result.Health);
+    }
+
+    [Fact]
     public async Task DeployAsync_SurfacesExecFailureAndKeepsPlan()
     {
         var captured = new List<string>();
