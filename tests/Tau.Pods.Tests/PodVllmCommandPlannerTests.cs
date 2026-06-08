@@ -43,11 +43,15 @@ public sealed class PodVllmCommandPlannerTests
         Assert.Contains("model_cache_path='/srv/hf cache/models--meta-llama--Llama-3.1-8B-Instruct'", plan.ServeCommand, StringComparison.Ordinal);
         Assert.Contains("vllm serve \"$resolved_model_path\"", plan.ServeCommand, StringComparison.Ordinal);
         Assert.Contains("--port 8081", plan.ServeCommand, StringComparison.Ordinal);
+        Assert.Contains("--api-key \"$PI_API_KEY\"", plan.ServeCommand, StringComparison.Ordinal);
         Assert.Contains("--served-model-name 'llama-8b'", plan.ServeCommand, StringComparison.Ordinal);
         Assert.Contains("'--tensor-parallel-size' '2'", plan.ServeCommand, StringComparison.Ordinal);
         Assert.Contains("MODEL_ID='meta-llama/Llama-3.1-8B-Instruct'", plan.RunnerScript, StringComparison.Ordinal);
         Assert.Contains("VLLM_ARGS='--tensor-parallel-size 2'", plan.RunnerScript, StringComparison.Ordinal);
         Assert.Contains("VLLM_CMD=", plan.RunnerScript, StringComparison.Ordinal);
+        Assert.Contains("HF_HUB_ENABLE_HF_TRANSFER=1 hf download \"$MODEL_ID\"", plan.RunnerScript, StringComparison.Ordinal);
+        Assert.Contains("ERROR: Failed to download model", plan.RunnerScript, StringComparison.Ordinal);
+        Assert.Contains("Model download complete", plan.RunnerScript, StringComparison.Ordinal);
         Assert.Contains("Model runner exiting with code", plan.RunnerScript, StringComparison.Ordinal);
         Assert.Contains("bash -c \"$VLLM_CMD\"", plan.RunnerScript, StringComparison.Ordinal);
         Assert.Contains("script -q -f -c \"$HOME/.tau_pods/model_run_llama-8b--rm.sh\" \"$HOME/.vllm_logs/llama-8b--rm.log\"", plan.WrapperScript, StringComparison.Ordinal);

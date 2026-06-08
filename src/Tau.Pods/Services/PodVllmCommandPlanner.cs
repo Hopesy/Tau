@@ -195,6 +195,15 @@ public sealed class PodVllmCommandPlanner
             "fi\n" +
             "echo \"=========================================\"\n" +
             "echo \"\"\n" +
+            "echo \"Downloading model (will skip if cached)...\"\n" +
+            "HF_HUB_ENABLE_HF_TRANSFER=1 hf download \"$MODEL_ID\"\n\n" +
+            "if [ $? -ne 0 ]; then\n" +
+            "    echo \"ERROR: Failed to download model\" >&2\n" +
+            "    exit 1\n" +
+            "fi\n\n" +
+            "echo \"\"\n" +
+            "echo \"Model download complete\"\n" +
+            "echo \"\"\n" +
             "echo \"Starting vLLM server...\"\n" +
             "echo \"Command: $VLLM_CMD\"\n" +
             "echo \"=========================================\"\n" +
@@ -514,6 +523,7 @@ public sealed class PodVllmCommandPlanner
             .Append(modelArgument)
             .Append(" --host 0.0.0.0 --port ")
             .Append(port.ToString(System.Globalization.CultureInfo.InvariantCulture))
+            .Append(" --api-key \"$PI_API_KEY\"")
             .Append(" --served-model-name ")
             .Append(ShellSingleQuote(servedModelName));
 

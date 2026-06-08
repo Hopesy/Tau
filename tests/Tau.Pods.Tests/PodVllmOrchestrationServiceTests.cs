@@ -70,6 +70,9 @@ public sealed class PodVllmOrchestrationServiceTests
         Assert.Equal(result.Command, command);
         Assert.Contains("mkdir -p ~/.tau_pods ~/.vllm_logs", command, StringComparison.Ordinal);
         Assert.Contains("cat > ~/.tau_pods/model_run_llama-8b.sh <<'EOF'", command, StringComparison.Ordinal);
+        Assert.Contains("HF_HUB_ENABLE_HF_TRANSFER=1 hf download \"$MODEL_ID\"", command, StringComparison.Ordinal);
+        Assert.Contains("ERROR: Failed to download model", command, StringComparison.Ordinal);
+        Assert.Contains("--api-key \"$PI_API_KEY\"", command, StringComparison.Ordinal);
         Assert.Contains("Model runner exiting with code", command, StringComparison.Ordinal);
         Assert.Contains("cat > ~/.tau_pods/model_wrapper_llama-8b.sh <<'EOF'", command, StringComparison.Ordinal);
         Assert.Contains("script -q -f -c \"$HOME/.tau_pods/model_run_llama-8b.sh\" \"$HOME/.vllm_logs/llama-8b.log\"", command, StringComparison.Ordinal);
