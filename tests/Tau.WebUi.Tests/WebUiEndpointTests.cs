@@ -149,6 +149,159 @@ public sealed class WebUiEndpointTests
     }
 
     [Fact]
+    public async Task ArtifactEndpoints_PersistArtifactsAndHandleRuntimeMessages()
+    {
+        await using var fixture = await WebUiEndpointFixture.StartAsync(StreamOk);
+        var created = await fixture.Client.PostAsync(
+            "/api/sessions",
+            JsonBody(
+                new CreateSessionRequest("Artifacts", "openai", "gpt-5.4"),
+                WebUiEndpointJsonContext.Default.CreateSessionRequest));
+        created.EnsureSuccessStatusCode();
+        var session = JsonSerializer.Deserialize(
+            await created.Content.ReadAsStringAsync(),
+            WebUiEndpointJsonContext.Default.WebChatSessionDto);
+        Assert.NotNull(session);
+
+        var upsert = await fixture.Client.PutAsync(
+            $"/api/sessions/{session!.Id}/artifacts/index.html",
+            JsonBody(
+                new UpsertWebArtifactRequest("<h1>Hello artifact</h1>", "text/html"),
+                WebUiEndpointJsonContext.Default.UpsertWebArtifactRequest));
+
+        upsert.EnsureSuccessStatusCode();
+        var artifact = JsonSerializer.Deserialize(
+            await upsert.Content.ReadAsStringAsync(),
+            WebUiEndpointJsonContext.Default.WebArtifactDto);
+        Assert.NotNull(artifact);
+        Assert.Equal("index.html", artifact!.FileName);
+        Assert.Equal("text/html", artifact.MimeType);
+        Assert.Equal("<h1>Hello artifact</h1>", artifact.Content);
+        Assert.Equal(Encoding.UTF8.GetByteCount(artifact.Content), artifact.Size);
+
+        var list = await fixture.Client.GetAsync($"/api/sessions/{session.Id}/artifacts");
+        list.EnsureSuccessStatusCode();
+        var summaries = JsonSerializer.Deserialize(
+            await list.Content.ReadAsStringAsync(),
+            WebUiEndpointJsonContext.Default.WebArtifactSummaryDtoArray);
+        var summary = Assert.Single(summaries!);
+        Assert.Equal("index.html", summary.FileName);
+        Assert.Equal("text/html", summary.MimeType);
+
+        var get = await fixture.Client.GetAsync($"/api/sessions/{session.Id}/artifacts/index.html");
+        get.EnsureSuccessStatusCode();
+        var fetched = JsonSerializer.Deserialize(
+            await get.Content.ReadAsStringAsync(),
+            WebUiEndpointJsonContext.Default.WebArtifactDto);
+        Assert.Equal("<h1>Hello artifact</h1>", fetched?.Content);
+
+        var runtimeCreate = await fixture.Client.PostAsync(
+            $"/api/sessions/{session.Id}/runtime/messages",
+            JsonBody(
+                new WebRuntimeMessageRequest(
+                    "artifact-operation",
+                    MessageId: "msg-1",
+                    SandboxId: "sandbox-1",
+                    Action: "createOrUpdate",
+                    Filename: "data.json",
+                    Content: "{\"ok\":true}",
+                    MimeType: "application/json"),
+                WebUiEndpointJsonContext.Default.WebRuntimeMessageRequest));
+        runtimeCreate.EnsureSuccessStatusCode();
+        using (var createdRuntime = JsonDocument.Parse(await runtimeCreate.Content.ReadAsStringAsync()))
+        {
+            Assert.Equal("runtime-response", createdRuntime.RootElement.GetProperty("type").GetString());
+            Assert.Equal("msg-1", createdRuntime.RootElement.GetProperty("messageId").GetString());
+            Assert.Equal("sandbox-1", createdRuntime.RootElement.GetProperty("sandboxId").GetString());
+            Assert.True(createdRuntime.RootElement.GetProperty("success").GetBoolean());
+            Assert.Equal("data.json", createdRuntime.RootElement.GetProperty("result").GetString());
+        }
+
+        var runtimeList = await fixture.Client.PostAsync(
+            $"/api/sessions/{session.Id}/runtime/messages",
+            JsonBody(
+                new WebRuntimeMessageRequest(
+                    "artifact-operation",
+                    MessageId: "msg-2",
+                    SandboxId: "sandbox-1",
+                    Action: "list"),
+                WebUiEndpointJsonContext.Default.WebRuntimeMessageRequest));
+        runtimeList.EnsureSuccessStatusCode();
+        using (var listedRuntime = JsonDocument.Parse(await runtimeList.Content.ReadAsStringAsync()))
+        {
+            var files = listedRuntime.RootElement.GetProperty("result")
+                .EnumerateArray()
+                .Select(static item => item.GetString())
+                .ToArray();
+            Assert.Contains("data.json", files);
+            Assert.Contains("index.html", files);
+        }
+
+        var runtimeGet = await fixture.Client.PostAsync(
+            $"/api/sessions/{session.Id}/runtime/messages",
+            JsonBody(
+                new WebRuntimeMessageRequest(
+                    "artifact-operation",
+                    MessageId: "msg-3",
+                    SandboxId: "sandbox-1",
+                    Action: "get",
+                    Filename: "data.json"),
+                WebUiEndpointJsonContext.Default.WebRuntimeMessageRequest));
+        runtimeGet.EnsureSuccessStatusCode();
+        using (var fetchedRuntime = JsonDocument.Parse(await runtimeGet.Content.ReadAsStringAsync()))
+        {
+            Assert.True(fetchedRuntime.RootElement.GetProperty("success").GetBoolean());
+            Assert.Equal("{\"ok\":true}", fetchedRuntime.RootElement.GetProperty("result").GetString());
+        }
+
+        var persisted = await File.ReadAllTextAsync(fixture.ArtifactStorePath);
+        Assert.Contains(session.Id, persisted, StringComparison.Ordinal);
+        Assert.Contains("data.json", persisted, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ArtifactEndpoints_RejectUnsafeNamesAndDeleteArtifactsWithSession()
+    {
+        await using var fixture = await WebUiEndpointFixture.StartAsync(StreamOk);
+        var created = await fixture.Client.PostAsync(
+            "/api/sessions",
+            JsonBody(
+                new CreateSessionRequest("Artifact cleanup", "openai", "gpt-5.4"),
+                WebUiEndpointJsonContext.Default.CreateSessionRequest));
+        created.EnsureSuccessStatusCode();
+        var session = JsonSerializer.Deserialize(
+            await created.Content.ReadAsStringAsync(),
+            WebUiEndpointJsonContext.Default.WebChatSessionDto);
+        Assert.NotNull(session);
+
+        var rejected = await fixture.Client.PutAsync(
+            $"/api/sessions/{session!.Id}/artifacts/bad:name.txt",
+            JsonBody(
+                new UpsertWebArtifactRequest("unsafe"),
+                WebUiEndpointJsonContext.Default.UpsertWebArtifactRequest));
+
+        Assert.Equal(HttpStatusCode.BadRequest, rejected.StatusCode);
+        Assert.Contains("not portable", await rejected.Content.ReadAsStringAsync(), StringComparison.OrdinalIgnoreCase);
+
+        var upsert = await fixture.Client.PutAsync(
+            $"/api/sessions/{session.Id}/artifacts/notes.txt",
+            JsonBody(
+                new UpsertWebArtifactRequest("keep me", "text/plain"),
+                WebUiEndpointJsonContext.Default.UpsertWebArtifactRequest));
+        upsert.EnsureSuccessStatusCode();
+
+        var deleted = await fixture.Client.DeleteAsync($"/api/sessions/{session.Id}");
+        Assert.Equal(HttpStatusCode.NoContent, deleted.StatusCode);
+
+        var missingArtifacts = await fixture.Client.GetAsync($"/api/sessions/{session.Id}/artifacts");
+        Assert.Equal(HttpStatusCode.NotFound, missingArtifacts.StatusCode);
+        if (File.Exists(fixture.ArtifactStorePath))
+        {
+            Assert.DoesNotContain("notes.txt", await File.ReadAllTextAsync(fixture.ArtifactStorePath), StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
     public async Task ExportJsonlEndpoint_ExportsSessionAndPreservesExistingJsonAndHtmlExports()
     {
         await using var fixture = await WebUiEndpointFixture.StartAsync(StreamOk);
@@ -764,16 +917,18 @@ public sealed class WebUiEndpointTests
 
     private sealed class WebUiEndpointFixture : IAsyncDisposable
     {
-        private WebUiEndpointFixture(WebApplication app, HttpClient client, string storePath)
+        private WebUiEndpointFixture(WebApplication app, HttpClient client, string storePath, string artifactStorePath)
         {
             App = app;
             Client = client;
             StorePath = storePath;
+            ArtifactStorePath = artifactStorePath;
         }
 
         public WebApplication App { get; }
         public HttpClient Client { get; }
         public string StorePath { get; }
+        public string ArtifactStorePath { get; }
 
         public static async Task<WebUiEndpointFixture> StartAsync(
             Func<string, CancellationToken, IAsyncEnumerable<AgentEvent>> run,
@@ -797,12 +952,15 @@ public sealed class WebUiEndpointTests
         private static async Task<WebUiEndpointFixture> StartAsync(Func<IServiceProvider, WebChatService> chatFactory)
         {
             var storePath = Path.Combine(Path.GetTempPath(), $"tau-webui-endpoint-{Guid.NewGuid():N}.json");
+            var artifactStorePath = Path.Combine(Path.GetTempPath(), $"tau-webui-artifacts-{Guid.NewGuid():N}.json");
             var builder = WebApplication.CreateBuilder(new WebApplicationOptions
             {
                 EnvironmentName = "Development"
             });
             builder.WebHost.UseUrls("http://127.0.0.1:0");
             builder.Services.AddSingleton(new WebChatStore(storePath));
+            builder.Services.AddSingleton(new WebArtifactStore(artifactStorePath));
+            builder.Services.AddSingleton<WebArtifactService>();
             builder.Services.AddSingleton(chatFactory);
             var app = builder.Build();
             app.MapWebUiEndpoints();
@@ -812,7 +970,7 @@ public sealed class WebUiEndpointTests
                 .Get<IServerAddressesFeature>();
             var address = Assert.Single(addresses?.Addresses ?? []);
             var client = new HttpClient { BaseAddress = new Uri(address) };
-            return new WebUiEndpointFixture(app, client, storePath);
+            return new WebUiEndpointFixture(app, client, storePath, artifactStorePath);
         }
 
         public async ValueTask DisposeAsync()
@@ -823,6 +981,10 @@ public sealed class WebUiEndpointTests
             if (File.Exists(StorePath))
             {
                 File.Delete(StorePath);
+            }
+            if (File.Exists(ArtifactStorePath))
+            {
+                File.Delete(ArtifactStorePath);
             }
         }
     }
@@ -880,7 +1042,12 @@ public sealed class WebUiEndpointTests
 
 [JsonSerializable(typeof(CreateSessionRequest))]
 [JsonSerializable(typeof(SendMessageRequest))]
+[JsonSerializable(typeof(UpsertWebArtifactRequest))]
+[JsonSerializable(typeof(WebRuntimeMessageRequest))]
 [JsonSerializable(typeof(WebChatSessionDto))]
+[JsonSerializable(typeof(WebArtifactDto))]
+[JsonSerializable(typeof(WebArtifactSummaryDto))]
+[JsonSerializable(typeof(WebArtifactSummaryDto[]))]
 [JsonSerializable(typeof(WebUiAuthStatusDto))]
 [JsonSerializable(typeof(WebChatStreamEventDto))]
 [JsonSerializable(typeof(WebChatSessionDto[]))]

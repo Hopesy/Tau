@@ -75,4 +75,39 @@ public sealed class WebUiBrowserFlowTests
         await Assertions.Expect(page.Locator("#sessions .session.active")).ToContainTextAsync("Renamed title", new() { Timeout = 5000 });
         await Assertions.Expect(page.Locator("#sessions .session.active")).Not.ToContainTextAsync("Initial title");
     }
+
+    [Fact]
+    public async Task ArtifactsPane_RefreshesAndRendersTextArtifact()
+    {
+        await using var context = await _fixture.NewContextAsync();
+        var page = await context.NewPageAsync();
+
+        await page.GotoAsync("/");
+        await page.WaitForFunctionAsync("document.querySelectorAll('#provider option').length > 0");
+
+        await page.FillAsync("#session-title", "Artifacts");
+        await page.ClickAsync("#new-session");
+        var session = page.Locator("#sessions .session.active");
+        await Assertions.Expect(session).ToBeVisibleAsync(new() { Timeout = 5000 });
+        await Assertions.Expect(session).ToContainTextAsync("Artifacts", new() { Timeout = 5000 });
+        var sessionId = await session.GetAttributeAsync("data-id");
+        Assert.False(string.IsNullOrWhiteSpace(sessionId));
+
+        await page.EvaluateAsync(
+            """
+            async sessionId => {
+              const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/artifacts/notes.txt`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ content: 'hello artifact pane', mimeType: 'text/plain' })
+              });
+              if (!response.ok) throw new Error(await response.text());
+            }
+            """,
+            sessionId);
+        await page.ClickAsync("#refresh-artifacts");
+
+        await Assertions.Expect(page.Locator("#artifacts-list .artifact-pill")).ToContainTextAsync("notes.txt", new() { Timeout = 5000 });
+        await Assertions.Expect(page.Locator("#artifact-preview")).ToContainTextAsync("hello artifact pane", new() { Timeout = 5000 });
+    }
 }

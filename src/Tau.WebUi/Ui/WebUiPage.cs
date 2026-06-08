@@ -16,7 +16,7 @@ public static class WebUiPage
             body { margin: 0; font-family: Inter, Segoe UI, sans-serif; background: #0b1020; color: #e8edf7; }
             .shell { display: grid; grid-template-columns: 320px 1fr; min-height: 100vh; }
             aside { border-right: 1px solid rgba(255,255,255,.08); padding: 20px; background: #0e152b; overflow: auto; }
-            main { display: grid; grid-template-rows: auto auto 1fr auto; min-height: 100vh; }
+            main { display: grid; grid-template-rows: auto auto 1fr auto; min-height: 100vh; min-width: 0; }
             h1 { margin: 0 0 8px; font-size: 22px; }
             h2 { margin: 0 0 12px; font-size: 14px; text-transform: uppercase; letter-spacing: .08em; color: #8fa3c7; }
             .meta { color: #9fb0cf; font-size: 13px; line-height: 1.6; white-space: pre-wrap; }
@@ -42,7 +42,20 @@ public static class WebUiPage
             .session-actions { display:flex; gap:6px; margin-top:10px; }
             .session-actions button { padding:6px 8px; border-radius:8px; font-size:12px; }
             .badge { font-size: 11px; padding: 3px 8px; border-radius: 999px; background: rgba(53,103,255,.18); color: #bfd0ff; }
-            #messages { padding: 20px; overflow: auto; display: grid; gap: 14px; }
+            .conversation-grid { min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, 34%); }
+            #messages { padding: 20px; overflow: auto; display: grid; align-content: start; gap: 14px; min-width: 0; }
+            #artifacts-pane { border-left: 1px solid rgba(255,255,255,.08); background: #091225; min-width: 0; display: grid; grid-template-rows: auto auto 1fr; }
+            .artifacts-head { padding: 14px 16px; border-bottom: 1px solid rgba(255,255,255,.08); display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+            .artifacts-head h2 { margin: 0; }
+            .artifacts-head button { padding: 7px 9px; border-radius: 8px; font-size: 12px; }
+            #artifacts-list { padding: 12px; display: flex; flex-wrap: wrap; gap: 8px; border-bottom: 1px solid rgba(255,255,255,.08); min-height: 54px; align-content: start; }
+            .artifact-pill { background: #172341; color: #cbd9f3; border: 1px solid rgba(255,255,255,.1); border-radius: 999px; padding: 7px 10px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+            .artifact-pill.active { background: #3567ff; color: #fff; border-color: transparent; }
+            #artifact-preview { min-height: 0; overflow: auto; padding: 12px; }
+            .artifact-empty { color: #8fa3c7; font-size: 13px; line-height: 1.5; }
+            .artifact-frame { width: 100%; min-height: 420px; height: calc(100vh - 300px); border: 1px solid rgba(255,255,255,.1); border-radius: 10px; background: #fff; }
+            .artifact-code { margin: 0; padding: 12px; border-radius: 10px; overflow: auto; background: #050b17; border: 1px solid rgba(255,255,255,.08); color: #dce6fa; white-space: pre; }
+            .artifact-image { max-width: 100%; border-radius: 10px; border: 1px solid rgba(255,255,255,.1); background: #050b17; }
             .message { border: 1px solid rgba(255,255,255,.08); border-radius: 14px; padding: 14px; background: rgba(255,255,255,.03); }
             .message.user { background: rgba(53,103,255,.12); }
             .role { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: #8fa3c7; margin-bottom: 8px; }
@@ -99,6 +112,8 @@ public static class WebUiPage
               .settings-grid { grid-template-columns: 1fr; }
               .composer-row { grid-template-columns: 1fr; }
               .composer-actions { grid-template-columns: 1fr 1fr; }
+              .conversation-grid { grid-template-columns: 1fr; }
+              #artifacts-pane { border-left: none; border-top: 1px solid rgba(255,255,255,.08); min-height: 360px; }
             }
           </style>
         </head>
@@ -134,7 +149,17 @@ public static class WebUiPage
                 <div id="session-meta" class="meta">No session selected.</div>
                 <div id="auth-status" class="meta">Auth status unavailable.</div>
               </div>
-              <div id="messages"></div>
+              <div class="conversation-grid">
+                <div id="messages"></div>
+                <section id="artifacts-pane">
+                  <div class="artifacts-head">
+                    <h2>Artifacts</h2>
+                    <button id="refresh-artifacts" class="secondary">Refresh</button>
+                  </div>
+                  <div id="artifacts-list"></div>
+                  <div id="artifact-preview" class="artifact-empty">No artifacts.</div>
+                </section>
+              </div>
               <div class="composer">
                 <div id="pending-attachments" class="attachments"></div>
                 <div class="composer-row">
@@ -152,6 +177,8 @@ public static class WebUiPage
             let currentSessionId = null;
             let catalog = { providers: [] };
             let pendingAttachments = [];
+            let currentArtifacts = [];
+            let activeArtifactFile = null;
             const currentSessionStorageKey = 'tau.webui.currentSessionId';
 
             async function fetchJson(url, options) {
@@ -170,6 +197,99 @@ public static class WebUiPage
 
             function escapeAttribute(text) {
               return escapeHtml(text).replaceAll("'", '&#39;');
+            }
+
+            function artifactUrl(sessionId, fileName) {
+              return `/api/sessions/${encodeURIComponent(sessionId)}/artifacts/${encodeURIComponent(fileName)}`;
+            }
+
+            function artifactSandboxId(artifact) {
+              return `artifact-${currentSessionId || 'session'}-${artifact.fileName}`;
+            }
+
+            function isKnownArtifactSandbox(sandboxId) {
+              return currentArtifacts.some(artifact => artifactSandboxId(artifact) === sandboxId);
+            }
+
+            function isHtmlArtifact(artifact) {
+              return artifact &&
+                ((artifact.mimeType || '').toLowerCase().includes('html') ||
+                  (artifact.fileName || '').toLowerCase().endsWith('.html') ||
+                  (artifact.fileName || '').toLowerCase().endsWith('.htm'));
+            }
+
+            function isImageArtifact(artifact) {
+              return artifact && (artifact.mimeType || '').toLowerCase().startsWith('image/');
+            }
+
+            function sandboxBridgeCode(sandboxId) {
+              return `<script>
+                window.__completionCallbacks = [];
+                window.sendRuntimeMessage = async (message) => {
+                  const messageId = 'msg_' + Date.now() + '_' + Math.random().toString(36).slice(2);
+                  return await new Promise((resolve, reject) => {
+                    const timeout = setTimeout(() => {
+                      window.removeEventListener('message', handler);
+                      reject(new Error('Runtime message timeout'));
+                    }, 30000);
+                    const handler = event => {
+                      const data = event.data || {};
+                      if (data.type === 'runtime-response' && data.messageId === messageId) {
+                        clearTimeout(timeout);
+                        window.removeEventListener('message', handler);
+                        if (data.success) resolve(data);
+                        else reject(new Error(data.error || 'Operation failed'));
+                      }
+                    };
+                    window.addEventListener('message', handler);
+                    window.parent.postMessage({ ...message, sandboxId: ${JSON.stringify(sandboxId)}, messageId }, '*');
+                  });
+                };
+                window.onCompleted = callback => window.__completionCallbacks.push(callback);
+                const isJsonFile = filename => String(filename || '').endsWith('.json');
+                window.listArtifacts = async () => {
+                  const response = await window.sendRuntimeMessage({ type: 'artifact-operation', action: 'list' });
+                  return response.result || [];
+                };
+                window.getArtifact = async filename => {
+                  const response = await window.sendRuntimeMessage({ type: 'artifact-operation', action: 'get', filename });
+                  const content = response.result;
+                  if (isJsonFile(filename)) return JSON.parse(content);
+                  return content;
+                };
+                window.createOrUpdateArtifact = async (filename, content, mimeType) => {
+                  let finalContent = content;
+                  if (typeof finalContent !== 'string') finalContent = JSON.stringify(finalContent, null, 2);
+                  await window.sendRuntimeMessage({ type: 'artifact-operation', action: 'createOrUpdate', filename, content: finalContent, mimeType });
+                };
+                window.deleteArtifact = async filename => {
+                  await window.sendRuntimeMessage({ type: 'artifact-operation', action: 'delete', filename });
+                };
+                ['log', 'warn', 'error', 'info'].forEach(method => {
+                  const original = console[method].bind(console);
+                  console[method] = (...args) => {
+                    original(...args);
+                    const text = args.map(arg => {
+                      try { return typeof arg === 'object' ? JSON.stringify(arg) : String(arg); }
+                      catch { return String(arg); }
+                    }).join(' ');
+                    window.sendRuntimeMessage({ type: 'console', method, text }).catch(() => {});
+                  };
+                });
+                window.complete = async (error, returnValue) => {
+                  for (const callback of window.__completionCallbacks) {
+                    await callback(!error);
+                  }
+                  await window.sendRuntimeMessage(error
+                    ? { type: 'execution-error', text: error.message || String(error) }
+                    : { type: 'execution-complete', text: returnValue === undefined ? '' : String(returnValue) });
+                };
+              <\/script>`;
+            }
+
+            function artifactSandboxSrcdoc(artifact) {
+              const sandboxId = artifactSandboxId(artifact);
+              return `${sandboxBridgeCode(sandboxId)}${artifact.content || ''}`;
             }
 
             function formatBytes(size) {
@@ -231,6 +351,85 @@ public static class WebUiPage
                   renderPendingAttachments();
                 });
               });
+            }
+
+            async function loadArtifacts(sessionId) {
+              if (!sessionId) {
+                currentArtifacts = [];
+                activeArtifactFile = null;
+                renderArtifacts();
+                return;
+              }
+
+              currentArtifacts = await fetchJson(`/api/sessions/${encodeURIComponent(sessionId)}/artifacts`);
+              if (activeArtifactFile && !currentArtifacts.some(artifact => artifact.fileName === activeArtifactFile)) {
+                activeArtifactFile = null;
+              }
+              if (!activeArtifactFile && currentArtifacts.length) {
+                activeArtifactFile = currentArtifacts[0].fileName;
+              }
+              renderArtifacts();
+            }
+
+            async function loadArtifactContent(fileName) {
+              if (!currentSessionId || !fileName) return null;
+              return await fetchJson(artifactUrl(currentSessionId, fileName));
+            }
+
+            async function selectArtifact(fileName) {
+              activeArtifactFile = fileName;
+              renderArtifacts();
+              const artifact = await loadArtifactContent(fileName);
+              if (artifact) {
+                renderArtifactPreview(artifact);
+              }
+            }
+
+            function renderArtifacts() {
+              const list = document.getElementById('artifacts-list');
+              if (!list) return;
+              list.innerHTML = currentArtifacts.map(artifact => `
+                <button class="artifact-pill ${artifact.fileName === activeArtifactFile ? 'active' : ''}" data-file="${escapeAttribute(artifact.fileName)}">
+                  ${escapeHtml(artifact.fileName)}
+                </button>`).join('');
+              list.querySelectorAll('.artifact-pill').forEach(node => {
+                node.addEventListener('click', () => selectArtifact(node.dataset.file));
+              });
+
+              const preview = document.getElementById('artifact-preview');
+              if (!currentArtifacts.length) {
+                preview.className = 'artifact-empty';
+                preview.textContent = 'No artifacts.';
+                return;
+              }
+
+              if (activeArtifactFile) {
+                loadArtifactContent(activeArtifactFile)
+                  .then(artifact => artifact && renderArtifactPreview(artifact))
+                  .catch(error => {
+                    preview.className = 'artifact-empty';
+                    preview.textContent = `artifact failed: ${error.message || error}`;
+                  });
+              }
+            }
+
+            function renderArtifactPreview(artifact) {
+              const preview = document.getElementById('artifact-preview');
+              preview.className = '';
+              if (isHtmlArtifact(artifact)) {
+                preview.innerHTML = `<iframe class="artifact-frame" sandbox="allow-scripts allow-forms" srcdoc="${escapeAttribute(artifactSandboxSrcdoc(artifact))}"></iframe>`;
+                return;
+              }
+
+              if (isImageArtifact(artifact)) {
+                const src = artifact.content.startsWith('data:')
+                  ? artifact.content
+                  : `data:${artifact.mimeType};base64,${artifact.content}`;
+                preview.innerHTML = `<img class="artifact-image" src="${escapeAttribute(src)}" alt="" />`;
+                return;
+              }
+
+              preview.innerHTML = `<pre class="artifact-code"><code>${escapeHtml(artifact.content || '')}</code></pre>`;
             }
 
             function isTextFile(file) {
@@ -850,6 +1049,31 @@ public static class WebUiPage
               return session;
             }
 
+            window.addEventListener('message', async event => {
+              const message = event.data || {};
+              if (!message.sandboxId || !message.messageId || !currentSessionId) return;
+              if (!isKnownArtifactSandbox(message.sandboxId)) return;
+              try {
+                const response = await fetchJson(`/api/sessions/${encodeURIComponent(currentSessionId)}/runtime/messages`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify(message)
+                });
+                if (message.type === 'artifact-operation' && (message.action === 'createOrUpdate' || message.action === 'delete')) {
+                  await loadArtifacts(currentSessionId);
+                }
+                event.source?.postMessage(response, '*');
+              } catch (error) {
+                event.source?.postMessage({
+                  type: 'runtime-response',
+                  messageId: message.messageId,
+                  sandboxId: message.sandboxId,
+                  success: false,
+                  error: error.message || String(error)
+                }, '*');
+              }
+            });
+
             function exportSession(sessionId) {
               window.location.href = `/api/sessions/${encodeURIComponent(sessionId)}/export`;
             }
@@ -991,6 +1215,7 @@ public static class WebUiPage
                 rememberCurrentSession(null);
                 applySessionSettings(null);
                 renderMessages(null);
+                await loadArtifacts(null);
               }
               await loadStatus();
               await loadSessions();
@@ -1072,6 +1297,7 @@ public static class WebUiPage
               renderSessions(sessions);
               const sessionIds = new Set(sessions.map(session => session.id));
               if (currentSessionId && sessionIds.has(currentSessionId)) {
+                await openSession(currentSessionId, sessions);
                 return;
               }
 
@@ -1085,16 +1311,18 @@ public static class WebUiPage
                 rememberCurrentSession(null);
                 applySessionSettings(null);
                 renderMessages(null);
+                await loadArtifacts(null);
               }
             }
 
-            async function openSession(id) {
+            async function openSession(id, knownSessions) {
               currentSessionId = id;
               rememberCurrentSession(id);
               const session = await fetchJson(`/api/sessions/${id}`);
-              renderSessions(await fetchJson('/api/sessions'));
+              renderSessions(knownSessions || await fetchJson('/api/sessions'));
               applySessionSettings(session);
               renderMessages(session);
+              await loadArtifacts(id);
             }
 
             async function createSession() {
@@ -1112,6 +1340,7 @@ public static class WebUiPage
               await loadSessions();
               applySessionSettings(session);
               renderMessages(session);
+              await loadArtifacts(session.id);
             }
 
             async function saveSettings() {
@@ -1128,6 +1357,7 @@ public static class WebUiPage
               await loadStatus();
               await loadSessions();
               applySessionSettings(session);
+              await loadArtifacts(currentSessionId);
             }
 
             async function sendMessage() {
@@ -1147,6 +1377,7 @@ public static class WebUiPage
                 await loadStatus();
                 renderMessages(session);
                 applySessionSettings(session);
+                await loadArtifacts(currentSessionId);
                 await loadSessions();
               } catch (error) {
                 document.getElementById('session-meta').textContent = `send failed: ${error.message || error}`;
@@ -1175,6 +1406,15 @@ public static class WebUiPage
                 await openSession(currentSessionId);
               } else {
                 await loadSessions();
+              }
+            });
+            document.getElementById('refresh-artifacts').addEventListener('click', async () => {
+              try {
+                await loadArtifacts(currentSessionId);
+              } catch (error) {
+                const preview = document.getElementById('artifact-preview');
+                preview.className = 'artifact-empty';
+                preview.textContent = `artifact refresh failed: ${error.message || error}`;
               }
             });
             document.getElementById('save-settings').addEventListener('click', saveSettings);

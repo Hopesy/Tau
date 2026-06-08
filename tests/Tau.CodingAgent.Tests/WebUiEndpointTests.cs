@@ -432,23 +432,31 @@ public class WebUiEndpointTests
 
     private sealed class WebUiEndpointFixture : IAsyncDisposable
     {
-        private WebUiEndpointFixture(WebApplication app, HttpClient client, string storePath, List<FakeCodingAgentRunner> runners)
+        private WebUiEndpointFixture(
+            WebApplication app,
+            HttpClient client,
+            string storePath,
+            string artifactStorePath,
+            List<FakeCodingAgentRunner> runners)
         {
             App = app;
             Client = client;
             StorePath = storePath;
+            ArtifactStorePath = artifactStorePath;
             Runners = runners;
         }
 
         public WebApplication App { get; }
         public HttpClient Client { get; }
         public string StorePath { get; }
+        public string ArtifactStorePath { get; }
         public List<FakeCodingAgentRunner> Runners { get; }
 
         public static async Task<WebUiEndpointFixture> StartAsync(
             Func<string, CancellationToken, IAsyncEnumerable<AgentEvent>> run)
         {
             var storePath = Path.Combine(Path.GetTempPath(), $"tau-webui-endpoint-{Guid.NewGuid():N}.json");
+            var artifactStorePath = Path.Combine(Path.GetTempPath(), $"tau-webui-artifacts-{Guid.NewGuid():N}.json");
             var runners = new List<FakeCodingAgentRunner>();
             var builder = WebApplication.CreateBuilder(new WebApplicationOptions
             {
@@ -456,6 +464,8 @@ public class WebUiEndpointTests
             });
             builder.WebHost.UseUrls("http://127.0.0.1:0");
             builder.Services.AddSingleton(new WebChatStore(storePath));
+            builder.Services.AddSingleton(new WebArtifactStore(artifactStorePath));
+            builder.Services.AddSingleton<WebArtifactService>();
             builder.Services.AddSingleton<WebChatService>(sp => new WebChatService(
                 sp.GetRequiredService<WebChatStore>(),
                 (_, _, _) =>
@@ -473,7 +483,7 @@ public class WebUiEndpointTests
                 .Get<IServerAddressesFeature>();
             var address = Assert.Single(addresses?.Addresses ?? []);
             var client = new HttpClient { BaseAddress = new Uri(address) };
-            return new WebUiEndpointFixture(app, client, storePath, runners);
+            return new WebUiEndpointFixture(app, client, storePath, artifactStorePath, runners);
         }
 
         public async ValueTask DisposeAsync()
@@ -484,6 +494,10 @@ public class WebUiEndpointTests
             if (File.Exists(StorePath))
             {
                 File.Delete(StorePath);
+            }
+            if (File.Exists(ArtifactStorePath))
+            {
+                File.Delete(ArtifactStorePath);
             }
         }
     }

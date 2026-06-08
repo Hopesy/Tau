@@ -34,6 +34,36 @@ public sealed record WebChatAttachmentDto(
     string? ExtractedText = null,
     string? Preview = null);
 
+public sealed record WebArtifactDto(
+    string FileName,
+    string Content,
+    string MimeType,
+    long Size,
+    DateTimeOffset CreatedAt,
+    DateTimeOffset UpdatedAt);
+
+public sealed record WebArtifactSummaryDto(
+    string FileName,
+    string MimeType,
+    long Size,
+    DateTimeOffset CreatedAt,
+    DateTimeOffset UpdatedAt);
+
+public sealed record UpsertWebArtifactRequest(
+    string? Content,
+    string? MimeType = null);
+
+public sealed record WebRuntimeMessageRequest(
+    string? Type,
+    string? MessageId = null,
+    string? SandboxId = null,
+    string? Action = null,
+    string? Filename = null,
+    string? Content = null,
+    string? MimeType = null,
+    string? Method = null,
+    string? Text = null);
+
 public sealed record WebChatToolCallDto(
     string Id,
     string ToolName,

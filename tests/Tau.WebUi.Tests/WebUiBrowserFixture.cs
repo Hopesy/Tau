@@ -20,11 +20,13 @@ public sealed class WebUiBrowserFixture : IAsyncLifetime
 
     public string BaseAddress { get; private set; } = string.Empty;
     public string StorePath { get; private set; } = string.Empty;
+    public string ArtifactStorePath { get; private set; } = string.Empty;
     public IBrowser Browser => _browser ?? throw new InvalidOperationException("Browser not initialised.");
 
     public async Task InitializeAsync()
     {
         StorePath = Path.Combine(Path.GetTempPath(), $"tau-webui-browser-{Guid.NewGuid():N}.json");
+        ArtifactStorePath = Path.Combine(Path.GetTempPath(), $"tau-webui-browser-artifacts-{Guid.NewGuid():N}.json");
 
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
@@ -32,6 +34,8 @@ public sealed class WebUiBrowserFixture : IAsyncLifetime
         });
         builder.WebHost.UseUrls("http://127.0.0.1:0");
         builder.Services.AddSingleton(new WebChatStore(StorePath));
+        builder.Services.AddSingleton(new WebArtifactStore(ArtifactStorePath));
+        builder.Services.AddSingleton<WebArtifactService>();
         builder.Services.AddSingleton<WebChatService>(sp => new WebChatService(
             sp.GetRequiredService<WebChatStore>(),
             (_, _, _) => new FakeWebUiRunner(StreamHello)));
@@ -70,6 +74,10 @@ public sealed class WebUiBrowserFixture : IAsyncLifetime
         if (File.Exists(StorePath))
         {
             File.Delete(StorePath);
+        }
+        if (File.Exists(ArtifactStorePath))
+        {
+            File.Delete(ArtifactStorePath);
         }
     }
 

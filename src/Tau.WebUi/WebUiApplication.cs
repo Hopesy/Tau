@@ -48,6 +48,54 @@ public static class WebUiApplication
             var session = chat.GetSession(id);
             return session is null ? Results.NotFound() : Results.Ok(session);
         });
+        app.MapGet("/api/sessions/{id}/artifacts", (string id, WebChatService chat, WebArtifactService artifacts) =>
+        {
+            return chat.HasSession(id) ? Results.Ok(artifacts.ListArtifacts(id)) : Results.NotFound();
+        });
+        app.MapGet("/api/sessions/{id}/artifacts/{fileName}", (string id, string fileName, WebChatService chat, WebArtifactService artifacts) =>
+        {
+            if (!chat.HasSession(id))
+            {
+                return Results.NotFound();
+            }
+
+            var artifact = artifacts.GetArtifact(id, fileName);
+            return artifact is null ? Results.NotFound() : Results.Ok(artifact);
+        });
+        app.MapPut("/api/sessions/{id}/artifacts/{fileName}", (string id, string fileName, UpsertWebArtifactRequest request, WebChatService chat, WebArtifactService artifacts) =>
+        {
+            if (!chat.HasSession(id))
+            {
+                return Results.NotFound();
+            }
+
+            try
+            {
+                return Results.Ok(artifacts.UpsertArtifact(id, fileName, request));
+            }
+            catch (Exception ex)
+            {
+                return Results.BadRequest(ex.Message);
+            }
+        });
+        app.MapDelete("/api/sessions/{id}/artifacts/{fileName}", (string id, string fileName, WebChatService chat, WebArtifactService artifacts) =>
+        {
+            if (!chat.HasSession(id))
+            {
+                return Results.NotFound();
+            }
+
+            return artifacts.DeleteArtifact(id, fileName) ? Results.NoContent() : Results.NotFound();
+        });
+        app.MapPost("/api/sessions/{id}/runtime/messages", (string id, WebRuntimeMessageRequest request, WebChatService chat, WebArtifactService artifacts) =>
+        {
+            if (!chat.HasSession(id))
+            {
+                return Results.NotFound();
+            }
+
+            return Results.Json(artifacts.HandleRuntimeMessage(id, request));
+        });
         app.MapGet("/api/sessions/{id}/export", (string id, WebChatService chat) =>
         {
             var session = chat.GetSession(id);
@@ -224,9 +272,15 @@ public static class WebUiApplication
                     ex.LineNumber);
             }
         });
-        app.MapDelete("/api/sessions/{id}", (string id, WebChatService chat) =>
+        app.MapDelete("/api/sessions/{id}", (string id, WebChatService chat, WebArtifactService artifacts) =>
         {
-            return chat.DeleteSession(id) ? Results.NoContent() : Results.NotFound();
+            if (!chat.DeleteSession(id))
+            {
+                return Results.NotFound();
+            }
+
+            artifacts.DeleteSession(id);
+            return Results.NoContent();
         });
         app.MapPut("/api/sessions/{id}", (string id, UpdateSessionSettingsRequest request, WebChatService chat) =>
         {
