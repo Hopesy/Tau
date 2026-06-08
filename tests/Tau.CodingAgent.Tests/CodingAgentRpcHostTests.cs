@@ -295,6 +295,169 @@ public sealed class CodingAgentRpcHostTests
     }
 
     [Fact]
+    public async Task RunAsync_ExtensionUiSelectEmitsRequestAndCompletesFromRpcResponse()
+    {
+        var input = new AsyncLineReader();
+        var output = new JsonLineWriter();
+        var bridge = new CodingAgentRpcExtensionUiBridge();
+        var host = new CodingAgentRpcHost(
+            new FakeCodingAgentRunner((_, _) => EmptyRun()),
+            input,
+            output,
+            extensionUi: bridge);
+
+        var runTask = host.RunAsync();
+        var selectTask = bridge.SelectAsync("Pick target", ["alpha", "beta"]);
+        var request = await output.WaitForJsonLineAsync(
+                line => line.GetProperty("type").GetString() == "extension_ui_request",
+                TimeSpan.FromSeconds(5));
+
+        Assert.Equal("select", request.GetProperty("method").GetString());
+        Assert.Equal("Pick target", request.GetProperty("title").GetString());
+        Assert.False(request.TryGetProperty("timeout", out _));
+        Assert.Equal(
+            ["alpha", "beta"],
+            request.GetProperty("options").EnumerateArray().Select(option => option.GetString()!).ToArray());
+        var requestId = request.GetProperty("id").GetString();
+        Assert.False(string.IsNullOrWhiteSpace(requestId));
+
+        input.Enqueue($"{{\"type\":\"extension_ui_response\",\"id\":\"{requestId}\",\"value\":\"beta\"}}");
+        var selected = await selectTask.WaitAsync(TimeSpan.FromSeconds(5));
+        input.Complete();
+        await runTask.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal("beta", selected);
+        Assert.DoesNotContain(
+            ReadJsonLines(output),
+            line => line.GetProperty("type").GetString() == "response");
+    }
+
+    [Fact]
+    public async Task RunAsync_ExtensionUiConfirmInputAndEditorCompleteFromRpcResponses()
+    {
+        var input = new AsyncLineReader();
+        var output = new JsonLineWriter();
+        var bridge = new CodingAgentRpcExtensionUiBridge();
+        var host = new CodingAgentRpcHost(
+            new FakeCodingAgentRunner((_, _) => EmptyRun()),
+            input,
+            output,
+            extensionUi: bridge);
+
+        var runTask = host.RunAsync();
+
+        var confirmTask = bridge.ConfirmAsync("Continue?", "Run the task");
+        var confirmRequest = await output.WaitForJsonLineAsync(
+            line => line.TryGetProperty("method", out var method) && method.GetString() == "confirm",
+            TimeSpan.FromSeconds(5));
+        Assert.Equal("Run the task", confirmRequest.GetProperty("message").GetString());
+        input.Enqueue($"{{\"type\":\"extension_ui_response\",\"id\":\"{confirmRequest.GetProperty("id").GetString()}\",\"confirmed\":true}}");
+        Assert.True(await confirmTask.WaitAsync(TimeSpan.FromSeconds(5)));
+
+        var inputTask = bridge.InputAsync("Name", "project");
+        var inputRequest = await output.WaitForJsonLineAsync(
+            line => line.TryGetProperty("method", out var method) && method.GetString() == "input",
+            TimeSpan.FromSeconds(5));
+        Assert.Equal("project", inputRequest.GetProperty("placeholder").GetString());
+        input.Enqueue($"{{\"type\":\"extension_ui_response\",\"id\":\"{inputRequest.GetProperty("id").GetString()}\",\"value\":\"Tau\"}}");
+        Assert.Equal("Tau", await inputTask.WaitAsync(TimeSpan.FromSeconds(5)));
+
+        var editorTask = bridge.EditorAsync("Edit prompt", "prefill");
+        var editorRequest = await output.WaitForJsonLineAsync(
+            line => line.TryGetProperty("method", out var method) && method.GetString() == "editor",
+            TimeSpan.FromSeconds(5));
+        Assert.Equal("prefill", editorRequest.GetProperty("prefill").GetString());
+        input.Enqueue($"{{\"type\":\"extension_ui_response\",\"id\":\"{editorRequest.GetProperty("id").GetString()}\",\"cancelled\":true}}");
+        Assert.Null(await editorTask.WaitAsync(TimeSpan.FromSeconds(5)));
+
+        input.Complete();
+        await runTask.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
+    [Fact]
+    public async Task ExtensionUiBridge_FireAndForgetRequestsUseUpstreamRpcShape()
+    {
+        var output = new JsonLineWriter();
+        var bridge = new CodingAgentRpcExtensionUiBridge();
+        _ = new CodingAgentRpcHost(
+            new FakeCodingAgentRunner((_, _) => EmptyRun()),
+            new StringReader(string.Empty),
+            output,
+            extensionUi: bridge);
+
+        await bridge.SetStatusAsync("build", "running");
+        await bridge.NotifyAsync("Heads up", "warning");
+        await bridge.SetWidgetAsync("summary", ["line 1", "line 2"], "belowEditor");
+        await bridge.NotifyAsync("Plain notice");
+        await bridge.SetStatusAsync("idle", null);
+        await bridge.SetWidgetAsync("empty", null);
+        await bridge.SetTitleAsync("Tau");
+        await bridge.SetEditorTextAsync("draft");
+
+        var lines = ReadJsonLines(output);
+        var notify = lines.Single(line =>
+            line.GetProperty("method").GetString() == "notify" &&
+            line.GetProperty("message").GetString() == "Heads up");
+        Assert.Equal("Heads up", notify.GetProperty("message").GetString());
+        Assert.Equal("warning", notify.GetProperty("notifyType").GetString());
+
+        var plainNotify = lines.Single(line =>
+            line.GetProperty("method").GetString() == "notify" &&
+            line.GetProperty("message").GetString() == "Plain notice");
+        Assert.False(plainNotify.TryGetProperty("notifyType", out _));
+
+        var status = lines.Single(line =>
+            line.GetProperty("method").GetString() == "setStatus" &&
+            line.GetProperty("statusKey").GetString() == "build");
+        Assert.Equal("extension_ui_request", status.GetProperty("type").GetString());
+        Assert.Equal("build", status.GetProperty("statusKey").GetString());
+        Assert.Equal("running", status.GetProperty("statusText").GetString());
+
+        var idleStatus = lines.Single(line =>
+            line.GetProperty("method").GetString() == "setStatus" &&
+            line.GetProperty("statusKey").GetString() == "idle");
+        Assert.False(idleStatus.TryGetProperty("statusText", out _));
+
+        var widget = lines.Single(line =>
+            line.GetProperty("method").GetString() == "setWidget" &&
+            line.GetProperty("widgetKey").GetString() == "summary");
+        Assert.Equal("summary", widget.GetProperty("widgetKey").GetString());
+        Assert.Equal("belowEditor", widget.GetProperty("widgetPlacement").GetString());
+        Assert.Equal(
+            ["line 1", "line 2"],
+            widget.GetProperty("widgetLines").EnumerateArray().Select(line => line.GetString()!).ToArray());
+
+        var emptyWidget = lines.Single(line =>
+            line.GetProperty("method").GetString() == "setWidget" &&
+            line.GetProperty("widgetKey").GetString() == "empty");
+        Assert.False(emptyWidget.TryGetProperty("widgetLines", out _));
+        Assert.False(emptyWidget.TryGetProperty("widgetPlacement", out _));
+
+        Assert.Equal("Tau", lines.Single(line => line.GetProperty("method").GetString() == "setTitle").GetProperty("title").GetString());
+        Assert.Equal(
+            "draft",
+            lines.Single(line => line.GetProperty("method").GetString() == "set_editor_text").GetProperty("text").GetString());
+    }
+
+    [Fact]
+    public async Task ExtensionUiBridge_CancelledBeforeRequestReturnsDefaultsWithoutEmittingRequest()
+    {
+        var output = new JsonLineWriter();
+        var bridge = new CodingAgentRpcExtensionUiBridge();
+        _ = new CodingAgentRpcHost(
+            new FakeCodingAgentRunner((_, _) => EmptyRun()),
+            new StringReader(string.Empty),
+            output,
+            extensionUi: bridge);
+        using var cts = new CancellationTokenSource();
+        await cts.CancelAsync();
+
+        Assert.Null(await bridge.SelectAsync("Pick target", ["alpha"], cancellationToken: cts.Token));
+        Assert.False(await bridge.ConfirmAsync("Continue?", "Run the task", cancellationToken: cts.Token));
+        Assert.Empty(ReadJsonLines(output));
+    }
+
+    [Fact]
     public async Task RunAsync_GetAvailableModelsAndSetModelRequireConfiguredAuth()
     {
         var runner = new FakeCodingAgentRunner((_, _) => EmptyRun());
@@ -2260,6 +2423,54 @@ public sealed class CodingAgentRpcHostTests
             }
 
             return null;
+        }
+    }
+
+    private sealed class JsonLineWriter : StringWriter
+    {
+        private readonly Channel<JsonElement> _lines = Channel.CreateUnbounded<JsonElement>();
+        private readonly object _gate = new();
+
+        public async Task<JsonElement> WaitForJsonLineAsync(
+            Func<JsonElement, bool> predicate,
+            TimeSpan timeout)
+        {
+            using var cts = new CancellationTokenSource(timeout);
+            while (await _lines.Reader.WaitToReadAsync(cts.Token).ConfigureAwait(false))
+            {
+                while (_lines.Reader.TryRead(out var line))
+                {
+                    if (predicate(line))
+                    {
+                        return line;
+                    }
+                }
+            }
+
+            throw new TimeoutException("Timed out waiting for a matching JSON line.");
+        }
+
+        public override Task WriteLineAsync(string? value)
+        {
+            lock (_gate)
+            {
+                base.WriteLine(value);
+            }
+
+            if (!string.IsNullOrWhiteSpace(value))
+            {
+                _lines.Writer.TryWrite(JsonDocument.Parse(value).RootElement.Clone());
+            }
+
+            return Task.CompletedTask;
+        }
+
+        public override string ToString()
+        {
+            lock (_gate)
+            {
+                return base.ToString();
+            }
         }
     }
 

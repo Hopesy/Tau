@@ -41,6 +41,8 @@ public sealed class CodingAgentRpcHost
     private CancellationTokenSource? _activeBashCts;
     private BashOutputQueueState? _activeBashOutputQueue;
 
+    public CodingAgentRpcExtensionUiBridge ExtensionUi { get; }
+
     public CodingAgentRpcHost(
         ICodingAgentRunner runner,
         TextReader input,
@@ -54,7 +56,8 @@ public sealed class CodingAgentRpcHost
         Func<CodingAgentSessionSwitchHookState, CancellationToken, Task<CodingAgentSessionSwitchHookResult?>>? sessionSwitchHook = null,
         CodingAgentPromptTemplateStore? promptTemplateStore = null,
         CodingAgentSkillStore? skillStore = null,
-        CodingAgentExtensionCommandStore? extensionCommandStore = null)
+        CodingAgentExtensionCommandStore? extensionCommandStore = null,
+        CodingAgentRpcExtensionUiBridge? extensionUi = null)
     {
         ArgumentNullException.ThrowIfNull(runner);
         ArgumentNullException.ThrowIfNull(input);
@@ -69,6 +72,8 @@ public sealed class CodingAgentRpcHost
         _promptTemplateStore = promptTemplateStore;
         _skillStore = skillStore;
         _extensionCommandStore = extensionCommandStore;
+        ExtensionUi = extensionUi ?? new CodingAgentRpcExtensionUiBridge();
+        ExtensionUi.Attach(WriteJsonLineAsync);
         _shellRunner = shellRunner ?? new SystemCodingAgentShellRunner();
         _autoCompaction = autoCompaction ?? CodingAgentAutoCompactionOptions.Disabled;
         _sessionSwitchCoordinator = new CodingAgentSessionSwitchCoordinator(
@@ -137,6 +142,12 @@ public sealed class CodingAgentRpcHost
             {
                 await WriteErrorAsync(id, "unknown", "RPC command is missing a type.", cancellationToken)
                     .ConfigureAwait(false);
+                return;
+            }
+
+            if (type.Equals("extension_ui_response", StringComparison.Ordinal))
+            {
+                ExtensionUi.TryHandleResponse(root);
                 return;
             }
 
