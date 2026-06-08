@@ -34,6 +34,35 @@ public class CodingAgentPrintModeTests
     }
 
     [Fact]
+    public async Task RunAsync_WithImagePromptUsesContentBlocks()
+    {
+        var runner = new FakeCodingAgentRunner((_, _) => GetEvents());
+        var output = new StringWriter();
+        var error = new StringWriter();
+        var printMode = new CodingAgentPrintMode(runner, output, error);
+        var prompt = new CodingAgentInitialPrompt(
+            "describe",
+            [new ImageContent("aGVsbG8=", "image/png")]);
+
+        var exitCode = await printMode.RunAsync(prompt);
+
+        Assert.Equal(0, exitCode);
+        Assert.Empty(error.ToString());
+        Assert.Empty(runner.Inputs);
+        var content = Assert.Single(runner.ContentInputs);
+        Assert.Equal("describe", Assert.IsType<TextContent>(content[0]).Text);
+        var image = Assert.IsType<ImageContent>(content[1]);
+        Assert.Equal("aGVsbG8=", image.Data);
+        Assert.Equal("image/png", image.MimeType);
+
+        static async IAsyncEnumerable<AgentEvent> GetEvents()
+        {
+            yield return new AgentEndEvent();
+            await Task.CompletedTask;
+        }
+    }
+
+    [Fact]
     public async Task RunAsync_AgentEndError_WritesToErrorAndReturnsOne()
     {
         var runner = new FakeCodingAgentRunner((_, _) => GetEvents());

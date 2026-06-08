@@ -25,6 +25,8 @@ public sealed class CodingAgentHost
     private CodingAgentAutoCompactionOptions _autoCompaction;
     private readonly CodingAgentCommandRouter _commandRouter;
     private readonly ICodingAgentTurnInputSource? _turnInputSource;
+    private readonly CodingAgentInitialPrompt? _initialPrompt;
+    private readonly IReadOnlyList<string> _initialMessages;
     private readonly IDisposable? _compositionBinding;
     private CodingAgentRetryOptions _retryOptions;
     private bool _shutdownRendered;
@@ -60,7 +62,9 @@ public sealed class CodingAgentHost
         IKeyBindingMap? keyBindings = null,
         CodingAgentExtensionResourceState? extensionResourceState = null,
         Func<IKeyBindingMap?>? reloadKeyBindings = null,
-        TuiCompositionSession? compositionSession = null)
+        TuiCompositionSession? compositionSession = null,
+        CodingAgentInitialPrompt? initialPrompt = null,
+        IReadOnlyList<string>? initialMessages = null)
     {
         _ui = ui;
         _runner = runner;
@@ -74,6 +78,8 @@ public sealed class CodingAgentHost
         _autoCompaction = _autoCompactionBase.WithEnabledOverride(autoCompactionEnabled);
         _retryOptions = retryOptions ?? CodingAgentRetryOptions.Disabled;
         _turnInputSource = turnInputSource;
+        _initialPrompt = initialPrompt;
+        _initialMessages = initialMessages ?? [];
         _compositionBinding = compositionSession?.BindTranscript(ui);
         RefreshCompositionStatus();
         _commandRouter = new CodingAgentCommandRouter(
@@ -117,6 +123,7 @@ public sealed class CodingAgentHost
     {
         _compositionSession?.Start();
         _ui.ShowWelcome("Tau — Coding Agent", "Type your message, or 'exit' to quit.");
+        await RunInitialInputsAsync(cancellationToken).ConfigureAwait(false);
 
         while (!cancellationToken.IsCancellationRequested)
         {
@@ -189,6 +196,42 @@ public sealed class CodingAgentHost
         return 0;
     }
 
+    private async Task RunInitialInputsAsync(CancellationToken cancellationToken)
+    {
+        if (_initialPrompt is not null)
+        {
+            await TryAutoCompactAsync(_initialPrompt.Text, cancellationToken).ConfigureAwait(false);
+            await RunTurnWithRetryAsync(_initialPrompt, cancellationToken).ConfigureAwait(false);
+            PersistSession();
+        }
+
+        foreach (var message in _initialMessages)
+        {
+            if (string.IsNullOrWhiteSpace(message))
+            {
+                continue;
+            }
+
+            var slashPreparation = TryPrepareSlashInvocation(message, out var preparedInput, out var handledSlashResult);
+            if (handledSlashResult is not null)
+            {
+                RenderCommandResult(handledSlashResult);
+                PersistSession();
+                if (_shutdownRendered)
+                {
+                    return;
+                }
+
+                continue;
+            }
+
+            var input = slashPreparation == SlashInvocationPreparation.Expanded ? preparedInput : message;
+            await TryAutoCompactAsync(input, cancellationToken).ConfigureAwait(false);
+            await RunTurnWithRetryAsync(input, cancellationToken).ConfigureAwait(false);
+            PersistSession();
+        }
+    }
+
     private async Task<bool> TryHandleEditorActionAsync(
         EditorAction action,
         CancellationToken cancellationToken)
@@ -259,15 +302,39 @@ public sealed class CodingAgentHost
 
     private async Task RunTurnWithRetryAsync(string input, CancellationToken cancellationToken)
     {
+        await RunTurnWithRetryAsync(
+                input,
+                (logContext, token) => RunSingleTurnAttemptAsync(input, logContext, token),
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private async Task RunTurnWithRetryAsync(
+        CodingAgentInitialPrompt prompt,
+        CancellationToken cancellationToken)
+    {
+        var displayText = prompt.Text;
+        await RunTurnWithRetryAsync(
+                displayText,
+                (logContext, token) => RunSingleTurnAttemptAsync(prompt, logContext, token),
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private async Task RunTurnWithRetryAsync(
+        string displayedInput,
+        Func<TauRuntimeLogContext, CancellationToken, Task<CodingAgentTurnAttemptResult>> runAttempt,
+        CancellationToken cancellationToken)
+    {
         var rollbackSnapshot = CreateRollbackSnapshot();
         var logContext = CreateTurnLogContext();
         var retryAttempt = 0;
         var overflowRecoveryAttempted = false;
-        _ui.WriteUserMessage(input);
+        _ui.WriteUserMessage(displayedInput);
 
         while (true)
         {
-            var result = await RunSingleTurnAttemptAsync(input, logContext, cancellationToken).ConfigureAwait(false);
+            var result = await runAttempt(logContext, cancellationToken).ConfigureAwait(false);
             if (result.IsSuccess)
             {
                 if (retryAttempt > 0)
@@ -357,6 +424,63 @@ public sealed class CodingAgentHost
 
             RollbackTurn(rollbackSnapshot, "rolled back failed turn");
             return;
+        }
+    }
+
+    private async Task<CodingAgentTurnAttemptResult> RunSingleTurnAttemptAsync(
+        CodingAgentInitialPrompt prompt,
+        TauRuntimeLogContext logContext,
+        CancellationToken cancellationToken)
+    {
+        var errorAlreadyRendered = false;
+        using var turnInputCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        Task? turnInputTask = null;
+
+        try
+        {
+            RefreshCompositionStatus("running");
+            var events = prompt.HasImages
+                ? _runner.RunAsync(prompt.ToContentBlocks(), logContext, cancellationToken)
+                : _runner.RunAsync(prompt.Text, logContext, cancellationToken);
+            turnInputTask = StartTurnInputListener(turnInputCts.Token);
+
+            await foreach (var evt in events.ConfigureAwait(false))
+            {
+                if (evt is AgentEndEvent { ErrorMessage: not null } end)
+                {
+                    HandleEvent(evt);
+                    errorAlreadyRendered = true;
+                    return CodingAgentTurnAttemptResult.Failed(end.ErrorMessage, errorAlreadyRendered);
+                }
+
+                HandleEvent(evt);
+            }
+
+            return CodingAgentTurnAttemptResult.Success();
+        }
+        catch (OperationCanceledException)
+        {
+            WriteCancelled();
+            return CodingAgentTurnAttemptResult.Cancelled();
+        }
+        catch (Exception ex)
+        {
+            return CodingAgentTurnAttemptResult.Failed(ex.Message, errorAlreadyRendered: false);
+        }
+        finally
+        {
+            turnInputCts.Cancel();
+            if (turnInputTask is not null)
+            {
+                try
+                {
+                    await turnInputTask.ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    // Expected when the turn finishes before the input listener does.
+                }
+            }
         }
     }
 

@@ -4,18 +4,41 @@ using Tau.Tui.Abstractions;
 using Tau.Tui.Rendering;
 using Tau.Tui.Runtime;
 
-var printPrompt = TryExtractPrintPrompt(args);
-var rpcMode = HasRpcMode(args);
-var noContextFiles = HasNoContextFiles(args);
-var noThemes = HasNoThemes(args);
-var explicitThemePaths = GetThemePaths(args);
+CodingAgentCliArguments cli;
+try
+{
+    cli = CodingAgentCliArguments.Parse(args);
+}
+catch (ArgumentException ex)
+{
+    Console.Error.WriteLine(ex.Message);
+    return 1;
+}
+
+var printMode = cli.PrintMode;
+var rpcMode = cli.RpcMode;
+var noContextFiles = cli.NoContextFiles;
+var noThemes = cli.NoThemes;
+var explicitThemePaths = cli.ThemePaths;
+if (rpcMode && cli.FileArguments.Count > 0)
+{
+    Console.Error.WriteLine("error: @file arguments are not supported in RPC mode");
+    return 1;
+}
+
+var stdinContent = await TryReadRedirectedStdinAsync(rpcMode).ConfigureAwait(false);
+if (!rpcMode && !printMode && stdinContent is not null)
+{
+    printMode = true;
+}
+
 var keyReader = new SystemConsoleKeyReader();
-var useCompositionUi = ShouldUseCompositionUi(printPrompt, rpcMode);
+var useCompositionUi = ShouldUseCompositionUi(printMode, rpcMode);
 var compositionSession = useCompositionUi
     ? new TuiCompositionSession(TuiAnsiRenderSurface.ForConsole(), keyReader)
     : null;
 ITerminal terminal = compositionSession is null ? new SystemConsoleTerminal() : new TuiPassiveTerminal();
-var editor = printPrompt is null && !rpcMode ? CreateInteractiveEditorIfAttached(keyReader, compositionSession, useCompositionUi) : null;
+var editor = !printMode && !rpcMode ? CreateInteractiveEditorIfAttached(keyReader, compositionSession, useCompositionUi) : null;
 var ui = new InteractiveConsoleSession(
     terminal,
     editor,
@@ -27,103 +50,6 @@ var ui = new InteractiveConsoleSession(
             compositionSession.Render(force: true);
         });
 
-static bool HasRpcMode(string[] cliArgs)
-{
-    for (var i = 0; i < cliArgs.Length; i++)
-    {
-        var arg = cliArgs[i];
-        if (arg.Equals("--mode=rpc", StringComparison.OrdinalIgnoreCase))
-        {
-            return true;
-        }
-
-        if (arg.Equals("--mode", StringComparison.OrdinalIgnoreCase) &&
-            i + 1 < cliArgs.Length &&
-            cliArgs[i + 1].Equals("rpc", StringComparison.OrdinalIgnoreCase))
-        {
-            return true;
-        }
-    }
-
-    return false;
-}
-
-static bool HasNoContextFiles(string[] cliArgs)
-{
-    foreach (var arg in cliArgs)
-    {
-        if (arg.Equals("--no-context-files", StringComparison.OrdinalIgnoreCase) ||
-            arg.Equals("-nc", StringComparison.OrdinalIgnoreCase))
-        {
-            return true;
-        }
-    }
-
-    return false;
-}
-
-static bool HasNoThemes(string[] cliArgs)
-{
-    foreach (var arg in cliArgs)
-    {
-        if (arg.Equals("--no-themes", StringComparison.OrdinalIgnoreCase) ||
-            arg.Equals("-nt", StringComparison.OrdinalIgnoreCase))
-        {
-            return true;
-        }
-    }
-
-    return false;
-}
-
-static IReadOnlyList<string> GetThemePaths(string[] cliArgs)
-{
-    var paths = new List<string>();
-    for (var i = 0; i < cliArgs.Length; i++)
-    {
-        var arg = cliArgs[i];
-        if (arg.Equals("--theme", StringComparison.OrdinalIgnoreCase))
-        {
-            if (i + 1 >= cliArgs.Length)
-            {
-                Console.Error.WriteLine("error: --theme requires a path argument");
-                Environment.Exit(1);
-            }
-
-            paths.Add(cliArgs[++i]);
-            continue;
-        }
-
-        if (arg.StartsWith("--theme=", StringComparison.OrdinalIgnoreCase))
-        {
-            paths.Add(arg["--theme=".Length..]);
-        }
-    }
-
-    return paths;
-}
-
-static string? TryExtractPrintPrompt(string[] cliArgs)
-{
-    for (var i = 0; i < cliArgs.Length; i++)
-    {
-        var arg = cliArgs[i];
-        if (arg is "--print" or "-p")
-        {
-            if (i + 1 >= cliArgs.Length)
-            {
-                Console.Error.WriteLine("error: --print requires a prompt argument");
-                Environment.Exit(1);
-            }
-            return cliArgs[i + 1];
-        }
-        if (arg.StartsWith("--print=", StringComparison.Ordinal))
-        {
-            return arg["--print=".Length..];
-        }
-    }
-    return null;
-}
 JsonlTauLogSink? logSink;
 try
 {
@@ -135,12 +61,24 @@ catch
     logSink = null;
 }
 
-static bool ShouldUseCompositionUi(string? printPrompt, bool rpcMode) =>
-    printPrompt is null &&
+static bool ShouldUseCompositionUi(bool printMode, bool rpcMode) =>
+    !printMode &&
     !rpcMode &&
     !Console.IsInputRedirected &&
     !Console.IsOutputRedirected &&
     !string.Equals(Environment.GetEnvironmentVariable("TAU_CODING_AGENT_DISABLE_INPUT_EDITOR"), "1", StringComparison.Ordinal);
+
+static async Task<string?> TryReadRedirectedStdinAsync(bool rpcMode)
+{
+    if (rpcMode || !Console.IsInputRedirected)
+    {
+        return null;
+    }
+
+    var content = await Console.In.ReadToEndAsync().ConfigureAwait(false);
+    var trimmed = content.Trim();
+    return string.IsNullOrEmpty(trimmed) ? null : trimmed;
+}
 
 static InteractiveInputEditor? CreateInteractiveEditorIfAttached(
     IConsoleKeyReader keyReader,
@@ -263,6 +201,25 @@ var session = CodingAgentTreeSessionStore.HasExplicitTreeSessionPath || treeSess
     ? treeSession.ToFlatSnapshot()
     : flatSession;
 var settings = settingsStore.Load();
+CodingAgentInitialPrompt? initialPrompt = null;
+try
+{
+    initialPrompt = await CodingAgentInitialMessageBuilder.BuildAsync(
+            cli.Messages,
+            cli.FileArguments,
+            stdinContent,
+            options: new CodingAgentInitialMessageOptions(
+                AutoResizeImages: settings.ImagesAutoResize ?? true,
+                BlockImages: settings.ImagesBlockImages ?? false),
+            cancellationToken: CancellationToken.None)
+        .ConfigureAwait(false);
+}
+catch (Exception ex) when (ex is FileNotFoundException or IOException or UnauthorizedAccessException)
+{
+    Console.Error.WriteLine($"error: {ex.Message}");
+    return 1;
+}
+
 var providerId = Environment.GetEnvironmentVariable("TAU_PROVIDER") ?? session.Provider ?? settings.DefaultProvider;
 var modelId = Environment.GetEnvironmentVariable("TAU_MODEL")
               ?? (string.Equals(providerId, session.Provider, StringComparison.OrdinalIgnoreCase) ? session.Model : null)
@@ -292,10 +249,16 @@ Console.CancelKeyPress += (_, e) =>
     cts.Cancel();
 };
 
-if (printPrompt is not null)
+if (printMode)
 {
-    var printMode = new CodingAgentPrintMode(runner, Console.Out, Console.Error);
-    return await printMode.RunAsync(printPrompt, cts.Token).ConfigureAwait(false);
+    var printRunner = new CodingAgentPrintMode(runner, Console.Out, Console.Error);
+    if (initialPrompt is null)
+    {
+        Console.Error.WriteLine("error: --print requires a prompt, stdin, or @file argument");
+        return 1;
+    }
+
+    return await printRunner.RunAsync(initialPrompt, cts.Token).ConfigureAwait(false);
 }
 
 if (rpcMode)
@@ -390,6 +353,8 @@ var host = new CodingAgentHost(
                 skillStore,
                 extensionCommandStore));
             return editor.KeyBindings;
-        });
+        },
+    initialPrompt: initialPrompt,
+    initialMessages: cli.Messages.Count > 1 ? cli.Messages.Skip(1).ToArray() : null);
 
 return await host.RunAsync(cts.Token).ConfigureAwait(false);
