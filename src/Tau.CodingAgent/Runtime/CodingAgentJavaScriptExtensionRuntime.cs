@@ -2,6 +2,8 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
+using Tau.Agent;
+using Tau.Ai;
 
 namespace Tau.CodingAgent.Runtime;
 
@@ -32,6 +34,7 @@ public sealed record CodingAgentJavaScriptExtensionLoadResult(
     bool Success,
     IReadOnlyList<CodingAgentJavaScriptExtensionCommand> Commands,
     IReadOnlyList<CodingAgentJavaScriptExtensionTool> Tools,
+    IReadOnlyList<string> EventHandlerTypes,
     CodingAgentJavaScriptExtensionUnsupportedRegistrations Unsupported,
     string? Error);
 
@@ -51,6 +54,19 @@ public sealed record CodingAgentJavaScriptExtensionToolInvokeResult(
 public sealed record CodingAgentJavaScriptExtensionToolPrepareResult(
     bool Success,
     JsonElement? PreparedArgs,
+    string? Error);
+
+public sealed record CodingAgentJavaScriptExtensionToolCallEventResult(
+    bool Success,
+    bool Blocked,
+    string? Reason,
+    string? Error);
+
+public sealed record CodingAgentJavaScriptExtensionToolResultEventResult(
+    bool Success,
+    IReadOnlyList<string> Content,
+    bool IsError,
+    JsonElement? Details,
     string? Error);
 
 public sealed class CodingAgentJavaScriptExtensionRuntime
@@ -82,7 +98,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
         var execution = Execute(BuildPayload("load", filePath, _cwd));
         if (!execution.Success)
         {
-            return new CodingAgentJavaScriptExtensionLoadResult(false, [], [], EmptyUnsupported, execution.Error);
+            return new CodingAgentJavaScriptExtensionLoadResult(false, [], [], [], EmptyUnsupported, execution.Error);
         }
 
         try
@@ -95,6 +111,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
                     false,
                     [],
                     [],
+                    [],
                     ReadUnsupported(root),
                     ReadString(root, "error") ?? "javascript extension load failed");
             }
@@ -103,6 +120,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
                 true,
                 ReadCommands(root),
                 ReadTools(root),
+                ReadStringArray(root, "eventHandlers"),
                 ReadUnsupported(root),
                 null);
         }
@@ -110,6 +128,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
         {
             return new CodingAgentJavaScriptExtensionLoadResult(
                 false,
+                [],
                 [],
                 [],
                 EmptyUnsupported,
@@ -257,6 +276,105 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
         }
     }
 
+    public CodingAgentJavaScriptExtensionToolCallEventResult EmitToolCall(
+        string filePath,
+        string toolName,
+        string toolCallId,
+        JsonElement args)
+    {
+        var execution = Execute(BuildPayload(
+            "emitToolCall",
+            filePath,
+            _cwd,
+            toolName: toolName,
+            toolCallId: toolCallId,
+            toolArgs: args));
+        if (!execution.Success)
+        {
+            return new CodingAgentJavaScriptExtensionToolCallEventResult(false, false, null, execution.Error);
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(execution.ResultJson);
+            var root = document.RootElement;
+            if (!ReadBool(root, "ok"))
+            {
+                return new CodingAgentJavaScriptExtensionToolCallEventResult(
+                    false,
+                    false,
+                    null,
+                    ReadString(root, "error") ?? "javascript extension tool_call handler failed");
+            }
+
+            return new CodingAgentJavaScriptExtensionToolCallEventResult(
+                true,
+                ReadBool(root, "block"),
+                ReadString(root, "reason"),
+                null);
+        }
+        catch (JsonException ex)
+        {
+            return new CodingAgentJavaScriptExtensionToolCallEventResult(
+                false,
+                false,
+                null,
+                $"invalid node extension runtime output: {ex.Message}");
+        }
+    }
+
+    public CodingAgentJavaScriptExtensionToolResultEventResult EmitToolResult(
+        string filePath,
+        string toolName,
+        string toolCallId,
+        JsonElement args,
+        ToolResult result)
+    {
+        var execution = Execute(BuildPayload(
+            "emitToolResult",
+            filePath,
+            _cwd,
+            toolName: toolName,
+            toolCallId: toolCallId,
+            toolArgs: args,
+            toolResult: result));
+        if (!execution.Success)
+        {
+            return new CodingAgentJavaScriptExtensionToolResultEventResult(false, [], result.IsError, null, execution.Error);
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(execution.ResultJson);
+            var root = document.RootElement;
+            if (!ReadBool(root, "ok"))
+            {
+                return new CodingAgentJavaScriptExtensionToolResultEventResult(
+                    false,
+                    [],
+                    result.IsError,
+                    null,
+                    ReadString(root, "error") ?? "javascript extension tool_result handler failed");
+            }
+
+            return new CodingAgentJavaScriptExtensionToolResultEventResult(
+                true,
+                ReadStringArray(root, "content"),
+                ReadBool(root, "isError"),
+                root.TryGetProperty("details", out var details) ? details.Clone() : null,
+                null);
+        }
+        catch (JsonException ex)
+        {
+            return new CodingAgentJavaScriptExtensionToolResultEventResult(
+                false,
+                [],
+                result.IsError,
+                null,
+                $"invalid node extension runtime output: {ex.Message}");
+        }
+    }
+
     private ProcessExecutionResult Execute(string payloadJson)
     {
         var executable = string.IsNullOrWhiteSpace(_nodeExecutable) ? "node" : _nodeExecutable!;
@@ -324,7 +442,8 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
         string? args = null,
         string? toolName = null,
         string? toolCallId = null,
-        JsonElement? toolArgs = null)
+        JsonElement? toolArgs = null,
+        ToolResult? toolResult = null)
     {
         using var stream = new MemoryStream();
         using (var writer = new Utf8JsonWriter(stream))
@@ -359,10 +478,100 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
                 toolArgs.Value.WriteTo(writer);
             }
 
+            if (toolResult is not null)
+            {
+                writer.WritePropertyName("toolResult");
+                WriteToolResult(writer, toolResult);
+            }
+
             writer.WriteEndObject();
         }
 
         return Encoding.UTF8.GetString(stream.ToArray());
+    }
+
+    private static void WriteToolResult(Utf8JsonWriter writer, ToolResult result)
+    {
+        writer.WriteStartObject();
+        writer.WriteBoolean("isError", result.IsError);
+        writer.WritePropertyName("content");
+        WriteContentBlocks(writer, result.Content);
+        if (result.Details is not null)
+        {
+            writer.WritePropertyName("details");
+            WriteObject(writer, result.Details);
+        }
+
+        writer.WriteEndObject();
+    }
+
+    private static void WriteContentBlocks(Utf8JsonWriter writer, IReadOnlyList<ContentBlock> content)
+    {
+        writer.WriteStartArray();
+        foreach (var block in content)
+        {
+            writer.WriteStartObject();
+            switch (block)
+            {
+                case TextContent text:
+                    writer.WriteString("type", "text");
+                    writer.WriteString("text", text.Text);
+                    break;
+                case ImageContent image:
+                    writer.WriteString("type", "image");
+                    writer.WriteString("data", image.Data);
+                    writer.WriteString("mimeType", image.MimeType);
+                    break;
+                case ThinkingContent thinking:
+                    writer.WriteString("type", "text");
+                    writer.WriteString("text", thinking.Thinking);
+                    break;
+                default:
+                    writer.WriteString("type", block.Type);
+                    break;
+            }
+
+            writer.WriteEndObject();
+        }
+
+        writer.WriteEndArray();
+    }
+
+    private static void WriteObject(Utf8JsonWriter writer, object value)
+    {
+        switch (value)
+        {
+            case JsonElement element:
+                element.WriteTo(writer);
+                break;
+            case JsonDocument document:
+                document.RootElement.WriteTo(writer);
+                break;
+            case string text:
+                writer.WriteStringValue(text);
+                break;
+            case bool boolean:
+                writer.WriteBooleanValue(boolean);
+                break;
+            case int integer:
+                writer.WriteNumberValue(integer);
+                break;
+            case long integer:
+                writer.WriteNumberValue(integer);
+                break;
+            case double number:
+                writer.WriteNumberValue(number);
+                break;
+            case float number:
+                writer.WriteNumberValue(number);
+                break;
+            case decimal number:
+                writer.WriteNumberValue(number);
+                break;
+            default:
+                writer.WriteStringValue(value.ToString());
+                break;
+        }
     }
 
     private static IReadOnlyList<CodingAgentJavaScriptExtensionCommand> ReadCommands(JsonElement root)
@@ -686,6 +895,19 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
           return text.length === 0 ? [] : [text];
         }
 
+        function normalizeToolEventContent(value) {
+          if (!Array.isArray(value)) return normalizeToolContent(value);
+          return value.map(item => toText(item)).filter(text => text.length > 0);
+        }
+
+        function normalizeContentBlocks(value) {
+          if (!Array.isArray(value)) return [];
+          return value.map(item => {
+            if (item && typeof item === "object") return item;
+            return { type: "text", text: toText(item) };
+          });
+        }
+
         function normalizeToolResult(value) {
           if (value && typeof value === "object") {
             const content = Object.prototype.hasOwnProperty.call(value, "content")
@@ -705,7 +927,24 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
           };
         }
 
-        function createApi(commandMap, toolMap, unsupported, actions, payload) {
+        function addHandler(handlerMap, unsupported, eventName, handler) {
+          const key = String(eventName ?? "");
+          if ((key !== "tool_call" && key !== "tool_result") || typeof handler !== "function") {
+            unsupported.handlers++;
+            return () => {};
+          }
+
+          const handlers = handlerMap.get(key) ?? [];
+          handlers.push(handler);
+          handlerMap.set(key, handlers);
+          return () => {
+            const current = handlerMap.get(key) ?? [];
+            const index = current.indexOf(handler);
+            if (index >= 0) current.splice(index, 1);
+          };
+        }
+
+        function createApi(commandMap, toolMap, handlerMap, unsupported, actions, payload) {
           const recordMessage = value => {
             const message = toText(value);
             if (message.trim().length > 0) actions.push({ type: "sendMessage", message });
@@ -724,7 +963,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
             registerMessageRenderer() { unsupported.messageRenderers++; },
             registerProvider() { unsupported.providers++; },
             unregisterProvider() { unsupported.providers++; },
-            on() { unsupported.handlers++; },
+            on(eventName, handler) { return addHandler(handlerMap, unsupported, eventName, handler); },
             getFlag() { return undefined; },
             sendMessage: recordMessage,
             sendUserMessage: recordMessage,
@@ -753,7 +992,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
             setThinkingLevel() {},
             exec() { return Promise.reject(new Error("extension exec is not supported by Tau javascript runtime baseline")); },
             events: {
-              on() { unsupported.handlers++; return () => {}; },
+              on(eventName, handler) { return addHandler(handlerMap, unsupported, eventName, handler); },
               emit() {}
             },
             cwd: payload.cwd
@@ -825,9 +1064,10 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
           const payload = JSON.parse(input || "{}");
           const commandMap = new Map();
           const toolMap = new Map();
+          const handlerMap = new Map();
           const unsupported = { tools: 0, flags: 0, shortcuts: 0, handlers: 0, messageRenderers: 0, providers: 0 };
           const actions = [];
-          const api = createApi(commandMap, toolMap, unsupported, actions, payload);
+          const api = createApi(commandMap, toolMap, handlerMap, unsupported, actions, payload);
           const factory = await loadFactory(payload.filePath);
           await factory(api);
 
@@ -848,8 +1088,78 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
             executionMode: typeof tool?.executionMode === "string" ? tool.executionMode : undefined
           }));
 
+          const eventHandlers = Array.from(handlerMap.entries())
+            .filter(entry => entry[1].length > 0)
+            .map(entry => entry[0]);
+
           if (payload.mode === "load") {
-            write({ ok: true, commands, tools, unsupported });
+            write({ ok: true, commands, tools, eventHandlers, unsupported });
+            return;
+          }
+
+          if (payload.mode === "emitToolCall") {
+            const handlers = handlerMap.get("tool_call") ?? [];
+            const event = {
+              type: "tool_call",
+              toolName: String(payload.toolName ?? ""),
+              toolCallId: String(payload.toolCallId ?? ""),
+              input: payload.toolArgs && typeof payload.toolArgs === "object" ? payload.toolArgs : {}
+            };
+
+            let result = undefined;
+            for (const handler of handlers) {
+              const handlerResult = await handler(event, createCommandContext(api, payload));
+              if (handlerResult) {
+                result = handlerResult;
+                if (result.block) break;
+              }
+            }
+
+            write({
+              ok: true,
+              block: result && result.block === true,
+              reason: result && typeof result.reason === "string" ? result.reason : undefined
+            });
+            return;
+          }
+
+          if (payload.mode === "emitToolResult") {
+            const handlers = handlerMap.get("tool_result") ?? [];
+            const event = {
+              type: "tool_result",
+              toolName: String(payload.toolName ?? ""),
+              toolCallId: String(payload.toolCallId ?? ""),
+              input: payload.toolArgs && typeof payload.toolArgs === "object" ? payload.toolArgs : {},
+              content: normalizeContentBlocks(payload.toolResult?.content),
+              details: payload.toolResult && Object.prototype.hasOwnProperty.call(payload.toolResult, "details")
+                ? payload.toolResult.details
+                : undefined,
+              isError: payload.toolResult?.isError === true
+            };
+
+            for (const handler of handlers) {
+              try {
+                const handlerResult = await handler(event, createCommandContext(api, payload));
+                if (!handlerResult) continue;
+                if (Object.prototype.hasOwnProperty.call(handlerResult, "content")) {
+                  event.content = normalizeContentBlocks(handlerResult.content);
+                }
+                if (Object.prototype.hasOwnProperty.call(handlerResult, "details")) {
+                  event.details = handlerResult.details;
+                }
+                if (Object.prototype.hasOwnProperty.call(handlerResult, "isError")) {
+                  event.isError = handlerResult.isError === true;
+                }
+              } catch {
+              }
+            }
+
+            write({
+              ok: true,
+              content: normalizeToolEventContent(event.content),
+              isError: event.isError,
+              details: event.details
+            });
             return;
           }
 

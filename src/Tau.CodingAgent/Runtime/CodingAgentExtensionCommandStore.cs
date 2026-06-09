@@ -70,6 +70,12 @@ public sealed record CodingAgentExtensionModule(
     string Runtime,
     string Status);
 
+public sealed record CodingAgentExtensionEventHandler(
+    string FilePath,
+    string Scope,
+    string Runtime,
+    string EventType);
+
 public sealed record CodingAgentExtensionDiagnostic(
     string Severity,
     string Message,
@@ -82,6 +88,7 @@ public sealed record CodingAgentExtensionStatus(
     CodingAgentExtensionResources Resources,
     IReadOnlyList<CodingAgentExtensionFileStatus> Files,
     IReadOnlyList<CodingAgentExtensionModule> Modules,
+    IReadOnlyList<CodingAgentExtensionEventHandler> EventHandlers,
     IReadOnlyList<CodingAgentExtensionDiagnostic> Diagnostics);
 
 public sealed class CodingAgentExtensionCommandStore
@@ -130,6 +137,32 @@ public sealed class CodingAgentExtensionCommandStore
             .ToArray();
     }
 
+    public IReadOnlyList<IToolInterceptor> LoadToolInterceptors()
+    {
+        var modules = LoadStatus()
+            .EventHandlers
+            .Where(static handler =>
+                handler.EventType.Equals("tool_call", StringComparison.Ordinal) ||
+                handler.EventType.Equals("tool_result", StringComparison.Ordinal))
+            .GroupBy(static handler => Path.GetFullPath(handler.FilePath), StringComparer.OrdinalIgnoreCase)
+            .Select(static group =>
+            {
+                var handlers = group.ToArray();
+                var first = handlers[0];
+                return new CodingAgentExtensionToolEventModule(
+                    first.FilePath,
+                    first.Scope,
+                    first.Runtime,
+                    handlers.Any(static handler => handler.EventType.Equals("tool_call", StringComparison.Ordinal)),
+                    handlers.Any(static handler => handler.EventType.Equals("tool_result", StringComparison.Ordinal)));
+            })
+            .ToArray();
+
+        return modules.Length == 0
+            ? []
+            : [new CodingAgentExtensionToolEventInterceptor(modules, _javaScriptRuntime)];
+    }
+
     public CodingAgentExtensionResources LoadResources()
     {
         return LoadStatus().Resources;
@@ -144,11 +177,12 @@ public sealed class CodingAgentExtensionCommandStore
         var themePaths = new List<string>();
         var files = new List<CodingAgentExtensionFileStatus>();
         var modules = new List<CodingAgentExtensionModule>();
+        var eventHandlers = new List<CodingAgentExtensionEventHandler>();
         var diagnostics = new List<CodingAgentExtensionDiagnostic>();
         if (_includeDefaults)
         {
-            LoadSourceDirectory(_userExtensionsDirectory, "user", definitions, tools, skillPaths, promptPaths, themePaths, files, modules, diagnostics, _javaScriptRuntime);
-            LoadSourceDirectory(Path.Combine(_cwd, ".tau", "extensions"), "project", definitions, tools, skillPaths, promptPaths, themePaths, files, modules, diagnostics, _javaScriptRuntime);
+            LoadSourceDirectory(_userExtensionsDirectory, "user", definitions, tools, skillPaths, promptPaths, themePaths, files, modules, eventHandlers, diagnostics, _javaScriptRuntime);
+            LoadSourceDirectory(Path.Combine(_cwd, ".tau", "extensions"), "project", definitions, tools, skillPaths, promptPaths, themePaths, files, modules, eventHandlers, diagnostics, _javaScriptRuntime);
         }
 
         foreach (var path in GetExplicitPaths())
@@ -156,7 +190,7 @@ public sealed class CodingAgentExtensionCommandStore
             var resolved = ResolvePath(path, _cwd);
             if (Directory.Exists(resolved))
             {
-                LoadSourceDirectory(resolved, "path", definitions, tools, skillPaths, promptPaths, themePaths, files, modules, diagnostics, _javaScriptRuntime, reportMissing: true);
+                LoadSourceDirectory(resolved, "path", definitions, tools, skillPaths, promptPaths, themePaths, files, modules, eventHandlers, diagnostics, _javaScriptRuntime, reportMissing: true);
             }
             else if (File.Exists(resolved) && Path.GetExtension(resolved).Equals(".json", StringComparison.OrdinalIgnoreCase))
             {
@@ -164,7 +198,7 @@ public sealed class CodingAgentExtensionCommandStore
             }
             else if (File.Exists(resolved) && IsModuleFile(resolved))
             {
-                AddModule(resolved, "path", modules, definitions, tools, diagnostics, _javaScriptRuntime);
+                AddModule(resolved, "path", modules, eventHandlers, definitions, tools, diagnostics, _javaScriptRuntime);
             }
             else if (File.Exists(resolved))
             {
@@ -197,6 +231,7 @@ public sealed class CodingAgentExtensionCommandStore
             modules
                 .DistinctBy(static module => Path.GetFullPath(module.FilePath), StringComparer.OrdinalIgnoreCase)
                 .ToArray(),
+            eventHandlers,
             diagnostics);
     }
 
@@ -308,6 +343,7 @@ public sealed class CodingAgentExtensionCommandStore
         ICollection<string> themePaths,
         ICollection<CodingAgentExtensionFileStatus> fileStatuses,
         ICollection<CodingAgentExtensionModule> modules,
+        ICollection<CodingAgentExtensionEventHandler> eventHandlers,
         ICollection<CodingAgentExtensionDiagnostic> diagnostics,
         CodingAgentJavaScriptExtensionRuntime javaScriptRuntime,
         bool reportMissing = false)
@@ -351,7 +387,7 @@ public sealed class CodingAgentExtensionCommandStore
 
         foreach (var module in DiscoverModuleFiles(directory))
         {
-            AddModule(module, scope, modules, definitions, tools, diagnostics, javaScriptRuntime);
+            AddModule(module, scope, modules, eventHandlers, definitions, tools, diagnostics, javaScriptRuntime);
         }
     }
 
@@ -848,6 +884,7 @@ public sealed class CodingAgentExtensionCommandStore
         string filePath,
         string scope,
         ICollection<CodingAgentExtensionModule> modules,
+        ICollection<CodingAgentExtensionEventHandler> eventHandlers,
         ICollection<CommandDefinition> definitions,
         ICollection<CodingAgentExtensionTool> tools,
         ICollection<CodingAgentExtensionDiagnostic> diagnostics,
@@ -949,6 +986,15 @@ public sealed class CodingAgentExtensionCommandStore
                 tool.ExecutionMode));
         }
 
+        foreach (var eventType in result.EventHandlerTypes)
+        {
+            eventHandlers.Add(new CodingAgentExtensionEventHandler(
+                fullPath,
+                scope,
+                runtime,
+                eventType));
+        }
+
         modules.Add(new CodingAgentExtensionModule(
             fullPath,
             scope,
@@ -958,7 +1004,13 @@ public sealed class CodingAgentExtensionCommandStore
 
     private static string FormatNodeModuleStatus(CodingAgentJavaScriptExtensionLoadResult result)
     {
-        var status = $"loaded; commands {result.Commands.Count(static command => command.HasHandler)}; tools {result.Tools.Count(static tool => tool.HasHandler)}; limited runtime";
+        var status = $"loaded; commands {result.Commands.Count(static command => command.HasHandler)}; tools {result.Tools.Count(static tool => tool.HasHandler)}";
+        if (result.EventHandlerTypes.Count > 0)
+        {
+            status = $"{status}; events {result.EventHandlerTypes.Count}";
+        }
+
+        status = $"{status}; limited runtime";
         var unsupported = new List<string>();
         if (result.Unsupported.Tools > 0)
         {

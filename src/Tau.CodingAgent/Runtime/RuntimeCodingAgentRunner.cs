@@ -660,7 +660,8 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner, ICodingAgentT
         TauRuntimeLogContext? logContext = null,
         ProviderRegistry? providerRegistryOverride = null,
         ModelCatalog? modelCatalogOverride = null,
-        bool autoResizeImages = true)
+        bool autoResizeImages = true,
+        IReadOnlyList<IToolInterceptor>? interceptors = null)
     {
         var registry = providerRegistryOverride ?? new ProviderRegistry();
         if (providerRegistryOverride is null)
@@ -681,6 +682,7 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner, ICodingAgentT
             Model = model,
             ProviderRegistry = registry,
             Tools = tools,
+            Interceptors = interceptors ?? [],
             LogSink = logSink ?? NullTauLogSink.Instance,
             LogContext = logContext,
             SystemPrompt = string.IsNullOrWhiteSpace(systemPromptOverride)

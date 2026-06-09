@@ -255,6 +255,7 @@ var modelId = cli.Model ?? Environment.GetEnvironmentVariable("TAU_MODEL")
 var runnerTools = RuntimeCodingAgentRunner.CreateDefaultTools(
     settings.ImagesAutoResize ?? true,
     extensionCommandStore.LoadTools());
+var runnerInterceptors = extensionCommandStore.LoadToolInterceptors();
 var runner = RuntimeCodingAgentRunner.Create(
     providerId,
     modelId,
@@ -264,7 +265,8 @@ var runner = RuntimeCodingAgentRunner.Create(
     skills: skillStore.Load(),
     contextFiles: contextFileStore.Load(),
     logSink: logSink,
-    autoResizeImages: settings.ImagesAutoResize ?? true);
+    autoResizeImages: settings.ImagesAutoResize ?? true,
+    interceptors: runnerInterceptors);
 runner.SessionName = session.Name;
 runner.SteeringMode = CodingAgentQueueModes.ToAgentQueueMode(settings.SteeringMode);
 runner.FollowUpMode = CodingAgentQueueModes.ToAgentQueueMode(settings.FollowUpMode);

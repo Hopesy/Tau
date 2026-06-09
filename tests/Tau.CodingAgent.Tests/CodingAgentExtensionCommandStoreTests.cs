@@ -695,6 +695,102 @@ public class CodingAgentExtensionCommandStoreTests
     }
 
     [Fact]
+    public async Task LoadToolInterceptors_BlocksJavascriptToolCallHandler()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-js-tool-call-hook-" + Guid.NewGuid().ToString("N"));
+        var extensionDirectory = Path.Combine(directory, ".tau", "extensions", "tool-call-hook");
+        Directory.CreateDirectory(extensionDirectory);
+        WriteJavaScriptExtension(
+            extensionDirectory,
+            """
+            export default function(pi) {
+              pi.on("tool_call", (event) => {
+                if (event.toolName === "hello_tool") {
+                  return { block: true, reason: `blocked ${event.input.name}` };
+                }
+              });
+            }
+            """);
+
+        try
+        {
+            var store = CreateJavaScriptStore(directory);
+            var status = store.LoadStatus();
+
+            Assert.Empty(status.Diagnostics);
+            Assert.Equal("tool_call", Assert.Single(status.EventHandlers).EventType);
+            Assert.Equal("loaded; commands 0; tools 0; events 1; limited runtime", Assert.Single(status.Modules).Status);
+
+            var interceptor = Assert.Single(store.LoadToolInterceptors());
+            using var args = JsonDocument.Parse("""{"name":"Ada"}""");
+
+            var decision = await interceptor.BeforeToolCallAsync(
+                new ToolCallContext("tool-call-1", "hello_tool", args.RootElement, []));
+
+            Assert.True(decision.Blocked);
+            Assert.Equal("blocked Ada", decision.Reason);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task LoadToolInterceptors_RewritesJavascriptToolResultHandler()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-js-tool-result-hook-" + Guid.NewGuid().ToString("N"));
+        var extensionDirectory = Path.Combine(directory, ".tau", "extensions", "tool-result-hook");
+        Directory.CreateDirectory(extensionDirectory);
+        WriteJavaScriptExtension(
+            extensionDirectory,
+            """
+            export default function(pi) {
+              pi.on("tool_result", (event) => {
+                if (event.toolName === "hello_tool") {
+                  return {
+                    content: [{ type: "text", text: `${event.content[0].text} patched for ${event.input.name}` }],
+                    details: { patched: true, original: event.details.source },
+                    isError: true
+                  };
+                }
+              });
+            }
+            """);
+
+        try
+        {
+            var store = CreateJavaScriptStore(directory);
+            var status = store.LoadStatus();
+
+            Assert.Empty(status.Diagnostics);
+            Assert.Equal("tool_result", Assert.Single(status.EventHandlers).EventType);
+
+            var interceptor = Assert.Single(store.LoadToolInterceptors());
+            using var args = JsonDocument.Parse("""{"name":"Ada"}""");
+            using var details = JsonDocument.Parse("""{"source":"extension"}""");
+            var original = new ToolResult(
+                [new TextContent("original")],
+                IsError: false,
+                Details: details.RootElement.Clone());
+
+            var result = await interceptor.AfterToolCallAsync(
+                new ToolCallContext("tool-call-1", "hello_tool", args.RootElement, []),
+                original);
+
+            Assert.True(result.IsError);
+            Assert.Equal("original patched for Ada", Assert.IsType<TextContent>(Assert.Single(result.Content)).Text);
+            var resultDetails = Assert.IsType<JsonElement>(result.Details);
+            Assert.True(resultDetails.GetProperty("patched").GetBoolean());
+            Assert.Equal("extension", resultDetails.GetProperty("original").GetString());
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public void LoadStatus_LoadsTypescriptRegisteredTools()
     {
         var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-ts-tool-load-" + Guid.NewGuid().ToString("N"));
