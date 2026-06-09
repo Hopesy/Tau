@@ -276,4 +276,75 @@ public sealed class WebUiBrowserFlowTests
         await Assertions.Expect(frame.Locator("body"))
             .ToContainTextAsync("notes.txt|hello attachment|16|from-attachment.txt", new() { Timeout = 5000 });
     }
+
+    [Fact]
+    public async Task JavaScriptRepl_CanUseSandboxProvidersAndCreateArtifacts()
+    {
+        await using var context = await _fixture.NewContextAsync();
+        var page = await context.NewPageAsync();
+
+        await page.GotoAsync("/");
+        await page.WaitForFunctionAsync("document.querySelectorAll('#provider option').length > 0");
+
+        await page.FillAsync("#session-title", "JavaScript REPL");
+        await page.ClickAsync("#new-session");
+        var session = page.Locator("#sessions .session.active");
+        await Assertions.Expect(session).ToBeVisibleAsync(new() { Timeout = 5000 });
+        var sessionId = await session.GetAttributeAsync("data-id");
+        Assert.False(string.IsNullOrWhiteSpace(sessionId));
+
+        var attachmentContent = Convert.ToBase64String(Encoding.UTF8.GetBytes("from attachment"));
+        var resultJson = await page.EvaluateAsync<string>(
+            """
+            async args => {
+              const message = await fetch(`/api/sessions/${encodeURIComponent(args.sessionId)}/messages`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  text: 'seed repl attachment',
+                  attachments: [{
+                    id: 'repl-att-1',
+                    type: 'text',
+                    fileName: 'source.txt',
+                    mimeType: 'text/plain',
+                    size: 15,
+                    content: args.attachmentContent,
+                    extractedText: 'from attachment'
+                  }]
+                })
+              });
+              if (!message.ok) throw new Error(await message.text());
+
+              await openSession(args.sessionId);
+              const result = await window.executeJavaScriptRepl(`
+                console.log('sum', 2 + 3);
+                const attachments = window.listAttachments();
+                const text = window.readTextAttachment(attachments[0].id);
+                await window.createOrUpdateArtifact('repl-data.json', { text, answer: 42 }, 'application/json');
+                const stored = await window.getArtifact('repl-data.json');
+                await window.returnDownloadableFile('repl.txt', stored.text, 'text/plain');
+                return { stored, fileCount: attachments.length };
+              `);
+              return JSON.stringify(result);
+            }
+            """,
+            new { sessionId, attachmentContent });
+
+        using var result = System.Text.Json.JsonDocument.Parse(resultJson);
+        var root = result.RootElement;
+        Assert.Contains("sum 5", root.GetProperty("output").GetString(), StringComparison.Ordinal);
+        Assert.Contains("[Files returned: 1]", root.GetProperty("output").GetString(), StringComparison.Ordinal);
+        Assert.Equal(1, root.GetProperty("files").GetArrayLength());
+        var file = root.GetProperty("files")[0];
+        Assert.Equal("repl.txt", file.GetProperty("fileName").GetString());
+        Assert.Equal("text/plain", file.GetProperty("mimeType").GetString());
+        Assert.Equal("from attachment", file.GetProperty("content").GetString());
+        Assert.Equal(42, root.GetProperty("returnValue").GetProperty("stored").GetProperty("answer").GetInt32());
+        Assert.Equal(1, root.GetProperty("returnValue").GetProperty("fileCount").GetInt32());
+
+        await Assertions.Expect(page.Locator("#artifacts-list .artifact-pill[data-file='repl-data.json']"))
+            .ToContainTextAsync("repl-data.json", new() { Timeout = 5000 });
+        await page.ClickAsync("#artifacts-list .artifact-pill[data-file='repl-data.json']");
+        await Assertions.Expect(page.Locator("#artifact-preview")).ToContainTextAsync("\"answer\": 42", new() { Timeout = 5000 });
+    }
 }

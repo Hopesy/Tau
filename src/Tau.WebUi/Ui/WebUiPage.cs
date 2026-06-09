@@ -187,6 +187,7 @@ public static class WebUiPage
             let pendingAttachments = [];
             let currentArtifacts = [];
             let activeArtifactFile = null;
+            const activeReplSandboxes = new Map();
             const currentSessionStorageKey = 'tau.webui.currentSessionId';
 
             async function fetchJson(url, options) {
@@ -315,6 +316,7 @@ public static class WebUiPage
               const attachmentsJson = sandboxSafeJson(attachments);
               return `<script>
                 window.__completionCallbacks = [];
+                window.__runtimePendingSends = [];
                 window.sendRuntimeMessage = async (message) => {
                   const messageId = 'msg_' + Date.now() + '_' + Math.random().toString(36).slice(2);
                   return await new Promise((resolve, reject) => {
@@ -432,16 +434,21 @@ public static class WebUiPage
                       try { return typeof arg === 'object' ? JSON.stringify(arg) : String(arg); }
                       catch { return String(arg); }
                     }).join(' ');
-                    window.sendRuntimeMessage({ type: 'console', method, text }).catch(() => {});
+                    const pending = window.sendRuntimeMessage({ type: 'console', method, text }).catch(() => {});
+                    window.__runtimePendingSends.push(pending);
                   };
+                });
+                window.onCompleted(async () => {
+                  const pending = window.__runtimePendingSends.splice(0);
+                  if (pending.length > 0) await Promise.all(pending);
                 });
                 window.complete = async (error, returnValue) => {
                   for (const callback of window.__completionCallbacks) {
                     await callback(!error);
                   }
                   await window.sendRuntimeMessage(error
-                    ? { type: 'execution-error', text: error.message || String(error) }
-                    : { type: 'execution-complete', text: returnValue === undefined ? '' : String(returnValue) });
+                    ? { type: 'execution-error', text: error.message || String(error), error }
+                    : { type: 'execution-complete', returnValue });
                 };
               <\/script>`;
             }
@@ -450,6 +457,134 @@ public static class WebUiPage
               const sandboxId = artifactSandboxId(artifact);
               return `${sandboxBridgeCode(sandboxId, collectSessionAttachments(currentSession))}${artifact.content || ''}`;
             }
+
+            function escapeScriptContent(code) {
+              return String(code || '').replace(/<\/script/gi, '<\\/script');
+            }
+
+            function replSandboxSrcdoc(sandboxId, code) {
+              return `<!doctype html>
+                <html>
+                <head>${sandboxBridgeCode(sandboxId, collectSessionAttachments(currentSession))}</head>
+                <body>
+                <script type="module">
+                (async () => {
+                  try {
+                    const userCodeFunc = async () => {
+                      ${escapeScriptContent(code)}
+                    };
+                    const returnValue = await userCodeFunc();
+                    await window.complete(null, returnValue);
+                  } catch (error) {
+                    await window.complete({
+                      message: error?.message || String(error),
+                      stack: error?.stack || new Error().stack
+                    });
+                  }
+                })();
+                <\/script>
+                </body>
+                </html>`;
+            }
+
+            function formatReplReturnValue(value) {
+              if (value === undefined) return '';
+              if (typeof value === 'object') {
+                try {
+                  return JSON.stringify(value, null, 2);
+                } catch {
+                  return String(value);
+                }
+              }
+              return String(value);
+            }
+
+            function formatJavaScriptReplOutput(context, success, error) {
+              const lines = [];
+              for (const entry of context.console) {
+                if (entry?.text) lines.push(entry.text);
+              }
+
+              if (!success) {
+                if (lines.length > 0) lines.push('');
+                const message = error?.message || String(error || 'Unknown error');
+                const stack = error?.stack || '';
+                lines.push(`Error: ${message}${stack ? `\n${stack}` : ''}`);
+              } else if (context.returnValue !== undefined) {
+                if (lines.length > 0) lines.push('');
+                lines.push(`=> ${formatReplReturnValue(context.returnValue)}`);
+              }
+
+              if (context.files.length > 0) {
+                lines.push(`[Files returned: ${context.files.length}]`);
+                for (const file of context.files) {
+                  lines.push(`  - ${file.fileName} (${file.mimeType})`);
+                }
+              } else if (context.code.includes('returnDownloadableFile')) {
+                lines.push('[No files returned - check async operations]');
+              }
+
+              return lines.join('\n').trim() || 'Code executed successfully (no output)';
+            }
+
+            function completeJavaScriptRepl(context, success, error) {
+              if (context.completed) return;
+              context.completed = true;
+              clearTimeout(context.timeoutId);
+              activeReplSandboxes.delete(context.sandboxId);
+              context.iframe.remove();
+
+              const result = {
+                output: formatJavaScriptReplOutput(context, success, error),
+                files: context.files,
+                console: context.console,
+                returnValue: context.returnValue
+              };
+
+              if (success) {
+                context.resolve(result);
+              } else {
+                const failure = new Error(result.output);
+                failure.result = result;
+                context.reject(failure);
+              }
+            }
+
+            async function executeJavaScriptRepl(code) {
+              if (!currentSessionId) throw new Error('JavaScript REPL requires an active session.');
+              if (!code) throw new Error('Code parameter is required.');
+
+              const sandboxId = `repl-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+              const iframe = document.createElement('iframe');
+              iframe.sandbox.add('allow-scripts', 'allow-modals');
+              iframe.style.cssText = 'width: 0; height: 0; border: 0; position: absolute; left: -10000px; top: -10000px;';
+
+              const result = await new Promise((resolve, reject) => {
+                const context = {
+                  sandboxId,
+                  code: String(code),
+                  iframe,
+                  console: [],
+                  files: [],
+                  returnValue: undefined,
+                  completed: false,
+                  resolve,
+                  reject,
+                  timeoutId: 0
+                };
+                context.timeoutId = setTimeout(() => {
+                  completeJavaScriptRepl(context, false, { message: 'Execution timeout (120s)', stack: '' });
+                }, 120000);
+                activeReplSandboxes.set(sandboxId, context);
+                iframe.srcdoc = replSandboxSrcdoc(sandboxId, context.code);
+                document.body.appendChild(iframe);
+              });
+
+              await loadArtifacts(currentSessionId);
+              return result;
+            }
+
+            window.executeJavaScriptRepl = executeJavaScriptRepl;
 
             function formatBytes(size) {
               const value = Number(size || 0);
@@ -1236,9 +1371,68 @@ public static class WebUiPage
               return session;
             }
 
+            async function handleReplRuntimeMessage(context, message, source) {
+              const respond = response => {
+                source?.postMessage({
+                  type: 'runtime-response',
+                  messageId: message.messageId,
+                  sandboxId: message.sandboxId,
+                  ...response
+                }, '*');
+              };
+
+              try {
+                if (message.type === 'console') {
+                  context.console.push({ type: message.method || 'log', text: message.text || '' });
+                  respond({ success: true });
+                  return;
+                }
+
+                if (message.type === 'file-returned') {
+                  context.files.push({
+                    fileName: message.fileName || 'file',
+                    content: message.content,
+                    mimeType: message.mimeType || 'application/octet-stream'
+                  });
+                  respond({ success: true, result: { fileName: message.fileName, mimeType: message.mimeType } });
+                  return;
+                }
+
+                if (message.type === 'execution-complete') {
+                  context.returnValue = message.returnValue;
+                  respond({ success: true });
+                  completeJavaScriptRepl(context, true);
+                  return;
+                }
+
+                if (message.type === 'execution-error') {
+                  respond({ success: false, error: message.text || message.error?.message || 'Sandbox execution failed.' });
+                  completeJavaScriptRepl(context, false, message.error || { message: message.text || 'Sandbox execution failed.', stack: '' });
+                  return;
+                }
+
+                const response = await fetchJson(`/api/sessions/${encodeURIComponent(currentSessionId)}/runtime/messages`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify(message)
+                });
+                if (message.type === 'artifact-operation' && ['createOrUpdate', 'create', 'update', 'rewrite', 'delete'].includes(message.action)) {
+                  await loadArtifacts(currentSessionId);
+                }
+                source?.postMessage(response, '*');
+              } catch (error) {
+                respond({ success: false, error: error.message || String(error) });
+              }
+            }
+
             window.addEventListener('message', async event => {
               const message = event.data || {};
               if (!message.sandboxId || !message.messageId || !currentSessionId) return;
+              const replContext = activeReplSandboxes.get(message.sandboxId);
+              if (replContext) {
+                await handleReplRuntimeMessage(replContext, message, event.source);
+                return;
+              }
               if (!isKnownArtifactSandbox(message.sandboxId)) return;
               try {
                 const response = await fetchJson(`/api/sessions/${encodeURIComponent(currentSessionId)}/runtime/messages`, {

@@ -59,4 +59,22 @@ public sealed class WebUiPageTests
         Assert.Contains("/runtime/messages", html, StringComparison.Ordinal);
         Assert.Contains("isKnownArtifactSandbox", html, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public void Html_IncludesJavaScriptReplExecutionHost()
+    {
+        var html = WebUiPage.Html;
+
+        Assert.Contains("const activeReplSandboxes = new Map()", html, StringComparison.Ordinal);
+        Assert.Contains("function replSandboxSrcdoc(sandboxId, code)", html, StringComparison.Ordinal);
+        Assert.Contains("function executeJavaScriptRepl(code)", html, StringComparison.Ordinal);
+        Assert.Contains("window.executeJavaScriptRepl = executeJavaScriptRepl", html, StringComparison.Ordinal);
+        Assert.Contains("iframe.sandbox.add('allow-scripts', 'allow-modals')", html, StringComparison.Ordinal);
+        Assert.Contains("activeReplSandboxes.set(sandboxId, context)", html, StringComparison.Ordinal);
+        Assert.Contains("handleReplRuntimeMessage(replContext, message, event.source)", html, StringComparison.Ordinal);
+        Assert.Contains("message.type === 'execution-complete'", html, StringComparison.Ordinal);
+        Assert.Contains("message.type === 'execution-error'", html, StringComparison.Ordinal);
+        Assert.Contains("window.__runtimePendingSends", html, StringComparison.Ordinal);
+        Assert.Contains("returnValue: context.returnValue", html, StringComparison.Ordinal);
+    }
 }
