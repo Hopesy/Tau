@@ -31,7 +31,8 @@ public sealed record CodingAgentSettingsSnapshot(
     bool? ShowHardwareCursor = null,
     int? EditorPaddingX = null,
     int? AutocompleteMaxVisible = null,
-    string? MarkdownCodeBlockIndent = null);
+    string? MarkdownCodeBlockIndent = null,
+    IReadOnlyList<CodingAgentPackageSource>? Packages = null);
 
 public sealed class CodingAgentSettingsStore
 {
@@ -93,7 +94,8 @@ public sealed class CodingAgentSettingsStore
                 document?.ShowHardwareCursor,
                 NormalizeEditorPaddingX(document?.EditorPaddingX),
                 NormalizeAutocompleteMaxVisible(document?.AutocompleteMaxVisible),
-                document?.Markdown?.CodeBlockIndent);
+                document?.Markdown?.CodeBlockIndent,
+                NormalizePackages(document?.Packages));
         }
         catch (JsonException)
         {
@@ -143,6 +145,7 @@ public sealed class CodingAgentSettingsStore
             EditorPaddingX = NormalizeEditorPaddingX(snapshot.EditorPaddingX),
             AutocompleteMaxVisible = NormalizeAutocompleteMaxVisible(snapshot.AutocompleteMaxVisible),
             Markdown = CreateMarkdownSettingsDocument(snapshot),
+            Packages = NormalizePackages(snapshot.Packages),
             UpdatedAt = DateTimeOffset.UtcNow
         };
 
@@ -237,6 +240,54 @@ public sealed class CodingAgentSettingsStore
         snapshot.MarkdownCodeBlockIndent is null
             ? null
             : new CodingAgentMarkdownSettingsDocument { CodeBlockIndent = snapshot.MarkdownCodeBlockIndent };
+
+    private static CodingAgentPackageSource[]? NormalizePackages(IReadOnlyList<CodingAgentPackageSource>? packages)
+    {
+        if (packages is null || packages.Count == 0)
+        {
+            return null;
+        }
+
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var normalized = new List<CodingAgentPackageSource>();
+        foreach (var package in packages)
+        {
+            if (string.IsNullOrWhiteSpace(package.Source))
+            {
+                continue;
+            }
+
+            var source = package.Source.Trim();
+            if (!seen.Add(source))
+            {
+                continue;
+            }
+
+            normalized.Add(package with
+            {
+                Source = source,
+                Extensions = NormalizePackageFilterEntries(package.Extensions),
+                Skills = NormalizePackageFilterEntries(package.Skills),
+                Prompts = NormalizePackageFilterEntries(package.Prompts),
+                Themes = NormalizePackageFilterEntries(package.Themes)
+            });
+        }
+
+        return normalized.Count == 0 ? null : normalized.ToArray();
+    }
+
+    private static string[]? NormalizePackageFilterEntries(IReadOnlyList<string>? values)
+    {
+        if (values is null)
+        {
+            return null;
+        }
+
+        return values
+            .Where(static value => !string.IsNullOrWhiteSpace(value))
+            .Select(static value => value.Trim())
+            .ToArray();
+    }
 }
 
 internal sealed class CodingAgentSettingsDocument
@@ -266,6 +317,7 @@ internal sealed class CodingAgentSettingsDocument
     public int? EditorPaddingX { get; init; }
     public int? AutocompleteMaxVisible { get; init; }
     public CodingAgentMarkdownSettingsDocument? Markdown { get; init; }
+    public CodingAgentPackageSource[]? Packages { get; init; }
     public DateTimeOffset UpdatedAt { get; init; }
 }
 
@@ -331,4 +383,6 @@ internal static class CodingAgentQueueModes
 [JsonSerializable(typeof(CodingAgentTerminalSettingsDocument))]
 [JsonSerializable(typeof(CodingAgentImageSettingsDocument))]
 [JsonSerializable(typeof(CodingAgentMarkdownSettingsDocument))]
+[JsonSerializable(typeof(CodingAgentPackageSource))]
+[JsonSerializable(typeof(CodingAgentPackageSource[]))]
 internal sealed partial class CodingAgentSettingsJsonContext : JsonSerializerContext;

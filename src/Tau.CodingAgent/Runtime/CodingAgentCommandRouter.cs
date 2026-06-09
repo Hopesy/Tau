@@ -17,6 +17,8 @@ public sealed class CodingAgentCommandRouter
     private readonly CodingAgentContextFileStore? _contextFileStore;
     private readonly CodingAgentThemeStore? _themeStore;
     private readonly CodingAgentExtensionCommandStore? _extensionCommandStore;
+    private readonly CodingAgentPackageManager? _packageManager;
+    private readonly CodingAgentPackageResourceState? _packageResourceState;
     private readonly CodingAgentChangelogStore _changelogStore;
     private readonly CodingAgentAutoCompactionOptions _autoCompaction;
     private readonly Action<CodingAgentRetryOptions>? _retryOptionsChanged;
@@ -55,6 +57,8 @@ public sealed class CodingAgentCommandRouter
         CodingAgentContextFileStore? contextFileStore = null,
         CodingAgentThemeStore? themeStore = null,
         CodingAgentExtensionCommandStore? extensionCommandStore = null,
+        CodingAgentPackageManager? packageManager = null,
+        CodingAgentPackageResourceState? packageResourceState = null,
         CodingAgentChangelogStore? changelogStore = null,
         CodingAgentAutoCompactionOptions? autoCompaction = null,
         CodingAgentRetryOptions? retryOptions = null,
@@ -91,6 +95,8 @@ public sealed class CodingAgentCommandRouter
         _contextFileStore = contextFileStore;
         _themeStore = themeStore;
         _extensionCommandStore = extensionCommandStore;
+        _packageManager = packageManager;
+        _packageResourceState = packageResourceState;
         _changelogStore = changelogStore ?? new CodingAgentChangelogStore();
         _autoCompaction = autoCompaction ?? CodingAgentAutoCompactionOptions.Disabled;
         _retryOptions = retryOptions ?? CodingAgentRetryOptions.Disabled;
@@ -224,6 +230,18 @@ public sealed class CodingAgentCommandRouter
             _runner.FollowUpMode = CodingAgentQueueModes.ToAgentQueueMode(settings.FollowUpMode);
             lines.Add(
                 $"settings: loaded, retry {FormatRetryPolicy(_retryOptions)}, thinking {FormatThinkingLevel(_runner.ThinkingLevel)}, steering {CodingAgentQueueModes.FromAgentQueueMode(_runner.SteeringMode)}, follow-up {CodingAgentQueueModes.FromAgentQueueMode(_runner.FollowUpMode)}");
+        }
+
+        if (_packageManager is null)
+        {
+            lines.Add("packages: unavailable");
+        }
+        else
+        {
+            var packageResources = _packageManager.ResolveResources();
+            _packageResourceState?.Update(packageResources);
+            lines.Add(
+                $"packages: {_packageManager.ListConfiguredPackages().Count} configured, resources {packageResources.ExtensionPaths.Count} extensions, {packageResources.SkillPaths.Count} skills, {packageResources.PromptPaths.Count} prompts, {packageResources.ThemePaths.Count} themes, issues {packageResources.Diagnostics.Count}");
         }
 
         var extensionStatus = _extensionCommandStore?.LoadStatus();

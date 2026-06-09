@@ -70,12 +70,14 @@ public sealed class CodingAgentExtensionCommandStore
     private readonly string _cwd;
     private readonly string _userExtensionsDirectory;
     private readonly IReadOnlyList<string> _explicitPaths;
+    private readonly Func<IReadOnlyList<string>>? _additionalPathsProvider;
     private readonly bool _includeDefaults;
 
     public CodingAgentExtensionCommandStore(
         string? cwd = null,
         string? userExtensionsDirectory = null,
         IReadOnlyList<string>? explicitPaths = null,
+        Func<IReadOnlyList<string>>? additionalPathsProvider = null,
         bool includeDefaults = true)
     {
         _cwd = string.IsNullOrWhiteSpace(cwd) ? Environment.CurrentDirectory : Path.GetFullPath(cwd);
@@ -83,6 +85,7 @@ public sealed class CodingAgentExtensionCommandStore
             ? GetDefaultUserExtensionsDirectory()
             : Path.GetFullPath(userExtensionsDirectory);
         _explicitPaths = explicitPaths ?? GetConfiguredExtensionPaths();
+        _additionalPathsProvider = additionalPathsProvider;
         _includeDefaults = includeDefaults;
     }
 
@@ -110,7 +113,7 @@ public sealed class CodingAgentExtensionCommandStore
             LoadSourceDirectory(Path.Combine(_cwd, ".tau", "extensions"), "project", definitions, skillPaths, promptPaths, themePaths, files, diagnostics);
         }
 
-        foreach (var path in _explicitPaths)
+        foreach (var path in GetExplicitPaths())
         {
             var resolved = ResolvePath(path, _cwd);
             if (Directory.Exists(resolved))
@@ -149,6 +152,24 @@ public sealed class CodingAgentExtensionCommandStore
             resources,
             files,
             diagnostics);
+    }
+
+    private IEnumerable<string> GetExplicitPaths()
+    {
+        foreach (var path in _explicitPaths)
+        {
+            yield return path;
+        }
+
+        if (_additionalPathsProvider is null)
+        {
+            yield break;
+        }
+
+        foreach (var path in _additionalPathsProvider())
+        {
+            yield return path;
+        }
     }
 
     public bool TryInvoke(string input, out CodingAgentExtensionCommandInvocation? invocation)

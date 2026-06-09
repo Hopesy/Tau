@@ -144,6 +144,105 @@ public class CodingAgentSettingsStoreTests
     }
 
     [Fact]
+    public void SaveAndLoad_RoundTripsPackageSources()
+    {
+        var path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"tau-coding-agent-settings-packages-{Guid.NewGuid():N}.json");
+        var store = new CodingAgentSettingsStore(path);
+
+        try
+        {
+            store.Save(new CodingAgentSettingsSnapshot(
+                null,
+                null,
+                Packages:
+                [
+                    new CodingAgentPackageSource(" npm:@scope/example "),
+                    new CodingAgentPackageSource(
+                        "./local",
+                        Extensions: [" extensions/index.json "],
+                        Skills: [],
+                        Prompts: ["prompts"],
+                        Themes: ["themes/dark.json"])
+                ]));
+
+            var loaded = store.Load();
+
+            Assert.NotNull(loaded.Packages);
+            Assert.Collection(
+                loaded.Packages!,
+                package =>
+                {
+                    Assert.Equal("npm:@scope/example", package.Source);
+                    Assert.False(package.IsFiltered);
+                },
+                package =>
+                {
+                    Assert.Equal("./local", package.Source);
+                    Assert.True(package.IsFiltered);
+                    Assert.Equal(["extensions/index.json"], package.Extensions);
+                    Assert.Empty(package.Skills!);
+                    Assert.Equal(["prompts"], package.Prompts);
+                    Assert.Equal(["themes/dark.json"], package.Themes);
+                });
+        }
+        finally
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+        }
+    }
+
+    [Fact]
+    public void Load_ReadsUpstreamStringAndObjectPackageSources()
+    {
+        var path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"tau-coding-agent-settings-packages-read-{Guid.NewGuid():N}.json");
+
+        try
+        {
+            File.WriteAllText(
+                path,
+                """
+                {
+                  "packages": [
+                    "npm:@foo/bar",
+                    {
+                      "source": "./local",
+                      "extensions": ["ext"],
+                      "skills": ["skills"],
+                      "prompts": ["prompts"],
+                      "themes": ["themes"]
+                    }
+                  ]
+                }
+                """);
+
+            var loaded = new CodingAgentSettingsStore(path).Load();
+
+            Assert.NotNull(loaded.Packages);
+            Assert.Collection(
+                loaded.Packages!,
+                package => Assert.Equal("npm:@foo/bar", package.Source),
+                package =>
+                {
+                    Assert.Equal("./local", package.Source);
+                    Assert.Equal(["ext"], package.Extensions);
+                    Assert.Equal(["skills"], package.Skills);
+                    Assert.Equal(["prompts"], package.Prompts);
+                    Assert.Equal(["themes"], package.Themes);
+                });
+        }
+        finally
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+        }
+    }
+
+    [Fact]
     public void Load_InvalidJson_ReturnsEmptySnapshot()
     {
         var path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"tau-coding-agent-settings-invalid-{Guid.NewGuid():N}.json");
@@ -180,6 +279,7 @@ public class CodingAgentSettingsStoreTests
             Assert.Null(loaded.EditorPaddingX);
             Assert.Null(loaded.AutocompleteMaxVisible);
             Assert.Null(loaded.MarkdownCodeBlockIndent);
+            Assert.Null(loaded.Packages);
         }
         finally
         {

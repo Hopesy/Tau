@@ -18,6 +18,11 @@
 - 当前旧 dirty WIP 边界已经关闭：Agent platform baseline、CodingAgent `/settings select` `TuiSettingsList` adoption、100% parity goal restore 和 100% gap-map/acceptance-plan docs 都已作为独立 checkpoint 提交并推送；继续前仍必须重新读取 `git status --short --branch` 和当前 diff。
 - 当前恢复路线：先执行 `GOAL.md` Pass 0 状态校准，清理 matrix/next/quality/plan 中与最新 HEAD 证据不一致的 stale 描述；然后再从 matrix `Phase 2 Candidate Queue` 选择高价值 implementation/e2e 切片。优先级按阻塞程度排列：critical contracts、真实外部 e2e、product runtime parity、release/package final parity。
 
+## 当前推进记录（2026-06-09）
+
+- CodingAgent package manager / config 子切片已关闭一层本地合同：对照上游 `package-manager-cli.ts`、`core/package-manager.ts` 和 `core/settings-manager.ts`，Tau 顶层 `install/remove/uninstall/update/list/config` 现在会在 runner 初始化前处理 package source settings；默认写 user settings，`-l/--local` 写 project settings；settings store 支持上游 string/object `packages` source 形状；本地 package source 会解析 `package.json` 的 `pi.extensions/skills/prompts/themes` manifest 或约定目录，并把 package resources 合并进 extension/prompt/skill/theme stores；`/reload` 会先重新解析 package resources 再刷新 extensions。
+- 该子切片只覆盖 source 持久化、列表/config 摘要和本地 package resource discovery baseline。仍未关闭 npm/git install/pull/update 执行、glob/negation resource filter、interactive config selector、package-loaded TypeScript extension runtime、startup changelog/version state、install telemetry runtime、最终 `pi` package/bin identity 或真实 package consumer smoke。
+
 ## 范围
 
 包含：

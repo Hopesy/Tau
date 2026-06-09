@@ -4,6 +4,12 @@ using Tau.Tui.Abstractions;
 using Tau.Tui.Rendering;
 using Tau.Tui.Runtime;
 
+var packageManager = new CodingAgentPackageManager();
+if (CodingAgentPackageCli.TryHandle(args, Console.Out, Console.Error, packageManager, out var packageCommandExitCode))
+{
+    return packageCommandExitCode;
+}
+
 CodingAgentCliArguments cli;
 try
 {
@@ -130,6 +136,23 @@ static string? ResolveKeyBindingsPath()
     return string.IsNullOrWhiteSpace(home) ? null : Path.Combine(home, ".tau", "coding-agent-keybindings.json");
 }
 
+static IReadOnlyList<string> CombineResourcePaths(
+    IReadOnlyList<string> first,
+    IReadOnlyList<string> second)
+{
+    if (first.Count == 0)
+    {
+        return second;
+    }
+
+    if (second.Count == 0)
+    {
+        return first;
+    }
+
+    return first.Concat(second).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+}
+
 static Func<IReadOnlyList<CodingAgentTreeViewItem>, string?, CancellationToken, Task<CodingAgentTreeInteractiveNavigator.Result>> CreateTreeNavigator(
     IConsoleKeyReader keyReader,
     CodingAgentSettingsStore settingsStore,
@@ -182,14 +205,18 @@ var sessionStore = CodingAgentTreeSessionStore.IsJsonlPath(sessionFile)
     : new CodingAgentSessionStore();
 var treeSessionController = CodingAgentTreeSessionController.OpenOrCreate();
 var settingsStore = new CodingAgentSettingsStore();
-var extensionCommandStore = new CodingAgentExtensionCommandStore();
+var packageResourceState = new CodingAgentPackageResourceState(packageManager.ResolveResources());
+var extensionCommandStore = new CodingAgentExtensionCommandStore(
+    additionalPathsProvider: () => packageResourceState.ExtensionPaths);
 var extensionResourceState = new CodingAgentExtensionResourceState(extensionCommandStore.LoadResources());
-var promptTemplateStore = new CodingAgentPromptTemplateStore(additionalPathsProvider: () => extensionResourceState.PromptPaths);
-var skillStore = new CodingAgentSkillStore(additionalPathsProvider: () => extensionResourceState.SkillPaths);
+var promptTemplateStore = new CodingAgentPromptTemplateStore(
+    additionalPathsProvider: () => CombineResourcePaths(packageResourceState.PromptPaths, extensionResourceState.PromptPaths));
+var skillStore = new CodingAgentSkillStore(
+    additionalPathsProvider: () => CombineResourcePaths(packageResourceState.SkillPaths, extensionResourceState.SkillPaths));
 var contextFileStore = new CodingAgentContextFileStore(includeDefaults: !noContextFiles);
 var themeStore = new CodingAgentThemeStore(
     explicitPaths: explicitThemePaths.Count == 0 ? null : explicitThemePaths,
-    additionalPathsProvider: () => extensionResourceState.ThemePaths,
+    additionalPathsProvider: () => CombineResourcePaths(packageResourceState.ThemePaths, extensionResourceState.ThemePaths),
     includeDefaults: !noThemes);
 editor?.SetAutocompleteProvider(CodingAgentAutocompleteProviderFactory.Create(
     promptTemplateStore,
@@ -290,6 +317,8 @@ var host = new CodingAgentHost(
     contextFileStore: contextFileStore,
     themeStore: themeStore,
     extensionCommandStore: extensionCommandStore,
+    packageManager: packageManager,
+    packageResourceState: packageResourceState,
     autoCompaction: autoCompaction,
     autoCompactionEnabled: settings.AutoCompactionEnabled,
     retryOptions: CodingAgentRetryOptions.FromSettingsOrEnvironment(settings),
