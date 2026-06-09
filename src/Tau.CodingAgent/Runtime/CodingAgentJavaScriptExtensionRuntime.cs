@@ -22,6 +22,17 @@ public sealed record CodingAgentJavaScriptExtensionTool(
     bool HasPrepareArguments,
     string? ExecutionMode);
 
+public sealed record CodingAgentJavaScriptExtensionFlag(
+    string Name,
+    string Description,
+    string Type,
+    JsonElement? DefaultValue);
+
+public sealed record CodingAgentJavaScriptExtensionShortcut(
+    string Shortcut,
+    string Description,
+    bool HasHandler);
+
 public sealed record CodingAgentJavaScriptExtensionUnsupportedRegistrations(
     int Tools,
     int Flags,
@@ -34,6 +45,8 @@ public sealed record CodingAgentJavaScriptExtensionLoadResult(
     bool Success,
     IReadOnlyList<CodingAgentJavaScriptExtensionCommand> Commands,
     IReadOnlyList<CodingAgentJavaScriptExtensionTool> Tools,
+    IReadOnlyList<CodingAgentJavaScriptExtensionFlag> Flags,
+    IReadOnlyList<CodingAgentJavaScriptExtensionShortcut> Shortcuts,
     IReadOnlyList<string> EventHandlerTypes,
     CodingAgentJavaScriptExtensionUnsupportedRegistrations Unsupported,
     string? Error);
@@ -99,7 +112,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
         var execution = Execute(BuildPayload("load", filePath, _cwd));
         if (!execution.Success)
         {
-            return new CodingAgentJavaScriptExtensionLoadResult(false, [], [], [], EmptyUnsupported, execution.Error);
+            return new CodingAgentJavaScriptExtensionLoadResult(false, [], [], [], [], [], EmptyUnsupported, execution.Error);
         }
 
         try
@@ -113,6 +126,8 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
                     [],
                     [],
                     [],
+                    [],
+                    [],
                     ReadUnsupported(root),
                     ReadString(root, "error") ?? "javascript extension load failed");
             }
@@ -121,6 +136,8 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
                 true,
                 ReadCommands(root),
                 ReadTools(root),
+                ReadFlags(root),
+                ReadShortcuts(root),
                 ReadStringArray(root, "eventHandlers"),
                 ReadUnsupported(root),
                 null);
@@ -129,6 +146,8 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
         {
             return new CodingAgentJavaScriptExtensionLoadResult(
                 false,
+                [],
+                [],
                 [],
                 [],
                 [],
@@ -657,6 +676,81 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
         return document.RootElement.Clone();
     }
 
+    private static IReadOnlyList<CodingAgentJavaScriptExtensionFlag> ReadFlags(JsonElement root)
+    {
+        if (!root.TryGetProperty("flags", out var flagsElement) ||
+            flagsElement.ValueKind != JsonValueKind.Array)
+        {
+            return [];
+        }
+
+        var flags = new List<CodingAgentJavaScriptExtensionFlag>();
+        foreach (var flag in flagsElement.EnumerateArray())
+        {
+            if (flag.ValueKind != JsonValueKind.Object)
+            {
+                continue;
+            }
+
+            var name = ReadString(flag, "name");
+            if (string.IsNullOrWhiteSpace(name))
+            {
+                continue;
+            }
+
+            flags.Add(new CodingAgentJavaScriptExtensionFlag(
+                name,
+                ReadString(flag, "description") ?? string.Empty,
+                ReadString(flag, "type") ?? string.Empty,
+                ReadFlagDefault(flag)));
+        }
+
+        return flags.ToArray();
+    }
+
+    private static IReadOnlyList<CodingAgentJavaScriptExtensionShortcut> ReadShortcuts(JsonElement root)
+    {
+        if (!root.TryGetProperty("shortcuts", out var shortcutsElement) ||
+            shortcutsElement.ValueKind != JsonValueKind.Array)
+        {
+            return [];
+        }
+
+        var shortcuts = new List<CodingAgentJavaScriptExtensionShortcut>();
+        foreach (var shortcut in shortcutsElement.EnumerateArray())
+        {
+            if (shortcut.ValueKind != JsonValueKind.Object)
+            {
+                continue;
+            }
+
+            var key = ReadString(shortcut, "shortcut");
+            if (string.IsNullOrWhiteSpace(key))
+            {
+                continue;
+            }
+
+            shortcuts.Add(new CodingAgentJavaScriptExtensionShortcut(
+                key,
+                ReadString(shortcut, "description") ?? string.Empty,
+                ReadBool(shortcut, "hasHandler")));
+        }
+
+        return shortcuts.ToArray();
+    }
+
+    private static JsonElement? ReadFlagDefault(JsonElement flag)
+    {
+        if (!flag.TryGetProperty("default", out var value))
+        {
+            return null;
+        }
+
+        return value.ValueKind is JsonValueKind.True or JsonValueKind.False or JsonValueKind.String
+            ? value.Clone()
+            : null;
+    }
+
     private static IReadOnlyList<string> ReadRunnerMessages(JsonElement root)
     {
         if (!root.TryGetProperty("actions", out var actionsElement) ||
@@ -948,7 +1042,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
           };
         }
 
-        function createApi(commandMap, toolMap, handlerMap, unsupported, actions, payload) {
+        function createApi(commandMap, toolMap, flagMap, shortcutMap, flagValues, handlerMap, unsupported, actions, payload) {
           const recordMessage = value => {
             const message = toText(value);
             if (message.trim().length > 0) actions.push({ type: "sendMessage", message });
@@ -962,13 +1056,30 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
               const key = String(tool && tool.name !== undefined ? tool.name : "");
               toolMap.set(key, tool || {});
             },
-            registerFlag() { unsupported.flags++; },
-            registerShortcut() { unsupported.shortcuts++; },
+            registerFlag(name, options = {}) {
+              const key = String(name ?? "");
+              const flagOptions = options || {};
+              flagMap.set(key, { name: key, options: flagOptions });
+              if (Object.prototype.hasOwnProperty.call(flagOptions, "default") && !flagValues.has(key)) {
+                const defaultValue = flagOptions.default;
+                if (typeof defaultValue === "boolean" || typeof defaultValue === "string") {
+                  flagValues.set(key, defaultValue);
+                }
+              }
+            },
+            registerShortcut(shortcut, options = {}) {
+              const key = String(shortcut ?? "");
+              shortcutMap.set(key, { shortcut: key, options: options || {} });
+            },
             registerMessageRenderer() { unsupported.messageRenderers++; },
             registerProvider() { unsupported.providers++; },
             unregisterProvider() { unsupported.providers++; },
             on(eventName, handler) { return addHandler(handlerMap, unsupported, eventName, handler); },
-            getFlag() { return undefined; },
+            getFlag(name) {
+              const key = String(name ?? "");
+              if (!flagMap.has(key)) return undefined;
+              return flagValues.get(key);
+            },
             sendMessage: recordMessage,
             sendUserMessage: recordMessage,
             appendEntry() {},
@@ -1068,10 +1179,13 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
           const payload = JSON.parse(input || "{}");
           const commandMap = new Map();
           const toolMap = new Map();
+          const flagMap = new Map();
+          const shortcutMap = new Map();
+          const flagValues = new Map();
           const handlerMap = new Map();
           const unsupported = { tools: 0, flags: 0, shortcuts: 0, handlers: 0, messageRenderers: 0, providers: 0 };
           const actions = [];
-          const api = createApi(commandMap, toolMap, handlerMap, unsupported, actions, payload);
+          const api = createApi(commandMap, toolMap, flagMap, shortcutMap, flagValues, handlerMap, unsupported, actions, payload);
           const factory = await loadFactory(payload.filePath);
           await factory(api);
 
@@ -1092,12 +1206,30 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
             executionMode: typeof tool?.executionMode === "string" ? tool.executionMode : undefined
           }));
 
+          const flags = Array.from(flagMap.values()).map(flag => {
+            const defaultValue = flag.options && Object.prototype.hasOwnProperty.call(flag.options, "default")
+              ? flag.options.default
+              : undefined;
+            return {
+              name: flag.name,
+              description: typeof flag.options?.description === "string" ? flag.options.description : "",
+              type: flag.options?.type === "boolean" || flag.options?.type === "string" ? flag.options.type : "",
+              default: typeof defaultValue === "boolean" || typeof defaultValue === "string" ? defaultValue : undefined
+            };
+          });
+
+          const shortcuts = Array.from(shortcutMap.values()).map(shortcut => ({
+            shortcut: shortcut.shortcut,
+            description: typeof shortcut.options?.description === "string" ? shortcut.options.description : "",
+            hasHandler: typeof shortcut.options?.handler === "function"
+          }));
+
           const eventHandlers = Array.from(handlerMap.entries())
             .filter(entry => entry[1].length > 0)
             .map(entry => entry[0]);
 
           if (payload.mode === "load") {
-            write({ ok: true, commands, tools, eventHandlers, unsupported });
+            write({ ok: true, commands, tools, flags, shortcuts, eventHandlers, unsupported });
             return;
           }
 

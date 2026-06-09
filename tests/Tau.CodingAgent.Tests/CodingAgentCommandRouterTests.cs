@@ -1115,6 +1115,62 @@ public class CodingAgentCommandRouterTests
     }
 
     [Fact]
+    public async Task TryHandleAsync_ExtensionsCommand_ListsJavascriptFlagsAndShortcuts()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-router-js-flags-shortcuts-" + Guid.NewGuid().ToString("N"));
+        var extensionDirectory = Path.Combine(directory, ".tau", "extensions", "flags-shortcuts-js");
+        Directory.CreateDirectory(extensionDirectory);
+        await File.WriteAllTextAsync(
+            Path.Combine(extensionDirectory, "package.json"),
+            """
+            {
+              "type": "module",
+              "pi": {
+                "extensions": ["index.js"]
+              }
+            }
+            """);
+        await File.WriteAllTextAsync(
+            Path.Combine(extensionDirectory, "index.js"),
+            """
+            export default function(pi) {
+              pi.registerFlag("mode", {
+                description: "Mode flag",
+                type: "string",
+                default: "slow"
+              });
+              pi.registerShortcut("ctrl+m", {
+                description: "Toggle mode",
+                handler: async () => {}
+              });
+            }
+            """);
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var extensionStore = new CodingAgentExtensionCommandStore(
+            cwd: directory,
+            userExtensionsDirectory: Path.Combine(directory, "missing-user-extensions"),
+            javaScriptRuntime: new CodingAgentJavaScriptExtensionRuntime(directory, nodeExecutable: "node"));
+        var router = new CodingAgentCommandRouter(runner, extensionCommandStore: extensionStore);
+
+        try
+        {
+            var result = await router.TryHandleAsync("/extensions");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Contains("extensions: no slash commands", result.Message, StringComparison.Ordinal);
+            Assert.Contains("extension flags: mode (project, javascript, string, default \"slow\") - Mode flag", result.Message, StringComparison.Ordinal);
+            Assert.Contains("extension shortcuts: ctrl+m (project, javascript) - Toggle mode", result.Message, StringComparison.Ordinal);
+            Assert.Contains($"extension modules: {Path.Combine(extensionDirectory, "index.js")} (project, javascript, loaded; commands 0; tools 0; flags 1; shortcuts 1; limited runtime)", result.Message, StringComparison.Ordinal);
+            Assert.Empty(runner.Inputs);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task TryHandleAsync_ExtensionsCommand_ShowsLoadDiagnostics()
     {
         var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-router-diagnostics-" + Guid.NewGuid().ToString("N"));

@@ -43,6 +43,23 @@ public sealed record CodingAgentExtensionTool(
     bool HasPrepareArguments,
     string? ExecutionMode);
 
+public sealed record CodingAgentExtensionFlag(
+    string Name,
+    string Description,
+    string Type,
+    JsonElement? DefaultValue,
+    string FilePath,
+    string Scope,
+    string Runtime);
+
+public sealed record CodingAgentExtensionShortcut(
+    string Shortcut,
+    string Description,
+    bool HasHandler,
+    string FilePath,
+    string Scope,
+    string Runtime);
+
 public sealed record CodingAgentExtensionResources(
     IReadOnlyList<string> SkillPaths,
     IReadOnlyList<string> PromptPaths,
@@ -85,6 +102,8 @@ public sealed record CodingAgentExtensionDiagnostic(
 public sealed record CodingAgentExtensionStatus(
     IReadOnlyList<CodingAgentExtensionCommand> Commands,
     IReadOnlyList<CodingAgentExtensionTool> Tools,
+    IReadOnlyList<CodingAgentExtensionFlag> Flags,
+    IReadOnlyList<CodingAgentExtensionShortcut> Shortcuts,
     CodingAgentExtensionResources Resources,
     IReadOnlyList<CodingAgentExtensionFileStatus> Files,
     IReadOnlyList<CodingAgentExtensionModule> Modules,
@@ -172,6 +191,8 @@ public sealed class CodingAgentExtensionCommandStore
     {
         var definitions = new List<CommandDefinition>();
         var tools = new List<CodingAgentExtensionTool>();
+        var flags = new List<CodingAgentExtensionFlag>();
+        var shortcuts = new List<CodingAgentExtensionShortcut>();
         var skillPaths = new List<string>();
         var promptPaths = new List<string>();
         var themePaths = new List<string>();
@@ -181,8 +202,8 @@ public sealed class CodingAgentExtensionCommandStore
         var diagnostics = new List<CodingAgentExtensionDiagnostic>();
         if (_includeDefaults)
         {
-            LoadSourceDirectory(_userExtensionsDirectory, "user", definitions, tools, skillPaths, promptPaths, themePaths, files, modules, eventHandlers, diagnostics, _javaScriptRuntime);
-            LoadSourceDirectory(Path.Combine(_cwd, ".tau", "extensions"), "project", definitions, tools, skillPaths, promptPaths, themePaths, files, modules, eventHandlers, diagnostics, _javaScriptRuntime);
+            LoadSourceDirectory(_userExtensionsDirectory, "user", definitions, tools, flags, shortcuts, skillPaths, promptPaths, themePaths, files, modules, eventHandlers, diagnostics, _javaScriptRuntime);
+            LoadSourceDirectory(Path.Combine(_cwd, ".tau", "extensions"), "project", definitions, tools, flags, shortcuts, skillPaths, promptPaths, themePaths, files, modules, eventHandlers, diagnostics, _javaScriptRuntime);
         }
 
         foreach (var path in GetExplicitPaths())
@@ -190,7 +211,7 @@ public sealed class CodingAgentExtensionCommandStore
             var resolved = ResolvePath(path, _cwd);
             if (Directory.Exists(resolved))
             {
-                LoadSourceDirectory(resolved, "path", definitions, tools, skillPaths, promptPaths, themePaths, files, modules, eventHandlers, diagnostics, _javaScriptRuntime, reportMissing: true);
+                LoadSourceDirectory(resolved, "path", definitions, tools, flags, shortcuts, skillPaths, promptPaths, themePaths, files, modules, eventHandlers, diagnostics, _javaScriptRuntime, reportMissing: true);
             }
             else if (File.Exists(resolved) && Path.GetExtension(resolved).Equals(".json", StringComparison.OrdinalIgnoreCase))
             {
@@ -198,7 +219,7 @@ public sealed class CodingAgentExtensionCommandStore
             }
             else if (File.Exists(resolved) && IsModuleFile(resolved))
             {
-                AddModule(resolved, "path", modules, eventHandlers, definitions, tools, diagnostics, _javaScriptRuntime);
+                AddModule(resolved, "path", modules, eventHandlers, definitions, tools, flags, shortcuts, diagnostics, _javaScriptRuntime);
             }
             else if (File.Exists(resolved))
             {
@@ -226,6 +247,8 @@ public sealed class CodingAgentExtensionCommandStore
         return new CodingAgentExtensionStatus(
             ResolveInvocationNames(definitions),
             tools.ToArray(),
+            flags.ToArray(),
+            shortcuts.ToArray(),
             resources,
             files,
             modules
@@ -338,6 +361,8 @@ public sealed class CodingAgentExtensionCommandStore
         string scope,
         ICollection<CommandDefinition> definitions,
         ICollection<CodingAgentExtensionTool> tools,
+        ICollection<CodingAgentExtensionFlag> flags,
+        ICollection<CodingAgentExtensionShortcut> shortcuts,
         ICollection<string> skillPaths,
         ICollection<string> promptPaths,
         ICollection<string> themePaths,
@@ -387,7 +412,7 @@ public sealed class CodingAgentExtensionCommandStore
 
         foreach (var module in DiscoverModuleFiles(directory))
         {
-            AddModule(module, scope, modules, eventHandlers, definitions, tools, diagnostics, javaScriptRuntime);
+            AddModule(module, scope, modules, eventHandlers, definitions, tools, flags, shortcuts, diagnostics, javaScriptRuntime);
         }
     }
 
@@ -887,6 +912,8 @@ public sealed class CodingAgentExtensionCommandStore
         ICollection<CodingAgentExtensionEventHandler> eventHandlers,
         ICollection<CommandDefinition> definitions,
         ICollection<CodingAgentExtensionTool> tools,
+        ICollection<CodingAgentExtensionFlag> flags,
+        ICollection<CodingAgentExtensionShortcut> shortcuts,
         ICollection<CodingAgentExtensionDiagnostic> diagnostics,
         CodingAgentJavaScriptExtensionRuntime javaScriptRuntime)
     {
@@ -995,6 +1022,82 @@ public sealed class CodingAgentExtensionCommandStore
                 eventType));
         }
 
+        foreach (var flag in result.Flags)
+        {
+            var name = NormalizeName(flag.Name);
+            if (string.IsNullOrWhiteSpace(name))
+            {
+                diagnostics.Add(new CodingAgentExtensionDiagnostic(
+                    "warning",
+                    $"{runtime} extension registered a flag with an invalid name",
+                    fullPath,
+                    scope));
+                continue;
+            }
+
+            if (!flag.Type.Equals("boolean", StringComparison.Ordinal) &&
+                !flag.Type.Equals("string", StringComparison.Ordinal))
+            {
+                diagnostics.Add(new CodingAgentExtensionDiagnostic(
+                    "warning",
+                    $"{runtime} extension flag '{name}' has an unsupported type",
+                    fullPath,
+                    scope));
+                continue;
+            }
+
+            if (flags.Any(existing => existing.Name.Equals(name, StringComparison.Ordinal)))
+            {
+                continue;
+            }
+
+            flags.Add(new CodingAgentExtensionFlag(
+                name,
+                flag.Description.Trim(),
+                flag.Type,
+                flag.DefaultValue?.Clone(),
+                fullPath,
+                scope,
+                runtime));
+        }
+
+        foreach (var shortcut in result.Shortcuts)
+        {
+            var key = shortcut.Shortcut.Trim();
+            if (string.IsNullOrWhiteSpace(key))
+            {
+                diagnostics.Add(new CodingAgentExtensionDiagnostic(
+                    "warning",
+                    $"{runtime} extension registered a shortcut with an invalid key",
+                    fullPath,
+                    scope));
+                continue;
+            }
+
+            if (!shortcut.HasHandler)
+            {
+                diagnostics.Add(new CodingAgentExtensionDiagnostic(
+                    "warning",
+                    $"{runtime} extension shortcut '{key}' has no handler",
+                    fullPath,
+                    scope));
+                continue;
+            }
+
+            if (shortcuts.Any(existing => existing.Shortcut.Equals(key, StringComparison.OrdinalIgnoreCase)))
+            {
+                continue;
+            }
+
+            shortcuts.Add(new CodingAgentExtensionShortcut(
+                key,
+                shortcut.Description.Trim(),
+                true,
+                fullPath,
+                scope,
+                runtime));
+        }
+
         modules.Add(new CodingAgentExtensionModule(
             fullPath,
             scope,
@@ -1005,6 +1108,17 @@ public sealed class CodingAgentExtensionCommandStore
     private static string FormatNodeModuleStatus(CodingAgentJavaScriptExtensionLoadResult result)
     {
         var status = $"loaded; commands {result.Commands.Count(static command => command.HasHandler)}; tools {result.Tools.Count(static tool => tool.HasHandler)}";
+        if (result.Flags.Count > 0)
+        {
+            status = $"{status}; flags {result.Flags.Count}";
+        }
+
+        var shortcutCount = result.Shortcuts.Count(static shortcut => shortcut.HasHandler);
+        if (shortcutCount > 0)
+        {
+            status = $"{status}; shortcuts {shortcutCount}";
+        }
+
         if (result.EventHandlerTypes.Count > 0)
         {
             status = $"{status}; events {result.EventHandlerTypes.Count}";

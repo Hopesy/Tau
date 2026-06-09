@@ -532,6 +532,114 @@ public class CodingAgentExtensionCommandStoreTests
     }
 
     [Fact]
+    public void LoadStatus_LoadsJavascriptRegisteredFlagsAndGetFlagDefaults()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-js-flags-" + Guid.NewGuid().ToString("N"));
+        var extensionDirectory = Path.Combine(directory, ".tau", "extensions", "flags");
+        Directory.CreateDirectory(extensionDirectory);
+        WriteJavaScriptExtension(
+            extensionDirectory,
+            """
+            export default function(pi) {
+              pi.registerFlag("enabled", {
+                description: "Enable feature",
+                type: "boolean",
+                default: true
+              });
+              pi.registerFlag("mode", {
+                description: "Execution mode",
+                type: "string",
+                default: "slow"
+              });
+              pi.registerCommand("flag-check", {
+                description: "Read flags",
+                handler: async () => {
+                  return `enabled=${pi.getFlag("enabled")}; mode=${pi.getFlag("mode")}; missing=${pi.getFlag("missing") === undefined}`;
+                }
+              });
+            }
+            """);
+
+        try
+        {
+            var store = CreateJavaScriptStore(directory);
+
+            var status = store.LoadStatus();
+
+            Assert.Empty(status.Diagnostics);
+            Assert.Equal(2, status.Flags.Count);
+            var enabled = Assert.Single(status.Flags, static flag => flag.Name == "enabled");
+            Assert.Equal("Enable feature", enabled.Description);
+            Assert.Equal("boolean", enabled.Type);
+            Assert.NotNull(enabled.DefaultValue);
+            Assert.True(enabled.DefaultValue.Value.GetBoolean());
+            Assert.Equal("project", enabled.Scope);
+            Assert.Equal("javascript", enabled.Runtime);
+
+            var mode = Assert.Single(status.Flags, static flag => flag.Name == "mode");
+            Assert.Equal("Execution mode", mode.Description);
+            Assert.Equal("string", mode.Type);
+            Assert.NotNull(mode.DefaultValue);
+            Assert.Equal("slow", mode.DefaultValue.Value.GetString());
+
+            var module = Assert.Single(status.Modules);
+            Assert.Equal("loaded; commands 1; tools 0; flags 2; limited runtime", module.Status);
+
+            var handled = store.TryInvoke("/flag-check", out var invocation);
+            Assert.True(handled);
+            Assert.NotNull(invocation);
+            Assert.False(invocation.IsError);
+            Assert.False(invocation.SendToRunner);
+            Assert.Equal("enabled=true; mode=slow; missing=true", invocation.Message);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void LoadStatus_LoadsJavascriptRegisteredShortcuts()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-js-shortcuts-" + Guid.NewGuid().ToString("N"));
+        var extensionDirectory = Path.Combine(directory, ".tau", "extensions", "shortcuts");
+        Directory.CreateDirectory(extensionDirectory);
+        WriteJavaScriptExtension(
+            extensionDirectory,
+            """
+            export default function(pi) {
+              pi.registerShortcut("ctrl+x", {
+                description: "Run extension shortcut",
+                handler: async (ctx) => {
+                  ctx.sendMessage("shortcut handled");
+                }
+              });
+            }
+            """);
+
+        try
+        {
+            var store = CreateJavaScriptStore(directory);
+
+            var status = store.LoadStatus();
+
+            Assert.Empty(status.Diagnostics);
+            var shortcut = Assert.Single(status.Shortcuts);
+            Assert.Equal("ctrl+x", shortcut.Shortcut);
+            Assert.Equal("Run extension shortcut", shortcut.Description);
+            Assert.True(shortcut.HasHandler);
+            Assert.Equal("project", shortcut.Scope);
+            Assert.Equal("javascript", shortcut.Runtime);
+            var module = Assert.Single(status.Modules);
+            Assert.Equal("loaded; commands 0; tools 0; shortcuts 1; limited runtime", module.Status);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public void LoadStatus_LoadsJavascriptRegisteredTools()
     {
         var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-js-tool-load-" + Guid.NewGuid().ToString("N"));
@@ -891,6 +999,58 @@ public class CodingAgentExtensionCommandStoreTests
             Assert.Equal("object", tool.ParameterSchema.GetProperty("type").GetString());
             var module = Assert.Single(status.Modules);
             Assert.Equal("loaded; commands 0; tools 1; limited runtime", module.Status);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void LoadStatus_LoadsTypescriptRegisteredFlagsAndShortcuts()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-ts-flags-shortcuts-" + Guid.NewGuid().ToString("N"));
+        var extensionDirectory = Path.Combine(directory, ".tau", "extensions", "ts-flags-shortcuts");
+        Directory.CreateDirectory(extensionDirectory);
+        WriteTypeScriptExtension(
+            extensionDirectory,
+            """
+            export default function(pi: any) {
+              pi.registerFlag("dry-run", {
+                description: "Preview only",
+                type: "boolean",
+                default: false
+              });
+              pi.registerShortcut("ctrl+shift+d", {
+                description: "Toggle dry run",
+                handler: async () => {}
+              });
+            }
+            """);
+
+        try
+        {
+            var store = CreateTypeScriptStore(directory);
+
+            var status = store.LoadStatus();
+
+            Assert.Empty(status.Diagnostics);
+            var flag = Assert.Single(status.Flags);
+            Assert.Equal("dry-run", flag.Name);
+            Assert.Equal("Preview only", flag.Description);
+            Assert.Equal("boolean", flag.Type);
+            Assert.NotNull(flag.DefaultValue);
+            Assert.False(flag.DefaultValue.Value.GetBoolean());
+            Assert.Equal("typescript", flag.Runtime);
+
+            var shortcut = Assert.Single(status.Shortcuts);
+            Assert.Equal("ctrl+shift+d", shortcut.Shortcut);
+            Assert.Equal("Toggle dry run", shortcut.Description);
+            Assert.True(shortcut.HasHandler);
+            Assert.Equal("typescript", shortcut.Runtime);
+
+            var module = Assert.Single(status.Modules);
+            Assert.Equal("loaded; commands 0; tools 0; flags 1; shortcuts 1; limited runtime", module.Status);
         }
         finally
         {

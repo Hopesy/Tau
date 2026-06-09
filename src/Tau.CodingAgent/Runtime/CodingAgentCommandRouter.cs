@@ -252,8 +252,7 @@ public sealed class CodingAgentCommandRouter
         else
         {
             _extensionResourceState?.Update(extensionStatus.Resources);
-            lines.Add(
-                $"extensions: {extensionStatus.Commands.Count} commands, {extensionStatus.Tools.Count} tools, {extensionStatus.Files.Count} files, {extensionStatus.Diagnostics.Count} issues");
+            lines.Add(FormatExtensionReloadSummary(extensionStatus));
         }
 
         var prompts = _promptTemplateStore?.Load();
@@ -2120,8 +2119,10 @@ public sealed class CodingAgentCommandRouter
         var status = _extensionCommandStore?.LoadStatus();
         var commands = status?.Commands ?? [];
         var tools = status?.Tools ?? [];
+        var flags = status?.Flags ?? [];
+        var shortcuts = status?.Shortcuts ?? [];
         var lines = new List<string>();
-        if (commands.Count == 0 && tools.Count == 0)
+        if (commands.Count == 0 && tools.Count == 0 && flags.Count == 0 && shortcuts.Count == 0)
         {
             lines.Add("extensions: none");
         }
@@ -2201,6 +2202,29 @@ public sealed class CodingAgentCommandRouter
             lines.Add($"extension tools: {string.Join("; ", tools)}");
         }
 
+        if (status.Flags.Count > 0)
+        {
+            var flags = status.Flags.Select(static flag =>
+            {
+                var defaultValue = flag.DefaultValue is { } value
+                    ? $", default {FormatExtensionFlagDefault(value)}"
+                    : string.Empty;
+                var description = string.IsNullOrWhiteSpace(flag.Description) ? string.Empty : $" - {flag.Description}";
+                return $"{flag.Name} ({flag.Scope}, {flag.Runtime}, {flag.Type}{defaultValue}){description}";
+            });
+            lines.Add($"extension flags: {string.Join("; ", flags)}");
+        }
+
+        if (status.Shortcuts.Count > 0)
+        {
+            var shortcuts = status.Shortcuts.Select(static shortcut =>
+            {
+                var description = string.IsNullOrWhiteSpace(shortcut.Description) ? string.Empty : $" - {shortcut.Description}";
+                return $"{shortcut.Shortcut} ({shortcut.Scope}, {shortcut.Runtime}){description}";
+            });
+            lines.Add($"extension shortcuts: {string.Join("; ", shortcuts)}");
+        }
+
         if (status.Modules.Count > 0)
         {
             var modules = status.Modules.Select(static module =>
@@ -2214,6 +2238,29 @@ public sealed class CodingAgentCommandRouter
                 $"{diagnostic.Severity} {diagnostic.Path} ({diagnostic.Scope}) - {diagnostic.Message}");
             lines.Add($"extension issues: {string.Join("; ", issues)}");
         }
+    }
+
+    private static string FormatExtensionReloadSummary(CodingAgentExtensionStatus status)
+    {
+        var summary = $"extensions: {status.Commands.Count} commands, {status.Tools.Count} tools";
+        if (status.Flags.Count > 0)
+        {
+            summary = $"{summary}, {status.Flags.Count} flags";
+        }
+
+        if (status.Shortcuts.Count > 0)
+        {
+            summary = $"{summary}, {status.Shortcuts.Count} shortcuts";
+        }
+
+        return $"{summary}, {status.Files.Count} files, {status.Diagnostics.Count} issues";
+    }
+
+    private static string FormatExtensionFlagDefault(JsonElement value)
+    {
+        return value.ValueKind == JsonValueKind.String
+            ? JsonSerializer.Serialize(value.GetString())
+            : value.GetRawText();
     }
 
     private async Task<CodingAgentCommandResult> HandleAuthCommandAsync(
