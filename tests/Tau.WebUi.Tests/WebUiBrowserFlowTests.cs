@@ -113,6 +113,94 @@ public sealed class WebUiBrowserFlowTests
     }
 
     [Fact]
+    public async Task ArtifactsPane_RendersSpecializedViewerBaselines()
+    {
+        await using var context = await _fixture.NewContextAsync();
+        var page = await context.NewPageAsync();
+
+        await page.GotoAsync("/");
+        await page.WaitForFunctionAsync("document.querySelectorAll('#provider option').length > 0");
+
+        await page.FillAsync("#session-title", "Artifact viewers");
+        await page.ClickAsync("#new-session");
+        var session = page.Locator("#sessions .session.active");
+        await Assertions.Expect(session).ToBeVisibleAsync(new() { Timeout = 5000 });
+        await Assertions.Expect(session).ToContainTextAsync("Artifact viewers", new() { Timeout = 5000 });
+        var sessionId = await session.GetAttributeAsync("data-id");
+        Assert.False(string.IsNullOrWhiteSpace(sessionId));
+
+        await page.EvaluateAsync(
+            """
+            async sessionId => {
+              const markdown = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/artifacts/notes.md`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ content: '# Viewer Title\n\n- [x] rendered item', mimeType: 'text/markdown' })
+              });
+              if (!markdown.ok) throw new Error(await markdown.text());
+
+              const svg = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/artifacts/chart.svg`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  content: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 40"><text x="8" y="24">SVG OK</text></svg>',
+                  mimeType: 'image/svg+xml'
+                })
+              });
+              if (!svg.ok) throw new Error(await svg.text());
+
+              const pdf = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/artifacts/report.pdf`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ content: 'JVBERi0xLjQKJcTl8uXrp/Og0MTGCg==', mimeType: 'application/pdf' })
+              });
+              if (!pdf.ok) throw new Error(await pdf.text());
+
+              const generic = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/artifacts/archive.bin`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ content: 'AAECAwQ=', mimeType: 'application/octet-stream' })
+              });
+              if (!generic.ok) throw new Error(await generic.text());
+            }
+            """,
+            sessionId);
+
+        await page.ClickAsync($"#sessions .session[data-id='{sessionId}']");
+        await page.ClickAsync("#refresh-artifacts");
+
+        await Assertions.Expect(page.Locator("#artifacts-list .artifact-pill[data-file='notes.md']")).ToContainTextAsync("notes.md", new() { Timeout = 5000 });
+        await page.ClickAsync("#artifacts-list .artifact-pill[data-file='notes.md']");
+        await Assertions.Expect(page.Locator("#artifact-preview .artifact-viewer-title")).ToContainTextAsync("notes.md", new() { Timeout = 5000 });
+        await Assertions.Expect(page.Locator("#artifact-preview")).ToContainTextAsync("Markdown preview", new() { Timeout = 5000 });
+        await Assertions.Expect(page.Locator("#artifact-preview h1")).ToContainTextAsync("Viewer Title", new() { Timeout = 5000 });
+        await Assertions.Expect(page.Locator("#artifact-preview .task-check")).ToBeCheckedAsync(new() { Timeout = 5000 });
+
+        await page.ClickAsync("#artifacts-list .artifact-pill[data-file='chart.svg']");
+
+        await Assertions.Expect(page.Locator("#artifact-preview .artifact-viewer-title")).ToContainTextAsync("chart.svg", new() { Timeout = 5000 });
+        await Assertions.Expect(page.Locator("#artifact-preview")).ToContainTextAsync("SVG preview", new() { Timeout = 5000 });
+        var svgFrame = page.FrameLocator("iframe.artifact-frame");
+        await Assertions.Expect(svgFrame.Locator("svg")).ToBeVisibleAsync(new() { Timeout = 5000 });
+        await Assertions.Expect(svgFrame.Locator("text")).ToContainTextAsync("SVG OK", new() { Timeout = 5000 });
+
+        await page.ClickAsync("#artifacts-list .artifact-pill[data-file='report.pdf']");
+
+        await Assertions.Expect(page.Locator("#artifact-preview .artifact-viewer-title")).ToContainTextAsync("report.pdf", new() { Timeout = 5000 });
+        await Assertions.Expect(page.Locator("#artifact-preview")).ToContainTextAsync("PDF preview", new() { Timeout = 5000 });
+        var pdfSrc = await page.Locator("#artifact-preview iframe.artifact-frame").GetAttributeAsync("src");
+        Assert.StartsWith("data:application/pdf;base64,", pdfSrc);
+
+        await page.ClickAsync("#artifacts-list .artifact-pill[data-file='archive.bin']");
+
+        await Assertions.Expect(page.Locator("#artifact-preview .artifact-viewer-title")).ToContainTextAsync("archive.bin", new() { Timeout = 5000 });
+        await Assertions.Expect(page.Locator("#artifact-preview")).ToContainTextAsync("Generic file", new() { Timeout = 5000 });
+        await Assertions.Expect(page.Locator("#artifact-preview")).ToContainTextAsync("Preview not available for this file type.", new() { Timeout = 5000 });
+        var downloadHref = await page.Locator("#artifact-preview .artifact-download-link").GetAttributeAsync("href");
+        Assert.StartsWith("data:application/octet-stream;base64,", downloadHref);
+    }
+
+    [Fact]
     public async Task HtmlArtifact_CanReadSessionAttachmentsAndReturnDownloadableFile()
     {
         await using var context = await _fixture.NewContextAsync();

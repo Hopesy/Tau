@@ -56,6 +56,13 @@ public static class WebUiPage
             .artifact-frame { width: 100%; min-height: 420px; height: calc(100vh - 300px); border: 1px solid rgba(255,255,255,.1); border-radius: 10px; background: #fff; }
             .artifact-code { margin: 0; padding: 12px; border-radius: 10px; overflow: auto; background: #050b17; border: 1px solid rgba(255,255,255,.08); color: #dce6fa; white-space: pre; }
             .artifact-image { max-width: 100%; border-radius: 10px; border: 1px solid rgba(255,255,255,.1); background: #050b17; }
+            .artifact-viewer { display: grid; gap: 12px; min-height: 100%; align-content: start; }
+            .artifact-viewer-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; color: #9fb0cf; font-size: 12px; }
+            .artifact-viewer-title { color: #e8edf7; font-weight: 650; overflow-wrap: anywhere; }
+            .artifact-markdown { padding: 12px; border-radius: 10px; border: 1px solid rgba(255,255,255,.08); background: rgba(255,255,255,.03); }
+            .artifact-download-link { color: #bfd0ff; text-decoration: none; border: 1px solid rgba(158,183,255,.35); border-radius: 999px; padding: 6px 10px; background: rgba(53,103,255,.12); }
+            .artifact-generic { min-height: 260px; display: grid; place-items: center; text-align: center; color: #9fb0cf; }
+            .artifact-generic-card { max-width: 420px; display: grid; gap: 10px; padding: 22px; border-radius: 12px; border: 1px solid rgba(255,255,255,.09); background: rgba(255,255,255,.03); }
             .message { border: 1px solid rgba(255,255,255,.08); border-radius: 14px; padding: 14px; background: rgba(255,255,255,.03); }
             .message.user { background: rgba(53,103,255,.12); }
             .role { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: #8fa3c7; margin-bottom: 8px; }
@@ -221,6 +228,65 @@ public static class WebUiPage
 
             function isImageArtifact(artifact) {
               return artifact && (artifact.mimeType || '').toLowerCase().startsWith('image/');
+            }
+
+            const textArtifactExtensions = new Set([
+              'txt', 'json', 'xml', 'yaml', 'yml', 'toml', 'csv',
+              'js', 'javascript', 'ts', 'typescript', 'jsx', 'tsx',
+              'py', 'python', 'java', 'c', 'cpp', 'h', 'cs', 'fs',
+              'php', 'rb', 'ruby', 'go', 'rust', 'swift', 'kotlin',
+              'scala', 'dart', 'html', 'css', 'scss', 'sass', 'less',
+              'sh', 'bash', 'ps1', 'bat', 'sql', 'r', 'matlab', 'julia',
+              'lua', 'perl', 'vue', 'svelte'
+            ]);
+
+            function artifactExtension(artifact) {
+              const name = (artifact?.fileName || '').toLowerCase();
+              const dot = name.lastIndexOf('.');
+              return dot >= 0 ? name.slice(dot + 1) : '';
+            }
+
+            function isMarkdownArtifact(artifact) {
+              const mime = (artifact?.mimeType || '').toLowerCase();
+              const ext = artifactExtension(artifact);
+              return mime.includes('markdown') || ext === 'md' || ext === 'markdown';
+            }
+
+            function isSvgArtifact(artifact) {
+              const mime = (artifact?.mimeType || '').toLowerCase();
+              return mime.includes('svg') || artifactExtension(artifact) === 'svg';
+            }
+
+            function isPdfArtifact(artifact) {
+              const mime = (artifact?.mimeType || '').toLowerCase();
+              return mime.includes('pdf') || artifactExtension(artifact) === 'pdf';
+            }
+
+            function isTextArtifact(artifact) {
+              const mime = (artifact?.mimeType || '').toLowerCase();
+              return mime.startsWith('text/') ||
+                mime.includes('json') ||
+                mime.includes('xml') ||
+                mime.includes('yaml') ||
+                mime.includes('javascript') ||
+                textArtifactExtensions.has(artifactExtension(artifact));
+            }
+
+            function artifactDataUrl(artifact, fallbackMime) {
+              const content = artifact?.content || '';
+              if (content.startsWith('data:')) return content;
+              const mimeType = artifact?.mimeType || fallbackMime || 'application/octet-stream';
+              if (mimeType.startsWith('text/') || mimeType.includes('svg') || mimeType.includes('json') || mimeType.includes('xml')) {
+                return `data:${mimeType};charset=utf-8,${encodeURIComponent(content)}`;
+              }
+              return `data:${mimeType};base64,${content}`;
+            }
+
+            function artifactViewerHead(artifact, label, extra = '') {
+              const meta = [label, artifact.mimeType || 'application/octet-stream', formatBytes(artifact.size || 0)]
+                .filter(Boolean)
+                .join(' | ');
+              return `<div class="artifact-viewer-head"><div><div class="artifact-viewer-title">${escapeHtml(artifact.fileName)}</div><div>${escapeHtml(meta)}</div></div>${extra}</div>`;
             }
 
             function sandboxSafeJson(value) {
@@ -510,7 +576,18 @@ public static class WebUiPage
               const preview = document.getElementById('artifact-preview');
               preview.className = '';
               if (isHtmlArtifact(artifact)) {
-                preview.innerHTML = `<iframe class="artifact-frame" sandbox="allow-scripts allow-forms" srcdoc="${escapeAttribute(artifactSandboxSrcdoc(artifact))}"></iframe>`;
+                preview.innerHTML = `<div class="artifact-viewer">${artifactViewerHead(artifact, 'HTML artifact')}<iframe class="artifact-frame" sandbox="allow-scripts allow-forms" srcdoc="${escapeAttribute(artifactSandboxSrcdoc(artifact))}"></iframe></div>`;
+                return;
+              }
+
+              if (isMarkdownArtifact(artifact)) {
+                preview.innerHTML = `<div class="artifact-viewer">${artifactViewerHead(artifact, 'Markdown preview')}<div class="message-text artifact-markdown">${renderText(artifact.content || '')}</div></div>`;
+                return;
+              }
+
+              if (isSvgArtifact(artifact)) {
+                const download = `<a class="artifact-download-link" download="${escapeAttribute(artifact.fileName)}" href="${escapeAttribute(artifactDataUrl(artifact, 'image/svg+xml'))}">Download</a>`;
+                preview.innerHTML = `<div class="artifact-viewer">${artifactViewerHead(artifact, 'SVG preview', download)}<iframe class="artifact-frame" sandbox="" srcdoc="${escapeAttribute(artifact.content || '')}"></iframe></div>`;
                 return;
               }
 
@@ -518,11 +595,25 @@ public static class WebUiPage
                 const src = artifact.content.startsWith('data:')
                   ? artifact.content
                   : `data:${artifact.mimeType};base64,${artifact.content}`;
-                preview.innerHTML = `<img class="artifact-image" src="${escapeAttribute(src)}" alt="" />`;
+                const download = `<a class="artifact-download-link" download="${escapeAttribute(artifact.fileName)}" href="${escapeAttribute(src)}">Download</a>`;
+                preview.innerHTML = `<div class="artifact-viewer">${artifactViewerHead(artifact, 'Image preview', download)}<img class="artifact-image" src="${escapeAttribute(src)}" alt="" /></div>`;
                 return;
               }
 
-              preview.innerHTML = `<pre class="artifact-code"><code>${escapeHtml(artifact.content || '')}</code></pre>`;
+              if (isPdfArtifact(artifact)) {
+                const src = artifactDataUrl(artifact, 'application/pdf');
+                const download = `<a class="artifact-download-link" download="${escapeAttribute(artifact.fileName)}" href="${escapeAttribute(src)}">Download</a>`;
+                preview.innerHTML = `<div class="artifact-viewer">${artifactViewerHead(artifact, 'PDF preview', download)}<iframe class="artifact-frame" src="${escapeAttribute(src)}"></iframe></div>`;
+                return;
+              }
+
+              if (isTextArtifact(artifact)) {
+                preview.innerHTML = `<div class="artifact-viewer">${artifactViewerHead(artifact, 'Text preview')}<pre class="artifact-code"><code>${escapeHtml(artifact.content || '')}</code></pre></div>`;
+                return;
+              }
+
+              const download = `<a class="artifact-download-link" download="${escapeAttribute(artifact.fileName)}" href="${escapeAttribute(artifactDataUrl(artifact, artifact.mimeType || 'application/octet-stream'))}">Download</a>`;
+              preview.innerHTML = `<div class="artifact-generic"><div class="artifact-generic-card">${artifactViewerHead(artifact, 'Generic file', download)}<div>Preview not available for this file type.</div></div></div>`;
             }
 
             function isTextFile(file) {

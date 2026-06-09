@@ -46,6 +46,15 @@ public sealed class WebUiPageTests
         Assert.Contains("type: 'file-returned'", html, StringComparison.Ordinal);
         Assert.Contains("action: 'htmlArtifactLogs'", html, StringComparison.Ordinal);
         Assert.Contains("old_str, new_str", html, StringComparison.Ordinal);
+        Assert.Contains("function isMarkdownArtifact(artifact)", html, StringComparison.Ordinal);
+        Assert.Contains("function isSvgArtifact(artifact)", html, StringComparison.Ordinal);
+        Assert.Contains("function isPdfArtifact(artifact)", html, StringComparison.Ordinal);
+        Assert.Contains("function isTextArtifact(artifact)", html, StringComparison.Ordinal);
+        Assert.Contains("textArtifactExtensions", html, StringComparison.Ordinal);
+        Assert.Contains("Markdown preview", html, StringComparison.Ordinal);
+        Assert.Contains("SVG preview", html, StringComparison.Ordinal);
+        Assert.Contains("PDF preview", html, StringComparison.Ordinal);
+        Assert.Contains("Generic file", html, StringComparison.Ordinal);
         Assert.Contains("fileName, content: finalContent", html, StringComparison.Ordinal);
         Assert.Contains("/runtime/messages", html, StringComparison.Ordinal);
         Assert.Contains("isKnownArtifactSandbox", html, StringComparison.Ordinal);
