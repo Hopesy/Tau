@@ -306,10 +306,23 @@ public static class WebUiPage
                   if (isJsonFile(filename)) return JSON.parse(content);
                   return content;
                 };
+                const stringifyArtifactContent = content => typeof content === 'string' ? content : JSON.stringify(content, null, 2);
+                window.createArtifact = async (filename, content, mimeType) => {
+                  await window.sendRuntimeMessage({ type: 'artifact-operation', action: 'create', filename, content: stringifyArtifactContent(content), mimeType });
+                };
+                window.updateArtifact = async (filename, old_str, new_str) => {
+                  await window.sendRuntimeMessage({ type: 'artifact-operation', action: 'update', filename, old_str, new_str });
+                };
+                window.rewriteArtifact = async (filename, content, mimeType) => {
+                  await window.sendRuntimeMessage({ type: 'artifact-operation', action: 'rewrite', filename, content: stringifyArtifactContent(content), mimeType });
+                };
                 window.createOrUpdateArtifact = async (filename, content, mimeType) => {
-                  let finalContent = content;
-                  if (typeof finalContent !== 'string') finalContent = JSON.stringify(finalContent, null, 2);
+                  const finalContent = stringifyArtifactContent(content);
                   await window.sendRuntimeMessage({ type: 'artifact-operation', action: 'createOrUpdate', filename, content: finalContent, mimeType });
+                };
+                window.htmlArtifactLogs = async filename => {
+                  const response = await window.sendRuntimeMessage({ type: 'artifact-operation', action: 'htmlArtifactLogs', filename });
+                  return response.result || '';
                 };
                 window.deleteArtifact = async filename => {
                   await window.sendRuntimeMessage({ type: 'artifact-operation', action: 'delete', filename });
@@ -1142,7 +1155,7 @@ public static class WebUiPage
                   headers: { 'Content-Type': 'application/json' },
                   body: JSON.stringify(message)
                 });
-                if (message.type === 'artifact-operation' && (message.action === 'createOrUpdate' || message.action === 'delete')) {
+                if (message.type === 'artifact-operation' && ['createOrUpdate', 'create', 'update', 'rewrite', 'delete'].includes(message.action)) {
                   await loadArtifacts(currentSessionId);
                 }
                 event.source?.postMessage(response, '*');

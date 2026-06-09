@@ -32,7 +32,11 @@ public sealed class WebUiPageTests
         Assert.Contains("id=\"refresh-artifacts\"", html, StringComparison.Ordinal);
         Assert.Contains("window.listArtifacts", html, StringComparison.Ordinal);
         Assert.Contains("window.getArtifact", html, StringComparison.Ordinal);
+        Assert.Contains("window.createArtifact", html, StringComparison.Ordinal);
+        Assert.Contains("window.updateArtifact", html, StringComparison.Ordinal);
+        Assert.Contains("window.rewriteArtifact", html, StringComparison.Ordinal);
         Assert.Contains("window.createOrUpdateArtifact", html, StringComparison.Ordinal);
+        Assert.Contains("window.htmlArtifactLogs", html, StringComparison.Ordinal);
         Assert.Contains("window.deleteArtifact", html, StringComparison.Ordinal);
         Assert.Contains("window.attachments", html, StringComparison.Ordinal);
         Assert.Contains("window.listAttachments", html, StringComparison.Ordinal);
@@ -40,6 +44,8 @@ public sealed class WebUiPageTests
         Assert.Contains("window.readBinaryAttachment", html, StringComparison.Ordinal);
         Assert.Contains("window.returnDownloadableFile", html, StringComparison.Ordinal);
         Assert.Contains("type: 'file-returned'", html, StringComparison.Ordinal);
+        Assert.Contains("action: 'htmlArtifactLogs'", html, StringComparison.Ordinal);
+        Assert.Contains("old_str, new_str", html, StringComparison.Ordinal);
         Assert.Contains("fileName, content: finalContent", html, StringComparison.Ordinal);
         Assert.Contains("/runtime/messages", html, StringComparison.Ordinal);
         Assert.Contains("isKnownArtifactSandbox", html, StringComparison.Ordinal);

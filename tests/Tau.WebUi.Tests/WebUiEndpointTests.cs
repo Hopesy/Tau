@@ -283,6 +283,169 @@ public sealed class WebUiEndpointTests
     }
 
     [Fact]
+    public async Task ArtifactEndpoints_HandleUpstreamArtifactOperationSemantics()
+    {
+        await using var fixture = await WebUiEndpointFixture.StartAsync(StreamOk);
+        var created = await fixture.Client.PostAsync(
+            "/api/sessions",
+            JsonBody(
+                new CreateSessionRequest("Artifact operations", "openai", "gpt-5.4"),
+                WebUiEndpointJsonContext.Default.CreateSessionRequest));
+        created.EnsureSuccessStatusCode();
+        var session = JsonSerializer.Deserialize(
+            await created.Content.ReadAsStringAsync(),
+            WebUiEndpointJsonContext.Default.WebChatSessionDto);
+        Assert.NotNull(session);
+
+        var runtimeCreate = await fixture.Client.PostAsync(
+            $"/api/sessions/{session!.Id}/runtime/messages",
+            JsonBody(
+                new WebRuntimeMessageRequest(
+                    "artifact-operation",
+                    MessageId: "msg-create",
+                    SandboxId: $"artifact-{session.Id}-report.html",
+                    Action: "create",
+                    Filename: "report.html",
+                    Content: "alpha old old",
+                    MimeType: "text/html"),
+                WebUiEndpointJsonContext.Default.WebRuntimeMessageRequest));
+        runtimeCreate.EnsureSuccessStatusCode();
+        using (var createResponse = JsonDocument.Parse(await runtimeCreate.Content.ReadAsStringAsync()))
+        {
+            Assert.True(createResponse.RootElement.GetProperty("success").GetBoolean());
+            Assert.Equal("report.html", createResponse.RootElement.GetProperty("result").GetString());
+        }
+
+        var duplicateCreate = await fixture.Client.PostAsync(
+            $"/api/sessions/{session.Id}/runtime/messages",
+            JsonBody(
+                new WebRuntimeMessageRequest(
+                    "artifact-operation",
+                    MessageId: "msg-duplicate",
+                    SandboxId: $"artifact-{session.Id}-report.html",
+                    Action: "create",
+                    Filename: "report.html",
+                    Content: "overwrite"),
+                WebUiEndpointJsonContext.Default.WebRuntimeMessageRequest));
+        duplicateCreate.EnsureSuccessStatusCode();
+        using (var duplicateResponse = JsonDocument.Parse(await duplicateCreate.Content.ReadAsStringAsync()))
+        {
+            Assert.False(duplicateResponse.RootElement.GetProperty("success").GetBoolean());
+            Assert.Contains("already exists", duplicateResponse.RootElement.GetProperty("error").GetString(), StringComparison.Ordinal);
+        }
+
+        var runtimeUpdate = await fixture.Client.PostAsync(
+            $"/api/sessions/{session.Id}/runtime/messages",
+            JsonBody(
+                new WebRuntimeMessageRequest(
+                    "artifact-operation",
+                    MessageId: "msg-update",
+                    SandboxId: $"artifact-{session.Id}-report.html",
+                    Action: "update",
+                    Filename: "report.html",
+                    OldString: "old",
+                    NewString: "new"),
+                WebUiEndpointJsonContext.Default.WebRuntimeMessageRequest));
+        runtimeUpdate.EnsureSuccessStatusCode();
+        using (var updateResponse = JsonDocument.Parse(await runtimeUpdate.Content.ReadAsStringAsync()))
+        {
+            Assert.True(updateResponse.RootElement.GetProperty("success").GetBoolean());
+        }
+
+        var afterUpdate = await fixture.Client.GetAsync($"/api/sessions/{session.Id}/artifacts/report.html");
+        afterUpdate.EnsureSuccessStatusCode();
+        var updatedArtifact = JsonSerializer.Deserialize(
+            await afterUpdate.Content.ReadAsStringAsync(),
+            WebUiEndpointJsonContext.Default.WebArtifactDto);
+        Assert.Equal("alpha new old", updatedArtifact?.Content);
+
+        var missingStringUpdate = await fixture.Client.PostAsync(
+            $"/api/sessions/{session.Id}/runtime/messages",
+            JsonBody(
+                new WebRuntimeMessageRequest(
+                    "artifact-operation",
+                    MessageId: "msg-missing-string",
+                    SandboxId: $"artifact-{session.Id}-report.html",
+                    Action: "update",
+                    Filename: "report.html",
+                    OldString: "absent",
+                    NewString: "value"),
+                WebUiEndpointJsonContext.Default.WebRuntimeMessageRequest));
+        missingStringUpdate.EnsureSuccessStatusCode();
+        using (var missingStringResponse = JsonDocument.Parse(await missingStringUpdate.Content.ReadAsStringAsync()))
+        {
+            Assert.False(missingStringResponse.RootElement.GetProperty("success").GetBoolean());
+            Assert.Contains("String not found in file", missingStringResponse.RootElement.GetProperty("error").GetString(), StringComparison.Ordinal);
+            Assert.Contains("alpha new old", missingStringResponse.RootElement.GetProperty("error").GetString(), StringComparison.Ordinal);
+        }
+
+        var runtimeRewrite = await fixture.Client.PostAsync(
+            $"/api/sessions/{session.Id}/runtime/messages",
+            JsonBody(
+                new WebRuntimeMessageRequest(
+                    "artifact-operation",
+                    MessageId: "msg-rewrite",
+                    SandboxId: $"artifact-{session.Id}-report.html",
+                    Action: "rewrite",
+                    Filename: "report.html",
+                    Content: "<h1>rewritten</h1>"),
+                WebUiEndpointJsonContext.Default.WebRuntimeMessageRequest));
+        runtimeRewrite.EnsureSuccessStatusCode();
+        using (var rewriteResponse = JsonDocument.Parse(await runtimeRewrite.Content.ReadAsStringAsync()))
+        {
+            Assert.True(rewriteResponse.RootElement.GetProperty("success").GetBoolean());
+        }
+
+        var runtimeConsole = await fixture.Client.PostAsync(
+            $"/api/sessions/{session.Id}/runtime/messages",
+            JsonBody(
+                new WebRuntimeMessageRequest(
+                    "console",
+                    MessageId: "msg-console",
+                    SandboxId: $"artifact-{session.Id}-report.html",
+                    Method: "log",
+                    Text: "boot ok"),
+                WebUiEndpointJsonContext.Default.WebRuntimeMessageRequest));
+        runtimeConsole.EnsureSuccessStatusCode();
+
+        var runtimeLogs = await fixture.Client.PostAsync(
+            $"/api/sessions/{session.Id}/runtime/messages",
+            JsonBody(
+                new WebRuntimeMessageRequest(
+                    "artifact-operation",
+                    MessageId: "msg-logs",
+                    SandboxId: $"artifact-{session.Id}-report.html",
+                    Action: "htmlArtifactLogs",
+                    Filename: "report.html"),
+                WebUiEndpointJsonContext.Default.WebRuntimeMessageRequest));
+        runtimeLogs.EnsureSuccessStatusCode();
+        using (var logsResponse = JsonDocument.Parse(await runtimeLogs.Content.ReadAsStringAsync()))
+        {
+            Assert.True(logsResponse.RootElement.GetProperty("success").GetBoolean());
+            Assert.Contains("[log] boot ok", logsResponse.RootElement.GetProperty("result").GetString(), StringComparison.Ordinal);
+        }
+
+        var runtimeDelete = await fixture.Client.PostAsync(
+            $"/api/sessions/{session.Id}/runtime/messages",
+            JsonBody(
+                new WebRuntimeMessageRequest(
+                    "artifact-operation",
+                    MessageId: "msg-delete",
+                    SandboxId: $"artifact-{session.Id}-report.html",
+                    Action: "delete",
+                    Filename: "report.html"),
+                WebUiEndpointJsonContext.Default.WebRuntimeMessageRequest));
+        runtimeDelete.EnsureSuccessStatusCode();
+        using (var deleteResponse = JsonDocument.Parse(await runtimeDelete.Content.ReadAsStringAsync()))
+        {
+            Assert.True(deleteResponse.RootElement.GetProperty("success").GetBoolean());
+        }
+
+        var deleted = await fixture.Client.GetAsync($"/api/sessions/{session.Id}/artifacts/report.html");
+        Assert.Equal(HttpStatusCode.NotFound, deleted.StatusCode);
+    }
+
+    [Fact]
     public async Task ArtifactEndpoints_RejectUnsafeNamesAndDeleteArtifactsWithSession()
     {
         await using var fixture = await WebUiEndpointFixture.StartAsync(StreamOk);

@@ -64,7 +64,9 @@ public sealed record WebRuntimeMessageRequest(
     string? Content = null,
     string? MimeType = null,
     string? Method = null,
-    string? Text = null);
+    string? Text = null,
+    [property: JsonPropertyName("old_str")] string? OldString = null,
+    [property: JsonPropertyName("new_str")] string? NewString = null);
 
 public sealed record WebChatToolCallDto(
     string Id,
