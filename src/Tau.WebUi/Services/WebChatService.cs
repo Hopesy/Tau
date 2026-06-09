@@ -19,12 +19,20 @@ public sealed class WebChatService
     private readonly ModelCatalog _catalog;
     private readonly ProviderAuthResolver _authResolver;
     private readonly WebChatStore _store;
-    private readonly Func<string, string, IReadOnlyList<ChatMessage>?, TauRuntimeLogContext?, ICodingAgentRunner> _runnerFactory;
+    private readonly Func<string, string, string, IReadOnlyList<ChatMessage>?, TauRuntimeLogContext?, ICodingAgentRunner> _runnerFactory;
 
     public WebChatService(WebChatStore store, ITauLogSink? logSink = null)
         : this(
             store,
-            (provider, model, history, logContext) => WebUiRunnerFactory.Create(provider, model, history, logSink, logContext),
+            (sessionId, provider, model, history, logContext) => WebUiRunnerFactory.Create(provider, model, history, logSink, logContext),
+            logSink)
+    {
+    }
+
+    public WebChatService(WebChatStore store, WebArtifactService artifacts, ITauLogSink? logSink = null)
+        : this(
+            store,
+            (sessionId, provider, model, history, logContext) => WebUiRunnerFactory.Create(provider, model, history, artifacts, sessionId, logSink, logContext),
             logSink)
     {
     }
@@ -34,13 +42,26 @@ public sealed class WebChatService
         Func<string, string, IReadOnlyList<ChatMessage>?, ICodingAgentRunner> runnerFactory)
         : this(
             store,
-            (provider, model, history, _) => runnerFactory(provider, model, history))
+            (_, provider, model, history, _) => runnerFactory(provider, model, history))
     {
     }
 
     public WebChatService(
         WebChatStore store,
         Func<string, string, IReadOnlyList<ChatMessage>?, TauRuntimeLogContext?, ICodingAgentRunner> runnerFactory,
+        ITauLogSink? logSink = null,
+        ProviderAuthResolver? authResolver = null)
+        : this(
+            store,
+            (_, provider, model, history, logContext) => runnerFactory(provider, model, history, logContext),
+            logSink,
+            authResolver)
+    {
+    }
+
+    public WebChatService(
+        WebChatStore store,
+        Func<string, string, string, IReadOnlyList<ChatMessage>?, TauRuntimeLogContext?, ICodingAgentRunner> runnerFactory,
         ITauLogSink? logSink = null,
         ProviderAuthResolver? authResolver = null)
     {
@@ -401,13 +422,13 @@ public sealed class WebChatService
     {
         private readonly SemaphoreSlim _gate = new(1, 1);
         private readonly List<WebChatMessageDto> _messages = [];
-        private readonly Func<string, string, IReadOnlyList<ChatMessage>?, TauRuntimeLogContext?, ICodingAgentRunner> _runnerFactory;
+        private readonly Func<string, string, string, IReadOnlyList<ChatMessage>?, TauRuntimeLogContext?, ICodingAgentRunner> _runnerFactory;
 
         public WebChatSession(
             string? title,
             string provider,
             string model,
-            Func<string, string, IReadOnlyList<ChatMessage>?, TauRuntimeLogContext?, ICodingAgentRunner> runnerFactory)
+            Func<string, string, string, IReadOnlyList<ChatMessage>?, TauRuntimeLogContext?, ICodingAgentRunner> runnerFactory)
         {
             _runnerFactory = runnerFactory;
             Id = Guid.NewGuid().ToString("N");
@@ -427,7 +448,7 @@ public sealed class WebChatService
             DateTimeOffset updatedAt,
             IReadOnlyList<WebChatMessageDto> messages,
             WebChatSessionSourceMetadataDto? sourceMetadata,
-            Func<string, string, IReadOnlyList<ChatMessage>?, TauRuntimeLogContext?, ICodingAgentRunner> runnerFactory)
+            Func<string, string, string, IReadOnlyList<ChatMessage>?, TauRuntimeLogContext?, ICodingAgentRunner> runnerFactory)
         {
             _runnerFactory = runnerFactory;
             Id = id;
@@ -450,7 +471,7 @@ public sealed class WebChatService
 
         public static WebChatSession FromDto(
             WebChatSessionDto dto,
-            Func<string, string, IReadOnlyList<ChatMessage>?, TauRuntimeLogContext?, ICodingAgentRunner> runnerFactory)
+            Func<string, string, string, IReadOnlyList<ChatMessage>?, TauRuntimeLogContext?, ICodingAgentRunner> runnerFactory)
         {
             return new WebChatSession(dto.Id, dto.Title, dto.Provider, dto.Model, dto.CreatedAt, dto.UpdatedAt, dto.Messages, dto.SourceMetadata, runnerFactory);
         }
@@ -459,7 +480,7 @@ public sealed class WebChatService
             WebChatSessionDto dto,
             string provider,
             string model,
-            Func<string, string, IReadOnlyList<ChatMessage>?, TauRuntimeLogContext?, ICodingAgentRunner> runnerFactory)
+            Func<string, string, string, IReadOnlyList<ChatMessage>?, TauRuntimeLogContext?, ICodingAgentRunner> runnerFactory)
         {
             var now = DateTimeOffset.UtcNow;
             var title = string.IsNullOrWhiteSpace(dto.Title) ? $"Imported {now:HH:mm:ss}" : dto.Title.Trim();
@@ -527,7 +548,7 @@ public sealed class WebChatService
                     CorrelationId: Guid.NewGuid().ToString("N"),
                     SessionId: Id,
                     MessageId: Guid.NewGuid().ToString("N"));
-                var runner = _runnerFactory(Provider, Model, BuildHistoryWithoutLatestUser(), logContext);
+                var runner = _runnerFactory(Id, Provider, Model, BuildHistoryWithoutLatestUser(), logContext);
                 var assistant = new StringBuilder();
                 var thinking = new StringBuilder();
                 var toolEvents = new List<string>();

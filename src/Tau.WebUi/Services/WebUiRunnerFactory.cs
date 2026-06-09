@@ -16,4 +16,26 @@ public static class WebUiRunnerFactory
     {
         return RuntimeCodingAgentRunner.Create(provider, model, history, logSink: logSink, logContext: logContext);
     }
+
+    public static ICodingAgentRunner Create(
+        string provider,
+        string model,
+        IReadOnlyList<ChatMessage>? history,
+        WebArtifactService artifacts,
+        string sessionId,
+        ITauLogSink? logSink = null,
+        TauRuntimeLogContext? logContext = null)
+    {
+        var tools = RuntimeCodingAgentRunner.CreateDefaultTools()
+            .Concat(WebUiTools.CreateSessionTools(sessionId, artifacts))
+            .ToArray();
+
+        return RuntimeCodingAgentRunner.Create(
+            provider,
+            model,
+            history,
+            toolsOverride: tools,
+            logSink: logSink,
+            logContext: logContext);
+    }
 }

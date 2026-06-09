@@ -1354,19 +1354,27 @@ public static class WebUiPage
                 buffer = lines.pop() || '';
                 for (const line of lines) {
                   if (!line.trim()) continue;
-                  session = applyStreamEvent(session, JSON.parse(line));
+                  const event = JSON.parse(line);
+                  session = applyStreamEvent(session, event);
                   currentSession = session;
                   renderMessages(session);
                   applySessionSettings(session);
+                  if (event.type === 'tool_end' && event.toolCall?.toolName === 'artifacts') {
+                    await loadArtifacts(sessionId);
+                  }
                 }
               }
 
               buffer += decoder.decode();
               if (buffer.trim()) {
-                session = applyStreamEvent(session, JSON.parse(buffer));
+                const event = JSON.parse(buffer);
+                session = applyStreamEvent(session, event);
                 currentSession = session;
                 renderMessages(session);
                 applySessionSettings(session);
+                if (event.type === 'tool_end' && event.toolCall?.toolName === 'artifacts') {
+                  await loadArtifacts(sessionId);
+                }
               }
               return session;
             }

@@ -693,7 +693,7 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner, ICodingAgentT
         return ModelCatalog.GetDefaultModelId(providerId);
     }
 
-    private static IAgentTool[] CreateDefaultTools()
+    public static IAgentTool[] CreateDefaultTools()
     {
         return
         [
