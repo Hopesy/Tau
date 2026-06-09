@@ -235,6 +235,12 @@ internal static class ToolExecutor
                 terminalReason = decision.Reason;
                 break;
             }
+
+            if (decision.Arguments.HasValue)
+            {
+                args = decision.Arguments.Value.Clone();
+                effectiveCallContext = effectiveCallContext with { Arguments = args };
+            }
         }
 
         if (terminalResult is not null)
@@ -437,6 +443,12 @@ internal static class ToolExecutor
                 terminalFailureKind = "blocked";
                 terminalReason = decision.Reason;
                 break;
+            }
+
+            if (decision.Arguments.HasValue)
+            {
+                preparedArgs = decision.Arguments.Value.Clone();
+                effectiveCallContext = effectiveCallContext with { Arguments = preparedArgs };
             }
         }
 

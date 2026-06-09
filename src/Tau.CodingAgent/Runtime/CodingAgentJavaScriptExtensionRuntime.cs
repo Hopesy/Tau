@@ -60,6 +60,7 @@ public sealed record CodingAgentJavaScriptExtensionToolCallEventResult(
     bool Success,
     bool Blocked,
     string? Reason,
+    JsonElement? Arguments,
     string? Error);
 
 public sealed record CodingAgentJavaScriptExtensionToolResultEventResult(
@@ -291,7 +292,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
             toolArgs: args));
         if (!execution.Success)
         {
-            return new CodingAgentJavaScriptExtensionToolCallEventResult(false, false, null, execution.Error);
+            return new CodingAgentJavaScriptExtensionToolCallEventResult(false, false, null, null, execution.Error);
         }
 
         try
@@ -304,6 +305,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
                     false,
                     false,
                     null,
+                    null,
                     ReadString(root, "error") ?? "javascript extension tool_call handler failed");
             }
 
@@ -311,6 +313,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
                 true,
                 ReadBool(root, "block"),
                 ReadString(root, "reason"),
+                root.TryGetProperty("input", out var inputElement) ? inputElement.Clone() : null,
                 null);
         }
         catch (JsonException ex)
@@ -318,6 +321,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
             return new CodingAgentJavaScriptExtensionToolCallEventResult(
                 false,
                 false,
+                null,
                 null,
                 $"invalid node extension runtime output: {ex.Message}");
         }
@@ -1118,7 +1122,8 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
             write({
               ok: true,
               block: result && result.block === true,
-              reason: result && typeof result.reason === "string" ? result.reason : undefined
+              reason: result && typeof result.reason === "string" ? result.reason : undefined,
+              input: event.input
             });
             return;
           }

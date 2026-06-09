@@ -270,6 +270,89 @@ public sealed class AgentRuntimeContractTests
     }
 
     [Fact]
+    public async Task RunAsync_ToolInterceptorMutationUpdatesParallelExecutionArguments()
+    {
+        var observer = new ObservingInterceptor();
+        var tool = new RecordingTool(
+            "count",
+            """
+            {
+                "type": "object",
+                "properties": {
+                    "count": { "type": "integer" }
+                },
+                "required": ["count"]
+            }
+            """)
+        {
+            ExecuteAsyncOverride = async (_, args, _, onUpdate) =>
+            {
+                if (onUpdate is not null)
+                {
+                    await onUpdate(new ToolUpdate("mutated")).ConfigureAwait(false);
+                }
+
+                return new ToolResult([new TextContent(args.GetProperty("count").GetString()!)]);
+            }
+        };
+        var runtime = new AgentRuntime();
+        runtime.AddMessage(new UserMessage("use tool"));
+
+        var events = await CollectAsync(runtime.RunAsync(CreateConfig(
+            new ScriptedProvider(
+                new AssistantMessage([new ToolCallContent("tool-1", "count", """{"count":"42"}""")]),
+                new AssistantMessage([new TextContent("done")])),
+            [tool],
+            [
+                new MutatingInterceptor("""{"count":"mutated"}"""),
+                observer
+            ])));
+
+        Assert.True(tool.Executed);
+        Assert.True(observer.SeenArguments.HasValue);
+        Assert.Equal("mutated", observer.SeenArguments.Value.GetProperty("count").GetString());
+        var update = Assert.Single(events.OfType<ToolExecutionUpdateEvent>());
+        Assert.Equal("""{"count":"mutated"}""", update.Args);
+        var toolResult = Assert.Single(runtime.State.Messages.OfType<ToolResultMessage>());
+        Assert.False(toolResult.IsError);
+        Assert.Equal("mutated", ReadText(toolResult));
+    }
+
+    [Fact]
+    public async Task RunAsync_ToolInterceptorMutationUpdatesSequentialExecutionArguments()
+    {
+        var tool = new RecordingTool(
+            "count",
+            """
+            {
+                "type": "object",
+                "properties": {
+                    "count": { "type": "integer" }
+                },
+                "required": ["count"]
+            }
+            """)
+        {
+            ExecutionMode = ToolExecutionMode.Sequential,
+            Execute = args => new ToolResult([new TextContent(args.GetProperty("count").GetString()!)])
+        };
+        var runtime = new AgentRuntime();
+        runtime.AddMessage(new UserMessage("use tool"));
+
+        await CollectAsync(runtime.RunAsync(CreateConfig(
+            new ScriptedProvider(
+                new AssistantMessage([new ToolCallContent("tool-1", "count", """{"count":"42"}""")]),
+                new AssistantMessage([new TextContent("done")])),
+            [tool],
+            [new MutatingInterceptor("""{"count":"sequential"}""")])));
+
+        Assert.True(tool.Executed);
+        var toolResult = Assert.Single(runtime.State.Messages.OfType<ToolResultMessage>());
+        Assert.False(toolResult.IsError);
+        Assert.Equal("sequential", ReadText(toolResult));
+    }
+
+    [Fact]
     public async Task RunAsync_ToolExecuteExceptionBecomesErrorToolResult()
     {
         var tool = new RecordingTool("explode", """{"type":"object"}""")
@@ -709,6 +792,7 @@ public sealed class AgentRuntimeContractTests
         public string Label => name;
         public string Description => name;
         public JsonElement ParameterSchema { get; } = JsonDocument.Parse(schemaJson).RootElement.Clone();
+        public ToolExecutionMode ExecutionMode { get; init; } = ToolExecutionMode.Parallel;
         public bool Executed { get; private set; }
         public Func<JsonElement, JsonElement>? Prepare { get; init; }
         public Func<JsonElement, ToolResult>? Execute { get; init; }
@@ -730,6 +814,26 @@ public sealed class AgentRuntimeContractTests
             }
 
             return Task.FromResult(Execute?.Invoke(args) ?? new ToolResult([new TextContent("ok")]));
+        }
+    }
+
+    private sealed class MutatingInterceptor(string argumentsJson) : IToolInterceptor
+    {
+        public Task<ToolCallDecision> BeforeToolCallAsync(ToolCallContext context, CancellationToken ct = default)
+        {
+            using var document = JsonDocument.Parse(argumentsJson);
+            return Task.FromResult(ToolCallDecision.AllowWithArguments(document.RootElement));
+        }
+    }
+
+    private sealed class ObservingInterceptor : IToolInterceptor
+    {
+        public JsonElement? SeenArguments { get; private set; }
+
+        public Task<ToolCallDecision> BeforeToolCallAsync(ToolCallContext context, CancellationToken ct = default)
+        {
+            SeenArguments = context.Arguments.Clone();
+            return Task.FromResult(ToolCallDecision.Allow);
         }
     }
 

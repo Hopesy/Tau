@@ -19,8 +19,14 @@ public record ToolCallContext(
     System.Text.Json.JsonElement Arguments,
     IReadOnlyList<Ai.ChatMessage> ConversationHistory);
 
-public record struct ToolCallDecision(bool Blocked, string? Reason = null)
+public record struct ToolCallDecision(
+    bool Blocked,
+    string? Reason = null,
+    System.Text.Json.JsonElement? Arguments = null)
 {
     public static ToolCallDecision Allow => new(false);
+    public static ToolCallDecision AllowWithArguments(System.Text.Json.JsonElement arguments) =>
+        new(false, null, arguments.Clone());
+
     public static ToolCallDecision Block(string reason) => new(true, reason);
 }

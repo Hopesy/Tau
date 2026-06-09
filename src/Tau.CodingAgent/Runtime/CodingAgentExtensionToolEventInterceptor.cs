@@ -29,6 +29,8 @@ public sealed class CodingAgentExtensionToolEventInterceptor : IToolInterceptor
     {
         ct.ThrowIfCancellationRequested();
 
+        var effectiveContext = context;
+        var hasArgumentsMutation = false;
         foreach (var module in _modules)
         {
             if (!module.HandlesToolCall)
@@ -39,13 +41,13 @@ public sealed class CodingAgentExtensionToolEventInterceptor : IToolInterceptor
             ct.ThrowIfCancellationRequested();
             var result = _runtime.EmitToolCall(
                 module.FilePath,
-                context.ToolName,
-                context.ToolCallId,
-                context.Arguments);
+                effectiveContext.ToolName,
+                effectiveContext.ToolCallId,
+                effectiveContext.Arguments);
             if (!result.Success)
             {
                 throw new InvalidOperationException(
-                    result.Error ?? $"extension tool_call handler failed for '{context.ToolName}'");
+                    result.Error ?? $"extension tool_call handler failed for '{effectiveContext.ToolName}'");
             }
 
             if (result.Blocked)
@@ -55,9 +57,18 @@ public sealed class CodingAgentExtensionToolEventInterceptor : IToolInterceptor
                         ? "blocked by extension"
                         : result.Reason));
             }
+
+            if (result.Arguments.HasValue)
+            {
+                var arguments = result.Arguments.Value.Clone();
+                effectiveContext = effectiveContext with { Arguments = arguments };
+                hasArgumentsMutation = true;
+            }
         }
 
-        return Task.FromResult(ToolCallDecision.Allow);
+        return Task.FromResult(hasArgumentsMutation
+            ? ToolCallDecision.AllowWithArguments(effectiveContext.Arguments)
+            : ToolCallDecision.Allow);
     }
 
     public Task<ToolResult> AfterToolCallAsync(

@@ -737,6 +737,62 @@ public class CodingAgentExtensionCommandStoreTests
     }
 
     [Fact]
+    public async Task LoadToolInterceptors_MutatesJavascriptToolCallInputAcrossModules()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-js-tool-call-mutation-" + Guid.NewGuid().ToString("N"));
+        var firstExtension = Path.Combine(directory, ".tau", "extensions", "a-first-hook");
+        var secondExtension = Path.Combine(directory, ".tau", "extensions", "b-second-hook");
+        Directory.CreateDirectory(firstExtension);
+        Directory.CreateDirectory(secondExtension);
+        WriteJavaScriptExtension(
+            firstExtension,
+            """
+            export default function(pi) {
+              pi.on("tool_call", (event) => {
+                if (event.toolName === "hello_tool") {
+                  event.input.name = String(event.input.name ?? "").toUpperCase();
+                }
+              });
+            }
+            """);
+        WriteJavaScriptExtension(
+            secondExtension,
+            """
+            export default function(pi) {
+              pi.on("tool_call", (event) => {
+                if (event.toolName === "hello_tool") {
+                  event.input.seenBySecondHook = event.input.name;
+                }
+              });
+            }
+            """);
+
+        try
+        {
+            var store = CreateJavaScriptStore(directory);
+            var status = store.LoadStatus();
+
+            Assert.Empty(status.Diagnostics);
+            Assert.Equal(2, status.EventHandlers.Count);
+
+            var interceptor = Assert.Single(store.LoadToolInterceptors());
+            using var args = JsonDocument.Parse("""{"name":"ada"}""");
+
+            var decision = await interceptor.BeforeToolCallAsync(
+                new ToolCallContext("tool-call-1", "hello_tool", args.RootElement, []));
+
+            Assert.False(decision.Blocked);
+            Assert.True(decision.Arguments.HasValue);
+            Assert.Equal("ADA", decision.Arguments.Value.GetProperty("name").GetString());
+            Assert.Equal("ADA", decision.Arguments.Value.GetProperty("seenBySecondHook").GetString());
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task LoadToolInterceptors_RewritesJavascriptToolResultHandler()
     {
         var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-js-tool-result-hook-" + Guid.NewGuid().ToString("N"));
