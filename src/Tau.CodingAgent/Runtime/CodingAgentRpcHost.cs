@@ -347,10 +347,8 @@ public sealed class CodingAgentRpcHost
             _activePromptCts = cts;
         }
 
-        await WriteSuccessAsync(id, "prompt", cancellationToken: cancellationToken).ConfigureAwait(false);
-
         var logContext = CreatePromptLogContext(id);
-        var task = Task.Run(() => RunPromptAsync(message, content, logContext, cts), CancellationToken.None);
+        var task = Task.Run(() => RunPromptAsync(id, message, content, logContext, cts), CancellationToken.None);
         lock (_gate)
         {
             _activePromptTask = task;
@@ -917,6 +915,7 @@ public sealed class CodingAgentRpcHost
     }
 
     private async Task RunPromptAsync(
+        string? id,
         string message,
         IReadOnlyList<ContentBlock>? content,
         TauRuntimeLogContext logContext,
@@ -924,12 +923,13 @@ public sealed class CodingAgentRpcHost
     {
         var rollbackSnapshot = CreateRollbackSnapshot();
         var retryAttempt = 0;
+        var response = new RpcPromptResponseState(this, id);
 
         try
         {
             while (true)
             {
-                var result = await RunSinglePromptAttemptAsync(message, content, logContext, cts.Token).ConfigureAwait(false);
+                var result = await RunSinglePromptAttemptAsync(message, content, logContext, response, cts.Token).ConfigureAwait(false);
                 if (result.IsSuccess)
                 {
                     if (retryAttempt > 0)
@@ -939,6 +939,12 @@ public sealed class CodingAgentRpcHost
                             .ConfigureAwait(false);
                     }
 
+                    return;
+                }
+
+                if (result.IsPreflightFailure)
+                {
+                    RestorePromptSnapshot(rollbackSnapshot);
                     return;
                 }
 
@@ -1144,6 +1150,7 @@ public sealed class CodingAgentRpcHost
         string message,
         IReadOnlyList<ContentBlock>? content,
         TauRuntimeLogContext logContext,
+        RpcPromptResponseState response,
         CancellationToken cancellationToken)
     {
         try
@@ -1154,6 +1161,7 @@ public sealed class CodingAgentRpcHost
 
             await foreach (var evt in events.ConfigureAwait(false))
             {
+                await response.AcceptAsync(CancellationToken.None).ConfigureAwait(false);
                 await WriteJsonLineAsync(ToRpcEvent(evt), cancellationToken).ConfigureAwait(false);
                 if (evt is AgentEndEvent { ErrorMessage: not null } end)
                 {
@@ -1161,7 +1169,13 @@ public sealed class CodingAgentRpcHost
                 }
             }
 
+            await response.AcceptAsync(CancellationToken.None).ConfigureAwait(false);
             return RpcPromptAttemptResult.Success();
+        }
+        catch (Exception ex) when (!response.IsAccepted && ex is not OperationCanceledException)
+        {
+            await response.FailAsync(ex.Message, CancellationToken.None).ConfigureAwait(false);
+            return RpcPromptAttemptResult.PreflightFailed(ex.Message);
         }
         catch (OperationCanceledException)
         {
@@ -2821,9 +2835,37 @@ public sealed class CodingAgentRpcHost
         public void IncrementDroppedOutputEvents() => Interlocked.Increment(ref _droppedOutputEvents);
     }
 
-    private sealed record RpcPromptAttemptResult(bool IsSuccess, string? ErrorMessage)
+    private sealed class RpcPromptResponseState(CodingAgentRpcHost host, string? id)
+    {
+        private int _completed;
+
+        public bool IsAccepted => Volatile.Read(ref _completed) == 1;
+
+        public async Task AcceptAsync(CancellationToken cancellationToken)
+        {
+            if (Interlocked.CompareExchange(ref _completed, 1, 0) != 0)
+            {
+                return;
+            }
+
+            await host.WriteSuccessAsync(id, "prompt", cancellationToken: cancellationToken).ConfigureAwait(false);
+        }
+
+        public async Task FailAsync(string error, CancellationToken cancellationToken)
+        {
+            if (Interlocked.CompareExchange(ref _completed, -1, 0) != 0)
+            {
+                return;
+            }
+
+            await host.WriteErrorAsync(id, "prompt", error, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private sealed record RpcPromptAttemptResult(bool IsSuccess, string? ErrorMessage, bool IsPreflightFailure = false)
     {
         public static RpcPromptAttemptResult Success() => new(true, null);
         public static RpcPromptAttemptResult Failed(string? errorMessage) => new(false, errorMessage);
+        public static RpcPromptAttemptResult PreflightFailed(string? errorMessage) => new(false, errorMessage, true);
     }
 }

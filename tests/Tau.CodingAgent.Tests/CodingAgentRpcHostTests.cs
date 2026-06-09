@@ -33,6 +33,16 @@ public sealed class CodingAgentRpcHostTests
         Assert.Equal("p1", response.GetProperty("id").GetString());
         Assert.True(response.GetProperty("success").GetBoolean());
 
+        var responseIndex = Enumerable.Range(0, lines.Count)
+            .Single(index =>
+                lines[index].GetProperty("type").GetString() == "response" &&
+                lines[index].GetProperty("command").GetString() == "prompt");
+        var agentStartIndex = lines
+            .Select((line, index) => (line, index))
+            .Single(item => item.line.GetProperty("type").GetString() == "agent_start")
+            .index;
+        Assert.True(responseIndex < agentStartIndex);
+
         var textDelta = lines.Single(line =>
             line.GetProperty("type").GetString() == "message_update" &&
             line.GetProperty("assistantMessageEvent").GetProperty("type").GetString() == "text_delta");
@@ -40,6 +50,49 @@ public sealed class CodingAgentRpcHostTests
         Assert.Equal("rpc ok", textDelta.GetProperty("assistantMessageEvent").GetProperty("delta").GetString());
 
         Assert.Contains(lines, line => line.GetProperty("type").GetString() == "agent_end");
+    }
+
+    [Fact]
+    public async Task RunAsync_PromptReturnsErrorWhenRunnerFailsBeforeStarting()
+    {
+        var runner = new FakeCodingAgentRunner((_, _) =>
+            throw new InvalidOperationException("model preflight failed"));
+        var output = new StringWriter();
+        var host = new CodingAgentRpcHost(
+            runner,
+            new StringReader("{\"id\":\"p1\",\"type\":\"prompt\",\"message\":\"hello\"}\n"),
+            output);
+
+        await host.RunAsync();
+
+        var lines = ReadJsonLines(output);
+        var response = Assert.Single(lines);
+        Assert.Equal("response", response.GetProperty("type").GetString());
+        Assert.Equal("p1", response.GetProperty("id").GetString());
+        Assert.Equal("prompt", response.GetProperty("command").GetString());
+        Assert.False(response.GetProperty("success").GetBoolean());
+        Assert.Equal("model preflight failed", response.GetProperty("error").GetString());
+    }
+
+    [Fact]
+    public async Task RunAsync_PromptReturnsErrorWhenRunnerThrowsBeforeFirstEvent()
+    {
+        var runner = new FakeCodingAgentRunner((_, _) => ThrowBeforeFirstEvent());
+        var output = new StringWriter();
+        var host = new CodingAgentRpcHost(
+            runner,
+            new StringReader("{\"id\":\"p1\",\"type\":\"prompt\",\"message\":\"hello\"}\n"),
+            output);
+
+        await host.RunAsync();
+
+        var lines = ReadJsonLines(output);
+        var response = Assert.Single(lines);
+        Assert.Equal("response", response.GetProperty("type").GetString());
+        Assert.Equal("p1", response.GetProperty("id").GetString());
+        Assert.Equal("prompt", response.GetProperty("command").GetString());
+        Assert.False(response.GetProperty("success").GetBoolean());
+        Assert.Equal("async preflight failed", response.GetProperty("error").GetString());
     }
 
     [Fact]
@@ -2459,6 +2512,19 @@ public sealed class CodingAgentRpcHostTests
         yield return new AgentEndEvent();
         await Task.CompletedTask;
     }
+
+    private static async IAsyncEnumerable<AgentEvent> ThrowBeforeFirstEvent()
+    {
+        await Task.Yield();
+        if (ShouldThrowBeforeFirstEvent())
+        {
+            throw new InvalidOperationException("async preflight failed");
+        }
+
+        yield return new AgentStartEvent();
+    }
+
+    private static bool ShouldThrowBeforeFirstEvent() => true;
 
     private static async IAsyncEnumerable<AgentEvent> RunPromptWithAssistantMessageEvents()
     {
