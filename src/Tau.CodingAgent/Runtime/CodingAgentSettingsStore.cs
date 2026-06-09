@@ -24,6 +24,7 @@ public sealed record CodingAgentSettingsSnapshot(
     bool? QuietStartup = null,
     bool? CollapseChangelog = null,
     bool? EnableInstallTelemetry = null,
+    string? LastChangelogVersion = null,
     bool? TerminalShowImages = null,
     bool? TerminalClearOnShrink = null,
     bool? ImagesAutoResize = null,
@@ -87,6 +88,7 @@ public sealed class CodingAgentSettingsStore
                 document?.QuietStartup,
                 document?.CollapseChangelog,
                 document?.EnableInstallTelemetry,
+                NormalizeOptionalString(document?.LastChangelogVersion),
                 document?.Terminal?.ShowImages,
                 document?.Terminal?.ClearOnShrink,
                 document?.Images?.AutoResize,
@@ -139,6 +141,7 @@ public sealed class CodingAgentSettingsStore
             QuietStartup = snapshot.QuietStartup,
             CollapseChangelog = snapshot.CollapseChangelog,
             EnableInstallTelemetry = snapshot.EnableInstallTelemetry,
+            LastChangelogVersion = NormalizeOptionalString(snapshot.LastChangelogVersion),
             Terminal = CreateTerminalSettingsDocument(snapshot),
             Images = CreateImageSettingsDocument(snapshot),
             ShowHardwareCursor = snapshot.ShowHardwareCursor,
@@ -311,6 +314,7 @@ internal sealed class CodingAgentSettingsDocument
     public bool? QuietStartup { get; init; }
     public bool? CollapseChangelog { get; init; }
     public bool? EnableInstallTelemetry { get; init; }
+    public string? LastChangelogVersion { get; init; }
     public CodingAgentTerminalSettingsDocument? Terminal { get; init; }
     public CodingAgentImageSettingsDocument? Images { get; init; }
     public bool? ShowHardwareCursor { get; init; }

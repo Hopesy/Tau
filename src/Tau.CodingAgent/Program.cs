@@ -228,6 +228,7 @@ var session = CodingAgentTreeSessionStore.HasExplicitTreeSessionPath || treeSess
     ? treeSession.ToFlatSnapshot()
     : flatSession;
 var settings = settingsStore.Load();
+var changelogStore = new CodingAgentChangelogStore();
 CodingAgentInitialPrompt? initialPrompt = null;
 try
 {
@@ -319,6 +320,7 @@ var host = new CodingAgentHost(
     extensionCommandStore: extensionCommandStore,
     packageManager: packageManager,
     packageResourceState: packageResourceState,
+    changelogStore: changelogStore,
     autoCompaction: autoCompaction,
     autoCompactionEnabled: settings.AutoCompactionEnabled,
     retryOptions: CodingAgentRetryOptions.FromSettingsOrEnvironment(settings),
@@ -372,6 +374,7 @@ var host = new CodingAgentHost(
     keyBindings: editor?.KeyBindings,
     extensionResourceState: extensionResourceState,
     compositionSession: compositionSession,
+    startupNoticeService: new CodingAgentStartupNoticeService(settingsStore, changelogStore),
     reloadKeyBindings: editor is null
         ? null
         : () =>

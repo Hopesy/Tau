@@ -21,7 +21,8 @@
 ## 当前推进记录（2026-06-09）
 
 - CodingAgent package manager / config 子切片已关闭一层本地合同：对照上游 `package-manager-cli.ts`、`core/package-manager.ts`、`core/settings-manager.ts` 和 `utils/git.ts`，Tau 顶层 `install/remove/uninstall/update/list/config` 现在会在 runner 初始化前处理 package source settings；默认写 user settings，`-l/--local` 写 project settings；settings store 支持上游 string/object `packages` source 形状；npm package install/remove/update 现在通过可注入 command runner 执行全局 `npm install -g`、project `.tau/npm --prefix` 与 settings `npmCommand`；git source 支持常见 `git:` / HTTPS / SSH source 的 clone/checkout/pull/remove 到 user/project `.tau/git` install root；`PI_OFFLINE` 会跳过 update；命令失败不会写入 settings；本地 package source 会解析 `package.json` 的 `pi.extensions/skills/prompts/themes` manifest、约定目录和 package object filters，并支持 plain include、glob include、`!` exclude、`+` exact force-include、`-` exact force-exclude，把 package resources 合并进 extension/prompt/skill/theme stores；`/reload` 会先重新解析 package resources 再刷新 extensions。
-- 该子切片覆盖 source 持久化、列表/config 摘要、本地 package resource discovery/filter 和 npm/git install/update/remove execution baseline。仍未关闭 interactive config selector、package-loaded TypeScript extension runtime、startup changelog/version state、install telemetry runtime、最终 `pi` package/bin identity、真实 npm/git network smoke 或真实 package consumer smoke。
+- CodingAgent startup changelog / install telemetry runtime 子切片已关闭一层本地启动合同：settings snapshot/document 持久化 `lastChangelogVersion`，RPC settings surface 可读写同一字段；交互式 host 只在 fresh session 启动时检查版本状态，首次安装记录当前版本并发送 best-effort telemetry，版本变化时按 `collapseChangelog` 显示折叠或完整更新摘要，恢复已有 session messages 时跳过；`PI_OFFLINE` 禁用 telemetry，`PI_TELEMETRY` 覆盖 settings。该子切片使用 Tau-native release notes 表格作为 changelog 源，不宣称上游完整 CHANGELOG slicing 或真实安装/更新 telemetry e2e。
+- 当前 CodingAgent package/changelog/telemetry 局部 baseline 覆盖 source 持久化、列表/config 摘要、本地 package resource discovery/filter、npm/git install/update/remove execution、startup version state 和 install telemetry runtime。仍未关闭 interactive config selector、package-loaded TypeScript extension runtime、最终 `pi` package/bin identity、真实 npm/git network smoke、真实 package consumer smoke 或真实 install telemetry e2e。
 
 ## 范围
 
@@ -498,6 +499,7 @@ git diff --check
 
 ## 决策记录
 
+- 2026-06-09：startup changelog / install telemetry 子切片限定为 Tau-native interactive startup baseline：复用现有 `CodingAgentChangelogStore` 的 release notes 表格解析，而不是引入上游 `CHANGELOG.md` `## [version]` parser；fresh install 只记录版本并上报 telemetry，不显示 changelog，更新启动才显示折叠或完整 notice；恢复已有 messages 的 session 不弹 notice，避免污染 resume flow。真实 npm/git package update、最终 `pi` package identity、完整 TypeScript extension runtime 和真实 telemetry backend e2e 继续留在后续 parity closure。
 - 2026-06-08：`Tau.Pods` config path/env 的第一刀限定为 `PI_CONFIG_DIR` env override，用来先固定可验证的上游 env override 和显式 config precedence；第二刀已继续把 Tau 默认配置从 `tau.pods.json` 切到 `~/.pi/pods.json` 并关闭 missing config 空对象语义。record-shaped schema migration 后续已按独立切片收口，保持 path/env、missing-file 和 schema 迁移可分开评审。
 - 2026-06-08：第二刀把 `Tau.Pods` 默认配置从 Tau-local `tau.pods.json` 切到上游 `~/.pi/pods.json`，并把 missing-file load 语义改为上游空 config。测试侧不写真实用户 home，而是用 isolated `PI_CONFIG_DIR` 覆盖无显式路径命令；record-shaped schema migration 后续已单独关闭，避免把 path/env、missing-file 和 schema 迁移混成一个不可审查提交。
 - 2026-06-08：record-shaped schema 子切片只改变 `PodsConfigStore` 的外部配置读写合同：load 支持上游 record shape 与旧 Tau list shape，save 输出上游 record shape。内部继续使用 `PodsConfig.Pods` list 和 typed result records，避免让运行中服务、CLI 命令和测试一次性承担 schema 重排。

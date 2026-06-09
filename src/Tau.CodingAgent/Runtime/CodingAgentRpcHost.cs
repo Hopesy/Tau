@@ -1276,6 +1276,7 @@ public sealed class CodingAgentRpcHost
             quietStartup = settings.QuietStartup ?? false,
             collapseChangelog = settings.CollapseChangelog ?? false,
             enableInstallTelemetry = settings.EnableInstallTelemetry ?? true,
+            lastChangelogVersion = settings.LastChangelogVersion,
             terminal = new
             {
                 showImages = settings.TerminalShowImages ?? true,
@@ -1397,6 +1398,11 @@ public sealed class CodingAgentRpcHost
         if (settingsElement.TryGetProperty("enableInstallTelemetry", out var enableInstallTelemetry))
         {
             updated = updated with { EnableInstallTelemetry = ReadNullableBoolean(enableInstallTelemetry) };
+        }
+
+        if (settingsElement.TryGetProperty("lastChangelogVersion", out var lastChangelogVersion))
+        {
+            updated = updated with { LastChangelogVersion = ReadNullableString(lastChangelogVersion) };
         }
 
         if (settingsElement.TryGetProperty("terminal", out var terminal))

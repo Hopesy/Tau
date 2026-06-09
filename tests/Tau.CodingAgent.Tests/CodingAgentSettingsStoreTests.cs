@@ -98,6 +98,7 @@ public class CodingAgentSettingsStoreTests
                 QuietStartup: true,
                 CollapseChangelog: true,
                 EnableInstallTelemetry: false,
+                LastChangelogVersion: " 0.1.0 ",
                 TerminalShowImages: false,
                 TerminalClearOnShrink: true,
                 ImagesAutoResize: false,
@@ -132,6 +133,7 @@ public class CodingAgentSettingsStoreTests
             Assert.True(loaded.QuietStartup);
             Assert.True(loaded.CollapseChangelog);
             Assert.False(loaded.EnableInstallTelemetry);
+            Assert.Equal("0.1.0", loaded.LastChangelogVersion);
             Assert.False(loaded.TerminalShowImages);
             Assert.True(loaded.TerminalClearOnShrink);
             Assert.False(loaded.ImagesAutoResize);
@@ -271,6 +273,7 @@ public class CodingAgentSettingsStoreTests
             Assert.Null(loaded.QuietStartup);
             Assert.Null(loaded.CollapseChangelog);
             Assert.Null(loaded.EnableInstallTelemetry);
+            Assert.Null(loaded.LastChangelogVersion);
             Assert.Null(loaded.TerminalShowImages);
             Assert.Null(loaded.TerminalClearOnShrink);
             Assert.Null(loaded.ImagesAutoResize);

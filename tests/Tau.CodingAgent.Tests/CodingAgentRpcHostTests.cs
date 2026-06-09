@@ -1244,6 +1244,7 @@ public sealed class CodingAgentRpcHostTests
             QuietStartup: true,
             CollapseChangelog: true,
             EnableInstallTelemetry: false,
+            LastChangelogVersion: "0.1.0",
             TerminalShowImages: false,
             TerminalClearOnShrink: true,
             ImagesAutoResize: false,
@@ -1285,6 +1286,7 @@ public sealed class CodingAgentRpcHostTests
         Assert.True(data.GetProperty("quietStartup").GetBoolean());
         Assert.True(data.GetProperty("collapseChangelog").GetBoolean());
         Assert.False(data.GetProperty("enableInstallTelemetry").GetBoolean());
+        Assert.Equal("0.1.0", data.GetProperty("lastChangelogVersion").GetString());
         var terminal = data.GetProperty("terminal");
         Assert.False(terminal.GetProperty("showImages").GetBoolean());
         Assert.True(terminal.GetProperty("clearOnShrink").GetBoolean());
@@ -1320,7 +1322,7 @@ public sealed class CodingAgentRpcHostTests
         var output = new StringWriter();
         var updateJson = string.Join(
             "\n",
-            "{\"id\":\"us1\",\"type\":\"update_settings\",\"settings\":{\"model\":{\"provider\":\"google\",\"modelId\":\"gemini-2.5-pro\"},\"treeFilterMode\":\"labeled-only\",\"retry\":{\"enabled\":true,\"maxAttempts\":5,\"baseDelayMilliseconds\":250},\"defaultThinkingLevel\":\"xhigh\",\"enabledModels\":[\"google/gemini-2.5-pro\",\"openai/gpt-5.4\",\"google/gemini-2.5-pro\"],\"steeringMode\":\"all\",\"followUpMode\":\"all\",\"autoCompactionEnabled\":true,\"theme\":\"light\",\"shellPath\":\"C:\\\\tools\\\\bash.exe\",\"shellCommandPrefix\":\"source ~/.bashrc\",\"npmCommand\":[\"mise\",\"exec\",\"node@22\",\"--\",\"npm\",\"npm\"],\"quietStartup\":true,\"collapseChangelog\":true,\"enableInstallTelemetry\":false,\"terminal\":{\"showImages\":false,\"clearOnShrink\":true},\"images\":{\"autoResize\":false,\"blockImages\":true},\"markdown\":{\"codeBlockIndent\":\"    \"},\"showHardwareCursor\":true,\"editorPaddingX\":8,\"autocompleteMaxVisible\":1}}",
+            "{\"id\":\"us1\",\"type\":\"update_settings\",\"settings\":{\"model\":{\"provider\":\"google\",\"modelId\":\"gemini-2.5-pro\"},\"treeFilterMode\":\"labeled-only\",\"retry\":{\"enabled\":true,\"maxAttempts\":5,\"baseDelayMilliseconds\":250},\"defaultThinkingLevel\":\"xhigh\",\"enabledModels\":[\"google/gemini-2.5-pro\",\"openai/gpt-5.4\",\"google/gemini-2.5-pro\"],\"steeringMode\":\"all\",\"followUpMode\":\"all\",\"autoCompactionEnabled\":true,\"theme\":\"light\",\"shellPath\":\"C:\\\\tools\\\\bash.exe\",\"shellCommandPrefix\":\"source ~/.bashrc\",\"npmCommand\":[\"mise\",\"exec\",\"node@22\",\"--\",\"npm\",\"npm\"],\"quietStartup\":true,\"collapseChangelog\":true,\"enableInstallTelemetry\":false,\"lastChangelogVersion\":\"0.1.0\",\"terminal\":{\"showImages\":false,\"clearOnShrink\":true},\"images\":{\"autoResize\":false,\"blockImages\":true},\"markdown\":{\"codeBlockIndent\":\"    \"},\"showHardwareCursor\":true,\"editorPaddingX\":8,\"autocompleteMaxVisible\":1}}",
             "{\"id\":\"state1\",\"type\":\"get_state\"}",
             string.Empty);
         var host = new CodingAgentRpcHost(
@@ -1365,6 +1367,7 @@ public sealed class CodingAgentRpcHostTests
         Assert.True(saved.QuietStartup);
         Assert.True(saved.CollapseChangelog);
         Assert.False(saved.EnableInstallTelemetry);
+        Assert.Equal("0.1.0", saved.LastChangelogVersion);
         Assert.False(saved.TerminalShowImages);
         Assert.True(saved.TerminalClearOnShrink);
         Assert.False(saved.ImagesAutoResize);

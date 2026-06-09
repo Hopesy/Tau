@@ -1855,6 +1855,65 @@ public class CodingAgentHostTests
     }
 
     [Fact]
+    public async Task RunAsync_StartupNotice_RendersCollapsedChangelogAndUpdatesVersion()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-startup-changelog-host-" + Guid.NewGuid().ToString("N"));
+        var changelog = Path.Combine(directory, "feature-release-notes.md");
+        var settingsPath = Path.Combine(directory, "settings.json");
+        Directory.CreateDirectory(directory);
+        await File.WriteAllTextAsync(
+            changelog,
+            """
+            | 日期 | 功能域 | 用户价值 | 变更摘要 |
+            | --- | --- | --- | --- |
+            | 2026-06-09 | CodingAgent | 启动时展示更新摘要。 | 新增 startup changelog baseline。 |
+            """);
+        var settingsStore = new CodingAgentSettingsStore(settingsPath);
+        settingsStore.Save(new CodingAgentSettingsSnapshot(
+            null,
+            null,
+            CollapseChangelog: true,
+            LastChangelogVersion: "0.0.9"));
+        var terminal = new FakeTerminal();
+        terminal.QueueInput("exit");
+
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var host = new CodingAgentHost(
+            new InteractiveConsoleSession(terminal),
+            runner,
+            settingsStore: settingsStore,
+            startupNoticeService: new CodingAgentStartupNoticeService(
+                settingsStore,
+                new CodingAgentChangelogStore(changelog),
+                new NoopInstallTelemetryReporter(),
+                currentVersion: "0.1.0",
+                environment: _ => null));
+
+        try
+        {
+            await host.RunAsync();
+
+            Assert.Empty(runner.Inputs);
+            Assert.Equal("0.1.0", settingsStore.Load().LastChangelogVersion);
+            Assert.Contains(
+                "status> Updated to v0.1.0. Use /changelog to view full changelog.",
+                terminal.FlattenedText(),
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    private sealed class NoopInstallTelemetryReporter : ICodingAgentInstallTelemetryReporter
+    {
+        public void ReportInstall(string version)
+        {
+        }
+    }
+
+    [Fact]
     public async Task RunAsync_CompactCommand_RendersStatusAndPersistsCompactedSession()
     {
         var path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"tau-coding-agent-compact-{Guid.NewGuid():N}.json");

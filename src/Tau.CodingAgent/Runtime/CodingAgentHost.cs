@@ -27,6 +27,7 @@ public sealed class CodingAgentHost
     private readonly ICodingAgentTurnInputSource? _turnInputSource;
     private readonly CodingAgentInitialPrompt? _initialPrompt;
     private readonly IReadOnlyList<string> _initialMessages;
+    private readonly CodingAgentStartupNoticeService? _startupNoticeService;
     private readonly IDisposable? _compositionBinding;
     private CodingAgentRetryOptions _retryOptions;
     private bool _shutdownRendered;
@@ -66,7 +67,8 @@ public sealed class CodingAgentHost
         Func<IKeyBindingMap?>? reloadKeyBindings = null,
         TuiCompositionSession? compositionSession = null,
         CodingAgentInitialPrompt? initialPrompt = null,
-        IReadOnlyList<string>? initialMessages = null)
+        IReadOnlyList<string>? initialMessages = null,
+        CodingAgentStartupNoticeService? startupNoticeService = null)
     {
         _ui = ui;
         _runner = runner;
@@ -82,6 +84,7 @@ public sealed class CodingAgentHost
         _turnInputSource = turnInputSource;
         _initialPrompt = initialPrompt;
         _initialMessages = initialMessages ?? [];
+        _startupNoticeService = startupNoticeService;
         _compositionBinding = compositionSession?.BindTranscript(ui);
         RefreshCompositionStatus();
         _commandRouter = new CodingAgentCommandRouter(
@@ -127,6 +130,7 @@ public sealed class CodingAgentHost
     {
         _compositionSession?.Start();
         _ui.ShowWelcome("Tau — Coding Agent", "Type your message, or 'exit' to quit.");
+        ShowStartupNoticeIfNeeded();
         await RunInitialInputsAsync(cancellationToken).ConfigureAwait(false);
 
         while (!cancellationToken.IsCancellationRequested)
@@ -198,6 +202,17 @@ public sealed class CodingAgentHost
 
         _compositionSession?.Stop();
         return 0;
+    }
+
+    private void ShowStartupNoticeIfNeeded()
+    {
+        var notice = _startupNoticeService?.Prepare(_runner.Messages.Count > 0);
+        if (notice is null)
+        {
+            return;
+        }
+
+        _ui.WriteStatus(notice.Text);
     }
 
     private async Task RunInitialInputsAsync(CancellationToken cancellationToken)
