@@ -80,7 +80,7 @@ try {
     $cost = Invoke-JsonScript `
         -Name 'report-session-costs' `
         -ScriptPath 'scripts/report-session-costs.ps1' `
-        -Arguments @('-Directory', $tempRoot, '-Days', '7', '-SessionPath', $sessionPath, '-Json')
+        -Arguments @('-Directory', $tempRoot, '-Days', '36500', '-SessionPath', $sessionPath, '-Json')
 
     Add-Assertion -Name 'transcript succeeded' -Passed ($transcript.succeeded -eq $true) -Detail 'Transcript export did not succeed.'
     Add-Assertion -Name 'transcript message count' -Passed ($transcript.messageCount -eq 4) -Detail "Expected 4 transcript messages, actual $($transcript.messageCount)."

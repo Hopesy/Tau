@@ -217,16 +217,16 @@ public sealed class AgentRuntime
                         }
                         else if (evt is DoneEvent done)
                         {
-                            assistantMessage = done.Message;
-                            var success = IsSuccessfulProviderMessage(done.Message);
-                            LogProviderEnd(success, success ? "none" : GetProviderFailureKind(done.Message), done.Message);
+                            assistantMessage = EnrichAssistantMessage(done.Message, config.Model);
+                            var success = IsSuccessfulProviderMessage(assistantMessage);
+                            LogProviderEnd(success, success ? "none" : GetProviderFailureKind(assistantMessage), assistantMessage);
                             State.SetStreaming(false);
                             if (!assistantStarted)
                             {
-                                yield return new MessageStartEvent(done.Message);
+                                yield return new MessageStartEvent(assistantMessage);
                             }
                             State.AddMessage(assistantMessage);
-                            yield return new MessageEndEvent(done.Message);
+                            yield return new MessageEndEvent(assistantMessage);
                         }
                         else if (evt is ErrorEvent error)
                         {
@@ -235,6 +235,7 @@ public sealed class AgentRuntime
                                 ErrorMessage = error.Error,
                                 StopReason = error.Message?.StopReason ?? error.Partial?.StopReason ?? StopReason.Error
                             };
+                            assistantMessage = EnrichAssistantMessage(assistantMessage, config.Model);
                             LogProviderEnd(false, "stream-error", assistantMessage);
                             State.SetStreaming(false);
                             State.SetError(error.Error);
@@ -462,14 +463,19 @@ public sealed class AgentRuntime
         AddOptionalInt(fields, "cacheWriteTokens", usage.CacheWriteTokens);
         AddOptionalField(fields, "serviceTier", usage.ServiceTier);
 
-        if (model.Cost is not null)
+        UsageCost? cost = usage.Cost;
+        if (cost is null && model.Cost is not null)
         {
-            var cost = ModelCatalog.CalculateCost(model, usage);
-            fields["inputCost"] = cost.Input.ToString(System.Globalization.CultureInfo.InvariantCulture);
-            fields["outputCost"] = cost.Output.ToString(System.Globalization.CultureInfo.InvariantCulture);
-            fields["cacheReadCost"] = cost.CacheRead.ToString(System.Globalization.CultureInfo.InvariantCulture);
-            fields["cacheWriteCost"] = cost.CacheWrite.ToString(System.Globalization.CultureInfo.InvariantCulture);
-            fields["totalCost"] = cost.Total.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            cost = ModelCatalog.CalculateCost(model, usage);
+        }
+
+        if (cost is { } resolvedCost)
+        {
+            fields["inputCost"] = resolvedCost.Input.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            fields["outputCost"] = resolvedCost.Output.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            fields["cacheReadCost"] = resolvedCost.CacheRead.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            fields["cacheWriteCost"] = resolvedCost.CacheWrite.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            fields["totalCost"] = resolvedCost.Total.ToString(System.Globalization.CultureInfo.InvariantCulture);
         }
     }
 
@@ -499,22 +505,41 @@ public sealed class AgentRuntime
     private static string FormatEnum<T>(T value) where T : struct, Enum =>
         value.ToString().ToLowerInvariant();
 
+    private static AssistantMessage EnrichAssistantMessage(AssistantMessage message, Model model) =>
+        message with
+        {
+            Api = string.IsNullOrWhiteSpace(message.Api) ? model.Api : message.Api,
+            Provider = string.IsNullOrWhiteSpace(message.Provider) ? model.Provider : message.Provider,
+            Model = string.IsNullOrWhiteSpace(message.Model) ? model.Id : message.Model,
+            Timestamp = message.Timestamp ?? DateTimeOffset.UtcNow,
+            Usage = EnrichUsageCost(message.Usage, model)
+        };
+
+    private static Usage? EnrichUsageCost(Usage? usage, Model model)
+    {
+        if (usage is not { } value ||
+            value.Cost is not null ||
+            model.Cost is null)
+        {
+            return usage;
+        }
+
+        return value with { Cost = ModelCatalog.CalculateCost(model, value) };
+    }
+
     private static AssistantMessage CreateFailureMessage(
         string error,
         StopReason stopReason,
         Model model,
         AssistantMessage? partial = null)
     {
-        return (partial ?? new AssistantMessage([new TextContent(string.Empty)])) with
+        var message = (partial ?? new AssistantMessage([new TextContent(string.Empty)])) with
         {
             ErrorMessage = error,
             StopReason = stopReason,
-            Usage = partial?.Usage ?? new Usage(0, 0, 0, 0),
-            Api = partial?.Api ?? model.Api,
-            Provider = partial?.Provider ?? model.Provider,
-            Model = partial?.Model ?? model.Id,
-            Timestamp = partial?.Timestamp ?? DateTimeOffset.UtcNow
+            Usage = partial?.Usage ?? new Usage(0, 0, 0, 0)
         };
+        return EnrichAssistantMessage(message, model);
     }
 
     private bool DrainQueuedMessages(Channel<ChatMessage> channel, AgentQueueMode mode)

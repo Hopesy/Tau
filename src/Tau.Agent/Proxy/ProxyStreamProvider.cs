@@ -295,6 +295,18 @@ public sealed class ProxyStreamProvider : IStreamProvider
         AddIfNotNull(result, "cacheRead", usage.CacheReadTokens);
         AddIfNotNull(result, "cacheWrite", usage.CacheWriteTokens);
         AddIfNotNull(result, "serviceTier", usage.ServiceTier);
+        if (usage.Cost is { } cost)
+        {
+            result["cost"] = new Dictionary<string, object>
+            {
+                ["input"] = cost.Input,
+                ["output"] = cost.Output,
+                ["cacheRead"] = cost.CacheRead,
+                ["cacheWrite"] = cost.CacheWrite,
+                ["total"] = cost.Total
+            };
+        }
+
         return result;
     }
 
@@ -453,7 +465,21 @@ public sealed class ProxyStreamProvider : IStreamProvider
         var cacheRead = GetInt(usage, "cacheRead", "cacheReadTokens", "cache_read_tokens");
         var cacheWrite = GetInt(usage, "cacheWrite", "cacheWriteTokens", "cache_write_tokens");
         var serviceTier = GetString(usage, "serviceTier", "service_tier");
-        return new Usage(input, output, cacheRead, cacheWrite, serviceTier);
+        return new Usage(input, output, cacheRead, cacheWrite, serviceTier, ReadUsageCost(usage));
+    }
+
+    private static UsageCost? ReadUsageCost(JsonElement usage)
+    {
+        if (!TryGetProperty(usage, out var cost, "cost") || cost.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        return new UsageCost(
+            Input: GetDecimal(cost, "input", "input_cost") ?? 0m,
+            Output: GetDecimal(cost, "output", "output_cost") ?? 0m,
+            CacheRead: GetDecimal(cost, "cacheRead", "cache_read") ?? 0m,
+            CacheWrite: GetDecimal(cost, "cacheWrite", "cache_write") ?? 0m);
     }
 
     private static StopReason MapStopReason(string? value) =>
@@ -606,6 +632,16 @@ public sealed class ProxyStreamProvider : IStreamProvider
         }
 
         return value.TryGetInt32(out var intValue) ? intValue : null;
+    }
+
+    private static decimal? GetDecimal(JsonElement element, params string[] names)
+    {
+        if (!TryGetProperty(element, out var value, names) || value.ValueKind != JsonValueKind.Number)
+        {
+            return null;
+        }
+
+        return value.TryGetDecimal(out var decimalValue) ? decimalValue : null;
     }
 
     private static bool TryGetProperty(JsonElement element, out JsonElement value, params string[] names)

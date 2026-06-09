@@ -139,6 +139,61 @@ public sealed class CodingAgentTreeSessionRedactionTests
     }
 
     [Fact]
+    public void WritesJsonlSessionEntries_PersistsAssistantUsageCost()
+    {
+        var path = CreateTempPath("tau-tree-usage-cost");
+        var timestamp = new DateTimeOffset(2026, 6, 9, 12, 34, 56, TimeSpan.Zero);
+
+        try
+        {
+            var store = new CodingAgentTreeSessionStore(path, secretRedactor: new TauSecretRedactor(enabled: true));
+            store.AppendMessages(
+                [
+                    new AssistantMessage([new TextContent("priced")])
+                    {
+                        Provider = "openai",
+                        Model = "gpt-5.4",
+                        Api = "openai-responses",
+                        Timestamp = timestamp,
+                        Usage = new Usage(
+                            InputTokens: 1_000_000,
+                            OutputTokens: 2_000_000,
+                            CacheReadTokens: 300_000,
+                            CacheWriteTokens: 400_000,
+                            ServiceTier: "priority",
+                            Cost: new UsageCost(4m, 32m, 0.3m, 0.8m))
+                    }
+                ],
+                0);
+
+            var line = FindLine(File.ReadAllLines(path), "\"role\":\"assistant\"");
+            using var entry = JsonDocument.Parse(line);
+            var message = entry.RootElement.GetProperty("message");
+            Assert.Equal("openai", message.GetProperty("provider").GetString());
+            Assert.Equal("gpt-5.4", message.GetProperty("model").GetString());
+            Assert.Equal("openai-responses", message.GetProperty("api").GetString());
+            Assert.Equal(timestamp, message.GetProperty("timestamp").GetDateTimeOffset());
+            var usage = message.GetProperty("usage");
+            Assert.Equal(1_000_000, usage.GetProperty("inputTokens").GetInt32());
+            Assert.Equal(2_000_000, usage.GetProperty("outputTokens").GetInt32());
+            Assert.Equal(300_000, usage.GetProperty("cacheReadTokens").GetInt32());
+            Assert.Equal(400_000, usage.GetProperty("cacheWriteTokens").GetInt32());
+            Assert.Equal("priority", usage.GetProperty("serviceTier").GetString());
+            Assert.Equal(37.1m, usage.GetProperty("cost").GetProperty("total").GetDecimal());
+
+            var snapshot = store.LoadCurrentBranchSnapshot();
+            var assistant = Assert.IsType<AssistantMessage>(Assert.Single(snapshot.Messages));
+            Assert.Equal("openai", assistant.Provider);
+            Assert.Equal("gpt-5.4", assistant.Model);
+            Assert.Equal(37.1m, assistant.Usage!.Value.Cost!.Value.Total);
+        }
+        finally
+        {
+            DeleteIfExists(path);
+        }
+    }
+
+    [Fact]
     public void LoadCurrentBranchSnapshot_RestoresTreeAfterRedactedWrites()
     {
         var path = CreateTempPath("tau-tree-redaction-restore");

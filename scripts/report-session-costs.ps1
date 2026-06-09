@@ -415,7 +415,7 @@ try {
     }
 
     if ($costRecords -eq 0) {
-        $script:warnings += 'No usage.cost records were found. Current Tau CodingAgent JSONL sessions do not persist assistant usage costs, so this script does not infer or recalculate dollar costs.'
+        $script:warnings += 'No usage.cost records were found. This script does not infer or recalculate dollar costs for older sessions or models without persisted cost data.'
     }
 
     $result = [ordered]@{

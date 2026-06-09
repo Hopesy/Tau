@@ -21,6 +21,7 @@ namespace Tau.Ai.Serialization;
 [JsonSerializable(typeof(ModelCompatibility))]
 [JsonSerializable(typeof(VercelGatewayRouting))]
 [JsonSerializable(typeof(Usage))]
+[JsonSerializable(typeof(UsageCost))]
 [JsonSerializable(typeof(ModelCost))]
 [JsonSerializable(typeof(StreamOptions))]
 [JsonSerializable(typeof(SimpleStreamOptions))]

@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Tau.Ai;
 using Tau.CodingAgent.Runtime;
 
@@ -53,6 +54,65 @@ public class CodingAgentSessionStoreTests
             Assert.Equal("call-1", toolResult.ToolCallId);
             Assert.True(toolResult.IsError);
             Assert.Equal("done", Assert.IsType<TextContent>(Assert.Single(toolResult.Content)).Text);
+        }
+        finally
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+        }
+    }
+
+    [Fact]
+    public void SaveAndLoad_RoundTripsAssistantUsageCostAndMetadata()
+    {
+        var path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"tau-coding-agent-session-usage-{Guid.NewGuid():N}.json");
+        var store = new CodingAgentSessionStore(path);
+        var timestamp = new DateTimeOffset(2026, 6, 9, 12, 34, 56, TimeSpan.Zero);
+
+        try
+        {
+            store.Save(
+                [
+                    new AssistantMessage([new TextContent("priced")])
+                    {
+                        Provider = "openai",
+                        Model = "gpt-5.4",
+                        Api = "openai-responses",
+                        Timestamp = timestamp,
+                        Usage = new Usage(
+                            InputTokens: 1_000_000,
+                            OutputTokens: 2_000_000,
+                            CacheReadTokens: 300_000,
+                            CacheWriteTokens: 400_000,
+                            ServiceTier: "priority",
+                            Cost: new UsageCost(4m, 32m, 0.3m, 0.8m))
+                    }
+                ]);
+
+            var loaded = store.Load();
+
+            var assistant = Assert.IsType<AssistantMessage>(Assert.Single(loaded.Messages));
+            Assert.Equal("openai", assistant.Provider);
+            Assert.Equal("gpt-5.4", assistant.Model);
+            Assert.Equal("openai-responses", assistant.Api);
+            Assert.Equal(timestamp, assistant.Timestamp);
+            Assert.NotNull(assistant.Usage);
+            Assert.Equal(1_000_000, assistant.Usage!.Value.InputTokens);
+            Assert.Equal(2_000_000, assistant.Usage.Value.OutputTokens);
+            Assert.Equal(300_000, assistant.Usage.Value.CacheReadTokens);
+            Assert.Equal(400_000, assistant.Usage.Value.CacheWriteTokens);
+            Assert.Equal("priority", assistant.Usage.Value.ServiceTier);
+            Assert.NotNull(assistant.Usage.Value.Cost);
+            Assert.Equal(37.1m, assistant.Usage.Value.Cost!.Value.Total);
+
+            using var document = JsonDocument.Parse(File.ReadAllText(path));
+            var message = document.RootElement.GetProperty("messages")[0];
+            Assert.Equal("openai", message.GetProperty("provider").GetString());
+            Assert.Equal("gpt-5.4", message.GetProperty("model").GetString());
+            Assert.Equal("openai-responses", message.GetProperty("api").GetString());
+            Assert.Equal(37.1m, message.GetProperty("usage").GetProperty("cost").GetProperty("total").GetDecimal());
         }
         finally
         {

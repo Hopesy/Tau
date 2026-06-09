@@ -26,7 +26,7 @@ public sealed class ProxyStreamProviderTests
                     """{"type":"toolcall_delta","contentIndex":1,"delta":"{\"query\":\"par"}""",
                     """{"type":"toolcall_delta","contentIndex":1,"delta":"is\"}"}""",
                     """{"type":"toolcall_end","contentIndex":1}""",
-                    """{"type":"done","reason":"toolUse","usage":{"input":11,"output":4,"cacheRead":2,"cacheWrite":1,"serviceTier":"flex"}}"""),
+                    """{"type":"done","reason":"toolUse","usage":{"input":11,"output":4,"cacheRead":2,"cacheWrite":1,"serviceTier":"flex","cost":{"input":0.11,"output":0.22,"cacheRead":0.03,"cacheWrite":0.04,"total":0.40}}}"""),
                 Encoding.UTF8,
                 "text/event-stream")
         });
@@ -46,6 +46,12 @@ public sealed class ProxyStreamProviderTests
             [
                 new UserMessage("hello"),
                 new AssistantMessage([new TextContent("ack")])
+                {
+                    Usage = new Usage(3, 4, 1, 2, "priority", new UsageCost(0.3m, 0.4m, 0.1m, 0.2m)),
+                    Provider = "context-provider",
+                    Model = "context-model",
+                    Api = "context-api"
+                }
             ],
             [
                 new Tool("lookup", "Look up a record.", JsonDocument.Parse("""{"type":"object"}""").RootElement.Clone())
@@ -84,6 +90,12 @@ public sealed class ProxyStreamProviderTests
         Assert.Equal(2, done.Message.Usage?.CacheReadTokens);
         Assert.Equal(1, done.Message.Usage?.CacheWriteTokens);
         Assert.Equal("flex", done.Message.Usage?.ServiceTier);
+        Assert.NotNull(done.Message.Usage?.Cost);
+        Assert.Equal(0.11m, done.Message.Usage!.Value.Cost!.Value.Input);
+        Assert.Equal(0.22m, done.Message.Usage.Value.Cost.Value.Output);
+        Assert.Equal(0.03m, done.Message.Usage.Value.Cost.Value.CacheRead);
+        Assert.Equal(0.04m, done.Message.Usage.Value.Cost.Value.CacheWrite);
+        Assert.Equal(0.40m, done.Message.Usage.Value.Cost.Value.Total);
 
         var text = Assert.Single(done.Message.Content.OfType<TextContent>());
         Assert.Equal("Hello", text.Text);
@@ -109,6 +121,11 @@ public sealed class ProxyStreamProviderTests
         var messages = contextJson.GetProperty("messages").EnumerateArray().ToArray();
         Assert.Equal("hello", messages[0].GetProperty("content").EnumerateArray().First().GetProperty("text").GetString());
         Assert.Equal("ack", messages[1].GetProperty("content").EnumerateArray().First().GetProperty("text").GetString());
+        Assert.Equal("context-provider", messages[1].GetProperty("provider").GetString());
+        Assert.Equal("context-model", messages[1].GetProperty("model").GetString());
+        var requestUsage = messages[1].GetProperty("usage");
+        Assert.Equal("priority", requestUsage.GetProperty("serviceTier").GetString());
+        Assert.Equal(1.0m, requestUsage.GetProperty("cost").GetProperty("total").GetDecimal());
         Assert.Equal("lookup", contextJson.GetProperty("tools").EnumerateArray().First().GetProperty("name").GetString());
 
         var optionsJson = body.RootElement.GetProperty("options");

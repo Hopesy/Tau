@@ -38,7 +38,8 @@ public record struct Usage(
     int OutputTokens,
     int? CacheReadTokens = null,
     int? CacheWriteTokens = null,
-    string? ServiceTier = null);
+    string? ServiceTier = null,
+    UsageCost? Cost = null);
 
 public enum StopReason
 {

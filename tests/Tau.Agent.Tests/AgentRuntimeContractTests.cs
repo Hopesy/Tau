@@ -77,6 +77,51 @@ public sealed class AgentRuntimeContractTests
     }
 
     [Fact]
+    public async Task RunAsync_EnrichesAssistantUsageCostAndProviderMetadata()
+    {
+        var provider = new ScriptedProvider(new AssistantMessage([new TextContent("priced")])
+        {
+            Usage = new Usage(
+                InputTokens: 1_000_000,
+                OutputTokens: 2_000_000,
+                CacheReadTokens: 500_000,
+                CacheWriteTokens: 250_000,
+                ServiceTier: "priority")
+        });
+        var model = new Model
+        {
+            Provider = "priced-provider",
+            Id = "priced-model",
+            Name = "Priced Model",
+            Api = provider.Api,
+            Cost = new ModelCost(2m, 8m, 0.5m, 1m)
+        };
+        var runtime = new AgentRuntime();
+        runtime.AddMessage(new UserMessage("hello"));
+
+        var events = await CollectAsync(runtime.RunAsync(CreateConfig(provider, [], model: model)));
+
+        var assistant = Assert.IsType<AssistantMessage>(runtime.State.Messages.Last());
+        Assert.Equal("priced-provider", assistant.Provider);
+        Assert.Equal("priced-model", assistant.Model);
+        Assert.Equal(provider.Api, assistant.Api);
+        Assert.NotNull(assistant.Timestamp);
+        Assert.NotNull(assistant.Usage);
+        Assert.Equal("priority", assistant.Usage!.Value.ServiceTier);
+        Assert.NotNull(assistant.Usage.Value.Cost);
+        var cost = assistant.Usage.Value.Cost!.Value;
+        Assert.Equal(4.0m, cost.Input);
+        Assert.Equal(32.0m, cost.Output);
+        Assert.Equal(0.5m, cost.CacheRead);
+        Assert.Equal(0.5m, cost.CacheWrite);
+        Assert.Equal(37.0m, cost.Total);
+
+        Assert.Same(assistant, Assert.IsType<AssistantMessage>(events.OfType<MessageEndEvent>().Single().Message));
+        Assert.Same(assistant, Assert.IsType<AssistantMessage>(events.OfType<TurnEndEvent>().Single().Message));
+        Assert.Same(assistant, Assert.IsType<AssistantMessage>(events.OfType<AgentEndEvent>().Single().Messages.Last()));
+    }
+
+    [Fact]
     public async Task RunAsync_CancellationDuringAssistantStreamEmitsAbortedTurnAndAgentEnd()
     {
         var provider = new BlockingProvider();
@@ -516,14 +561,15 @@ public sealed class AgentRuntimeContractTests
     private static AgentLoopConfig CreateConfig(
         IStreamProvider provider,
         IReadOnlyList<IAgentTool> tools,
-        IReadOnlyList<IToolInterceptor>? interceptors = null)
+        IReadOnlyList<IToolInterceptor>? interceptors = null,
+        Model? model = null)
     {
         var registry = new ProviderRegistry();
         registry.Register(provider.Api, provider);
 
         return new AgentLoopConfig
         {
-            Model = new Model
+            Model = model ?? new Model
             {
                 Provider = "test",
                 Id = "test-model",

@@ -123,6 +123,11 @@ public sealed class CodingAgentSessionStore
             AssistantMessage assistant => new CodingAgentSessionMessage
             {
                 Role = "assistant",
+                Usage = FromUsage(assistant.Usage),
+                Api = Normalize(assistant.Api),
+                Provider = Normalize(assistant.Provider),
+                Model = Normalize(assistant.Model),
+                Timestamp = assistant.Timestamp,
                 Content = assistant.Content.Select(FromContent).ToList()
             },
             ToolResultMessage toolResult => new CodingAgentSessionMessage
@@ -151,13 +156,81 @@ public sealed class CodingAgentSessionStore
         return message.Role switch
         {
             "user" => new UserMessage(content),
-            "assistant" => new AssistantMessage(content),
+            "assistant" => new AssistantMessage(content)
+            {
+                Usage = ToUsage(message.Usage),
+                Api = Normalize(message.Api),
+                Provider = Normalize(message.Provider),
+                Model = Normalize(message.Model),
+                Timestamp = message.Timestamp
+            },
             "toolResult" when !string.IsNullOrWhiteSpace(message.ToolCallId) => new ToolResultMessage(
                 message.ToolCallId,
                 content,
                 message.IsError),
             _ => null
         };
+    }
+
+    private static CodingAgentSessionUsage? FromUsage(Usage? usage)
+    {
+        if (usage is not { } value)
+        {
+            return null;
+        }
+
+        return new CodingAgentSessionUsage
+        {
+            InputTokens = value.InputTokens,
+            OutputTokens = value.OutputTokens,
+            CacheReadTokens = value.CacheReadTokens,
+            CacheWriteTokens = value.CacheWriteTokens,
+            ServiceTier = Normalize(value.ServiceTier),
+            Cost = FromUsageCost(value.Cost)
+        };
+    }
+
+    private static Usage? ToUsage(CodingAgentSessionUsage? usage)
+    {
+        if (usage is null)
+        {
+            return null;
+        }
+
+        return new Usage(
+            usage.InputTokens,
+            usage.OutputTokens,
+            usage.CacheReadTokens,
+            usage.CacheWriteTokens,
+            Normalize(usage.ServiceTier),
+            ToUsageCost(usage.Cost));
+    }
+
+    private static CodingAgentSessionUsageCost? FromUsageCost(UsageCost? cost)
+    {
+        if (cost is not { } value)
+        {
+            return null;
+        }
+
+        return new CodingAgentSessionUsageCost
+        {
+            Input = value.Input,
+            Output = value.Output,
+            CacheRead = value.CacheRead,
+            CacheWrite = value.CacheWrite,
+            Total = value.Total
+        };
+    }
+
+    private static UsageCost? ToUsageCost(CodingAgentSessionUsageCost? cost)
+    {
+        if (cost is null)
+        {
+            return null;
+        }
+
+        return new UsageCost(cost.Input, cost.Output, cost.CacheRead, cost.CacheWrite);
     }
 
     private static CodingAgentSessionContent FromContent(ContentBlock block)
@@ -205,6 +278,9 @@ public sealed class CodingAgentSessionStore
             _ => null
         };
     }
+
+    private static string? Normalize(string? value) =>
+        string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 }
 
 internal sealed class CodingAgentSessionDocument
@@ -222,7 +298,31 @@ internal sealed class CodingAgentSessionMessage
     public string Role { get; init; } = string.Empty;
     public string? ToolCallId { get; init; }
     public bool IsError { get; init; }
+    public CodingAgentSessionUsage? Usage { get; init; }
+    public string? Api { get; init; }
+    public string? Provider { get; init; }
+    public string? Model { get; init; }
+    public DateTimeOffset? Timestamp { get; init; }
     public List<CodingAgentSessionContent> Content { get; init; } = [];
+}
+
+internal sealed class CodingAgentSessionUsage
+{
+    public int InputTokens { get; init; }
+    public int OutputTokens { get; init; }
+    public int? CacheReadTokens { get; init; }
+    public int? CacheWriteTokens { get; init; }
+    public string? ServiceTier { get; init; }
+    public CodingAgentSessionUsageCost? Cost { get; init; }
+}
+
+internal sealed class CodingAgentSessionUsageCost
+{
+    public decimal Input { get; init; }
+    public decimal Output { get; init; }
+    public decimal CacheRead { get; init; }
+    public decimal CacheWrite { get; init; }
+    public decimal Total { get; init; }
 }
 
 internal sealed class CodingAgentSessionContent
