@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text.RegularExpressions;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -398,20 +399,20 @@ public sealed class CodingAgentPackageManager
     {
         if (source.IsFiltered)
         {
-            AddConfiguredResourceEntries(root, source.Extensions, "extensions", source, scope, extensions, diagnostics);
-            AddConfiguredResourceEntries(root, source.Skills, "skills", source, scope, skills, diagnostics);
-            AddConfiguredResourceEntries(root, source.Prompts, "prompts", source, scope, prompts, diagnostics);
-            AddConfiguredResourceEntries(root, source.Themes, "themes", source, scope, themes, diagnostics);
+            AddFilteredResourceEntries(root, source.Extensions, "extensions", extensions);
+            AddFilteredResourceEntries(root, source.Skills, "skills", skills);
+            AddFilteredResourceEntries(root, source.Prompts, "prompts", prompts);
+            AddFilteredResourceEntries(root, source.Themes, "themes", themes);
             return;
         }
 
         var manifest = ReadManifest(root, source, scope, diagnostics);
         if (manifest is not null)
         {
-            AddConfiguredResourceEntries(root, manifest.Extensions, "extensions", source, scope, extensions, diagnostics);
-            AddConfiguredResourceEntries(root, manifest.Skills, "skills", source, scope, skills, diagnostics);
-            AddConfiguredResourceEntries(root, manifest.Prompts, "prompts", source, scope, prompts, diagnostics);
-            AddConfiguredResourceEntries(root, manifest.Themes, "themes", source, scope, themes, diagnostics);
+            AddManifestResourceEntries(root, manifest.Extensions, "extensions", extensions);
+            AddManifestResourceEntries(root, manifest.Skills, "skills", skills);
+            AddManifestResourceEntries(root, manifest.Prompts, "prompts", prompts);
+            AddManifestResourceEntries(root, manifest.Themes, "themes", themes);
             return;
         }
 
@@ -430,20 +431,138 @@ public sealed class CodingAgentPackageManager
         }
     }
 
-    private void AddConfiguredResourceEntries(
+    private void AddManifestResourceEntries(
         string root,
         IReadOnlyList<string>? entries,
         string resourceType,
-        CodingAgentPackageSource source,
-        string scope,
-        ICollection<string> target,
-        ICollection<CodingAgentPackageDiagnostic> diagnostics)
+        ICollection<string> target)
     {
         if (entries is null)
         {
             return;
         }
 
+        if (!entries.Any(IsPatternEntry))
+        {
+            foreach (var entry in entries)
+            {
+                if (!string.IsNullOrWhiteSpace(entry))
+                {
+                    target.Add(ResolvePath(entry, root));
+                }
+            }
+
+            return;
+        }
+
+        var candidates = CollectFilesFromResourceEntries(root, entries, resourceType);
+        var overridePatterns = GetOverridePatterns(entries);
+        foreach (var path in ApplyResourcePatterns(candidates, overridePatterns, root))
+        {
+            target.Add(path);
+        }
+    }
+
+    private void AddFilteredResourceEntries(
+        string root,
+        IReadOnlyList<string>? entries,
+        string resourceType,
+        ICollection<string> target)
+    {
+        if (entries is null)
+        {
+            AddDefaultResourceEntries(root, resourceType, target);
+            return;
+        }
+
+        if (entries.Count == 0)
+        {
+            return;
+        }
+
+        var candidates = CollectDefaultResourceFiles(root, resourceType);
+        foreach (var path in ApplyResourcePatterns(candidates, entries, root))
+        {
+            target.Add(path);
+        }
+    }
+
+    private void AddDefaultResourceEntries(
+        string root,
+        string resourceType,
+        ICollection<string> target)
+    {
+        var manifest = ReadManifest(root, new CodingAgentPackageSource(root), "package", new List<CodingAgentPackageDiagnostic>());
+        var entries = GetResourceEntries(manifest, resourceType);
+        if (entries is not null)
+        {
+            AddManifestResourceEntries(root, entries, resourceType, target);
+            return;
+        }
+
+        AddConventionDirectory(root, resourceType, target);
+    }
+
+    private static bool IsOverridePattern(string value) =>
+        value.StartsWith("!", StringComparison.Ordinal) ||
+        value.StartsWith("+", StringComparison.Ordinal) ||
+        value.StartsWith("-", StringComparison.Ordinal);
+
+    private static IReadOnlyList<string> GetOverridePatterns(IReadOnlyList<string> entries) =>
+        entries.Where(IsOverridePattern).ToArray();
+
+    private static bool IsPatternEntry(string value) =>
+        IsOverridePattern(value) ||
+        value.Contains('*', StringComparison.Ordinal) ||
+        value.Contains('?', StringComparison.Ordinal);
+
+    private static IReadOnlyList<string>? GetResourceEntries(CodingAgentPackageSource? source, string resourceType) =>
+        resourceType switch
+        {
+            "extensions" => source?.Extensions,
+            "skills" => source?.Skills,
+            "prompts" => source?.Prompts,
+            "themes" => source?.Themes,
+            _ => null
+        };
+
+    private static IReadOnlyList<string> CollectDefaultResourceFiles(string root, string resourceType)
+    {
+        var packageJsonPath = Path.Combine(root, "package.json");
+        if (File.Exists(packageJsonPath))
+        {
+            try
+            {
+                using var document = JsonDocument.Parse(File.ReadAllText(packageJsonPath));
+                if (document.RootElement.TryGetProperty("pi", out var pi) &&
+                    pi.ValueKind == JsonValueKind.Object)
+                {
+                    var entries = ReadStringArray(pi, resourceType);
+                    if (entries is not null)
+                    {
+                        return ApplyResourcePatterns(
+                            CollectFilesFromResourceEntries(root, entries, resourceType),
+                            GetOverridePatterns(entries),
+                            root);
+                    }
+                }
+            }
+            catch (Exception ex) when (ex is JsonException or IOException or UnauthorizedAccessException)
+            {
+                return [];
+            }
+        }
+
+        var conventionDirectory = Path.Combine(root, resourceType);
+        return CollectResourceFilesFromPath(conventionDirectory, resourceType);
+    }
+
+    private static IReadOnlyList<string> CollectFilesFromResourceEntries(
+        string root,
+        IReadOnlyList<string> entries,
+        string resourceType)
+    {
+        var files = new List<string>();
         foreach (var entry in entries)
         {
             if (string.IsNullOrWhiteSpace(entry) || IsOverridePattern(entry))
@@ -451,24 +570,277 @@ public sealed class CodingAgentPackageManager
                 continue;
             }
 
-            if (entry.Contains('*', StringComparison.Ordinal) || entry.Contains('?', StringComparison.Ordinal))
+            if (HasGlob(entry))
             {
-                diagnostics.Add(new CodingAgentPackageDiagnostic(
-                    "warning",
-                    $"package {resourceType} glob patterns are not resolved in this baseline: {entry}",
-                    source.Source,
-                    scope));
-                continue;
+                foreach (var match in EnumerateGlobMatches(root, entry))
+                {
+                    files.AddRange(CollectResourceFilesFromPath(match, resourceType));
+                }
             }
+            else
+            {
+                files.AddRange(CollectResourceFilesFromPath(ResolvePath(entry, root), resourceType));
+            }
+        }
 
-            target.Add(ResolvePath(entry, root));
+        return files.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+    }
+
+    private static IReadOnlyList<string> CollectResourceFilesFromPath(string path, string resourceType)
+    {
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path) && !Directory.Exists(path))
+        {
+            return [];
+        }
+
+        if (File.Exists(path))
+        {
+            return [Path.GetFullPath(path)];
+        }
+
+        var pattern = resourceType switch
+        {
+            "extensions" => "*.json",
+            "skills" => "SKILL.md",
+            "prompts" => "*.md",
+            "themes" => "*.json",
+            _ => "*"
+        };
+        try
+        {
+            return Directory.EnumerateFiles(path, pattern, SearchOption.AllDirectories)
+                .Where(file => !IsUnderNodeModules(file) && !Path.GetFileName(file).StartsWith(".", StringComparison.Ordinal))
+                .Select(Path.GetFullPath)
+                .ToArray();
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or DirectoryNotFoundException)
+        {
+            return [];
         }
     }
 
-    private static bool IsOverridePattern(string value) =>
-        value.StartsWith("!", StringComparison.Ordinal) ||
-        value.StartsWith("+", StringComparison.Ordinal) ||
-        value.StartsWith("-", StringComparison.Ordinal);
+    private static IReadOnlyList<string> ApplyResourcePatterns(
+        IReadOnlyList<string> allFiles,
+        IReadOnlyList<string> patterns,
+        string root)
+    {
+        if (allFiles.Count == 0)
+        {
+            return [];
+        }
+
+        var includes = new List<string>();
+        var excludes = new List<string>();
+        var forceIncludes = new List<string>();
+        var forceExcludes = new List<string>();
+
+        foreach (var rawPattern in patterns)
+        {
+            if (string.IsNullOrWhiteSpace(rawPattern))
+            {
+                continue;
+            }
+
+            var pattern = rawPattern.Trim();
+            if (pattern.StartsWith("+", StringComparison.Ordinal))
+            {
+                forceIncludes.Add(pattern[1..]);
+            }
+            else if (pattern.StartsWith("-", StringComparison.Ordinal))
+            {
+                forceExcludes.Add(pattern[1..]);
+            }
+            else if (pattern.StartsWith("!", StringComparison.Ordinal))
+            {
+                excludes.Add(pattern[1..]);
+            }
+            else
+            {
+                includes.Add(pattern);
+            }
+        }
+
+        var result = includes.Count == 0
+            ? allFiles.ToList()
+            : allFiles.Where(file => MatchesAnyPattern(file, includes, root)).ToList();
+
+        if (excludes.Count > 0)
+        {
+            result = result.Where(file => !MatchesAnyPattern(file, excludes, root)).ToList();
+        }
+
+        foreach (var file in allFiles)
+        {
+            if (!result.Contains(file, StringComparer.OrdinalIgnoreCase) &&
+                MatchesAnyExactPattern(file, forceIncludes, root))
+            {
+                result.Add(file);
+            }
+        }
+
+        if (forceExcludes.Count > 0)
+        {
+            result = result.Where(file => !MatchesAnyExactPattern(file, forceExcludes, root)).ToList();
+        }
+
+        return result.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+    }
+
+    private static IEnumerable<string> EnumerateGlobMatches(string root, string pattern)
+    {
+        if (!Directory.Exists(root))
+        {
+            yield break;
+        }
+
+        IEnumerable<string> entries;
+        try
+        {
+            entries = Directory.EnumerateFileSystemEntries(root, "*", SearchOption.AllDirectories).ToArray();
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or DirectoryNotFoundException)
+        {
+            yield break;
+        }
+
+        foreach (var entry in entries)
+        {
+            if (!IsUnderNodeModules(entry) && MatchesPattern(entry, pattern, root))
+            {
+                yield return entry;
+            }
+        }
+    }
+
+    private static bool MatchesAnyPattern(string path, IEnumerable<string> patterns, string root) =>
+        patterns.Any(pattern => MatchesPattern(path, pattern, root));
+
+    private static bool MatchesAnyExactPattern(string path, IEnumerable<string> patterns, string root) =>
+        patterns.Any(pattern => MatchesExactPattern(path, pattern, root));
+
+    private static bool MatchesPattern(string path, string pattern, string root)
+    {
+        var normalizedPattern = NormalizePackagePattern(pattern);
+        var rel = ToPosixPath(Path.GetRelativePath(root, path));
+        var name = Path.GetFileName(path);
+        var full = ToPosixPath(Path.GetFullPath(path));
+
+        if (GlobMatches(rel, normalizedPattern) ||
+            GlobMatches(name, normalizedPattern) ||
+            GlobMatches(full, normalizedPattern))
+        {
+            return true;
+        }
+
+        if (!Path.GetFileName(path).Equals("SKILL.md", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var parent = Path.GetDirectoryName(path);
+        if (string.IsNullOrWhiteSpace(parent))
+        {
+            return false;
+        }
+
+        var parentRel = ToPosixPath(Path.GetRelativePath(root, parent));
+        var parentName = Path.GetFileName(parent);
+        var parentFull = ToPosixPath(Path.GetFullPath(parent));
+        return GlobMatches(parentRel, normalizedPattern) ||
+            GlobMatches(parentName, normalizedPattern) ||
+            GlobMatches(parentFull, normalizedPattern);
+    }
+
+    private static bool MatchesExactPattern(string path, string pattern, string root)
+    {
+        var normalizedPattern = NormalizeExactPattern(pattern);
+        var rel = ToPosixPath(Path.GetRelativePath(root, path));
+        var full = ToPosixPath(Path.GetFullPath(path));
+        if (rel.Equals(normalizedPattern, StringComparison.OrdinalIgnoreCase) ||
+            full.Equals(normalizedPattern, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        if (!Path.GetFileName(path).Equals("SKILL.md", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var parent = Path.GetDirectoryName(path);
+        if (string.IsNullOrWhiteSpace(parent))
+        {
+            return false;
+        }
+
+        var parentRel = ToPosixPath(Path.GetRelativePath(root, parent));
+        var parentFull = ToPosixPath(Path.GetFullPath(parent));
+        return parentRel.Equals(normalizedPattern, StringComparison.OrdinalIgnoreCase) ||
+            parentFull.Equals(normalizedPattern, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool GlobMatches(string value, string pattern) =>
+        Regex.IsMatch(ToPosixPath(value), GlobToRegex(pattern), RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+    private static string GlobToRegex(string pattern)
+    {
+        var normalized = NormalizePackagePattern(pattern);
+        var builder = new System.Text.StringBuilder("^");
+        for (var i = 0; i < normalized.Length; i++)
+        {
+            var ch = normalized[i];
+            if (ch == '*')
+            {
+                if (i + 1 < normalized.Length && normalized[i + 1] == '*')
+                {
+                    i++;
+                    if (i + 1 < normalized.Length && normalized[i + 1] == '/')
+                    {
+                        builder.Append("(?:.*/)?");
+                        i++;
+                    }
+                    else
+                    {
+                        builder.Append(".*");
+                    }
+                }
+                else
+                {
+                    builder.Append("[^/]*");
+                }
+            }
+            else if (ch == '?')
+            {
+                builder.Append("[^/]");
+            }
+            else
+            {
+                builder.Append(Regex.Escape(ch.ToString()));
+            }
+        }
+
+        builder.Append('$');
+        return builder.ToString();
+    }
+
+    private static string NormalizePackagePattern(string pattern) =>
+        ToPosixPath(pattern.Trim());
+
+    private static string NormalizeExactPattern(string pattern)
+    {
+        var normalized = NormalizePackagePattern(pattern);
+        return normalized.StartsWith("./", StringComparison.Ordinal) ? normalized[2..] : normalized;
+    }
+
+    private static bool HasGlob(string value) =>
+        value.Contains('*', StringComparison.Ordinal) ||
+        value.Contains('?', StringComparison.Ordinal);
+
+    private static string ToPosixPath(string path) =>
+        path.Replace('\\', '/');
+
+    private static bool IsUnderNodeModules(string path) =>
+        ToPosixPath(Path.GetFullPath(path)).Contains("/node_modules/", StringComparison.OrdinalIgnoreCase);
 
     private CodingAgentPackageSource? ReadManifest(
         string root,
@@ -1461,7 +1833,7 @@ public static class CodingAgentPackageCli
                 Usage:
                   tau update [source]
 
-                Refresh configured package sources. Tau currently resolves local package resources and leaves npm/git install execution open.
+                Refresh configured package sources and update npm/git package installs when applicable.
                 """,
             "list" => """
                 Usage:

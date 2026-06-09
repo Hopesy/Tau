@@ -105,6 +105,161 @@ public sealed class CodingAgentPackageManagerTests
     }
 
     [Fact]
+    public void ResolveResources_AppliesManifestGlobAndNegationPatterns()
+    {
+        using var temp = TempDirectory.Create();
+        var packageRoot = Path.Combine(temp.Path, "pkg");
+        Directory.CreateDirectory(Path.Combine(packageRoot, "prompts", "nested"));
+        File.WriteAllText(Path.Combine(packageRoot, "prompts", "public.md"), "# public");
+        File.WriteAllText(Path.Combine(packageRoot, "prompts", "draft.md"), "# draft");
+        File.WriteAllText(Path.Combine(packageRoot, "prompts", "nested", "deep.md"), "# deep");
+        File.WriteAllText(
+            Path.Combine(packageRoot, "package.json"),
+            """
+            {
+              "pi": {
+                "prompts": ["prompts/**/*.md", "!draft.md"]
+              }
+            }
+            """);
+
+        var settingsPath = Path.Combine(temp.Path, ".tau", "coding-agent-settings.json");
+        new CodingAgentSettingsStore(settingsPath).Save(new CodingAgentSettingsSnapshot(
+            null,
+            null,
+            Packages: [new CodingAgentPackageSource("./pkg")]));
+        var manager = new CodingAgentPackageManager(
+            cwd: temp.Path,
+            userSettingsPath: Path.Combine(temp.Path, "user-settings.json"),
+            projectSettingsPath: settingsPath);
+
+        var resources = manager.ResolveResources();
+
+        Assert.Empty(resources.Diagnostics);
+        Assert.Equal(
+            [
+                Path.Combine(packageRoot, "prompts", "nested", "deep.md"),
+                Path.Combine(packageRoot, "prompts", "public.md")
+            ],
+            resources.PromptPaths.OrderBy(path => path, StringComparer.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void ResolveResources_TreatsManifestPlainAndGlobEntriesAsSourcePaths()
+    {
+        using var temp = TempDirectory.Create();
+        var packageRoot = Path.Combine(temp.Path, "pkg");
+        Directory.CreateDirectory(Path.Combine(packageRoot, "extra"));
+        Directory.CreateDirectory(Path.Combine(packageRoot, "prompts", "nested"));
+        File.WriteAllText(Path.Combine(packageRoot, "extra", "special.md"), "# special");
+        File.WriteAllText(Path.Combine(packageRoot, "prompts", "public.md"), "# public");
+        File.WriteAllText(Path.Combine(packageRoot, "prompts", "nested", "deep.md"), "# deep");
+        File.WriteAllText(
+            Path.Combine(packageRoot, "package.json"),
+            """
+            {
+              "pi": {
+                "prompts": ["extra/special.md", "prompts/nested/**/*.md"]
+              }
+            }
+            """);
+
+        var settingsPath = Path.Combine(temp.Path, ".tau", "coding-agent-settings.json");
+        new CodingAgentSettingsStore(settingsPath).Save(new CodingAgentSettingsSnapshot(
+            null,
+            null,
+            Packages: [new CodingAgentPackageSource("./pkg")]));
+        var manager = new CodingAgentPackageManager(
+            cwd: temp.Path,
+            userSettingsPath: Path.Combine(temp.Path, "user-settings.json"),
+            projectSettingsPath: settingsPath);
+
+        var resources = manager.ResolveResources();
+
+        Assert.Empty(resources.Diagnostics);
+        Assert.Equal(
+            [
+                Path.Combine(packageRoot, "extra", "special.md"),
+                Path.Combine(packageRoot, "prompts", "nested", "deep.md")
+            ],
+            resources.PromptPaths.OrderBy(path => path, StringComparer.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void ResolveResources_AppliesPackageFilterIncludesExcludesAndForceOverrides()
+    {
+        using var temp = TempDirectory.Create();
+        var packageRoot = Path.Combine(temp.Path, "pkg");
+        Directory.CreateDirectory(Path.Combine(packageRoot, "prompts", "nested"));
+        Directory.CreateDirectory(Path.Combine(packageRoot, "skills", "demo"));
+        File.WriteAllText(Path.Combine(packageRoot, "prompts", "public.md"), "# public");
+        File.WriteAllText(Path.Combine(packageRoot, "prompts", "private.md"), "# private");
+        File.WriteAllText(Path.Combine(packageRoot, "prompts", "drop.md"), "# drop");
+        File.WriteAllText(Path.Combine(packageRoot, "prompts", "nested", "deep.md"), "# deep");
+        File.WriteAllText(Path.Combine(packageRoot, "skills", "demo", "SKILL.md"), "# skill");
+
+        var settingsPath = Path.Combine(temp.Path, ".tau", "coding-agent-settings.json");
+        new CodingAgentSettingsStore(settingsPath).Save(new CodingAgentSettingsSnapshot(
+            null,
+            null,
+            Packages:
+            [
+                new CodingAgentPackageSource(
+                    "./pkg",
+                    Prompts: ["prompts/**/*.md", "!private.md", "+prompts/private.md", "-prompts/drop.md"],
+                    Skills: [])
+            ]));
+        var manager = new CodingAgentPackageManager(
+            cwd: temp.Path,
+            userSettingsPath: Path.Combine(temp.Path, "user-settings.json"),
+            projectSettingsPath: settingsPath);
+
+        var resources = manager.ResolveResources();
+
+        Assert.Empty(resources.Diagnostics);
+        Assert.Empty(resources.SkillPaths);
+        Assert.Equal(
+            [
+                Path.Combine(packageRoot, "prompts", "nested", "deep.md"),
+                Path.Combine(packageRoot, "prompts", "private.md"),
+                Path.Combine(packageRoot, "prompts", "public.md")
+            ],
+            resources.PromptPaths.OrderBy(path => path, StringComparer.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void ResolveResources_AppliesPackageFilterPlainIncludesOnly()
+    {
+        using var temp = TempDirectory.Create();
+        var packageRoot = Path.Combine(temp.Path, "pkg");
+        Directory.CreateDirectory(Path.Combine(packageRoot, "prompts"));
+        File.WriteAllText(Path.Combine(packageRoot, "prompts", "public.md"), "# public");
+        File.WriteAllText(Path.Combine(packageRoot, "prompts", "private.md"), "# private");
+
+        var settingsPath = Path.Combine(temp.Path, ".tau", "coding-agent-settings.json");
+        new CodingAgentSettingsStore(settingsPath).Save(new CodingAgentSettingsSnapshot(
+            null,
+            null,
+            Packages:
+            [
+                new CodingAgentPackageSource(
+                    "./pkg",
+                    Prompts: ["prompts/public.md"])
+            ]));
+        var manager = new CodingAgentPackageManager(
+            cwd: temp.Path,
+            userSettingsPath: Path.Combine(temp.Path, "user-settings.json"),
+            projectSettingsPath: settingsPath);
+
+        var resources = manager.ResolveResources();
+
+        Assert.Empty(resources.Diagnostics);
+        Assert.Equal(
+            [Path.Combine(packageRoot, "prompts", "public.md")],
+            resources.PromptPaths.OrderBy(path => path, StringComparer.OrdinalIgnoreCase));
+    }
+
+    [Fact]
     public void InstallAndPersist_ProjectNpmPackageRunsPrefixInstallAndStoresSource()
     {
         using var temp = TempDirectory.Create();
