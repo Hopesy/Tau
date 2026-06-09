@@ -262,6 +262,72 @@ public sealed class CodingAgentRpcHostTests
     }
 
     [Fact]
+    public async Task RunAsync_GetStateReportsPendingMessageCountForActivePromptQueues()
+    {
+        var runner = new FakeCodingAgentRunner((_, ct) => BlockingRun(ct));
+        var output = new StringWriter();
+        var input = string.Join(
+            "\n",
+            "{\"id\":\"p1\",\"type\":\"prompt\",\"message\":\"work\"}",
+            "{\"id\":\"s1\",\"type\":\"steer\",\"message\":\"adjust now\"}",
+            "{\"id\":\"f1\",\"type\":\"follow_up\",\"message\":\"afterwards\"}",
+            "{\"id\":\"state1\",\"type\":\"get_state\"}",
+            "{\"id\":\"a1\",\"type\":\"abort\"}",
+            string.Empty);
+        var host = new CodingAgentRpcHost(runner, new StringReader(input), output);
+
+        await host.RunAsync();
+
+        var state = FindResponseById(ReadJsonLines(output), "state1").GetProperty("data");
+        Assert.True(state.GetProperty("isStreaming").GetBoolean());
+        Assert.False(state.GetProperty("isCompacting").GetBoolean());
+        Assert.Equal(2, state.GetProperty("pendingMessageCount").GetInt32());
+    }
+
+    [Fact]
+    public async Task RunAsync_GetStateDecrementsPendingMessageCountBeforeUserMessageStartEvent()
+    {
+        var steeringSeen = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var runner = new FakeCodingAgentRunner((_, ct) => RunPromptWithQueuedUserMessage(steeringSeen.Task, ct))
+        {
+            SteeringObserver = _ => steeringSeen.TrySetResult()
+        };
+        var input = new AsyncLineReader();
+        var output = new JsonLineWriter();
+        var host = new CodingAgentRpcHost(runner, input, output);
+        var hostTask = host.RunAsync();
+
+        input.Enqueue("{\"id\":\"p1\",\"type\":\"prompt\",\"message\":\"work\"}");
+        await output.WaitForJsonLineAsync(
+            line => line.GetProperty("type").GetString() == "response" &&
+                    line.GetProperty("command").GetString() == "prompt",
+            TimeSpan.FromSeconds(5));
+
+        input.Enqueue("{\"id\":\"s1\",\"type\":\"steer\",\"message\":\"adjust now\"}");
+        await output.WaitForJsonLineAsync(
+            line => line.GetProperty("type").GetString() == "response" &&
+                    line.GetProperty("command").GetString() == "steer",
+            TimeSpan.FromSeconds(5));
+        await output.WaitForJsonLineAsync(
+            line => line.GetProperty("type").GetString() == "message_start" &&
+                    line.GetProperty("message").GetProperty("role").GetString() == "user" &&
+                    line.GetProperty("message").GetProperty("content")[0].GetProperty("text").GetString() == "adjust now",
+            TimeSpan.FromSeconds(5));
+
+        input.Enqueue("{\"id\":\"state1\",\"type\":\"get_state\"}");
+        var state = await output.WaitForJsonLineAsync(
+            line => line.GetProperty("type").GetString() == "response" &&
+                    line.GetProperty("id").GetString() == "state1",
+            TimeSpan.FromSeconds(5));
+
+        Assert.Equal(0, state.GetProperty("data").GetProperty("pendingMessageCount").GetInt32());
+
+        input.Enqueue("{\"id\":\"a1\",\"type\":\"abort\"}");
+        input.Complete();
+        await hostTask;
+    }
+
+    [Fact]
     public async Task RunAsync_GetStateSetModelMessagesAndCommandsReturnStructuredData()
     {
         var runner = new FakeCodingAgentRunner((_, _) => EmptyRun());
@@ -1959,6 +2025,59 @@ public sealed class CodingAgentRpcHostTests
     }
 
     [Fact]
+    public async Task RunAsync_GetStateReportsCompactionWhileCompactCommandIsRunning()
+    {
+        using var temp = TempDirectory.Create();
+        var sessionPath = Path.Combine(temp.Path, "session.json");
+        var treePath = Path.Combine(temp.Path, "session.jsonl");
+        var sessionStore = new CodingAgentSessionStore(sessionPath);
+        var treeController = CodingAgentTreeSessionController.OpenOrCreate(treePath);
+        var compactionStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseCompaction = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var runner = new FakeCodingAgentRunner((_, _) => EmptyRun());
+        runner.MutableMessages.Add(new UserMessage("before"));
+        runner.MutableMessages.Add(new AssistantMessage([new TextContent("answer")]));
+        runner.CompactHandler = async (_, ct) =>
+        {
+            compactionStarted.TrySetResult();
+            await releaseCompaction.Task.WaitAsync(ct).ConfigureAwait(false);
+            runner.MutableMessages.Clear();
+            runner.MutableMessages.Add(CodingAgentCompactionMessages.CreateSummaryMessage("rpc summary"));
+            return new CodingAgentCompactionResult("rpc summary", 2, 1, 42);
+        };
+        var input = new AsyncLineReader();
+        var output = new JsonLineWriter();
+        var host = new CodingAgentRpcHost(
+            runner,
+            input,
+            output,
+            sessionStore,
+            treeSessionController: treeController);
+        var hostTask = host.RunAsync();
+
+        input.Enqueue("{\"id\":\"c1\",\"type\":\"compact\",\"customInstructions\":\"keep decisions\"}");
+        await compactionStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        input.Enqueue("{\"id\":\"state1\",\"type\":\"get_state\"}");
+
+        var state = await output.WaitForJsonLineAsync(
+            line => line.GetProperty("type").GetString() == "response" &&
+                    line.GetProperty("id").GetString() == "state1",
+            TimeSpan.FromSeconds(5));
+        Assert.True(state.GetProperty("data").GetProperty("isCompacting").GetBoolean());
+
+        releaseCompaction.TrySetResult();
+        var compact = await output.WaitForJsonLineAsync(
+            line => line.GetProperty("type").GetString() == "response" &&
+                    line.GetProperty("id").GetString() == "c1",
+            TimeSpan.FromSeconds(5));
+        Assert.True(compact.GetProperty("success").GetBoolean());
+        Assert.Equal("rpc summary", compact.GetProperty("data").GetProperty("summary").GetString());
+
+        input.Complete();
+        await hostTask;
+    }
+
+    [Fact]
     public async Task RunAsync_ExportHtmlWritesTranscriptAndReturnsPath()
     {
         using var temp = TempDirectory.Create();
@@ -2566,6 +2685,16 @@ public sealed class CodingAgentRpcHostTests
     {
         yield return new AgentStartEvent();
         await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+    }
+
+    private static async IAsyncEnumerable<AgentEvent> RunPromptWithQueuedUserMessage(
+        Task steeringSeen,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        yield return new AgentStartEvent();
+        await steeringSeen.WaitAsync(cancellationToken).ConfigureAwait(false);
+        yield return new MessageStartEvent(new UserMessage("adjust now"));
+        await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken).ConfigureAwait(false);
     }
 
     private static async IAsyncEnumerable<AgentEvent> EmptyRun()

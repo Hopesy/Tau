@@ -18,9 +18,11 @@ public sealed class AgentRuntimeQueueModeTests
         runtime.AddMessage(new UserMessage("initial"));
         runtime.Steer(new UserMessage("steer 1"));
         runtime.Steer(new UserMessage("steer 2"));
+        Assert.Equal(2, runtime.PendingMessageCount);
 
         await DrainAsync(runtime.RunAsync(CreateConfig(provider)));
 
+        Assert.Equal(0, runtime.PendingMessageCount);
         Assert.Equal(2, provider.Calls.Count);
         Assert.Equal(["initial", "steer 1"], provider.Calls[0].UserTexts);
         Assert.Equal(["initial", "steer 1", "steer 2"], provider.Calls[1].UserTexts);
@@ -37,9 +39,11 @@ public sealed class AgentRuntimeQueueModeTests
         runtime.AddMessage(new UserMessage("initial"));
         runtime.Steer(new UserMessage("steer 1"));
         runtime.Steer(new UserMessage("steer 2"));
+        Assert.Equal(2, runtime.PendingMessageCount);
 
         await DrainAsync(runtime.RunAsync(CreateConfig(provider)));
 
+        Assert.Equal(0, runtime.PendingMessageCount);
         var call = Assert.Single(provider.Calls);
         Assert.Equal(["initial", "steer 1", "steer 2"], call.UserTexts);
     }
@@ -55,9 +59,11 @@ public sealed class AgentRuntimeQueueModeTests
         runtime.AddMessage(new UserMessage("initial"));
         runtime.FollowUp(new UserMessage("follow 1"));
         runtime.FollowUp(new UserMessage("follow 2"));
+        Assert.Equal(2, runtime.PendingMessageCount);
 
         await DrainAsync(runtime.RunAsync(CreateConfig(provider)));
 
+        Assert.Equal(0, runtime.PendingMessageCount);
         Assert.Equal(3, provider.Calls.Count);
         Assert.Equal(["initial"], provider.Calls[0].UserTexts);
         Assert.Equal(["initial", "follow 1"], provider.Calls[1].UserTexts);
@@ -75,12 +81,29 @@ public sealed class AgentRuntimeQueueModeTests
         runtime.AddMessage(new UserMessage("initial"));
         runtime.FollowUp(new UserMessage("follow 1"));
         runtime.FollowUp(new UserMessage("follow 2"));
+        Assert.Equal(2, runtime.PendingMessageCount);
 
         await DrainAsync(runtime.RunAsync(CreateConfig(provider)));
 
+        Assert.Equal(0, runtime.PendingMessageCount);
         Assert.Equal(2, provider.Calls.Count);
         Assert.Equal(["initial"], provider.Calls[0].UserTexts);
         Assert.Equal(["initial", "follow 1", "follow 2"], provider.Calls[1].UserTexts);
+    }
+
+    [Fact]
+    public void ClearQueuesResetsPendingMessageCount()
+    {
+        var runtime = new AgentRuntime();
+        runtime.Steer(new UserMessage("steer"));
+        runtime.FollowUp(new UserMessage("follow"));
+        Assert.Equal(2, runtime.PendingMessageCount);
+
+        runtime.ClearSteeringQueue();
+        Assert.Equal(1, runtime.PendingMessageCount);
+
+        runtime.ClearFollowUpQueue();
+        Assert.Equal(0, runtime.PendingMessageCount);
     }
 
     private static AgentLoopConfig CreateConfig(RecordingProvider provider)

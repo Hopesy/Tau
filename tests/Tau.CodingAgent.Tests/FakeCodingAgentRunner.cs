@@ -11,6 +11,10 @@ namespace Tau.CodingAgent.Tests;
 public sealed class FakeCodingAgentRunner : ICodingAgentRunner, ICodingAgentToolResultDetailsProvider
 {
     private readonly Func<string, CancellationToken, IAsyncEnumerable<AgentEvent>> _run;
+    private readonly object _gate = new();
+    private readonly List<string> _pendingSteeringMessages = [];
+    private readonly List<string> _pendingFollowUpMessages = [];
+    private int _activeCompactionCount;
     private readonly Dictionary<string, List<Model>> _models = new(StringComparer.OrdinalIgnoreCase)
     {
         ["openai"] =
@@ -61,6 +65,18 @@ public sealed class FakeCodingAgentRunner : ICodingAgentRunner, ICodingAgentTool
     public ThinkingLevel? ThinkingLevel { get; set; }
     public AgentQueueMode SteeringMode { get; set; } = AgentQueueMode.OneAtATime;
     public AgentQueueMode FollowUpMode { get; set; } = AgentQueueMode.OneAtATime;
+    public int PendingMessageCount
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _pendingSteeringMessages.Count + _pendingFollowUpMessages.Count;
+            }
+        }
+    }
+
+    public bool IsCompacting => Volatile.Read(ref _activeCompactionCount) > 0;
     public Func<string?, CancellationToken, Task<CodingAgentCompactionResult>>? CompactHandler { get; set; }
     public Func<IReadOnlyList<ChatMessage>, string?, bool, CancellationToken, Task<CodingAgentBranchSummaryResult>>? BranchSummaryHandler { get; set; }
     public Action<string>? SteeringObserver { get; set; }
@@ -199,18 +215,26 @@ public sealed class FakeCodingAgentRunner : ICodingAgentRunner, ICodingAgentTool
             .WithUsage(CodingAgentSessionUsageSummary.FromMessages(Messages));
     }
 
-    public Task<CodingAgentCompactionResult> CompactAsync(string? customInstructions = null, CancellationToken cancellationToken = default)
+    public async Task<CodingAgentCompactionResult> CompactAsync(string? customInstructions = null, CancellationToken cancellationToken = default)
     {
         LastCompactInstructions = customInstructions;
-        if (CompactHandler is not null)
+        Interlocked.Increment(ref _activeCompactionCount);
+        try
         {
-            return CompactHandler(customInstructions, cancellationToken);
-        }
+            if (CompactHandler is not null)
+            {
+                return await CompactHandler(customInstructions, cancellationToken).ConfigureAwait(false);
+            }
 
-        throw new InvalidOperationException("Compaction is not configured for this test runner.");
+            throw new InvalidOperationException("Compaction is not configured for this test runner.");
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _activeCompactionCount);
+        }
     }
 
-    public Task<CodingAgentBranchSummaryResult> SummarizeBranchAsync(
+    public async Task<CodingAgentBranchSummaryResult> SummarizeBranchAsync(
         IReadOnlyList<ChatMessage> messages,
         string? customInstructions = null,
         bool replaceInstructions = false,
@@ -219,12 +243,20 @@ public sealed class FakeCodingAgentRunner : ICodingAgentRunner, ICodingAgentTool
         LastBranchSummaryMessages = messages;
         LastBranchSummaryInstructions = customInstructions;
         LastBranchSummaryReplaceInstructions = replaceInstructions;
-        if (BranchSummaryHandler is not null)
+        Interlocked.Increment(ref _activeCompactionCount);
+        try
         {
-            return BranchSummaryHandler(messages, customInstructions, replaceInstructions, cancellationToken);
-        }
+            if (BranchSummaryHandler is not null)
+            {
+                return await BranchSummaryHandler(messages, customInstructions, replaceInstructions, cancellationToken).ConfigureAwait(false);
+            }
 
-        throw new InvalidOperationException("Branch summarization is not configured for this test runner.");
+            throw new InvalidOperationException("Branch summarization is not configured for this test runner.");
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _activeCompactionCount);
+        }
     }
 
     public void ResetSession()
@@ -232,6 +264,7 @@ public sealed class FakeCodingAgentRunner : ICodingAgentRunner, ICodingAgentTool
         ResetSessionCalls++;
         MutableMessages.Clear();
         SessionName = null;
+        ClearPendingMessages();
     }
 
     public void RestoreSession(CodingAgentSessionSnapshot snapshot)
@@ -240,11 +273,13 @@ public sealed class FakeCodingAgentRunner : ICodingAgentRunner, ICodingAgentTool
         MutableMessages.Clear();
         MutableMessages.AddRange(snapshot.Messages);
         SessionName = snapshot.Name;
+        ClearPendingMessages();
     }
 
     public void Steer(string input)
     {
         SteeringInputs.Add(input);
+        TrackPendingSteeringMessage(input);
         SteeringObserver?.Invoke(input);
     }
 
@@ -253,12 +288,14 @@ public sealed class FakeCodingAgentRunner : ICodingAgentRunner, ICodingAgentTool
         SteeringContentInputs.Add(input);
         var text = ContentText(input);
         SteeringInputs.Add(text);
+        TrackPendingSteeringMessage(text);
         SteeringObserver?.Invoke(text);
     }
 
     public void FollowUp(string input)
     {
         FollowUpInputs.Add(input);
+        TrackPendingFollowUpMessage(input);
         FollowUpObserver?.Invoke(input);
     }
 
@@ -267,6 +304,7 @@ public sealed class FakeCodingAgentRunner : ICodingAgentRunner, ICodingAgentTool
         FollowUpContentInputs.Add(input);
         var text = ContentText(input);
         FollowUpInputs.Add(text);
+        TrackPendingFollowUpMessage(text);
         FollowUpObserver?.Invoke(text);
     }
 
@@ -280,7 +318,7 @@ public sealed class FakeCodingAgentRunner : ICodingAgentRunner, ICodingAgentTool
     {
         Inputs.Add(input);
         RunLogContexts.Add(logContext);
-        return _run(input, cancellationToken);
+        return TrackPendingMessageConsumption(_run(input, cancellationToken), cancellationToken);
     }
 
     public IAsyncEnumerable<AgentEvent> RunAsync(
@@ -295,7 +333,66 @@ public sealed class FakeCodingAgentRunner : ICodingAgentRunner, ICodingAgentTool
     {
         ContentInputs.Add(input);
         RunLogContexts.Add(logContext);
-        return _run(ContentText(input), cancellationToken);
+        return TrackPendingMessageConsumption(_run(ContentText(input), cancellationToken), cancellationToken);
+    }
+
+    private async IAsyncEnumerable<AgentEvent> TrackPendingMessageConsumption(
+        IAsyncEnumerable<AgentEvent> events,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        await foreach (var evt in events.WithCancellation(cancellationToken).ConfigureAwait(false))
+        {
+            if (evt is MessageStartEvent { Partial: UserMessage user })
+            {
+                MarkPendingMessageConsumed(ContentText(user.Content));
+            }
+
+            yield return evt;
+        }
+    }
+
+    private void TrackPendingSteeringMessage(string input)
+    {
+        lock (_gate)
+        {
+            _pendingSteeringMessages.Add(input);
+        }
+    }
+
+    private void TrackPendingFollowUpMessage(string input)
+    {
+        lock (_gate)
+        {
+            _pendingFollowUpMessages.Add(input);
+        }
+    }
+
+    private void MarkPendingMessageConsumed(string input)
+    {
+        lock (_gate)
+        {
+            var steeringIndex = _pendingSteeringMessages.IndexOf(input);
+            if (steeringIndex >= 0)
+            {
+                _pendingSteeringMessages.RemoveAt(steeringIndex);
+                return;
+            }
+
+            var followUpIndex = _pendingFollowUpMessages.IndexOf(input);
+            if (followUpIndex >= 0)
+            {
+                _pendingFollowUpMessages.RemoveAt(followUpIndex);
+            }
+        }
+    }
+
+    private void ClearPendingMessages()
+    {
+        lock (_gate)
+        {
+            _pendingSteeringMessages.Clear();
+            _pendingFollowUpMessages.Clear();
+        }
     }
 
     private static string ContentText(IReadOnlyList<ContentBlock> input) =>

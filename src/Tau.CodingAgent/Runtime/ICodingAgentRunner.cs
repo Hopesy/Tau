@@ -15,6 +15,8 @@ public interface ICodingAgentRunner
     ThinkingLevel? ThinkingLevel { get; set; }
     AgentQueueMode SteeringMode { get; set; }
     AgentQueueMode FollowUpMode { get; set; }
+    int PendingMessageCount { get; }
+    bool IsCompacting { get; }
     IReadOnlyList<string> GetProviders();
     IReadOnlyList<Model> GetModels(string provider);
     Model SelectModel(string? providerId, string? modelId);

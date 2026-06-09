@@ -30,6 +30,8 @@ internal sealed class FakeWebUiRunner : ICodingAgentRunner
     public ThinkingLevel? ThinkingLevel { get; set; }
     public AgentQueueMode SteeringMode { get; set; } = AgentQueueMode.OneAtATime;
     public AgentQueueMode FollowUpMode { get; set; } = AgentQueueMode.OneAtATime;
+    public int PendingMessageCount => 0;
+    public bool IsCompacting => false;
 
     public IReadOnlyList<string> GetProviders() => [Model.Provider];
 

@@ -710,6 +710,8 @@ public class RuntimeDelegationAgentRunnerTests
         public ThinkingLevel? ThinkingLevel { get; set; }
         public AgentQueueMode SteeringMode { get; set; } = AgentQueueMode.OneAtATime;
         public AgentQueueMode FollowUpMode { get; set; } = AgentQueueMode.OneAtATime;
+        public int PendingMessageCount => 0;
+        public bool IsCompacting => false;
         public List<TauRuntimeLogContext?> RunLogContexts { get; } = [];
         public string? LastInput { get; private set; }
         public CodingAgentSessionSnapshot? RestoredSnapshot { get; private set; }

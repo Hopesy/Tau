@@ -21,19 +21,39 @@ public sealed class AgentRuntime
     private readonly Channel<ChatMessage> _followUpQueue = Channel.CreateUnbounded<ChatMessage>();
     private CancellationTokenSource? _runCts;
     private readonly TaskCompletionSource _idleTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private int _pendingSteeringMessageCount;
+    private int _pendingFollowUpMessageCount;
 
     public AgentState State { get; } = new();
     public AgentQueueMode SteeringMode { get; set; } = AgentQueueMode.OneAtATime;
     public AgentQueueMode FollowUpMode { get; set; } = AgentQueueMode.OneAtATime;
     public bool HasQueuedMessages => _steeringQueue.Reader.TryPeek(out _) || _followUpQueue.Reader.TryPeek(out _);
+    public int PendingMessageCount =>
+        Volatile.Read(ref _pendingSteeringMessageCount) + Volatile.Read(ref _pendingFollowUpMessageCount);
 
     public void AddMessage(ChatMessage message) => State.AddMessage(message);
-    public void Steer(ChatMessage message) => _steeringQueue.Writer.TryWrite(message);
-    public void FollowUp(ChatMessage message) => _followUpQueue.Writer.TryWrite(message);
-    public void ClearSteeringQueue() => DrainChannel(_steeringQueue);
-    public void ClearFollowUpQueue() => DrainChannel(_followUpQueue);
-    public IReadOnlyList<ChatMessage> DrainSteeringMessages() => DrainQueuedMessagesToList(_steeringQueue, SteeringMode);
-    public IReadOnlyList<ChatMessage> DrainFollowUpMessages() => DrainQueuedMessagesToList(_followUpQueue, FollowUpMode);
+    public void Steer(ChatMessage message)
+    {
+        if (_steeringQueue.Writer.TryWrite(message))
+        {
+            Interlocked.Increment(ref _pendingSteeringMessageCount);
+        }
+    }
+
+    public void FollowUp(ChatMessage message)
+    {
+        if (_followUpQueue.Writer.TryWrite(message))
+        {
+            Interlocked.Increment(ref _pendingFollowUpMessageCount);
+        }
+    }
+
+    public void ClearSteeringQueue() => DrainChannel(_steeringQueue, ref _pendingSteeringMessageCount);
+    public void ClearFollowUpQueue() => DrainChannel(_followUpQueue, ref _pendingFollowUpMessageCount);
+    public IReadOnlyList<ChatMessage> DrainSteeringMessages() =>
+        DrainQueuedMessagesToList(_steeringQueue, SteeringMode, ref _pendingSteeringMessageCount);
+    public IReadOnlyList<ChatMessage> DrainFollowUpMessages() =>
+        DrainQueuedMessagesToList(_followUpQueue, FollowUpMode, ref _pendingFollowUpMessageCount);
 
     public void Abort() => _runCts?.Cancel();
     public Task WaitForIdleAsync() => _idleTcs.Task;
@@ -41,8 +61,8 @@ public sealed class AgentRuntime
     public void Reset()
     {
         State.Reset();
-        DrainChannel(_steeringQueue);
-        DrainChannel(_followUpQueue);
+        ClearSteeringQueue();
+        ClearFollowUpQueue();
     }
 
     public EventStream<AgentEvent, ChatMessage[]> RunStream(
@@ -109,7 +129,7 @@ public sealed class AgentRuntime
                     }
                     else
                     {
-                        DrainQueuedMessages(_steeringQueue, SteeringMode);
+                        DrainQueuedMessages(_steeringQueue, SteeringMode, ref _pendingSteeringMessageCount);
                     }
 
                     yield return new TurnStartEvent(turnIndex);
@@ -320,7 +340,7 @@ public sealed class AgentRuntime
                 } while (hasMoreWork && !token.IsCancellationRequested);
 
             } while (!token.IsCancellationRequested &&
-                     DrainQueuedMessages(_followUpQueue, FollowUpMode));
+                     DrainQueuedMessages(_followUpQueue, FollowUpMode, ref _pendingFollowUpMessageCount));
 
             yield return new AgentEndEvent(messages: State.Messages.ToArray());
         }
@@ -542,9 +562,9 @@ public sealed class AgentRuntime
         return EnrichAssistantMessage(message, model);
     }
 
-    private bool DrainQueuedMessages(Channel<ChatMessage> channel, AgentQueueMode mode)
+    private bool DrainQueuedMessages(Channel<ChatMessage> channel, AgentQueueMode mode, ref int pendingCount)
     {
-        var messages = DrainQueuedMessagesToList(channel, mode);
+        var messages = DrainQueuedMessagesToList(channel, mode, ref pendingCount);
         if (messages.Count == 0)
         {
             return false;
@@ -558,7 +578,10 @@ public sealed class AgentRuntime
         return true;
     }
 
-    private static IReadOnlyList<ChatMessage> DrainQueuedMessagesToList(Channel<ChatMessage> channel, AgentQueueMode mode)
+    private static IReadOnlyList<ChatMessage> DrainQueuedMessagesToList(
+        Channel<ChatMessage> channel,
+        AgentQueueMode mode,
+        ref int pendingCount)
     {
         var messages = new List<ChatMessage>();
         if (mode == AgentQueueMode.All)
@@ -566,6 +589,7 @@ public sealed class AgentRuntime
             while (channel.Reader.TryRead(out var message))
             {
                 messages.Add(message);
+                Interlocked.Decrement(ref pendingCount);
             }
 
             return messages;
@@ -574,14 +598,18 @@ public sealed class AgentRuntime
         if (channel.Reader.TryRead(out var next))
         {
             messages.Add(next);
+            Interlocked.Decrement(ref pendingCount);
         }
 
         return messages;
     }
 
-    private static void DrainChannel<T>(Channel<T> channel)
+    private static void DrainChannel(Channel<ChatMessage> channel, ref int pendingCount)
     {
-        while (channel.Reader.TryRead(out _)) { }
+        while (channel.Reader.TryRead(out _))
+        {
+            Interlocked.Decrement(ref pendingCount);
+        }
     }
 
     private static ChatMessage? GetPartialMessage(StreamEvent evt) => evt switch

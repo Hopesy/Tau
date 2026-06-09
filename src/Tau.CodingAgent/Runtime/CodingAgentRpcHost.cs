@@ -40,6 +40,8 @@ public sealed class CodingAgentRpcHost
     private Task? _activeBashTask;
     private CancellationTokenSource? _activeBashCts;
     private BashOutputQueueState? _activeBashOutputQueue;
+    private Task? _activeCompactionTask;
+    private CancellationTokenSource? _activeCompactionCts;
 
     public CodingAgentRpcExtensionUiBridge ExtensionUi { get; }
 
@@ -120,6 +122,12 @@ public sealed class CodingAgentRpcHost
             await activeBash.ConfigureAwait(false);
         }
 
+        var activeCompaction = GetActiveCompactionTask();
+        if (activeCompaction is not null)
+        {
+            await activeCompaction.ConfigureAwait(false);
+        }
+
         return 0;
     }
 
@@ -149,6 +157,15 @@ public sealed class CodingAgentRpcHost
             {
                 ExtensionUi.TryHandleResponse(root);
                 return;
+            }
+
+            if (!type.Equals("get_state", StringComparison.Ordinal))
+            {
+                var activeCompaction = GetActiveCompactionTask();
+                if (activeCompaction is not null)
+                {
+                    await activeCompaction.ConfigureAwait(false);
+                }
             }
 
             await HandleCommandAsync(id, type, root, cancellationToken).ConfigureAwait(false);
@@ -833,13 +850,67 @@ public sealed class CodingAgentRpcHost
             return;
         }
 
-        _treeSessionController?.SyncFromRunner(_runner);
-        var result = await _runner
-            .CompactAsync(GetOptionalString(command, "customInstructions"), cancellationToken)
-            .ConfigureAwait(false);
-        _treeSessionController?.RecordCompaction(_runner, result);
-        PersistSession();
-        await WriteSuccessAsync(id, "compact", result, cancellationToken).ConfigureAwait(false);
+        if (IsCompacting)
+        {
+            await WriteErrorAsync(id, "compact", "Compaction is already running.", cancellationToken)
+                .ConfigureAwait(false);
+            return;
+        }
+
+        var customInstructions = GetOptionalString(command, "customInstructions");
+        var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        lock (_gate)
+        {
+            _activeCompactionCts = cts;
+        }
+
+        var task = Task.Run(() => RunCompactAsync(id, customInstructions, cts), CancellationToken.None);
+        lock (_gate)
+        {
+            if (ReferenceEquals(_activeCompactionCts, cts))
+            {
+                _activeCompactionTask = task;
+            }
+        }
+    }
+
+    private async Task RunCompactAsync(
+        string? id,
+        string? customInstructions,
+        CancellationTokenSource cts)
+    {
+        try
+        {
+            _treeSessionController?.SyncFromRunner(_runner);
+            var result = await _runner
+                .CompactAsync(customInstructions, cts.Token)
+                .ConfigureAwait(false);
+            _treeSessionController?.RecordCompaction(_runner, result);
+            PersistSession();
+            await WriteSuccessAsync(id, "compact", result, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            await WriteErrorAsync(id, "compact", "Compaction cancelled.", CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            await WriteErrorAsync(id, "compact", ex.Message, CancellationToken.None).ConfigureAwait(false);
+        }
+        finally
+        {
+            lock (_gate)
+            {
+                if (ReferenceEquals(_activeCompactionCts, cts))
+                {
+                    _activeCompactionCts = null;
+                    _activeCompactionTask = null;
+                }
+            }
+
+            cts.Dispose();
+        }
     }
 
     private async Task HandleForkAsync(string? id, JsonElement command, CancellationToken cancellationToken)
@@ -1233,7 +1304,7 @@ public sealed class CodingAgentRpcHost
             isBashRunning = IsBashActive,
             bashOutputQueueCapacity = BashOutputQueueCapacity,
             bashDroppedOutputEvents = GetActiveBashDroppedOutputEvents(),
-            isCompacting = false,
+            isCompacting = IsCompacting,
             steeringMode = CodingAgentQueueModes.FromAgentQueueMode(_runner.SteeringMode),
             followUpMode = CodingAgentQueueModes.FromAgentQueueMode(_runner.FollowUpMode),
             sessionFile = treeSummary?.FilePath ?? _sessionStore?.Path,
@@ -1242,7 +1313,7 @@ public sealed class CodingAgentRpcHost
             autoCompactionEnabled = GetAutoCompactionEnabled(),
             autoRetryEnabled = GetRetryOptions().IsEnabled,
             messageCount = _runner.Messages.Count,
-            pendingMessageCount = 0
+            pendingMessageCount = _runner.PendingMessageCount
         };
     }
 
@@ -1808,6 +1879,14 @@ public sealed class CodingAgentRpcHost
         }
     }
 
+    private Task? GetActiveCompactionTask()
+    {
+        lock (_gate)
+        {
+            return _activeCompactionTask;
+        }
+    }
+
     private bool IsPromptActive
     {
         get
@@ -1826,6 +1905,17 @@ public sealed class CodingAgentRpcHost
             lock (_gate)
             {
                 return _activeBashCts is not null;
+            }
+        }
+    }
+
+    private bool IsCompacting
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _activeCompactionCts is not null || _runner.IsCompacting;
             }
         }
     }

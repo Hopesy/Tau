@@ -21,6 +21,7 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner, ICodingAgentT
     private readonly bool _refreshesGeneratedSystemPrompt;
     private AgentLoopConfig _config;
     private IReadOnlyList<CodingAgentContextFile> _contextFiles;
+    private int _activeCompactionCount;
 
     public RuntimeCodingAgentRunner(
         AgentRuntime runtime,
@@ -50,6 +51,8 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner, ICodingAgentT
     public Model Model => _config.Model;
     public string? SessionName { get; set; }
     public IReadOnlyDictionary<string, object?> ToolResultDetailsByToolCallId => _toolResultDetailsByToolCallId;
+    public int PendingMessageCount => _runtime.PendingMessageCount;
+    public bool IsCompacting => Volatile.Read(ref _activeCompactionCount) > 0;
 
     public AgentQueueMode SteeringMode
     {
@@ -143,48 +146,56 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner, ICodingAgentT
         string? customInstructions = null,
         CancellationToken cancellationToken = default)
     {
-        if (Messages.Count == 0)
+        Interlocked.Increment(ref _activeCompactionCount);
+        try
         {
-            throw new InvalidOperationException("Nothing to compact (session is empty)");
+            if (Messages.Count == 0)
+            {
+                throw new InvalidOperationException("Nothing to compact (session is empty)");
+            }
+
+            if (Messages.Count == 1 && IsCompactionSummaryMessage(Messages[0]))
+            {
+                throw new InvalidOperationException("Already compacted");
+            }
+
+            if (Messages.Count < 2)
+            {
+                throw new InvalidOperationException("Nothing to compact (session too small)");
+            }
+
+            var tokensBefore = CodingAgentTokenEstimator.Estimate(Messages);
+            var compactionPrompt = BuildCompactionPrompt(customInstructions, Messages);
+            var summaryContext = new LlmContext(
+                CodingAgentCompactionMessages.SystemPrompt,
+                [.. Messages, new UserMessage(compactionPrompt)],
+                Tools: null);
+            var summaryOptions = (_config.StreamOptions ?? new SimpleStreamOptions { MaxTokens = 16_384 }) with
+            {
+                MaxTokens = Math.Min(_config.StreamOptions?.MaxTokens ?? 16_384, 4_096),
+                CacheRetention = CacheRetention.None,
+                SessionId = null
+            };
+
+            var summaryMessage = await StreamFunctions
+                .CompleteSimpleAsync(_config.ProviderRegistry, _config.Model, summaryContext, summaryOptions)
+                .ConfigureAwait(false);
+            var summary = ExtractCompactionSummary(summaryMessage);
+            if (string.IsNullOrWhiteSpace(summary))
+            {
+                throw new InvalidOperationException("Compaction produced no text summary");
+            }
+
+            var messagesBefore = Messages.Count;
+            _runtime.Reset();
+            _runtime.AddMessage(CodingAgentCompactionMessages.CreateSummaryMessage(summary));
+
+            return new CodingAgentCompactionResult(summary, messagesBefore, Messages.Count, tokensBefore);
         }
-
-        if (Messages.Count == 1 && IsCompactionSummaryMessage(Messages[0]))
+        finally
         {
-            throw new InvalidOperationException("Already compacted");
+            Interlocked.Decrement(ref _activeCompactionCount);
         }
-
-        if (Messages.Count < 2)
-        {
-            throw new InvalidOperationException("Nothing to compact (session too small)");
-        }
-
-        var tokensBefore = CodingAgentTokenEstimator.Estimate(Messages);
-        var compactionPrompt = BuildCompactionPrompt(customInstructions, Messages);
-        var summaryContext = new LlmContext(
-            CodingAgentCompactionMessages.SystemPrompt,
-            [.. Messages, new UserMessage(compactionPrompt)],
-            Tools: null);
-        var summaryOptions = (_config.StreamOptions ?? new SimpleStreamOptions { MaxTokens = 16_384 }) with
-        {
-            MaxTokens = Math.Min(_config.StreamOptions?.MaxTokens ?? 16_384, 4_096),
-            CacheRetention = CacheRetention.None,
-            SessionId = null
-        };
-
-        var summaryMessage = await StreamFunctions
-            .CompleteSimpleAsync(_config.ProviderRegistry, _config.Model, summaryContext, summaryOptions)
-            .ConfigureAwait(false);
-        var summary = ExtractCompactionSummary(summaryMessage);
-        if (string.IsNullOrWhiteSpace(summary))
-        {
-            throw new InvalidOperationException("Compaction produced no text summary");
-        }
-
-        var messagesBefore = Messages.Count;
-        _runtime.Reset();
-        _runtime.AddMessage(CodingAgentCompactionMessages.CreateSummaryMessage(summary));
-
-        return new CodingAgentCompactionResult(summary, messagesBefore, Messages.Count, tokensBefore);
     }
 
     public async Task<CodingAgentBranchSummaryResult> SummarizeBranchAsync(
@@ -193,61 +204,69 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner, ICodingAgentT
         bool replaceInstructions = false,
         CancellationToken cancellationToken = default)
     {
-        if (messages.Count == 0)
+        Interlocked.Increment(ref _activeCompactionCount);
+        try
         {
-            throw new InvalidOperationException("No branch content to summarize");
+            if (messages.Count == 0)
+            {
+                throw new InvalidOperationException("No branch content to summarize");
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var tokensBefore = CodingAgentTokenEstimator.Estimate(messages);
+            var branchSummaryPrompt = BuildBranchSummaryPrompt(customInstructions, replaceInstructions, messages);
+            var summaryContext = new LlmContext(
+                CodingAgentCompactionMessages.SystemPrompt,
+                [new UserMessage(branchSummaryPrompt)],
+                Tools: null);
+            var summaryOptions = (_config.StreamOptions ?? new SimpleStreamOptions { MaxTokens = 16_384 }) with
+            {
+                MaxTokens = Math.Min(_config.StreamOptions?.MaxTokens ?? 16_384, 2_048),
+                CacheRetention = CacheRetention.None,
+                SessionId = null
+            };
+
+            var summaryMessage = await StreamFunctions
+                .CompleteSimpleAsync(_config.ProviderRegistry, _config.Model, summaryContext, summaryOptions)
+                .ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var summary = ExtractCompactionSummary(summaryMessage);
+            if (string.IsNullOrWhiteSpace(summary))
+            {
+                throw new InvalidOperationException("Branch summarization produced no text summary");
+            }
+
+            summary = CodingAgentCompactionMessages.BranchSummaryPreamble + summary.Trim();
+            var fileOperations = CodingAgentFileOperationTracker.Collect(messages);
+            var readFiles = fileOperations
+                .Where(static file => file.ReadCount > 0 && !file.WasModified)
+                .Select(static file => file.Path)
+                .Order(StringComparer.Ordinal)
+                .ToArray();
+            var modifiedFiles = fileOperations
+                .Where(static file => file.WasModified)
+                .Select(static file => file.Path)
+                .Order(StringComparer.Ordinal)
+                .ToArray();
+            var formattedFiles = CodingAgentFileOperationTracker.FormatForCompaction(messages);
+            if (!string.IsNullOrWhiteSpace(formattedFiles))
+            {
+                summary = $"{summary.Trim()}\n\n{formattedFiles}";
+            }
+
+            return new CodingAgentBranchSummaryResult(
+                summary,
+                messages.Count,
+                tokensBefore,
+                readFiles,
+                modifiedFiles);
         }
-
-        cancellationToken.ThrowIfCancellationRequested();
-
-        var tokensBefore = CodingAgentTokenEstimator.Estimate(messages);
-        var branchSummaryPrompt = BuildBranchSummaryPrompt(customInstructions, replaceInstructions, messages);
-        var summaryContext = new LlmContext(
-            CodingAgentCompactionMessages.SystemPrompt,
-            [new UserMessage(branchSummaryPrompt)],
-            Tools: null);
-        var summaryOptions = (_config.StreamOptions ?? new SimpleStreamOptions { MaxTokens = 16_384 }) with
+        finally
         {
-            MaxTokens = Math.Min(_config.StreamOptions?.MaxTokens ?? 16_384, 2_048),
-            CacheRetention = CacheRetention.None,
-            SessionId = null
-        };
-
-        var summaryMessage = await StreamFunctions
-            .CompleteSimpleAsync(_config.ProviderRegistry, _config.Model, summaryContext, summaryOptions)
-            .ConfigureAwait(false);
-        cancellationToken.ThrowIfCancellationRequested();
-
-        var summary = ExtractCompactionSummary(summaryMessage);
-        if (string.IsNullOrWhiteSpace(summary))
-        {
-            throw new InvalidOperationException("Branch summarization produced no text summary");
+            Interlocked.Decrement(ref _activeCompactionCount);
         }
-
-        summary = CodingAgentCompactionMessages.BranchSummaryPreamble + summary.Trim();
-        var fileOperations = CodingAgentFileOperationTracker.Collect(messages);
-        var readFiles = fileOperations
-            .Where(static file => file.ReadCount > 0 && !file.WasModified)
-            .Select(static file => file.Path)
-            .Order(StringComparer.Ordinal)
-            .ToArray();
-        var modifiedFiles = fileOperations
-            .Where(static file => file.WasModified)
-            .Select(static file => file.Path)
-            .Order(StringComparer.Ordinal)
-            .ToArray();
-        var formattedFiles = CodingAgentFileOperationTracker.FormatForCompaction(messages);
-        if (!string.IsNullOrWhiteSpace(formattedFiles))
-        {
-            summary = $"{summary.Trim()}\n\n{formattedFiles}";
-        }
-
-        return new CodingAgentBranchSummaryResult(
-            summary,
-            messages.Count,
-            tokensBefore,
-            readFiles,
-            modifiedFiles);
     }
 
     private static string BuildCompactionPrompt(string? customInstructions, IReadOnlyList<ChatMessage> messages)
