@@ -82,10 +82,20 @@ public sealed class CodingAgentRpcHostTests
         var toolCallEnd = events.Single(evt => evt.GetProperty("type").GetString() == "toolcall_end");
         Assert.Equal("call_1", toolCallEnd.GetProperty("toolCall").GetProperty("id").GetString());
         Assert.Equal("bash", toolCallEnd.GetProperty("toolCall").GetProperty("name").GetString());
+        var toolCallArguments = toolCallEnd.GetProperty("toolCall").GetProperty("arguments");
+        Assert.Equal(JsonValueKind.Object, toolCallArguments.ValueKind);
+        Assert.Equal("pwd", toolCallArguments.GetProperty("command").GetString());
+        Assert.Equal("sig_1", toolCallEnd.GetProperty("toolCall").GetProperty("thoughtSignature").GetString());
+        Assert.Equal(
+            JsonValueKind.Object,
+            toolCallEnd.GetProperty("partial").GetProperty("content")[0].GetProperty("arguments").ValueKind);
 
         var done = events.Single(evt => evt.GetProperty("type").GetString() == "done");
         Assert.Equal("toolUse", done.GetProperty("reason").GetString());
         Assert.Equal("assistant", done.GetProperty("message").GetProperty("role").GetString());
+        Assert.Equal(
+            JsonValueKind.Object,
+            done.GetProperty("message").GetProperty("content")[0].GetProperty("arguments").ValueKind);
     }
 
     [Fact]
@@ -253,6 +263,40 @@ public sealed class CodingAgentRpcHostTests
             .ToArray();
         Assert.DoesNotContain("compact", commands);
         Assert.DoesNotContain("fork", commands);
+    }
+
+    [Fact]
+    public async Task RunAsync_GetMessagesReturnsToolCallArgumentsAsObject()
+    {
+        var runner = new FakeCodingAgentRunner((_, _) => EmptyRun());
+        runner.MutableMessages.Add(new AssistantMessage([
+            new ToolCallContent("call_1", "bash", """{"command":"pwd","limit":3}""")
+            {
+                ThoughtSignature = "sig_1"
+            }
+        ]));
+        var output = new StringWriter();
+        var host = new CodingAgentRpcHost(
+            runner,
+            new StringReader("{\"id\":\"messages1\",\"type\":\"get_messages\"}\n"),
+            output);
+
+        await host.RunAsync();
+
+        var toolCall = FindResponse(ReadJsonLines(output), "get_messages")
+            .GetProperty("data")
+            .GetProperty("messages")[0]
+            .GetProperty("content")[0];
+
+        Assert.Equal("toolCall", toolCall.GetProperty("type").GetString());
+        Assert.Equal("call_1", toolCall.GetProperty("id").GetString());
+        Assert.Equal("bash", toolCall.GetProperty("name").GetString());
+        Assert.Equal("sig_1", toolCall.GetProperty("thoughtSignature").GetString());
+
+        var arguments = toolCall.GetProperty("arguments");
+        Assert.Equal(JsonValueKind.Object, arguments.ValueKind);
+        Assert.Equal("pwd", arguments.GetProperty("command").GetString());
+        Assert.Equal(3, arguments.GetProperty("limit").GetInt32());
     }
 
     [Fact]
@@ -2420,8 +2464,18 @@ public sealed class CodingAgentRpcHostTests
     {
         var text = new AssistantMessage([new TextContent("hello")]);
         var thinking = new AssistantMessage([new ThinkingContent("plan")]);
-        var tool = new AssistantMessage([new ToolCallContent("call_1", "bash", """{"command":"pwd"}""")]);
-        var done = new AssistantMessage([new ToolCallContent("call_1", "bash", """{"command":"pwd"}""")])
+        var tool = new AssistantMessage([
+            new ToolCallContent("call_1", "bash", """{"command":"pwd"}""")
+            {
+                ThoughtSignature = "sig_1"
+            }
+        ]);
+        var done = new AssistantMessage([
+            new ToolCallContent("call_1", "bash", """{"command":"pwd"}""")
+            {
+                ThoughtSignature = "sig_1"
+            }
+        ])
         {
             StopReason = StopReason.ToolUse
         };

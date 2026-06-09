@@ -271,7 +271,7 @@ public sealed class CodingAgentRpcHost
                 case "get_messages":
                     await WriteSuccessAsync(id, "get_messages", new
                     {
-                        messages = _runner.Messages.Select(CodingAgentSessionStore.FromMessage).ToArray()
+                        messages = _runner.Messages.Select(ToRpcMessage).ToArray()
                     }, cancellationToken).ConfigureAwait(false);
                     break;
                 case "get_commands":
@@ -2391,17 +2391,65 @@ public sealed class CodingAgentRpcHost
     private static object ToRpcMessage(ChatMessage message)
     {
         var converted = CodingAgentSessionStore.FromMessage(message);
-        return converted;
+        return new
+        {
+            role = converted.Role,
+            toolCallId = converted.ToolCallId,
+            isError = converted.Role.Equals("toolResult", StringComparison.Ordinal) ? converted.IsError : (bool?)null,
+            usage = converted.Usage,
+            api = converted.Api,
+            provider = converted.Provider,
+            model = converted.Model,
+            timestamp = converted.Timestamp,
+            content = GetContent(message).Select(ToRpcContent).ToArray()
+        };
     }
 
     private static object ToRpcContent(ContentBlock block) => block switch
     {
-        TextContent text => new { type = block.Type, text = text.Text },
-        ThinkingContent thinking => new { type = block.Type, thinking = thinking.Thinking, redacted = thinking.Redacted },
+        TextContent text => new { type = block.Type, text = text.Text, textSignature = text.TextSignature },
+        ThinkingContent thinking => new { type = block.Type, thinking = thinking.Thinking, thinkingSignature = thinking.ThinkingSignature, redacted = thinking.Redacted },
         ImageContent image => new { type = block.Type, data = image.Data, mimeType = image.MimeType },
-        ToolCallContent tool => new { type = block.Type, id = tool.Id, name = tool.Name, arguments = tool.Arguments },
+        ToolCallContent tool => new
+        {
+            type = block.Type,
+            id = tool.Id,
+            name = tool.Name,
+            arguments = ToRpcToolCallArguments(tool.Arguments),
+            thoughtSignature = tool.ThoughtSignature
+        },
         _ => new { type = block.Type }
     };
+
+    private static IReadOnlyList<ContentBlock> GetContent(ChatMessage message) => message switch
+    {
+        UserMessage user => user.Content,
+        AssistantMessage assistant => assistant.Content,
+        ToolResultMessage toolResult => toolResult.Content,
+        _ => []
+    };
+
+    private static object ToRpcToolCallArguments(string arguments)
+    {
+        if (string.IsNullOrWhiteSpace(arguments))
+        {
+            return new Dictionary<string, object?>();
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(arguments);
+            if (document.RootElement.ValueKind == JsonValueKind.Object)
+            {
+                return document.RootElement.Clone();
+            }
+        }
+        catch (JsonException)
+        {
+        }
+
+        return new Dictionary<string, object?>();
+    }
 
     private static IReadOnlyList<ContentBlock>? TryReadPromptContent(JsonElement command, string message)
     {
