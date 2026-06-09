@@ -20,8 +20,8 @@
 
 ## 当前推进记录（2026-06-09）
 
-- CodingAgent package manager / config 子切片已关闭一层本地合同：对照上游 `package-manager-cli.ts`、`core/package-manager.ts` 和 `core/settings-manager.ts`，Tau 顶层 `install/remove/uninstall/update/list/config` 现在会在 runner 初始化前处理 package source settings；默认写 user settings，`-l/--local` 写 project settings；settings store 支持上游 string/object `packages` source 形状；本地 package source 会解析 `package.json` 的 `pi.extensions/skills/prompts/themes` manifest 或约定目录，并把 package resources 合并进 extension/prompt/skill/theme stores；`/reload` 会先重新解析 package resources 再刷新 extensions。
-- 该子切片只覆盖 source 持久化、列表/config 摘要和本地 package resource discovery baseline。仍未关闭 npm/git install/pull/update 执行、glob/negation resource filter、interactive config selector、package-loaded TypeScript extension runtime、startup changelog/version state、install telemetry runtime、最终 `pi` package/bin identity 或真实 package consumer smoke。
+- CodingAgent package manager / config 子切片已关闭一层本地合同：对照上游 `package-manager-cli.ts`、`core/package-manager.ts`、`core/settings-manager.ts` 和 `utils/git.ts`，Tau 顶层 `install/remove/uninstall/update/list/config` 现在会在 runner 初始化前处理 package source settings；默认写 user settings，`-l/--local` 写 project settings；settings store 支持上游 string/object `packages` source 形状；npm package install/remove/update 现在通过可注入 command runner 执行全局 `npm install -g`、project `.tau/npm --prefix` 与 settings `npmCommand`；git source 支持常见 `git:` / HTTPS / SSH source 的 clone/checkout/pull/remove 到 user/project `.tau/git` install root；`PI_OFFLINE` 会跳过 update；命令失败不会写入 settings；本地 package source 会解析 `package.json` 的 `pi.extensions/skills/prompts/themes` manifest 或约定目录，并把 package resources 合并进 extension/prompt/skill/theme stores；`/reload` 会先重新解析 package resources 再刷新 extensions。
+- 该子切片覆盖 source 持久化、列表/config 摘要、本地 package resource discovery 和 npm/git install/update/remove execution baseline。仍未关闭 glob/negation resource filter、interactive config selector、package-loaded TypeScript extension runtime、startup changelog/version state、install telemetry runtime、最终 `pi` package/bin identity、真实 npm/git network smoke 或真实 package consumer smoke。
 
 ## 范围
 

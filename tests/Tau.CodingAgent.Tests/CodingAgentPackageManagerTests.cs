@@ -105,9 +105,177 @@ public sealed class CodingAgentPackageManagerTests
     }
 
     [Fact]
+    public void InstallAndPersist_ProjectNpmPackageRunsPrefixInstallAndStoresSource()
+    {
+        using var temp = TempDirectory.Create();
+        var runner = new FakePackageCommandRunner();
+        var manager = new CodingAgentPackageManager(
+            cwd: temp.Path,
+            userSettingsPath: Path.Combine(temp.Path, "user-settings.json"),
+            projectSettingsPath: Path.Combine(temp.Path, ".tau", "coding-agent-settings.json"),
+            commandRunner: runner);
+
+        manager.InstallAndPersist("npm:@foo/bar@1.2.3", local: true);
+
+        var command = Assert.Single(runner.Commands);
+        var installRoot = Path.Combine(temp.Path, ".tau", "npm");
+        Assert.Equal("npm", command.FileName);
+        Assert.Equal(temp.Path, command.WorkingDirectory);
+        Assert.Equal(["install", "@foo/bar@1.2.3", "--prefix", installRoot], command.Arguments);
+        Assert.True(File.Exists(Path.Combine(installRoot, ".gitignore")));
+        Assert.Contains("tau-extensions", File.ReadAllText(Path.Combine(installRoot, "package.json")), StringComparison.Ordinal);
+
+        var settings = new CodingAgentSettingsStore(Path.Combine(temp.Path, ".tau", "coding-agent-settings.json")).Load();
+        Assert.Equal("npm:@foo/bar@1.2.3", Assert.Single(settings.Packages!).Source);
+    }
+
+    [Fact]
+    public void InstallAndPersist_GlobalNpmPackageUsesConfiguredNpmCommand()
+    {
+        using var temp = TempDirectory.Create();
+        var runner = new FakePackageCommandRunner();
+        var userSettingsPath = Path.Combine(temp.Path, "user-settings.json");
+        new CodingAgentSettingsStore(userSettingsPath).Save(new CodingAgentSettingsSnapshot(
+            null,
+            null,
+            NpmCommand: ["mise", "exec", "node@20", "--", "npm"]));
+        var manager = new CodingAgentPackageManager(
+            cwd: temp.Path,
+            userSettingsPath: userSettingsPath,
+            projectSettingsPath: Path.Combine(temp.Path, ".tau", "coding-agent-settings.json"),
+            commandRunner: runner);
+
+        manager.InstallAndPersist("npm:@foo/bar", local: false);
+
+        var command = Assert.Single(runner.Commands);
+        Assert.Equal("mise", command.FileName);
+        Assert.Equal(["exec", "node@20", "--", "npm", "install", "-g", "@foo/bar"], command.Arguments);
+        var settings = new CodingAgentSettingsStore(userSettingsPath).Load();
+        Assert.Equal("npm:@foo/bar", Assert.Single(settings.Packages!).Source);
+    }
+
+    [Fact]
+    public void GitPackageInstallUpdateAndRemove_RunExpectedCommandsAndDeleteOnlyInstallPath()
+    {
+        using var temp = TempDirectory.Create();
+        var runner = new FakePackageCommandRunner();
+        var projectSettingsPath = Path.Combine(temp.Path, ".tau", "coding-agent-settings.json");
+        var manager = new CodingAgentPackageManager(
+            cwd: temp.Path,
+            userSettingsPath: Path.Combine(temp.Path, "user-settings.json"),
+            projectSettingsPath: projectSettingsPath,
+            commandRunner: runner);
+
+        manager.InstallAndPersist("git:github.com/example/pkg@main", local: true);
+
+        var targetDir = Path.Combine(temp.Path, ".tau", "git", "github.com", "example", "pkg");
+        Assert.Collection(
+            runner.Commands,
+            command =>
+            {
+                Assert.Equal("git", command.FileName);
+                Assert.Equal(["clone", "https://github.com/example/pkg", targetDir], command.Arguments);
+                Assert.Null(command.WorkingDirectory);
+            },
+            command =>
+            {
+                Assert.Equal("git", command.FileName);
+                Assert.Equal(["checkout", "main"], command.Arguments);
+                Assert.Equal(targetDir, command.WorkingDirectory);
+            });
+
+        Directory.CreateDirectory(targetDir);
+        File.WriteAllText(Path.Combine(targetDir, "package.json"), "{}");
+        runner.Commands.Clear();
+        new CodingAgentSettingsStore(projectSettingsPath).Save(new CodingAgentSettingsSnapshot(
+            null,
+            null,
+            Packages: [new CodingAgentPackageSource("git:github.com/example/pkg")]));
+
+        manager.Update("git:github.com/example/pkg");
+
+        Assert.Collection(
+            runner.Commands,
+            command =>
+            {
+                Assert.Equal("git", command.FileName);
+                Assert.Equal(["pull", "--ff-only"], command.Arguments);
+                Assert.Equal(targetDir, command.WorkingDirectory);
+            },
+            command =>
+            {
+                Assert.Equal("npm", command.FileName);
+                Assert.Equal(["install", "--omit=dev"], command.Arguments);
+                Assert.Equal(targetDir, command.WorkingDirectory);
+            });
+
+        runner.Commands.Clear();
+        Assert.True(manager.RemoveAndPersist("git:github.com/example/pkg", local: true));
+
+        Assert.False(Directory.Exists(targetDir));
+        Assert.Null(new CodingAgentSettingsStore(projectSettingsPath).Load().Packages);
+        Assert.Empty(runner.Commands);
+    }
+
+    [Fact]
+    public void Update_SkipsConfiguredPackagesWhenPiOfflineIsEnabled()
+    {
+        using var temp = TempDirectory.Create();
+        var previous = Environment.GetEnvironmentVariable("PI_OFFLINE");
+        try
+        {
+            Environment.SetEnvironmentVariable("PI_OFFLINE", "1");
+            var runner = new FakePackageCommandRunner();
+            var manager = new CodingAgentPackageManager(
+                cwd: temp.Path,
+                userSettingsPath: Path.Combine(temp.Path, "user-settings.json"),
+                projectSettingsPath: Path.Combine(temp.Path, ".tau", "coding-agent-settings.json"),
+                commandRunner: runner);
+            Assert.True(manager.AddSource("npm:@foo/bar", local: false));
+
+            manager.Update();
+
+            Assert.Empty(runner.Commands);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("PI_OFFLINE", previous);
+        }
+    }
+
+    [Fact]
+    public void PackageCli_CommandFailureReturnsErrorAndDoesNotPersistSource()
+    {
+        using var temp = TempDirectory.Create();
+        var runner = new FakePackageCommandRunner();
+        runner.Results.Enqueue(new CodingAgentPackageCommandResult(1, StandardError: "registry failed"));
+        var manager = new CodingAgentPackageManager(
+            cwd: temp.Path,
+            userSettingsPath: Path.Combine(temp.Path, "user-settings.json"),
+            projectSettingsPath: Path.Combine(temp.Path, ".tau", "coding-agent-settings.json"),
+            commandRunner: runner);
+        var output = new StringWriter();
+        var error = new StringWriter();
+
+        var handled = CodingAgentPackageCli.TryHandle(
+            ["install", "npm:@foo/bar"],
+            output,
+            error,
+            manager,
+            out var exitCode);
+
+        Assert.True(handled);
+        Assert.Equal(1, exitCode);
+        Assert.Contains("Error: Package command failed: npm exited with code 1", error.ToString(), StringComparison.Ordinal);
+        Assert.Empty(output.ToString());
+        Assert.Empty(manager.ListConfiguredPackages());
+    }
+
+    [Fact]
     public void PackageCli_InstallsListsAndRemovesProjectPackage()
     {
         using var temp = TempDirectory.Create();
+        Directory.CreateDirectory(Path.Combine(temp.Path, "pkg"));
         var manager = new CodingAgentPackageManager(
             cwd: temp.Path,
             userSettingsPath: Path.Combine(temp.Path, "user-settings.json"),
@@ -199,6 +367,19 @@ public sealed class CodingAgentPackageManagerTests
             catch (UnauthorizedAccessException)
             {
             }
+        }
+    }
+
+    private sealed class FakePackageCommandRunner : ICodingAgentPackageCommandRunner
+    {
+        public List<CodingAgentPackageCommand> Commands { get; } = [];
+
+        public Queue<CodingAgentPackageCommandResult> Results { get; } = [];
+
+        public CodingAgentPackageCommandResult Run(CodingAgentPackageCommand command)
+        {
+            Commands.Add(command);
+            return Results.Count == 0 ? new CodingAgentPackageCommandResult(0) : Results.Dequeue();
         }
     }
 }

@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -37,6 +38,61 @@ public sealed record CodingAgentPackageResources(
     IReadOnlyList<string> ThemePaths,
     IReadOnlyList<CodingAgentPackageDiagnostic> Diagnostics);
 
+public sealed record CodingAgentPackageCommand(
+    string FileName,
+    IReadOnlyList<string> Arguments,
+    string? WorkingDirectory = null);
+
+public sealed record CodingAgentPackageCommandResult(
+    int ExitCode,
+    string StandardOutput = "",
+    string StandardError = "");
+
+public interface ICodingAgentPackageCommandRunner
+{
+    CodingAgentPackageCommandResult Run(CodingAgentPackageCommand command);
+}
+
+public sealed class SystemCodingAgentPackageCommandRunner : ICodingAgentPackageCommandRunner
+{
+    public CodingAgentPackageCommandResult Run(CodingAgentPackageCommand command)
+    {
+        var startInfo = new ProcessStartInfo(command.FileName)
+        {
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true
+        };
+
+        if (!string.IsNullOrWhiteSpace(command.WorkingDirectory))
+        {
+            startInfo.WorkingDirectory = command.WorkingDirectory;
+        }
+
+        foreach (var argument in command.Arguments)
+        {
+            startInfo.ArgumentList.Add(argument);
+        }
+
+        using var process = new Process { StartInfo = startInfo };
+        try
+        {
+            process.Start();
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            throw new InvalidOperationException($"Package command failed to start: {command.FileName}", ex);
+        }
+
+        var stdout = process.StandardOutput.ReadToEndAsync();
+        var stderr = process.StandardError.ReadToEndAsync();
+        process.WaitForExit();
+        Task.WaitAll(stdout, stderr);
+        return new CodingAgentPackageCommandResult(process.ExitCode, stdout.Result, stderr.Result);
+    }
+}
+
 public sealed class CodingAgentPackageResourceState
 {
     private CodingAgentPackageResources _resources;
@@ -60,12 +116,18 @@ public sealed class CodingAgentPackageResourceState
 
 public sealed class CodingAgentPackageManager
 {
+    private const string ProjectConfigDirectoryName = ".tau";
+
     private readonly string _cwd;
+    private readonly ICodingAgentPackageCommandRunner _commandRunner;
+    private string? _globalNpmRoot;
+    private string? _globalNpmRootCommandKey;
 
     public CodingAgentPackageManager(
         string? cwd = null,
         string? userSettingsPath = null,
-        string? projectSettingsPath = null)
+        string? projectSettingsPath = null,
+        ICodingAgentPackageCommandRunner? commandRunner = null)
     {
         _cwd = string.IsNullOrWhiteSpace(cwd) ? Environment.CurrentDirectory : Path.GetFullPath(cwd);
         UserSettingsPath = string.IsNullOrWhiteSpace(userSettingsPath)
@@ -74,11 +136,15 @@ public sealed class CodingAgentPackageManager
         ProjectSettingsPath = string.IsNullOrWhiteSpace(projectSettingsPath)
             ? CodingAgentSettingsStore.GetDefaultPath()
             : Path.GetFullPath(projectSettingsPath);
+        UserInstallDirectory = Path.GetDirectoryName(UserSettingsPath) ?? Path.Combine(_cwd, ProjectConfigDirectoryName);
+        _commandRunner = commandRunner ?? new SystemCodingAgentPackageCommandRunner();
     }
 
     public string UserSettingsPath { get; }
 
     public string ProjectSettingsPath { get; }
+
+    public string UserInstallDirectory { get; }
 
     public static string GetDefaultUserSettingsPath()
     {
@@ -101,6 +167,39 @@ public sealed class CodingAgentPackageManager
         return packages;
     }
 
+    public void InstallAndPersist(string source, bool local)
+    {
+        Install(source, local);
+        AddSource(source, local);
+    }
+
+    public void Install(string source, bool local)
+    {
+        var normalized = NormalizeSource(source) ?? throw new ArgumentException("Package source is required.", nameof(source));
+        var parsed = ParseSource(normalized);
+        var scope = local ? "project" : "user";
+
+        switch (parsed)
+        {
+            case NpmPackageSource npm:
+                InstallNpm(npm, scope, temporary: false);
+                break;
+            case GitPackageSource git:
+                InstallGit(git, scope);
+                break;
+            case LocalPackageSource localSource:
+                var resolved = ResolvePath(localSource.Path, _cwd);
+                if (!Directory.Exists(resolved))
+                {
+                    throw new DirectoryNotFoundException($"Path does not exist: {resolved}");
+                }
+
+                break;
+            default:
+                throw new InvalidOperationException($"Unsupported install source: {normalized}");
+        }
+    }
+
     public bool AddSource(string source, bool local)
     {
         var normalized = NormalizeSource(source);
@@ -112,7 +211,8 @@ public sealed class CodingAgentPackageManager
         var store = CreateStore(local);
         var snapshot = store.Load();
         var packages = NormalizePackageSources(snapshot.Packages).ToList();
-        if (packages.Any(package => package.Source.Equals(normalized, StringComparison.OrdinalIgnoreCase)))
+        var scope = local ? "project" : "user";
+        if (packages.Any(package => SourcesMatch(package.Source, normalized, scope)))
         {
             return false;
         }
@@ -120,6 +220,33 @@ public sealed class CodingAgentPackageManager
         packages.Add(new CodingAgentPackageSource(normalized));
         store.Save(snapshot with { Packages = packages });
         return true;
+    }
+
+    public bool RemoveAndPersist(string source, bool local)
+    {
+        Remove(source, local);
+        return RemoveSource(source, local);
+    }
+
+    public void Remove(string source, bool local)
+    {
+        var normalized = NormalizeSource(source) ?? throw new ArgumentException("Package source is required.", nameof(source));
+        var parsed = ParseSource(normalized);
+        var scope = local ? "project" : "user";
+
+        switch (parsed)
+        {
+            case NpmPackageSource npm:
+                UninstallNpm(npm, scope);
+                break;
+            case GitPackageSource git:
+                RemoveGit(git, scope);
+                break;
+            case LocalPackageSource:
+                break;
+            default:
+                throw new InvalidOperationException($"Unsupported remove source: {normalized}");
+        }
     }
 
     public bool RemoveSource(string source, bool local)
@@ -133,8 +260,9 @@ public sealed class CodingAgentPackageManager
         var store = CreateStore(local);
         var snapshot = store.Load();
         var before = NormalizePackageSources(snapshot.Packages).ToArray();
+        var scope = local ? "project" : "user";
         var after = before
-            .Where(package => !package.Source.Equals(normalized, StringComparison.OrdinalIgnoreCase))
+            .Where(package => !SourcesMatch(package.Source, normalized, scope))
             .ToArray();
         if (after.Length == before.Length)
         {
@@ -149,7 +277,36 @@ public sealed class CodingAgentPackageManager
     {
         var normalized = NormalizeSource(source);
         return normalized is not null &&
-            ListConfiguredPackages().Any(package => package.Source.Equals(normalized, StringComparison.OrdinalIgnoreCase));
+            ListConfiguredPackages().Any(package => SourcesMatch(package.Source, normalized, package.Scope));
+    }
+
+    public void Update(string? source = null)
+    {
+        if (IsOfflineModeEnabled())
+        {
+            return;
+        }
+
+        var normalizedSource = NormalizeSource(source);
+        var configured = EnumerateConfiguredSources().ToArray();
+        var matched = false;
+
+        foreach (var configuredSource in configured)
+        {
+            if (normalizedSource is not null &&
+                !SourcesMatch(configuredSource.Source.Source, normalizedSource, configuredSource.Scope))
+            {
+                continue;
+            }
+
+            matched = true;
+            UpdateSourceForScope(configuredSource.Source.Source, configuredSource.Scope);
+        }
+
+        if (normalizedSource is not null && !matched)
+        {
+            throw new InvalidOperationException(BuildNoMatchingPackageMessage(normalizedSource, configured));
+        }
     }
 
     public CodingAgentPackageResources ResolveResources()
@@ -162,11 +319,11 @@ public sealed class CodingAgentPackageManager
 
         foreach (var configured in EnumerateConfiguredSources())
         {
-            if (!TryResolveLocalPackageRoot(configured.Source.Source, out var root))
+            if (!TryResolvePackageRoot(configured.Source.Source, configured.Scope, allowExternalLookup: true, out var root, out var issue))
             {
                 diagnostics.Add(new CodingAgentPackageDiagnostic(
                     "warning",
-                    "non-local package source is configured but Tau does not install npm/git packages in this baseline",
+                    issue ?? "package source could not be resolved",
                     configured.Source.Source,
                     configured.Scope));
                 continue;
@@ -176,7 +333,7 @@ public sealed class CodingAgentPackageManager
             {
                 diagnostics.Add(new CodingAgentPackageDiagnostic(
                     "warning",
-                    "local package source does not exist",
+                    "package install path does not exist",
                     configured.Source.Source,
                     configured.Scope));
                 continue;
@@ -201,7 +358,10 @@ public sealed class CodingAgentPackageManager
                 source.Source,
                 scope,
                 source.IsFiltered,
-                TryResolveLocalPackageRoot(source.Source, out var root) && Directory.Exists(root) ? root : null));
+                TryResolvePackageRoot(source.Source, scope, allowExternalLookup: false, out var root, out _) &&
+                    Directory.Exists(root)
+                    ? root
+                    : null));
         }
     }
 
@@ -348,20 +508,63 @@ public sealed class CodingAgentPackageManager
         }
     }
 
-    private bool TryResolveLocalPackageRoot(string source, out string root)
+    private bool TryResolvePackageRoot(
+        string source,
+        string scope,
+        bool allowExternalLookup,
+        out string root,
+        out string? issue)
     {
         root = string.Empty;
-        var normalized = source.StartsWith("file:", StringComparison.OrdinalIgnoreCase)
-            ? source["file:".Length..]
-            : source;
+        issue = null;
+        var parsed = ParseSource(source);
 
-        if (!IsLocalSource(normalized))
+        switch (parsed)
+        {
+            case LocalPackageSource local:
+                root = ResolvePath(local.Path, _cwd);
+                return true;
+            case GitPackageSource git:
+                root = GetGitInstallPath(git, scope);
+                return true;
+            case NpmPackageSource npm:
+                return TryGetNpmInstallPath(npm, scope, allowExternalLookup, out root, out issue);
+            default:
+                issue = "unsupported package source";
+                return false;
+        }
+    }
+
+    private bool TryGetNpmInstallPath(
+        NpmPackageSource source,
+        string scope,
+        bool allowExternalLookup,
+        out string root,
+        out string? issue)
+    {
+        issue = null;
+        root = string.Empty;
+        if (scope == "project")
+        {
+            root = Path.Combine(GetNpmInstallRoot(scope), "node_modules", source.Name);
+            return true;
+        }
+
+        if (!allowExternalLookup)
         {
             return false;
         }
 
-        root = ResolvePath(normalized, _cwd);
-        return true;
+        try
+        {
+            root = Path.Combine(GetGlobalNpmRoot(), source.Name);
+            return true;
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or IOException or UnauthorizedAccessException)
+        {
+            issue = $"npm package install root could not be resolved: {ex.Message}";
+            return false;
+        }
     }
 
     private static bool IsLocalSource(string source)
@@ -385,6 +588,502 @@ public sealed class CodingAgentPackageManager
             source.StartsWith("~", StringComparison.Ordinal) ||
             source.Contains('/', StringComparison.Ordinal) ||
             source.Contains('\\', StringComparison.Ordinal);
+    }
+
+    private void UpdateSourceForScope(string source, string scope)
+    {
+        var parsed = ParseSource(source);
+        switch (parsed)
+        {
+            case NpmPackageSource npm when !npm.Pinned:
+                InstallNpm(npm with { Spec = $"{npm.Name}@latest" }, scope, temporary: false);
+                break;
+            case GitPackageSource git when !git.Pinned:
+                UpdateGit(git, scope);
+                break;
+        }
+    }
+
+    private void InstallNpm(NpmPackageSource source, string scope, bool temporary)
+    {
+        if (scope == "user" && !temporary)
+        {
+            RunNpmCommand(["install", "-g", source.Spec]);
+            return;
+        }
+
+        var installRoot = GetNpmInstallRoot(scope);
+        EnsureNpmProject(installRoot);
+        RunNpmCommand(["install", source.Spec, "--prefix", installRoot]);
+    }
+
+    private void UninstallNpm(NpmPackageSource source, string scope)
+    {
+        if (scope == "user")
+        {
+            RunNpmCommand(["uninstall", "-g", source.Name]);
+            return;
+        }
+
+        var installRoot = GetNpmInstallRoot(scope);
+        if (!Directory.Exists(installRoot))
+        {
+            return;
+        }
+
+        RunNpmCommand(["uninstall", source.Name, "--prefix", installRoot]);
+    }
+
+    private void InstallGit(GitPackageSource source, string scope)
+    {
+        var targetDir = GetGitInstallPath(source, scope);
+        if (Directory.Exists(targetDir))
+        {
+            return;
+        }
+
+        var gitRoot = GetGitInstallRoot(scope);
+        EnsureGitIgnore(gitRoot);
+        var parent = Path.GetDirectoryName(targetDir);
+        if (!string.IsNullOrWhiteSpace(parent))
+        {
+            Directory.CreateDirectory(parent);
+        }
+
+        RunCommand("git", ["clone", source.Repo, targetDir]);
+        if (!string.IsNullOrWhiteSpace(source.Ref))
+        {
+            RunCommand("git", ["checkout", source.Ref], targetDir);
+        }
+
+        if (File.Exists(Path.Combine(targetDir, "package.json")))
+        {
+            RunNpmCommand(["install", "--omit=dev"], targetDir);
+        }
+    }
+
+    private void UpdateGit(GitPackageSource source, string scope)
+    {
+        var targetDir = GetGitInstallPath(source, scope);
+        if (!Directory.Exists(targetDir))
+        {
+            InstallGit(source, scope);
+            return;
+        }
+
+        RunCommand("git", ["pull", "--ff-only"], targetDir);
+        if (File.Exists(Path.Combine(targetDir, "package.json")))
+        {
+            RunNpmCommand(["install", "--omit=dev"], targetDir);
+        }
+    }
+
+    private void RemoveGit(GitPackageSource source, string scope)
+    {
+        var targetDir = GetGitInstallPath(source, scope);
+        var gitRoot = GetGitInstallRoot(scope);
+        if (!Directory.Exists(targetDir))
+        {
+            return;
+        }
+
+        if (!IsPathUnder(targetDir, gitRoot) || PathsEqual(targetDir, gitRoot))
+        {
+            throw new InvalidOperationException($"Refusing to remove package path outside install root: {targetDir}");
+        }
+
+        Directory.Delete(targetDir, recursive: true);
+        PruneEmptyGitParents(targetDir, gitRoot);
+    }
+
+    private void PruneEmptyGitParents(string targetDir, string installRoot)
+    {
+        var current = Path.GetDirectoryName(targetDir);
+        while (!string.IsNullOrWhiteSpace(current) &&
+               IsPathUnder(current, installRoot) &&
+               !PathsEqual(current, installRoot))
+        {
+            if (Directory.Exists(current) && Directory.EnumerateFileSystemEntries(current).Any())
+            {
+                break;
+            }
+
+            if (Directory.Exists(current))
+            {
+                Directory.Delete(current);
+            }
+
+            current = Path.GetDirectoryName(current);
+        }
+    }
+
+    private void EnsureNpmProject(string installRoot)
+    {
+        EnsureGitIgnore(installRoot);
+        var packageJsonPath = Path.Combine(installRoot, "package.json");
+        if (File.Exists(packageJsonPath))
+        {
+            return;
+        }
+
+        File.WriteAllText(
+            packageJsonPath,
+            """
+            {
+              "name": "tau-extensions",
+              "private": true
+            }
+            """);
+    }
+
+    private static void EnsureGitIgnore(string directory)
+    {
+        Directory.CreateDirectory(directory);
+        var ignorePath = Path.Combine(directory, ".gitignore");
+        if (!File.Exists(ignorePath))
+        {
+            File.WriteAllText(ignorePath, "*\n!.gitignore\n");
+        }
+    }
+
+    private string GetNpmInstallRoot(string scope)
+    {
+        if (scope == "project")
+        {
+            return Path.Combine(_cwd, ProjectConfigDirectoryName, "npm");
+        }
+
+        return Path.GetDirectoryName(GetGlobalNpmRoot()) ?? GetGlobalNpmRoot();
+    }
+
+    private string GetGlobalNpmRoot()
+    {
+        var npmCommand = GetNpmCommand();
+        var commandKey = string.Join('\0', new[] { npmCommand.Command }.Concat(npmCommand.Arguments));
+        if (_globalNpmRoot is not null && _globalNpmRootCommandKey == commandKey)
+        {
+            return _globalNpmRoot;
+        }
+
+        var result = RunCommandCapture(npmCommand.Command, [.. npmCommand.Arguments, "root", "-g"], _cwd);
+        var root = result.Trim();
+        if (string.IsNullOrWhiteSpace(root))
+        {
+            throw new InvalidOperationException("npm root -g returned an empty install root.");
+        }
+
+        _globalNpmRoot = root;
+        _globalNpmRootCommandKey = commandKey;
+        return _globalNpmRoot;
+    }
+
+    private string GetGitInstallPath(GitPackageSource source, string scope) =>
+        Path.Combine(GetGitInstallRoot(scope), source.Host, Path.Combine(source.Path.Split('/')));
+
+    private string GetGitInstallRoot(string scope) =>
+        scope == "project"
+            ? Path.Combine(_cwd, ProjectConfigDirectoryName, "git")
+            : Path.Combine(UserInstallDirectory, "git");
+
+    private NpmCommand GetNpmCommand()
+    {
+        var command = new CodingAgentSettingsStore(ProjectSettingsPath).Load().NpmCommand ??
+            new CodingAgentSettingsStore(UserSettingsPath).Load().NpmCommand;
+
+        if (command is null || command.Count == 0)
+        {
+            return new NpmCommand("npm", []);
+        }
+
+        var executable = command[0];
+        if (string.IsNullOrWhiteSpace(executable))
+        {
+            throw new InvalidOperationException("Invalid npmCommand: first array entry must be a non-empty command");
+        }
+
+        return new NpmCommand(executable, command.Skip(1).ToArray());
+    }
+
+    private void RunNpmCommand(IReadOnlyList<string> arguments, string? workingDirectory = null)
+    {
+        var command = GetNpmCommand();
+        RunCommand(command.Command, [.. command.Arguments, .. arguments], workingDirectory ?? _cwd);
+    }
+
+    private void RunCommand(string fileName, IReadOnlyList<string> arguments, string? workingDirectory = null)
+    {
+        var result = _commandRunner.Run(new CodingAgentPackageCommand(fileName, arguments, workingDirectory));
+        if (result.ExitCode != 0)
+        {
+            throw new InvalidOperationException(BuildCommandFailureMessage(fileName, result));
+        }
+    }
+
+    private string RunCommandCapture(string fileName, IReadOnlyList<string> arguments, string? workingDirectory = null)
+    {
+        var result = _commandRunner.Run(new CodingAgentPackageCommand(fileName, arguments, workingDirectory));
+        if (result.ExitCode != 0)
+        {
+            throw new InvalidOperationException(BuildCommandFailureMessage(fileName, result));
+        }
+
+        return result.StandardOutput;
+    }
+
+    private static string BuildCommandFailureMessage(string fileName, CodingAgentPackageCommandResult result)
+    {
+        var detail = result.StandardError;
+        if (string.IsNullOrWhiteSpace(detail))
+        {
+            detail = result.StandardOutput;
+        }
+
+        detail = CodingAgentSecretRedactor.Default.Redact(detail?.Trim());
+        if (string.IsNullOrWhiteSpace(detail))
+        {
+            return $"Package command failed: {fileName} exited with code {result.ExitCode}";
+        }
+
+        return $"Package command failed: {fileName} exited with code {result.ExitCode}: {Truncate(detail, 500)}";
+    }
+
+    private static string Truncate(string value, int maxLength) =>
+        value.Length <= maxLength ? value : value[..maxLength];
+
+    private static bool IsOfflineModeEnabled()
+    {
+        var value = Environment.GetEnvironmentVariable("PI_OFFLINE");
+        return value is not null &&
+            (value.Equals("1", StringComparison.OrdinalIgnoreCase) ||
+             value.Equals("true", StringComparison.OrdinalIgnoreCase) ||
+             value.Equals("yes", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static ParsedPackageSource ParseSource(string source)
+    {
+        var normalized = NormalizeSource(source) ?? string.Empty;
+        if (normalized.StartsWith("npm:", StringComparison.OrdinalIgnoreCase))
+        {
+            var spec = normalized["npm:".Length..].Trim();
+            var (name, version) = ParseNpmSpec(spec);
+            return new NpmPackageSource(normalized, spec, name, !string.IsNullOrWhiteSpace(version));
+        }
+
+        var localSource = normalized.StartsWith("file:", StringComparison.OrdinalIgnoreCase)
+            ? normalized["file:".Length..].Trim()
+            : normalized;
+        if (IsLocalSource(localSource))
+        {
+            return new LocalPackageSource(normalized, localSource);
+        }
+
+        if (TryParseGitSource(normalized, out var git))
+        {
+            return git;
+        }
+
+        return new LocalPackageSource(normalized, localSource);
+    }
+
+    private static (string Name, string? Version) ParseNpmSpec(string spec)
+    {
+        if (string.IsNullOrWhiteSpace(spec))
+        {
+            return (spec, null);
+        }
+
+        var versionSeparator = -1;
+        if (spec.StartsWith("@", StringComparison.Ordinal))
+        {
+            var slash = spec.IndexOf('/', StringComparison.Ordinal);
+            if (slash >= 0)
+            {
+                versionSeparator = spec.IndexOf('@', slash + 1);
+            }
+        }
+        else
+        {
+            versionSeparator = spec.IndexOf('@', StringComparison.Ordinal);
+        }
+
+        return versionSeparator > 0
+            ? (spec[..versionSeparator], spec[(versionSeparator + 1)..])
+            : (spec, null);
+    }
+
+    private static bool TryParseGitSource(string source, out GitPackageSource parsed)
+    {
+        parsed = default!;
+        var trimmed = source.Trim();
+        var hasGitPrefix = trimmed.StartsWith("git:", StringComparison.OrdinalIgnoreCase);
+        var raw = hasGitPrefix ? trimmed["git:".Length..].Trim() : trimmed;
+        if (!hasGitPrefix &&
+            !raw.StartsWith("http://", StringComparison.OrdinalIgnoreCase) &&
+            !raw.StartsWith("https://", StringComparison.OrdinalIgnoreCase) &&
+            !raw.StartsWith("ssh://", StringComparison.OrdinalIgnoreCase) &&
+            !raw.StartsWith("git://", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var split = SplitGitRef(raw);
+        var repo = split.Repo;
+        var host = string.Empty;
+        var path = string.Empty;
+
+        if (repo.StartsWith("git@", StringComparison.OrdinalIgnoreCase))
+        {
+            var colon = repo.IndexOf(':', StringComparison.Ordinal);
+            if (colon <= "git@".Length)
+            {
+                return false;
+            }
+
+            host = repo["git@".Length..colon];
+            path = repo[(colon + 1)..];
+        }
+        else if (repo.Contains("://", StringComparison.Ordinal))
+        {
+            if (!Uri.TryCreate(repo, UriKind.Absolute, out var uri))
+            {
+                return false;
+            }
+
+            host = uri.Host;
+            path = uri.AbsolutePath.TrimStart('/');
+        }
+        else
+        {
+            var slash = repo.IndexOf('/', StringComparison.Ordinal);
+            if (slash <= 0)
+            {
+                return false;
+            }
+
+            host = repo[..slash];
+            path = repo[(slash + 1)..];
+            if (!host.Contains('.', StringComparison.Ordinal) && !host.Equals("localhost", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            repo = $"https://{repo}";
+        }
+
+        var normalizedPath = path.Trim('/').Trim();
+        if (normalizedPath.EndsWith(".git", StringComparison.OrdinalIgnoreCase))
+        {
+            normalizedPath = normalizedPath[..^".git".Length];
+        }
+
+        if (string.IsNullOrWhiteSpace(host) ||
+            string.IsNullOrWhiteSpace(normalizedPath) ||
+            normalizedPath.Split('/', StringSplitOptions.RemoveEmptyEntries).Length < 2)
+        {
+            return false;
+        }
+
+        parsed = new GitPackageSource(
+            source,
+            repo.TrimEnd('/'),
+            host,
+            normalizedPath,
+            split.Ref,
+            !string.IsNullOrWhiteSpace(split.Ref));
+        return true;
+    }
+
+    private static (string Repo, string? Ref) SplitGitRef(string source)
+    {
+        var hash = source.LastIndexOf('#');
+        if (hash > 0 && hash < source.Length - 1)
+        {
+            return (source[..hash], source[(hash + 1)..]);
+        }
+
+        if (source.StartsWith("git@", StringComparison.OrdinalIgnoreCase))
+        {
+            var colon = source.IndexOf(':', StringComparison.Ordinal);
+            if (colon < 0)
+            {
+                return (source, null);
+            }
+
+            var path = source[(colon + 1)..];
+            var separator = path.IndexOf('@', StringComparison.Ordinal);
+            if (separator < 0 || separator == path.Length - 1)
+            {
+                return (source, null);
+            }
+
+            return ($"{source[..(colon + 1)]}{path[..separator]}", path[(separator + 1)..]);
+        }
+
+        if (source.Contains("://", StringComparison.Ordinal) && Uri.TryCreate(source, UriKind.Absolute, out var uri))
+        {
+            var path = uri.AbsolutePath.TrimStart('/');
+            var separator = path.IndexOf('@', StringComparison.Ordinal);
+            if (separator < 0 || separator == path.Length - 1)
+            {
+                return (source, null);
+            }
+
+            var repoPath = path[..separator];
+            var builder = new UriBuilder(uri) { Path = $"/{repoPath}", Fragment = string.Empty };
+            return (builder.Uri.ToString().TrimEnd('/'), path[(separator + 1)..]);
+        }
+
+        var slash = source.IndexOf('/', StringComparison.Ordinal);
+        if (slash < 0)
+        {
+            return (source, null);
+        }
+
+        var host = source[..slash];
+        var pathWithMaybeRef = source[(slash + 1)..];
+        var refSeparator = pathWithMaybeRef.IndexOf('@', StringComparison.Ordinal);
+        if (refSeparator < 0 || refSeparator == pathWithMaybeRef.Length - 1)
+        {
+            return (source, null);
+        }
+
+        return ($"{host}/{pathWithMaybeRef[..refSeparator]}", pathWithMaybeRef[(refSeparator + 1)..]);
+    }
+
+    private bool SourcesMatch(string configuredSource, string inputSource, string scope) =>
+        GetSourceMatchKey(configuredSource, scope)
+            .Equals(GetSourceMatchKey(inputSource, scope), StringComparison.OrdinalIgnoreCase);
+
+    private string GetSourceMatchKey(string source, string scope)
+    {
+        var parsed = ParseSource(source);
+        return parsed switch
+        {
+            NpmPackageSource npm => $"npm:{npm.Name}",
+            GitPackageSource git => $"git:{git.Host}/{git.Path}",
+            LocalPackageSource local => $"local:{ResolvePath(local.Path, scope == "project" ? _cwd : UserInstallDirectory)}",
+            _ => source
+        };
+    }
+
+    private string BuildNoMatchingPackageMessage(
+        string source,
+        IReadOnlyList<(CodingAgentPackageSource Source, string Scope)> configured)
+    {
+        var suggestion = configured
+            .Select(package => package.Source.Source)
+            .FirstOrDefault(configuredSource => SourcesMatch(configuredSource, source, "project"));
+        return suggestion is null
+            ? $"No matching package found for {source}"
+            : $"No matching package found for {source}. Did you mean {suggestion}?";
+    }
+
+    private static bool IsPathUnder(string path, string root)
+    {
+        var fullPath = Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var fullRoot = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        return fullPath.StartsWith(fullRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) ||
+            fullPath.Equals(fullRoot, StringComparison.OrdinalIgnoreCase);
     }
 
     private static IReadOnlyList<CodingAgentPackageSource> NormalizePackageSources(
@@ -478,6 +1177,26 @@ public sealed class CodingAgentPackageManager
 
     private static bool PathsEqual(string left, string right) =>
         string.Equals(Path.GetFullPath(left), Path.GetFullPath(right), StringComparison.OrdinalIgnoreCase);
+
+    private sealed record NpmCommand(string Command, IReadOnlyList<string> Arguments);
+
+    private abstract record ParsedPackageSource(string Source);
+
+    private sealed record NpmPackageSource(
+        string Source,
+        string Spec,
+        string Name,
+        bool Pinned) : ParsedPackageSource(Source);
+
+    private sealed record GitPackageSource(
+        string Source,
+        string Repo,
+        string Host,
+        string Path,
+        string? Ref,
+        bool Pinned) : ParsedPackageSource(Source);
+
+    private sealed record LocalPackageSource(string Source, string Path) : ParsedPackageSource(Source);
 }
 
 public static class CodingAgentPackageCli
@@ -535,7 +1254,17 @@ public static class CodingAgentPackageCli
                     return true;
                 }
 
-                packageManager.AddSource(parsed.Source, parsed.Local);
+                try
+                {
+                    packageManager.InstallAndPersist(parsed.Source, parsed.Local);
+                }
+                catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or IOException or UnauthorizedAccessException)
+                {
+                    error.WriteLine($"Error: {ex.Message}");
+                    exitCode = 1;
+                    return true;
+                }
+
                 output.WriteLine($"Installed {parsed.Source}");
                 return true;
 
@@ -548,7 +1277,19 @@ public static class CodingAgentPackageCli
                     return true;
                 }
 
-                if (!packageManager.RemoveSource(parsed.Source, parsed.Local))
+                bool removed;
+                try
+                {
+                    removed = packageManager.RemoveAndPersist(parsed.Source, parsed.Local);
+                }
+                catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or IOException or UnauthorizedAccessException)
+                {
+                    error.WriteLine($"Error: {ex.Message}");
+                    exitCode = 1;
+                    return true;
+                }
+
+                if (!removed)
                 {
                     error.WriteLine($"No matching package found for {parsed.Source}");
                     exitCode = 1;
@@ -563,9 +1304,13 @@ public static class CodingAgentPackageCli
                 return true;
 
             case "update":
-                if (!string.IsNullOrWhiteSpace(parsed.Source) && !packageManager.ContainsSource(parsed.Source))
+                try
                 {
-                    error.WriteLine($"No matching package found for {parsed.Source}");
+                    packageManager.Update(parsed.Source);
+                }
+                catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or IOException or UnauthorizedAccessException)
+                {
+                    error.WriteLine($"Error: {ex.Message}");
                     exitCode = 1;
                     return true;
                 }
