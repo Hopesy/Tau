@@ -259,7 +259,8 @@ var runner = RuntimeCodingAgentRunner.Create(
     systemPromptOverride: cli.SystemPrompt,
     skills: skillStore.Load(),
     contextFiles: contextFileStore.Load(),
-    logSink: logSink);
+    logSink: logSink,
+    autoResizeImages: settings.ImagesAutoResize ?? true);
 runner.SessionName = session.Name;
 runner.SteeringMode = CodingAgentQueueModes.ToAgentQueueMode(settings.SteeringMode);
 runner.FollowUpMode = CodingAgentQueueModes.ToAgentQueueMode(settings.FollowUpMode);

@@ -1,12 +1,19 @@
 using System.Text.Json;
 using Tau.Agent;
 using Tau.Ai;
+using Tau.CodingAgent.Runtime;
 
 namespace Tau.CodingAgent.Tools;
 
 public sealed class ReadFileTool : IAgentTool
 {
-    internal const int DefaultMaxImageBase64Bytes = 4_718_592; // 4.5MiB, matching upstream inline image headroom.
+    internal const int DefaultMaxImageBase64Bytes = CodingAgentImagePreprocessor.DefaultMaxBase64Bytes;
+    private readonly bool _autoResizeImages;
+
+    public ReadFileTool(bool autoResizeImages = true)
+    {
+        _autoResizeImages = autoResizeImages;
+    }
 
     public string Name => "read_file";
     public string Label => "Read File";
@@ -41,35 +48,47 @@ public sealed class ReadFileTool : IAgentTool
         var imageMimeType = await DetectImageMimeTypeAsync(path, ct).ConfigureAwait(false);
         if (imageMimeType is not null)
         {
-            var imageSize = new FileInfo(path).Length;
-            var encodedSize = EstimateBase64ByteCount(imageSize);
-            if (encodedSize >= DefaultMaxImageBase64Bytes)
+            var bytes = await File.ReadAllBytesAsync(path, ct).ConfigureAwait(false);
+            var processed = CodingAgentImagePreprocessor.Process(bytes, imageMimeType, _autoResizeImages);
+            var originalEncodedSize = EstimateBase64ByteCount(bytes.Length);
+            if (processed is null)
             {
                 return new ToolResult(
                     [
                         new TextContent(
-                            $"Read image file [{imageMimeType}]\n[Image omitted: exceeds the {ToolOutputTruncator.FormatSize(DefaultMaxImageBase64Bytes)} inline image size limit. Automatic resize is not implemented in Tau yet.]")
+                            $"Read image file [{imageMimeType}]\n[Image omitted: could not be resized below the inline image size limit.]")
                     ],
                     Details: ReadFileToolDetails.ForImage(
                         path,
                         imageMimeType,
-                        imageSize,
-                        encodedSize,
+                        bytes.Length,
+                        originalEncodedSize,
                         imageOmitted: true));
             }
 
-            var bytes = await File.ReadAllBytesAsync(path, ct).ConfigureAwait(false);
+            var imageText = $"Read image file [{processed.MimeType}]";
+            var dimensionNote = CodingAgentImagePreprocessor.FormatDimensionNote(processed);
+            if (dimensionNote is not null)
+            {
+                imageText += $"\n{dimensionNote}";
+            }
+
             return new ToolResult(
                 [
-                    new TextContent($"Read image file [{imageMimeType}]"),
-                    new ImageContent(Convert.ToBase64String(bytes), imageMimeType)
+                    new TextContent(imageText),
+                    new ImageContent(processed.Data, processed.MimeType)
                 ],
                 Details: ReadFileToolDetails.ForImage(
                     path,
-                    imageMimeType,
-                    imageSize,
-                    encodedSize,
-                    imageOmitted: false));
+                    processed.MimeType,
+                    processed.OriginalBytes,
+                    processed.EstimatedBase64Bytes,
+                    imageOmitted: false,
+                    imageResized: processed.WasResized,
+                    originalWidth: processed.OriginalWidth,
+                    originalHeight: processed.OriginalHeight,
+                    width: processed.Width,
+                    height: processed.Height));
         }
 
         var text = await File.ReadAllTextAsync(path, ct).ConfigureAwait(false);
@@ -242,7 +261,12 @@ public sealed record ReadFileToolDetails(
     string? MimeType = null,
     long? ImageBytes = null,
     long? EstimatedBase64Bytes = null,
-    bool ImageOmitted = false)
+    bool ImageOmitted = false,
+    bool ImageResized = false,
+    int? OriginalWidth = null,
+    int? OriginalHeight = null,
+    int? Width = null,
+    int? Height = null)
 {
     public static ReadFileToolDetails ForText(
         string path,
@@ -267,12 +291,22 @@ public sealed record ReadFileToolDetails(
         string mimeType,
         long imageBytes,
         long estimatedBase64Bytes,
-        bool imageOmitted) =>
+        bool imageOmitted,
+        bool imageResized = false,
+        int? originalWidth = null,
+        int? originalHeight = null,
+        int? width = null,
+        int? height = null) =>
         new(
             path,
             "image",
             MimeType: mimeType,
             ImageBytes: imageBytes,
             EstimatedBase64Bytes: estimatedBase64Bytes,
-            ImageOmitted: imageOmitted);
+            ImageOmitted: imageOmitted,
+            ImageResized: imageResized,
+            OriginalWidth: originalWidth,
+            OriginalHeight: originalHeight,
+            Width: width,
+            Height: height);
 }

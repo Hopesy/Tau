@@ -640,7 +640,8 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner, ICodingAgentT
         ITauLogSink? logSink = null,
         TauRuntimeLogContext? logContext = null,
         ProviderRegistry? providerRegistryOverride = null,
-        ModelCatalog? modelCatalogOverride = null)
+        ModelCatalog? modelCatalogOverride = null,
+        bool autoResizeImages = true)
     {
         var registry = providerRegistryOverride ?? new ProviderRegistry();
         if (providerRegistryOverride is null)
@@ -655,7 +656,7 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner, ICodingAgentT
             defaultProvider: Environment.GetEnvironmentVariable("TAU_PROVIDER"));
 
         var model = modelCatalog.GetModel(selection.Provider, selection.ModelId);
-        var tools = toolsOverride ?? CreateDefaultTools();
+        var tools = toolsOverride ?? CreateDefaultTools(autoResizeImages);
         var config = new AgentLoopConfig
         {
             Model = model,
@@ -695,11 +696,11 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner, ICodingAgentT
         return ModelCatalog.GetDefaultModelId(providerId);
     }
 
-    public static IAgentTool[] CreateDefaultTools()
+    public static IAgentTool[] CreateDefaultTools(bool autoResizeImages = true)
     {
         return
         [
-            new ReadFileTool(),
+            new ReadFileTool(autoResizeImages),
             new WriteFileTool(),
             new EditFileTool(),
             new ShellTool(),

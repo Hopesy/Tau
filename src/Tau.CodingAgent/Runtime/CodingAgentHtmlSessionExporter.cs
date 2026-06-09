@@ -828,6 +828,26 @@ public static class CodingAgentHtmlSessionExporter
                 FormatByteSize(details.EstimatedBase64Bytes.Value));
         }
 
+        if (details.Width is not null || details.Height is not null)
+        {
+            AppendToolResultMetadataEntry(
+                builder,
+                "dimensions",
+                FormatImageDimensions(details.Width, details.Height));
+        }
+
+        if (details.ImageResized)
+        {
+            AppendToolResultMetadataEntry(builder, "image resized", "true");
+            if (details.OriginalWidth is not null || details.OriginalHeight is not null)
+            {
+                AppendToolResultMetadataEntry(
+                    builder,
+                    "original dimensions",
+                    FormatImageDimensions(details.OriginalWidth, details.OriginalHeight));
+            }
+        }
+
         if (details.ImageOmitted)
         {
             AppendToolResultMetadataEntry(builder, "image omitted", "true");
@@ -869,6 +889,11 @@ public static class CodingAgentHtmlSessionExporter
         builder.AppendLine("</dl>");
         builder.AppendLine("</div>");
     }
+
+    private static string FormatImageDimensions(int? width, int? height) =>
+        width is null && height is null
+            ? "unknown"
+            : $"{width?.ToString(CultureInfo.InvariantCulture) ?? "?"}x{height?.ToString(CultureInfo.InvariantCulture) ?? "?"}";
 
     private static void AppendToolResultMetadataEntry(
         StringBuilder builder,

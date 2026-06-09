@@ -273,8 +273,6 @@ internal sealed record CodingAgentInitialMessageOptions(
 
 internal static class CodingAgentInitialMessageBuilder
 {
-    private const long MaxInlineImageBase64Bytes = 4_718_592;
-
     public static async Task<CodingAgentInitialPrompt?> BuildAsync(
         IReadOnlyList<string> messages,
         IReadOnlyList<string> fileArguments,
@@ -366,18 +364,21 @@ internal static class CodingAgentInitialMessageBuilder
             }
 
             var bytes = await File.ReadAllBytesAsync(path, cancellationToken).ConfigureAwait(false);
-            var encodedLength = EstimateBase64Length(bytes.Length);
-            if (encodedLength > MaxInlineImageBase64Bytes)
+            var processed = CodingAgentImagePreprocessor.Process(bytes, mimeType, options.AutoResizeImages);
+            if (processed is null)
             {
-                var resizeSuffix = options.AutoResizeImages
-                    ? " Automatic resize is not implemented in Tau yet."
-                    : string.Empty;
-                text += $"<file name=\"{path}\">[Image omitted: exceeds the inline image size limit.{resizeSuffix}]</file>\n";
+                var message = options.AutoResizeImages
+                    ? "[Image omitted: could not be resized below the inline image size limit.]"
+                    : "[Image omitted: exceeds the inline image size limit.]";
+                text += $"<file name=\"{path}\">{message}</file>\n";
                 continue;
             }
 
-            images.Add(new ImageContent(Convert.ToBase64String(bytes), mimeType));
-            text += $"<file name=\"{path}\"></file>\n";
+            images.Add(new ImageContent(processed.Data, processed.MimeType));
+            var dimensionNote = CodingAgentImagePreprocessor.FormatDimensionNote(processed);
+            text += dimensionNote is null
+                ? $"<file name=\"{path}\"></file>\n"
+                : $"<file name=\"{path}\">{dimensionNote}</file>\n";
         }
 
         return new ProcessedFiles(text, images);
@@ -528,9 +529,6 @@ internal static class CodingAgentInitialMessageBuilder
 
         return null;
     }
-
-    private static long EstimateBase64Length(long byteCount) =>
-        checked(((byteCount + 2) / 3) * 4);
 
     private sealed record ProcessedFiles(string Text, IReadOnlyList<ImageContent> Images);
 }

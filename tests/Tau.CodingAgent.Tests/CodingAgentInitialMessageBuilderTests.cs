@@ -1,5 +1,6 @@
 using Tau.Ai;
 using Tau.CodingAgent.Runtime;
+using Tau.Tui.Rendering;
 
 namespace Tau.CodingAgent.Tests;
 
@@ -117,6 +118,28 @@ public sealed class CodingAgentInitialMessageBuilderTests
         Assert.NotNull(prompt);
         Assert.Empty(prompt!.Images);
         Assert.Contains("[Image blocked by settings.]", prompt.Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task BuildAsync_AutoResizesLargePngFilesAndAddsDimensionNote()
+    {
+        using var temp = TempDirectory.Create();
+        var image = Path.Combine(temp.Path, "wide.png");
+        await File.WriteAllBytesAsync(image, ImageTestData.CreatePng(2501, 10));
+
+        var prompt = await CodingAgentInitialMessageBuilder.BuildAsync(
+            ["describe"],
+            ["wide.png"],
+            options: new CodingAgentInitialMessageOptions(WorkingDirectory: temp.Path));
+
+        Assert.NotNull(prompt);
+        Assert.Contains(
+            $"<file name=\"{image}\">[Image: original 2501x10, displayed at 2000x8. Multiply coordinates by 1.25 to map to original image.]</file>",
+            prompt!.Text,
+            StringComparison.Ordinal);
+        var content = Assert.Single(prompt.Images);
+        Assert.Equal("image/png", content.MimeType);
+        Assert.Equal(new TuiImageDimensions(2000, 8), TuiTerminalImage.GetPngDimensions(content.Data));
     }
 
     [Fact]

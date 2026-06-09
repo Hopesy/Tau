@@ -2,6 +2,7 @@ using System.Text.Json;
 using Tau.Agent;
 using Tau.Ai;
 using Tau.CodingAgent.Tools;
+using Tau.Tui.Rendering;
 
 namespace Tau.CodingAgent.Tests;
 
@@ -229,6 +230,39 @@ public sealed class ReadFileToolTests
             Assert.Equal("image/png", details.MimeType);
             Assert.False(details.ImageOmitted);
             Assert.True(details.ImageBytes > 0);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_WhenPngExceedsMaxDimensions_ResizesAndAddsDimensionNote()
+    {
+        var bytes = ImageTestData.CreatePng(2501, 10);
+        var path = await CreateTempFileAsync(".png", bytes);
+
+        try
+        {
+            var result = await ExecuteAsync(new ReadFileTool(), path);
+
+            Assert.False(result.IsError);
+            Assert.Contains("Read image file [image/png]", Text(result), StringComparison.Ordinal);
+            Assert.Contains(
+                "[Image: original 2501x10, displayed at 2000x8. Multiply coordinates by 1.25 to map to original image.]",
+                Text(result),
+                StringComparison.Ordinal);
+            var image = Assert.Single(result.Content.OfType<ImageContent>());
+            Assert.Equal("image/png", image.MimeType);
+            Assert.Equal(new TuiImageDimensions(2000, 8), TuiTerminalImage.GetPngDimensions(image.Data));
+            var details = Assert.IsType<ReadFileToolDetails>(result.Details);
+            Assert.False(details.ImageOmitted);
+            Assert.True(details.ImageResized);
+            Assert.Equal(2501, details.OriginalWidth);
+            Assert.Equal(10, details.OriginalHeight);
+            Assert.Equal(2000, details.Width);
+            Assert.Equal(8, details.Height);
         }
         finally
         {
