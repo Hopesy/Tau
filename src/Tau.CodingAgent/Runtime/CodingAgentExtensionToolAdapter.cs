@@ -26,6 +26,23 @@ public sealed class CodingAgentExtensionToolAdapter : IAgentTool
             ? ToolExecutionMode.Sequential
             : ToolExecutionMode.Parallel;
 
+    public ValueTask<JsonElement> PrepareArgumentsAsync(JsonElement rawArgs, CancellationToken ct = default)
+    {
+        ct.ThrowIfCancellationRequested();
+        if (!_definition.HasPrepareArguments)
+        {
+            return new ValueTask<JsonElement>(rawArgs);
+        }
+
+        var result = _runtime.PrepareToolArguments(_definition.FilePath, _definition.Name, rawArgs);
+        if (!result.Success || !result.PreparedArgs.HasValue)
+        {
+            throw new InvalidOperationException(result.Error ?? $"extension tool '{_definition.Name}' failed to prepare arguments");
+        }
+
+        return new ValueTask<JsonElement>(result.PreparedArgs.Value.Clone());
+    }
+
     public Task<ToolResult> ExecuteAsync(
         string toolCallId,
         JsonElement args,

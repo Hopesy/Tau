@@ -575,6 +575,7 @@ public class CodingAgentExtensionCommandStoreTests
             Assert.Equal("project", tool.Scope);
             Assert.Equal("javascript", tool.Runtime);
             Assert.Equal("sequential", tool.ExecutionMode);
+            Assert.False(tool.HasPrepareArguments);
             Assert.Equal("object", tool.ParameterSchema.GetProperty("type").GetString());
             Assert.True(tool.ParameterSchema.GetProperty("properties").TryGetProperty("name", out _));
             var module = Assert.Single(status.Modules);
@@ -641,6 +642,59 @@ public class CodingAgentExtensionCommandStoreTests
     }
 
     [Fact]
+    public async Task LoadTools_PreparesJavascriptRegisteredToolArguments()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-js-tool-prepare-" + Guid.NewGuid().ToString("N"));
+        var extensionDirectory = Path.Combine(directory, ".tau", "extensions", "prepare-tool");
+        Directory.CreateDirectory(extensionDirectory);
+        WriteJavaScriptExtension(
+            extensionDirectory,
+            """
+            export default function(pi) {
+              pi.registerTool({
+                name: "prepare_tool",
+                label: "Prepare Tool",
+                description: "Prepare raw tool arguments",
+                parameters: {
+                  type: "object",
+                  properties: {
+                    name: { type: "string" },
+                    prepared: { type: "boolean" }
+                  },
+                  required: ["name", "prepared"]
+                },
+                prepareArguments: (args) => ({
+                  name: String(args.name ?? "").toUpperCase(),
+                  prepared: true
+                }),
+                execute: async (_toolCallId, params) => `${params.name}:${params.prepared}`
+              });
+            }
+            """);
+
+        try
+        {
+            var store = CreateJavaScriptStore(directory);
+            var definition = Assert.Single(store.LoadToolDefinitions());
+            Assert.True(definition.HasPrepareArguments);
+            var tool = Assert.Single(store.LoadTools());
+            using var rawArgs = JsonDocument.Parse("""{"name":"ada"}""");
+
+            var preparedArgs = await tool.PrepareArgumentsAsync(rawArgs.RootElement);
+            var result = await tool.ExecuteAsync("tool-call-1", preparedArgs);
+
+            Assert.Equal("ADA", preparedArgs.GetProperty("name").GetString());
+            Assert.True(preparedArgs.GetProperty("prepared").GetBoolean());
+            Assert.False(result.IsError);
+            Assert.Equal("ADA:true", Assert.IsType<TextContent>(Assert.Single(result.Content)).Text);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public void LoadStatus_LoadsTypescriptRegisteredTools()
     {
         var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-ts-tool-load-" + Guid.NewGuid().ToString("N"));
@@ -685,6 +739,64 @@ public class CodingAgentExtensionCommandStoreTests
             Assert.Equal("object", tool.ParameterSchema.GetProperty("type").GetString());
             var module = Assert.Single(status.Modules);
             Assert.Equal("loaded; commands 0; tools 1; limited runtime", module.Status);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task LoadTools_PreparesTypescriptRegisteredToolArguments()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-ts-tool-prepare-" + Guid.NewGuid().ToString("N"));
+        var extensionDirectory = Path.Combine(directory, ".tau", "extensions", "ts-tool-prepare");
+        Directory.CreateDirectory(extensionDirectory);
+        WriteTypeScriptExtension(
+            extensionDirectory,
+            """
+            interface ToolParams {
+              name: string;
+              prepared: boolean;
+            }
+
+            export default function(pi: any) {
+              pi.registerTool({
+                name: "ts_prepare_tool",
+                label: "TS Prepare Tool",
+                description: "Prepare raw TypeScript tool arguments",
+                parameters: {
+                  type: "object",
+                  properties: {
+                    name: { type: "string" },
+                    prepared: { type: "boolean" }
+                  },
+                  required: ["name", "prepared"]
+                },
+                prepareArguments: (args: unknown): ToolParams => ({
+                  name: String((args as any).name ?? "").toUpperCase(),
+                  prepared: true
+                }),
+                execute: async (_toolCallId: string, params: ToolParams) => `TS ${params.name}:${params.prepared}`
+              });
+            }
+            """);
+
+        try
+        {
+            var store = CreateTypeScriptStore(directory);
+            var definition = Assert.Single(store.LoadToolDefinitions());
+            Assert.True(definition.HasPrepareArguments);
+            var tool = Assert.Single(store.LoadTools());
+            using var rawArgs = JsonDocument.Parse("""{"name":"ada"}""");
+
+            var preparedArgs = await tool.PrepareArgumentsAsync(rawArgs.RootElement);
+            var result = await tool.ExecuteAsync("tool-call-1", preparedArgs);
+
+            Assert.Equal("ADA", preparedArgs.GetProperty("name").GetString());
+            Assert.True(preparedArgs.GetProperty("prepared").GetBoolean());
+            Assert.False(result.IsError);
+            Assert.Equal("TS ADA:true", Assert.IsType<TextContent>(Assert.Single(result.Content)).Text);
         }
         finally
         {

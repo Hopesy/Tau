@@ -17,6 +17,7 @@ public sealed record CodingAgentJavaScriptExtensionTool(
     string Description,
     JsonElement ParameterSchema,
     bool HasHandler,
+    bool HasPrepareArguments,
     string? ExecutionMode);
 
 public sealed record CodingAgentJavaScriptExtensionUnsupportedRegistrations(
@@ -45,6 +46,11 @@ public sealed record CodingAgentJavaScriptExtensionToolInvokeResult(
     IReadOnlyList<string> Content,
     bool IsError,
     JsonElement? Details,
+    string? Error);
+
+public sealed record CodingAgentJavaScriptExtensionToolPrepareResult(
+    bool Success,
+    JsonElement? PreparedArgs,
     string? Error);
 
 public sealed class CodingAgentJavaScriptExtensionRuntime
@@ -196,6 +202,56 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
                 false,
                 [],
                 true,
+                null,
+                $"invalid node extension runtime output: {ex.Message}");
+        }
+    }
+
+    public CodingAgentJavaScriptExtensionToolPrepareResult PrepareToolArguments(
+        string filePath,
+        string toolName,
+        JsonElement args)
+    {
+        var execution = Execute(BuildPayload(
+            "prepareToolArguments",
+            filePath,
+            _cwd,
+            toolName: toolName,
+            toolArgs: args));
+        if (!execution.Success)
+        {
+            return new CodingAgentJavaScriptExtensionToolPrepareResult(false, null, execution.Error);
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(execution.ResultJson);
+            var root = document.RootElement;
+            if (!ReadBool(root, "ok"))
+            {
+                return new CodingAgentJavaScriptExtensionToolPrepareResult(
+                    false,
+                    null,
+                    ReadString(root, "error") ?? "javascript extension tool argument preparation failed");
+            }
+
+            if (!root.TryGetProperty("preparedArgs", out var preparedArgs))
+            {
+                return new CodingAgentJavaScriptExtensionToolPrepareResult(
+                    false,
+                    null,
+                    "javascript extension tool did not return prepared arguments");
+            }
+
+            return new CodingAgentJavaScriptExtensionToolPrepareResult(
+                true,
+                preparedArgs.Clone(),
+                null);
+        }
+        catch (JsonException ex)
+        {
+            return new CodingAgentJavaScriptExtensionToolPrepareResult(
+                false,
                 null,
                 $"invalid node extension runtime output: {ex.Message}");
         }
@@ -369,6 +425,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
                 ReadString(tool, "description") ?? string.Empty,
                 ReadParameterSchema(tool),
                 ReadBool(tool, "hasHandler"),
+                ReadBool(tool, "hasPrepareArguments"),
                 ReadString(tool, "executionMode")));
         }
 
@@ -787,11 +844,29 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
             description: typeof tool?.description === "string" ? tool.description : "",
             parameters: tool?.parameters && typeof tool.parameters === "object" ? tool.parameters : { type: "object" },
             hasHandler: typeof tool?.execute === "function",
+            hasPrepareArguments: typeof tool?.prepareArguments === "function",
             executionMode: typeof tool?.executionMode === "string" ? tool.executionMode : undefined
           }));
 
           if (payload.mode === "load") {
             write({ ok: true, commands, tools, unsupported });
+            return;
+          }
+
+          if (payload.mode === "prepareToolArguments") {
+            const tool = toolMap.get(String(payload.toolName ?? ""));
+            if (!tool) {
+              write({ ok: false, error: "Extension tool was not registered: " + String(payload.toolName ?? "") });
+              return;
+            }
+
+            if (typeof tool.prepareArguments !== "function") {
+              write({ ok: true, preparedArgs: payload.toolArgs === undefined ? {} : payload.toolArgs });
+              return;
+            }
+
+            const preparedArgs = await tool.prepareArguments(payload.toolArgs === undefined ? {} : payload.toolArgs);
+            write({ ok: true, preparedArgs: preparedArgs === undefined ? {} : preparedArgs });
             return;
           }
 

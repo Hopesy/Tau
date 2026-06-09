@@ -40,6 +40,7 @@ public sealed record CodingAgentExtensionTool(
     string FilePath,
     string Scope,
     string Runtime,
+    bool HasPrepareArguments,
     string? ExecutionMode);
 
 public sealed record CodingAgentExtensionResources(
@@ -944,6 +945,7 @@ public sealed class CodingAgentExtensionCommandStore
                 fullPath,
                 scope,
                 runtime,
+                tool.HasPrepareArguments,
                 tool.ExecutionMode));
         }
 
