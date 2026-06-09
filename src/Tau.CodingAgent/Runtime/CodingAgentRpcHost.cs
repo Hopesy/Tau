@@ -2253,7 +2253,7 @@ public sealed class CodingAgentRpcHost
         MessageUpdateEvent update => new
         {
             type = evt.Type,
-            streamEvent = ToRpcStreamEvent(update.StreamEvent),
+            assistantMessageEvent = ToRpcAssistantMessageEvent(update.StreamEvent),
             message = update.Message is null ? null : ToRpcMessage(update.Message)
         },
         MessageEndEvent message => new { type = evt.Type, message = ToRpcMessage(message.Message) },
@@ -2284,22 +2284,109 @@ public sealed class CodingAgentRpcHost
         content = result.Content.Select(ToRpcContent).ToArray()
     };
 
-    private static object ToRpcStreamEvent(StreamEvent evt) => evt switch
+    private static object ToRpcAssistantMessageEvent(StreamEvent evt) => evt switch
     {
         StartEvent start => new { type = evt.Type, partial = ToRpcMessage(start.Partial) },
-        TextStartEvent text => new { type = evt.Type, contentIndex = text.ContentIndex },
-        TextDeltaEvent text => new { type = evt.Type, contentIndex = text.ContentIndex, delta = text.Delta },
-        TextEndEvent text => new { type = evt.Type, contentIndex = text.ContentIndex },
-        ThinkingStartEvent thinking => new { type = evt.Type, contentIndex = thinking.ContentIndex },
-        ThinkingDeltaEvent thinking => new { type = evt.Type, contentIndex = thinking.ContentIndex, delta = thinking.Delta },
-        ThinkingEndEvent thinking => new { type = evt.Type, contentIndex = thinking.ContentIndex },
-        ToolCallStartEvent tool => new { type = evt.Type, contentIndex = tool.ContentIndex },
-        ToolCallDeltaEvent tool => new { type = evt.Type, contentIndex = tool.ContentIndex, delta = tool.Delta },
-        ToolCallEndEvent tool => new { type = evt.Type, contentIndex = tool.ContentIndex },
-        DoneEvent done => new { type = evt.Type, message = ToRpcMessage(done.Message) },
-        ErrorEvent error => new { type = evt.Type, error = error.Error, partial = error.Partial is null ? null : ToRpcMessage(error.Partial) },
+        TextStartEvent text => new
+        {
+            type = evt.Type,
+            contentIndex = text.ContentIndex,
+            partial = ToRpcMessage(text.Partial)
+        },
+        TextDeltaEvent text => new
+        {
+            type = evt.Type,
+            contentIndex = text.ContentIndex,
+            delta = text.Delta,
+            partial = ToRpcMessage(text.Partial)
+        },
+        TextEndEvent text => new
+        {
+            type = evt.Type,
+            contentIndex = text.ContentIndex,
+            content = GetContentAt<TextContent>(text.Partial, text.ContentIndex)?.Text ?? string.Empty,
+            partial = ToRpcMessage(text.Partial)
+        },
+        ThinkingStartEvent thinking => new
+        {
+            type = evt.Type,
+            contentIndex = thinking.ContentIndex,
+            partial = ToRpcMessage(thinking.Partial)
+        },
+        ThinkingDeltaEvent thinking => new
+        {
+            type = evt.Type,
+            contentIndex = thinking.ContentIndex,
+            delta = thinking.Delta,
+            partial = ToRpcMessage(thinking.Partial)
+        },
+        ThinkingEndEvent thinking => new
+        {
+            type = evt.Type,
+            contentIndex = thinking.ContentIndex,
+            content = GetContentAt<ThinkingContent>(thinking.Partial, thinking.ContentIndex)?.Thinking ?? string.Empty,
+            partial = ToRpcMessage(thinking.Partial)
+        },
+        ToolCallStartEvent tool => new
+        {
+            type = evt.Type,
+            contentIndex = tool.ContentIndex,
+            partial = ToRpcMessage(tool.Partial)
+        },
+        ToolCallDeltaEvent tool => new
+        {
+            type = evt.Type,
+            contentIndex = tool.ContentIndex,
+            delta = tool.Delta,
+            partial = ToRpcMessage(tool.Partial)
+        },
+        ToolCallEndEvent tool => new
+        {
+            type = evt.Type,
+            contentIndex = tool.ContentIndex,
+            toolCall = GetContentAt<ToolCallContent>(tool.Partial, tool.ContentIndex) is { } toolCall
+                ? ToRpcContent(toolCall)
+                : null,
+            partial = ToRpcMessage(tool.Partial)
+        },
+        DoneEvent done => new
+        {
+            type = evt.Type,
+            reason = ToRpcDoneReason(done.Message.StopReason),
+            message = ToRpcMessage(done.Message)
+        },
+        ErrorEvent error => new
+        {
+            type = evt.Type,
+            reason = ToRpcErrorReason(error),
+            error = ToRpcMessage(error.Message ?? error.Partial ?? new AssistantMessage())
+        },
         _ => new { type = evt.Type }
     };
+
+    private static TContent? GetContentAt<TContent>(AssistantMessage message, int contentIndex)
+        where TContent : ContentBlock
+    {
+        if (contentIndex < 0 || contentIndex >= message.Content.Count)
+        {
+            return null;
+        }
+
+        return message.Content[contentIndex] as TContent;
+    }
+
+    private static string ToRpcDoneReason(StopReason? stopReason) => stopReason switch
+    {
+        StopReason.MaxTokens => "length",
+        StopReason.ToolUse => "toolUse",
+        _ => "stop"
+    };
+
+    private static string ToRpcErrorReason(ErrorEvent error)
+    {
+        var stopReason = error.Message?.StopReason ?? error.Partial?.StopReason;
+        return stopReason == StopReason.Aborted ? "aborted" : "error";
+    }
 
     private static object ToRpcMessage(ChatMessage message)
     {

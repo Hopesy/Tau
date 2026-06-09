@@ -35,10 +35,57 @@ public sealed class CodingAgentRpcHostTests
 
         var textDelta = lines.Single(line =>
             line.GetProperty("type").GetString() == "message_update" &&
-            line.GetProperty("streamEvent").GetProperty("type").GetString() == "text_delta");
-        Assert.Equal("rpc ok", textDelta.GetProperty("streamEvent").GetProperty("delta").GetString());
+            line.GetProperty("assistantMessageEvent").GetProperty("type").GetString() == "text_delta");
+        Assert.False(textDelta.TryGetProperty("streamEvent", out _));
+        Assert.Equal("rpc ok", textDelta.GetProperty("assistantMessageEvent").GetProperty("delta").GetString());
 
         Assert.Contains(lines, line => line.GetProperty("type").GetString() == "agent_end");
+    }
+
+    [Fact]
+    public async Task RunAsync_MessageUpdateUsesUpstreamAssistantMessageEventShape()
+    {
+        var runner = new FakeCodingAgentRunner((_, _) => RunPromptWithAssistantMessageEvents());
+        var output = new StringWriter();
+        var host = new CodingAgentRpcHost(
+            runner,
+            new StringReader("{\"id\":\"p1\",\"type\":\"prompt\",\"message\":\"hello\"}\n"),
+            output);
+
+        await host.RunAsync();
+
+        var events = ReadJsonLines(output)
+            .Where(line => line.GetProperty("type").GetString() == "message_update")
+            .Select(line =>
+            {
+                Assert.False(line.TryGetProperty("streamEvent", out _));
+                return line.GetProperty("assistantMessageEvent");
+            })
+            .ToArray();
+
+        var textStart = events.Single(evt => evt.GetProperty("type").GetString() == "text_start");
+        Assert.Equal(0, textStart.GetProperty("contentIndex").GetInt32());
+        Assert.Equal("assistant", textStart.GetProperty("partial").GetProperty("role").GetString());
+
+        var textDelta = events.Single(evt => evt.GetProperty("type").GetString() == "text_delta");
+        Assert.Equal("he", textDelta.GetProperty("delta").GetString());
+        Assert.Equal("hello", textDelta.GetProperty("partial").GetProperty("content")[0].GetProperty("text").GetString());
+
+        var textEnd = events.Single(evt => evt.GetProperty("type").GetString() == "text_end");
+        Assert.Equal("hello", textEnd.GetProperty("content").GetString());
+        Assert.Equal("hello", textEnd.GetProperty("partial").GetProperty("content")[0].GetProperty("text").GetString());
+
+        var thinkingEnd = events.Single(evt => evt.GetProperty("type").GetString() == "thinking_end");
+        Assert.Equal("plan", thinkingEnd.GetProperty("content").GetString());
+        Assert.Equal("plan", thinkingEnd.GetProperty("partial").GetProperty("content")[0].GetProperty("thinking").GetString());
+
+        var toolCallEnd = events.Single(evt => evt.GetProperty("type").GetString() == "toolcall_end");
+        Assert.Equal("call_1", toolCallEnd.GetProperty("toolCall").GetProperty("id").GetString());
+        Assert.Equal("bash", toolCallEnd.GetProperty("toolCall").GetProperty("name").GetString());
+
+        var done = events.Single(evt => evt.GetProperty("type").GetString() == "done");
+        Assert.Equal("toolUse", done.GetProperty("reason").GetString());
+        Assert.Equal("assistant", done.GetProperty("message").GetProperty("role").GetString());
     }
 
     [Fact]
@@ -2366,6 +2413,31 @@ public sealed class CodingAgentRpcHostTests
         yield return new AgentStartEvent();
         yield return new MessageUpdateEvent(new TextDeltaEvent(0, "rpc ok", partial));
         yield return new AgentEndEvent();
+        await Task.CompletedTask;
+    }
+
+    private static async IAsyncEnumerable<AgentEvent> RunPromptWithAssistantMessageEvents()
+    {
+        var text = new AssistantMessage([new TextContent("hello")]);
+        var thinking = new AssistantMessage([new ThinkingContent("plan")]);
+        var tool = new AssistantMessage([new ToolCallContent("call_1", "bash", """{"command":"pwd"}""")]);
+        var done = new AssistantMessage([new ToolCallContent("call_1", "bash", """{"command":"pwd"}""")])
+        {
+            StopReason = StopReason.ToolUse
+        };
+
+        yield return new AgentStartEvent();
+        yield return new MessageUpdateEvent(new TextStartEvent(0, text), text);
+        yield return new MessageUpdateEvent(new TextDeltaEvent(0, "he", text), text);
+        yield return new MessageUpdateEvent(new TextEndEvent(0, text), text);
+        yield return new MessageUpdateEvent(new ThinkingStartEvent(0, thinking), thinking);
+        yield return new MessageUpdateEvent(new ThinkingDeltaEvent(0, "pl", thinking), thinking);
+        yield return new MessageUpdateEvent(new ThinkingEndEvent(0, thinking), thinking);
+        yield return new MessageUpdateEvent(new ToolCallStartEvent(0, tool), tool);
+        yield return new MessageUpdateEvent(new ToolCallDeltaEvent(0, """{"command":""", tool), tool);
+        yield return new MessageUpdateEvent(new ToolCallEndEvent(0, tool), tool);
+        yield return new MessageUpdateEvent(new DoneEvent(done), done);
+        yield return new AgentEndEvent(messages: [done]);
         await Task.CompletedTask;
     }
 
