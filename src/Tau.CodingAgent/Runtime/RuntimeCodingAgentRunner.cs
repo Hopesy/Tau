@@ -135,8 +135,10 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner, ICodingAgentT
             CodingAgentTokenEstimator.Estimate(messages),
             _config.Model.ContextWindow,
             SessionName,
-            sessionFile);
+            sessionFile)
+            .WithUsage(CodingAgentSessionUsageSummary.FromMessages(messages));
     }
+
     public async Task<CodingAgentCompactionResult> CompactAsync(
         string? customInstructions = null,
         CancellationToken cancellationToken = default)

@@ -194,6 +194,58 @@ public sealed class CodingAgentTreeSessionRedactionTests
     }
 
     [Fact]
+    public void GetCurrentBranchUsageSummary_SumsAssistantUsageCostAcrossCompactionBranch()
+    {
+        var path = CreateTempPath("tau-tree-usage-summary");
+
+        try
+        {
+            var store = new CodingAgentTreeSessionStore(path, secretRedactor: new TauSecretRedactor(enabled: true));
+            store.AppendMessages(
+                [
+                    new UserMessage("first"),
+                    new AssistantMessage([new TextContent("priced one")])
+                    {
+                        Usage = new Usage(
+                            InputTokens: 100,
+                            OutputTokens: 20,
+                            CacheReadTokens: 3,
+                            CacheWriteTokens: 4,
+                            ServiceTier: "flex",
+                            Cost: new UsageCost(0.01m, 0.02m, 0.003m, 0.004m))
+                    },
+                    new UserMessage("second"),
+                    new AssistantMessage([new TextContent("priced two")])
+                    {
+                        Usage = new Usage(
+                            InputTokens: 50,
+                            OutputTokens: 5,
+                            CacheReadTokens: 1,
+                            CacheWriteTokens: 2,
+                            ServiceTier: "default",
+                            Cost: new UsageCost(0.005m, 0.006m, 0.001m, 0.002m))
+                    }
+                ],
+                0);
+            store.AppendCompaction("summary keeps branch history", firstKeptEntryId: null, tokensBefore: 90);
+
+            var summary = store.GetCurrentBranchUsageSummary();
+
+            Assert.Equal(150, summary.Tokens.Input);
+            Assert.Equal(25, summary.Tokens.Output);
+            Assert.Equal(4, summary.Tokens.CacheRead);
+            Assert.Equal(6, summary.Tokens.CacheWrite);
+            Assert.Equal(185, summary.Tokens.Total);
+            Assert.Equal(0.051m, summary.Cost);
+            Assert.Equal(2, summary.CostRecords);
+        }
+        finally
+        {
+            DeleteIfExists(path);
+        }
+    }
+
+    [Fact]
     public void LoadCurrentBranchSnapshot_RestoresTreeAfterRedactedWrites()
     {
         var path = CreateTempPath("tau-tree-redaction-restore");

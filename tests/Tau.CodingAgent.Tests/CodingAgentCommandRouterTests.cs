@@ -3450,7 +3450,16 @@ public class CodingAgentCommandRouterTests
             [
                 new TextContent("checking"),
                 new ToolCallContent("tool-1", "read_file", "{}")
-            ]));
+            ])
+        {
+            Usage = new Usage(
+                InputTokens: 100,
+                OutputTokens: 20,
+                CacheReadTokens: 3,
+                CacheWriteTokens: 4,
+                ServiceTier: "flex",
+                Cost: new UsageCost(0.01m, 0.02m, 0.003m, 0.004m))
+        });
         runner.MutableMessages.Add(new ToolResultMessage("tool-1", [new TextContent("done")]));
         var sessionFile = Path.Combine(Path.GetTempPath(), "tau-session.json");
         var router = new CodingAgentCommandRouter(
@@ -3463,7 +3472,7 @@ public class CodingAgentCommandRouterTests
         Assert.True(result.Handled);
         Assert.False(result.IsError);
         Assert.Equal(
-            $"session: name port slice, model openai/gpt-5.4, messages 3 (user 1, assistant 1, tool 1, toolCalls 1), tokens ~9/128000 context (127991 remaining), retry enabled 2 attempts, base 125ms, file {sessionFile}",
+            $"session: name port slice, model openai/gpt-5.4, messages 3 (user 1, assistant 1, tool 1, toolCalls 1), tokens ~9/128000 context (127991 remaining), usage in/out/cache 100/20/7, cost $0.037, retry enabled 2 attempts, base 125ms, file {sessionFile}",
             result.Message);
         Assert.Empty(runner.Inputs);
     }
@@ -3510,6 +3519,51 @@ public class CodingAgentCommandRouterTests
             Assert.Contains($", tree {treePath}, leaf ", result.Message, StringComparison.Ordinal);
             Assert.Contains("branch messages 1", result.Message, StringComparison.Ordinal);
             Assert.Contains($", cwd {Environment.CurrentDirectory}", result.Message, StringComparison.Ordinal);
+            Assert.Empty(runner.Inputs);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_SessionCommand_WithTreeSessionUsesPersistedBranchUsageCost()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-coding-agent-session-tree-cost-" + Guid.NewGuid().ToString("N"));
+        var treePath = Path.Combine(directory, "session.jsonl");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.MutableMessages.Add(new UserMessage("price this"));
+        runner.MutableMessages.Add(new AssistantMessage([new TextContent("priced")])
+        {
+            Usage = new Usage(
+                InputTokens: 100,
+                OutputTokens: 20,
+                CacheReadTokens: 3,
+                CacheWriteTokens: 4,
+                ServiceTier: "flex",
+                Cost: new UsageCost(0.01m, 0.02m, 0.003m, 0.004m))
+        });
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+            var tree = CodingAgentTreeSessionController.OpenOrCreate(treePath);
+            tree.SyncFromRunner(runner);
+            runner.MutableMessages[1] = new AssistantMessage([new TextContent("priced without runtime usage")]);
+            var router = new CodingAgentCommandRouter(runner, treeSessionController: tree);
+
+            var result = await router.TryHandleAsync("/session");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.NotNull(result.Message);
+            Assert.Contains("usage in/out/cache 100/20/7", result.Message, StringComparison.Ordinal);
+            Assert.Contains("cost $0.037", result.Message, StringComparison.Ordinal);
+            Assert.Contains($", tree {treePath}, leaf ", result.Message, StringComparison.Ordinal);
             Assert.Empty(runner.Inputs);
         }
         finally

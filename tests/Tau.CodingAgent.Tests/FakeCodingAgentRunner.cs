@@ -195,8 +195,10 @@ public sealed class FakeCodingAgentRunner : ICodingAgentRunner, ICodingAgentTool
             CodingAgentTokenEstimator.Estimate(Messages),
             Model.ContextWindow,
             SessionName,
-            sessionFile);
+            sessionFile)
+            .WithUsage(CodingAgentSessionUsageSummary.FromMessages(Messages));
     }
+
     public Task<CodingAgentCompactionResult> CompactAsync(string? customInstructions = null, CancellationToken cancellationToken = default)
     {
         LastCompactInstructions = customInstructions;

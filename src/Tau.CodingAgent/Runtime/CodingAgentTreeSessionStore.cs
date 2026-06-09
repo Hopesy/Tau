@@ -354,6 +354,9 @@ public sealed class CodingAgentTreeSessionController
 
     public CodingAgentTreeSessionSummary GetSummary() => Store.GetSummary();
 
+    public CodingAgentSessionUsageSummary GetCurrentBranchUsageSummary() =>
+        Store.GetCurrentBranchUsageSummary();
+
     public CodingAgentTreeFoldState? LoadTreeFoldState() => Store.LoadTreeFoldState();
 
     public string FormatTree(int maxEntries = 24) => Store.FormatTree(maxEntries);
@@ -510,6 +513,30 @@ public sealed class CodingAgentTreeSessionStore
             state.LabelsById.Count,
             state.Header.Cwd,
             state.Header.ParentSession);
+    }
+
+    public CodingAgentSessionUsageSummary GetCurrentBranchUsageSummary()
+    {
+        var state = ReadState();
+        var branch = state.GetBranch(state.LeafId);
+        var messages = new List<ChatMessage>();
+        foreach (var entry in branch)
+        {
+            if (entry.Type != MessageType ||
+                entry.Message is null ||
+                !string.Equals(entry.Message.Role, "assistant", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var message = CodingAgentSessionStore.ToMessage(entry.Message);
+            if (message is not null)
+            {
+                messages.Add(message);
+            }
+        }
+
+        return CodingAgentSessionUsageSummary.FromMessages(messages);
     }
 
     public IReadOnlyList<string> AppendMessages(IReadOnlyList<ChatMessage> messages, int startIndex)

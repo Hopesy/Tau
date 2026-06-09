@@ -265,7 +265,7 @@ public sealed class CodingAgentRpcHost
                     await HandleCloneAsync(id, cancellationToken).ConfigureAwait(false);
                     break;
                 case "get_session_stats":
-                    await WriteSuccessAsync(id, "get_session_stats", _runner.GetSessionStats(_sessionStore?.Path), cancellationToken)
+                    await WriteSuccessAsync(id, "get_session_stats", CreateSessionStats(), cancellationToken)
                         .ConfigureAwait(false);
                     break;
                 case "get_messages":
@@ -811,6 +811,19 @@ public sealed class CodingAgentRpcHost
         _runner.SessionName = GetRequiredString(command, "name").Trim();
         PersistSession();
         await WriteSuccessAsync(id, "set_session_name", cancellationToken: cancellationToken).ConfigureAwait(false);
+    }
+
+    private CodingAgentSessionStats CreateSessionStats()
+    {
+        if (_treeSessionController is null)
+        {
+            return _runner.GetSessionStats(_sessionStore?.Path);
+        }
+
+        _treeSessionController.SyncFromRunner(_runner);
+        return _runner
+            .GetSessionStats(_sessionStore?.Path)
+            .WithUsage(_treeSessionController.GetCurrentBranchUsageSummary());
     }
 
     private async Task HandleCompactAsync(string? id, JsonElement command, CancellationToken cancellationToken)

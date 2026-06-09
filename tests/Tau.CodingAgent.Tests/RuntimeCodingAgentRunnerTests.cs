@@ -88,7 +88,16 @@ public class RuntimeCodingAgentRunnerTests
                     [
                         new TextContent("thinking"),
                         new ToolCallContent("tool-1", "read_file", "{}")
-                    ]),
+                    ])
+                {
+                    Usage = new Usage(
+                        InputTokens: 100,
+                        OutputTokens: 20,
+                        CacheReadTokens: 3,
+                        CacheWriteTokens: 4,
+                        ServiceTier: "flex",
+                        Cost: new UsageCost(0.01m, 0.02m, 0.003m, 0.004m))
+                },
                 new ToolResultMessage("tool-1", [new TextContent("done")])
             ]);
         runner.SessionName = "stats session";
@@ -106,6 +115,13 @@ public class RuntimeCodingAgentRunnerTests
         Assert.Equal(CodingAgentTokenEstimator.Estimate(runner.Messages), stats.EstimatedTokens);
         Assert.Equal(runner.Model.ContextWindow, stats.ContextWindowTokens);
         Assert.Equal(sessionFile, stats.SessionFile);
+        Assert.Equal(100, stats.Tokens.Input);
+        Assert.Equal(20, stats.Tokens.Output);
+        Assert.Equal(3, stats.Tokens.CacheRead);
+        Assert.Equal(4, stats.Tokens.CacheWrite);
+        Assert.Equal(127, stats.Tokens.Total);
+        Assert.Equal(0.037m, stats.Cost);
+        Assert.Equal(1, stats.CostRecords);
     }
 
     [Fact]

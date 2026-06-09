@@ -209,6 +209,89 @@ public sealed class CodingAgentRpcHostTests
     }
 
     [Fact]
+    public async Task RunAsync_GetSessionStatsReturnsUsageCostTotals()
+    {
+        var runner = new FakeCodingAgentRunner((_, _) => EmptyRun())
+        {
+            SessionName = "stats session"
+        };
+        runner.MutableMessages.Add(new UserMessage("price this"));
+        runner.MutableMessages.Add(new AssistantMessage([new TextContent("priced")])
+        {
+            Usage = new Usage(
+                InputTokens: 100,
+                OutputTokens: 20,
+                CacheReadTokens: 3,
+                CacheWriteTokens: 4,
+                ServiceTier: "flex",
+                Cost: new UsageCost(0.01m, 0.02m, 0.003m, 0.004m))
+        });
+        var output = new StringWriter();
+        var host = new CodingAgentRpcHost(
+            runner,
+            new StringReader("{\"id\":\"stats1\",\"type\":\"get_session_stats\"}\n"),
+            output);
+
+        await host.RunAsync();
+
+        var response = FindResponse(ReadJsonLines(output), "get_session_stats");
+        Assert.Equal("stats1", response.GetProperty("id").GetString());
+        Assert.True(response.GetProperty("success").GetBoolean());
+        var data = response.GetProperty("data");
+        Assert.Equal("openai", data.GetProperty("provider").GetString());
+        Assert.Equal("gpt-5.4", data.GetProperty("model").GetString());
+        Assert.Equal("stats session", data.GetProperty("sessionName").GetString());
+        var tokens = data.GetProperty("tokens");
+        Assert.Equal(100, tokens.GetProperty("input").GetInt32());
+        Assert.Equal(20, tokens.GetProperty("output").GetInt32());
+        Assert.Equal(3, tokens.GetProperty("cacheRead").GetInt32());
+        Assert.Equal(4, tokens.GetProperty("cacheWrite").GetInt32());
+        Assert.Equal(127, tokens.GetProperty("total").GetInt32());
+        Assert.Equal(0.037m, data.GetProperty("cost").GetDecimal());
+        Assert.Equal(1, data.GetProperty("costRecords").GetInt32());
+    }
+
+    [Fact]
+    public async Task RunAsync_GetSessionStatsWithTreeSessionUsesPersistedBranchUsageCost()
+    {
+        using var temp = TempDirectory.Create();
+        var treePath = Path.Combine(temp.Path, "session.jsonl");
+        var treeController = CodingAgentTreeSessionController.OpenOrCreate(treePath);
+        var runner = new FakeCodingAgentRunner((_, _) => EmptyRun());
+        runner.MutableMessages.Add(new UserMessage("price this"));
+        runner.MutableMessages.Add(new AssistantMessage([new TextContent("priced")])
+        {
+            Usage = new Usage(
+                InputTokens: 100,
+                OutputTokens: 20,
+                CacheReadTokens: 3,
+                CacheWriteTokens: 4,
+                ServiceTier: "flex",
+                Cost: new UsageCost(0.01m, 0.02m, 0.003m, 0.004m))
+        });
+        treeController.SyncFromRunner(runner);
+        runner.MutableMessages[1] = new AssistantMessage([new TextContent("priced without runtime usage")]);
+        var output = new StringWriter();
+        var host = new CodingAgentRpcHost(
+            runner,
+            new StringReader("{\"id\":\"stats1\",\"type\":\"get_session_stats\"}\n"),
+            output,
+            treeSessionController: treeController);
+
+        await host.RunAsync();
+
+        var data = FindResponse(ReadJsonLines(output), "get_session_stats").GetProperty("data");
+        var tokens = data.GetProperty("tokens");
+        Assert.Equal(100, tokens.GetProperty("input").GetInt32());
+        Assert.Equal(20, tokens.GetProperty("output").GetInt32());
+        Assert.Equal(3, tokens.GetProperty("cacheRead").GetInt32());
+        Assert.Equal(4, tokens.GetProperty("cacheWrite").GetInt32());
+        Assert.Equal(127, tokens.GetProperty("total").GetInt32());
+        Assert.Equal(0.037m, data.GetProperty("cost").GetDecimal());
+        Assert.Equal(1, data.GetProperty("costRecords").GetInt32());
+    }
+
+    [Fact]
     public async Task RunAsync_GetCommandsIncludesPromptSkillAndExtensionCommands()
     {
         using var temp = TempDirectory.Create();

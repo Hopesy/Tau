@@ -1014,19 +1014,18 @@ public sealed class CodingAgentCommandRouter
             return CodingAgentCommandResult.Error(CodingAgentCommandCatalog.Usage("/session"));
         }
 
-        var stats = _runner.GetSessionStats(_sessionFile);
+        var stats = GetSessionStats();
         var file = string.IsNullOrWhiteSpace(stats.SessionFile) ? "none" : stats.SessionFile;
         var tokenBudget = FormatTokenBudget(stats);
         if (_treeSessionController is not null)
         {
-            _treeSessionController.SyncFromRunner(_runner);
             var tree = _treeSessionController.GetSummary();
             return CodingAgentCommandResult.Status(
-                $"session: name {FormatSessionName(stats.SessionName)}, model {stats.Provider}/{stats.Model}, messages {stats.TotalMessages} (user {stats.UserMessages}, assistant {stats.AssistantMessages}, tool {stats.ToolResultMessages}, toolCalls {stats.ToolCalls}), tokens {tokenBudget}, retry {FormatRetryPolicy(_retryOptions)}, file {file}, tree {tree.FilePath}, leaf {FormatTreeId(tree.LeafId)}, entries {tree.EntryCount}, messages {tree.TotalMessageCount}, branch entries {tree.BranchEntryCount}, branch messages {tree.BranchMessageCount}, branches {tree.BranchPointCount}, labels {tree.LabelCount}, cwd {tree.Cwd}{FormatParentSession(tree.ParentSession)}");
+                $"session: name {FormatSessionName(stats.SessionName)}, model {stats.Provider}/{stats.Model}, messages {stats.TotalMessages} (user {stats.UserMessages}, assistant {stats.AssistantMessages}, tool {stats.ToolResultMessages}, toolCalls {stats.ToolCalls}), tokens {tokenBudget}{FormatUsageAndCost(stats)}, retry {FormatRetryPolicy(_retryOptions)}, file {file}, tree {tree.FilePath}, leaf {FormatTreeId(tree.LeafId)}, entries {tree.EntryCount}, messages {tree.TotalMessageCount}, branch entries {tree.BranchEntryCount}, branch messages {tree.BranchMessageCount}, branches {tree.BranchPointCount}, labels {tree.LabelCount}, cwd {tree.Cwd}{FormatParentSession(tree.ParentSession)}");
         }
 
         return CodingAgentCommandResult.Status(
-            $"session: name {FormatSessionName(stats.SessionName)}, model {stats.Provider}/{stats.Model}, messages {stats.TotalMessages} (user {stats.UserMessages}, assistant {stats.AssistantMessages}, tool {stats.ToolResultMessages}, toolCalls {stats.ToolCalls}), tokens {tokenBudget}, retry {FormatRetryPolicy(_retryOptions)}, file {file}");
+            $"session: name {FormatSessionName(stats.SessionName)}, model {stats.Provider}/{stats.Model}, messages {stats.TotalMessages} (user {stats.UserMessages}, assistant {stats.AssistantMessages}, tool {stats.ToolResultMessages}, toolCalls {stats.ToolCalls}), tokens {tokenBudget}{FormatUsageAndCost(stats)}, retry {FormatRetryPolicy(_retryOptions)}, file {file}");
     }
 
     private async Task<CodingAgentCommandResult> HandleMetadataCommandAsync(
@@ -3157,6 +3156,38 @@ public sealed class CodingAgentCommandRouter
 
         var threshold = _autoCompaction.ThresholdTokens;
         return $"{contextBudget}, auto-compact {threshold} ({Math.Max(0, threshold - estimate)} remaining)";
+    }
+
+    private CodingAgentSessionStats GetSessionStats()
+    {
+        if (_treeSessionController is null)
+        {
+            return _runner.GetSessionStats(_sessionFile);
+        }
+
+        _treeSessionController.SyncFromRunner(_runner);
+        return _runner
+            .GetSessionStats(_sessionFile)
+            .WithUsage(_treeSessionController.GetCurrentBranchUsageSummary());
+    }
+
+    private static string FormatUsageAndCost(CodingAgentSessionStats stats)
+    {
+        var parts = new List<string>();
+        if (stats.Tokens.Total > 0)
+        {
+            var cacheTokens = stats.Tokens.CacheRead + stats.Tokens.CacheWrite;
+            parts.Add($"usage in/out/cache {stats.Tokens.Input}/{stats.Tokens.Output}/{cacheTokens}");
+        }
+
+        if (stats.CostRecords > 0)
+        {
+            parts.Add($"cost ${stats.Cost.ToString("0.000", System.Globalization.CultureInfo.InvariantCulture)}");
+        }
+
+        return parts.Count == 0
+            ? string.Empty
+            : $", {string.Join(", ", parts)}";
     }
 
     private string? GetLastAssistantText()
