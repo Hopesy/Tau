@@ -416,18 +416,28 @@ public sealed class CodingAgentPackageManager
             return;
         }
 
-        AddConventionDirectory(root, "extensions", extensions);
-        AddConventionDirectory(root, "skills", skills);
-        AddConventionDirectory(root, "prompts", prompts);
-        AddConventionDirectory(root, "themes", themes);
+        AddConventionResourceEntries(root, "extensions", extensions);
+        AddConventionResourceEntries(root, "skills", skills);
+        AddConventionResourceEntries(root, "prompts", prompts);
+        AddConventionResourceEntries(root, "themes", themes);
     }
 
-    private static void AddConventionDirectory(string root, string name, ICollection<string> target)
+    private static void AddConventionResourceEntries(string root, string resourceType, ICollection<string> target)
     {
-        var directory = Path.Combine(root, name);
+        var directory = Path.Combine(root, resourceType);
         if (Directory.Exists(directory))
         {
-            target.Add(directory);
+            if (resourceType.Equals("extensions", StringComparison.Ordinal))
+            {
+                foreach (var entry in CollectExtensionEntries(directory))
+                {
+                    target.Add(entry);
+                }
+            }
+            else
+            {
+                target.Add(directory);
+            }
         }
     }
 
@@ -448,7 +458,18 @@ public sealed class CodingAgentPackageManager
             {
                 if (!string.IsNullOrWhiteSpace(entry))
                 {
-                    target.Add(ResolvePath(entry, root));
+                    var resolved = ResolvePath(entry, root);
+                    if (resourceType.Equals("extensions", StringComparison.Ordinal))
+                    {
+                        foreach (var path in CollectResourceFilesFromPath(resolved, resourceType))
+                        {
+                            target.Add(path);
+                        }
+                    }
+                    else
+                    {
+                        target.Add(resolved);
+                    }
                 }
             }
 
@@ -500,7 +521,7 @@ public sealed class CodingAgentPackageManager
             return;
         }
 
-        AddConventionDirectory(root, resourceType, target);
+        AddConventionResourceEntries(root, resourceType, target);
     }
 
     private static bool IsOverridePattern(string value) =>
@@ -593,6 +614,11 @@ public sealed class CodingAgentPackageManager
             return [];
         }
 
+        if (resourceType.Equals("extensions", StringComparison.Ordinal))
+        {
+            return CollectExtensionEntries(path);
+        }
+
         if (File.Exists(path))
         {
             return [Path.GetFullPath(path)];
@@ -618,6 +644,171 @@ public sealed class CodingAgentPackageManager
             return [];
         }
     }
+
+    private static IReadOnlyList<string> CollectExtensionEntries(string path)
+    {
+        if (File.Exists(path))
+        {
+            return IsExtensionEntryFile(path) ? [Path.GetFullPath(path)] : [];
+        }
+
+        if (!Directory.Exists(path))
+        {
+            return [];
+        }
+
+        var rootEntries = ResolveExtensionEntries(path);
+        if (rootEntries is not null)
+        {
+            return rootEntries;
+        }
+
+        var entries = new List<string>();
+        IEnumerable<string> children;
+        try
+        {
+            children = Directory.EnumerateFileSystemEntries(path)
+                .Order(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or DirectoryNotFoundException)
+        {
+            return [];
+        }
+
+        foreach (var child in children)
+        {
+            var name = Path.GetFileName(child);
+            if (IsIgnoredExtensionEntryName(name))
+            {
+                continue;
+            }
+
+            if (File.Exists(child))
+            {
+                if (IsExtensionEntryFile(child))
+                {
+                    entries.Add(Path.GetFullPath(child));
+                }
+
+                continue;
+            }
+
+            if (!Directory.Exists(child))
+            {
+                continue;
+            }
+
+            var resolved = ResolveExtensionEntries(child);
+            if (resolved is not null)
+            {
+                entries.AddRange(resolved);
+            }
+        }
+
+        return entries
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    private static IReadOnlyList<string>? ResolveExtensionEntries(string directory)
+    {
+        var manifestEntries = ResolveExtensionManifestEntries(directory);
+        if (manifestEntries.Count > 0)
+        {
+            return manifestEntries;
+        }
+
+        var indexTs = Path.Combine(directory, "index.ts");
+        if (File.Exists(indexTs))
+        {
+            return [Path.GetFullPath(indexTs)];
+        }
+
+        var indexJs = Path.Combine(directory, "index.js");
+        if (File.Exists(indexJs))
+        {
+            return [Path.GetFullPath(indexJs)];
+        }
+
+        var indexJson = Path.Combine(directory, "index.json");
+        if (File.Exists(indexJson))
+        {
+            return [Path.GetFullPath(indexJson)];
+        }
+
+        return null;
+    }
+
+    private static IReadOnlyList<string> ResolveExtensionManifestEntries(string directory)
+    {
+        var packageJsonPath = Path.Combine(directory, "package.json");
+        if (!File.Exists(packageJsonPath))
+        {
+            return [];
+        }
+
+        IReadOnlyList<string>? configured;
+        try
+        {
+            using var document = JsonDocument.Parse(File.ReadAllText(packageJsonPath));
+            configured = document.RootElement.TryGetProperty("pi", out var pi) && pi.ValueKind == JsonValueKind.Object
+                ? ReadStringArray(pi, "extensions")
+                : null;
+        }
+        catch (Exception ex) when (ex is JsonException or IOException or UnauthorizedAccessException)
+        {
+            return [];
+        }
+
+        if (configured is null || configured.Count == 0)
+        {
+            return [];
+        }
+
+        var entries = new List<string>();
+        foreach (var entry in configured)
+        {
+            if (string.IsNullOrWhiteSpace(entry))
+            {
+                continue;
+            }
+
+            var resolved = ResolvePath(entry, directory);
+            if (File.Exists(resolved))
+            {
+                if (IsExtensionEntryFile(resolved))
+                {
+                    entries.Add(Path.GetFullPath(resolved));
+                }
+
+                continue;
+            }
+
+            if (Directory.Exists(resolved) && !PathsEqual(resolved, directory))
+            {
+                entries.AddRange(CollectExtensionEntries(resolved));
+            }
+        }
+
+        return entries
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    private static bool IsExtensionEntryFile(string path)
+    {
+        var extension = Path.GetExtension(path);
+        return extension.Equals(".ts", StringComparison.OrdinalIgnoreCase) ||
+            extension.Equals(".js", StringComparison.OrdinalIgnoreCase) ||
+            extension.Equals(".json", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsIgnoredExtensionEntryName(string name) =>
+        string.IsNullOrWhiteSpace(name) ||
+        name.StartsWith(".", StringComparison.Ordinal) ||
+        name.Equals("node_modules", StringComparison.OrdinalIgnoreCase) ||
+        name.Equals(".git", StringComparison.OrdinalIgnoreCase);
 
     private static IReadOnlyList<string> ApplyResourcePatterns(
         IReadOnlyList<string> allFiles,

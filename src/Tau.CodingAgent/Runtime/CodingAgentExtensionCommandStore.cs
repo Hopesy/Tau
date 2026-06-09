@@ -51,6 +51,12 @@ public sealed record CodingAgentExtensionFileStatus(
     IReadOnlyList<string> PromptPaths,
     IReadOnlyList<string> ThemePaths);
 
+public sealed record CodingAgentExtensionModule(
+    string FilePath,
+    string Scope,
+    string Runtime,
+    string Status);
+
 public sealed record CodingAgentExtensionDiagnostic(
     string Severity,
     string Message,
@@ -61,6 +67,7 @@ public sealed record CodingAgentExtensionStatus(
     IReadOnlyList<CodingAgentExtensionCommand> Commands,
     CodingAgentExtensionResources Resources,
     IReadOnlyList<CodingAgentExtensionFileStatus> Files,
+    IReadOnlyList<CodingAgentExtensionModule> Modules,
     IReadOnlyList<CodingAgentExtensionDiagnostic> Diagnostics);
 
 public sealed class CodingAgentExtensionCommandStore
@@ -106,11 +113,12 @@ public sealed class CodingAgentExtensionCommandStore
         var promptPaths = new List<string>();
         var themePaths = new List<string>();
         var files = new List<CodingAgentExtensionFileStatus>();
+        var modules = new List<CodingAgentExtensionModule>();
         var diagnostics = new List<CodingAgentExtensionDiagnostic>();
         if (_includeDefaults)
         {
-            LoadSourceDirectory(_userExtensionsDirectory, "user", definitions, skillPaths, promptPaths, themePaths, files, diagnostics);
-            LoadSourceDirectory(Path.Combine(_cwd, ".tau", "extensions"), "project", definitions, skillPaths, promptPaths, themePaths, files, diagnostics);
+            LoadSourceDirectory(_userExtensionsDirectory, "user", definitions, skillPaths, promptPaths, themePaths, files, modules, diagnostics);
+            LoadSourceDirectory(Path.Combine(_cwd, ".tau", "extensions"), "project", definitions, skillPaths, promptPaths, themePaths, files, modules, diagnostics);
         }
 
         foreach (var path in GetExplicitPaths())
@@ -118,11 +126,15 @@ public sealed class CodingAgentExtensionCommandStore
             var resolved = ResolvePath(path, _cwd);
             if (Directory.Exists(resolved))
             {
-                LoadSourceDirectory(resolved, "path", definitions, skillPaths, promptPaths, themePaths, files, diagnostics, reportMissing: true);
+                LoadSourceDirectory(resolved, "path", definitions, skillPaths, promptPaths, themePaths, files, modules, diagnostics, reportMissing: true);
             }
             else if (File.Exists(resolved) && Path.GetExtension(resolved).Equals(".json", StringComparison.OrdinalIgnoreCase))
             {
                 LoadSourceFile(resolved, "path", definitions, skillPaths, promptPaths, themePaths, files, diagnostics);
+            }
+            else if (File.Exists(resolved) && IsModuleFile(resolved))
+            {
+                AddModule(resolved, "path", modules);
             }
             else if (File.Exists(resolved))
             {
@@ -151,6 +163,9 @@ public sealed class CodingAgentExtensionCommandStore
             ResolveInvocationNames(definitions),
             resources,
             files,
+            modules
+                .DistinctBy(static module => Path.GetFullPath(module.FilePath), StringComparer.OrdinalIgnoreCase)
+                .ToArray(),
             diagnostics);
     }
 
@@ -229,6 +244,7 @@ public sealed class CodingAgentExtensionCommandStore
         ICollection<string> promptPaths,
         ICollection<string> themePaths,
         ICollection<CodingAgentExtensionFileStatus> fileStatuses,
+        ICollection<CodingAgentExtensionModule> modules,
         ICollection<CodingAgentExtensionDiagnostic> diagnostics,
         bool reportMissing = false)
     {
@@ -267,6 +283,11 @@ public sealed class CodingAgentExtensionCommandStore
         foreach (var file in jsonFiles)
         {
             LoadSourceFile(file, scope, definitions, skillPaths, promptPaths, themePaths, fileStatuses, diagnostics);
+        }
+
+        foreach (var module in DiscoverModuleFiles(directory))
+        {
+            AddModule(module, scope, modules);
         }
     }
 
@@ -589,6 +610,181 @@ public sealed class CodingAgentExtensionCommandStore
         return parts.Any(static part =>
             part.Equals("node_modules", StringComparison.OrdinalIgnoreCase)
             || part.Equals(".git", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static IReadOnlyList<string> DiscoverModuleFiles(string directory)
+    {
+        if (!Directory.Exists(directory))
+        {
+            return [];
+        }
+
+        var rootEntries = ResolveModuleEntries(directory);
+        if (rootEntries is not null)
+        {
+            return rootEntries;
+        }
+
+        var modules = new List<string>();
+        IEnumerable<string> entries;
+        try
+        {
+            entries = Directory.EnumerateFileSystemEntries(directory)
+                .Order(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or DirectoryNotFoundException)
+        {
+            return [];
+        }
+
+        foreach (var entry in entries)
+        {
+            var name = Path.GetFileName(entry);
+            if (string.IsNullOrWhiteSpace(name) ||
+                name.StartsWith(".", StringComparison.Ordinal) ||
+                name.Equals("node_modules", StringComparison.OrdinalIgnoreCase) ||
+                name.Equals(".git", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (File.Exists(entry))
+            {
+                if (IsModuleFile(entry))
+                {
+                    modules.Add(Path.GetFullPath(entry));
+                }
+
+                continue;
+            }
+
+            if (!Directory.Exists(entry))
+            {
+                continue;
+            }
+
+            var resolved = ResolveModuleEntries(entry);
+            if (resolved is not null)
+            {
+                modules.AddRange(resolved);
+            }
+        }
+
+        return modules
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    private static IReadOnlyList<string>? ResolveModuleEntries(string directory)
+    {
+        var manifestEntries = ResolveModuleManifestEntries(directory);
+        if (manifestEntries.Count > 0)
+        {
+            return manifestEntries;
+        }
+
+        var indexTs = Path.Combine(directory, "index.ts");
+        if (File.Exists(indexTs))
+        {
+            return [Path.GetFullPath(indexTs)];
+        }
+
+        var indexJs = Path.Combine(directory, "index.js");
+        if (File.Exists(indexJs))
+        {
+            return [Path.GetFullPath(indexJs)];
+        }
+
+        return null;
+    }
+
+    private static IReadOnlyList<string> ResolveModuleManifestEntries(string directory)
+    {
+        var packageJsonPath = Path.Combine(directory, "package.json");
+        if (!File.Exists(packageJsonPath))
+        {
+            return [];
+        }
+
+        IReadOnlyList<string>? configured;
+        try
+        {
+            using var document = JsonDocument.Parse(File.ReadAllText(packageJsonPath));
+            configured = document.RootElement.TryGetProperty("pi", out var pi) && pi.ValueKind == JsonValueKind.Object
+                ? ReadPathArray(pi, "extensions")
+                : null;
+        }
+        catch (Exception ex) when (ex is JsonException or IOException or UnauthorizedAccessException)
+        {
+            return [];
+        }
+
+        if (configured is null || configured.Count == 0)
+        {
+            return [];
+        }
+
+        var modules = new List<string>();
+        foreach (var entry in configured)
+        {
+            var resolved = ResolvePath(entry, directory);
+            if (File.Exists(resolved))
+            {
+                if (IsModuleFile(resolved))
+                {
+                    modules.Add(Path.GetFullPath(resolved));
+                }
+
+                continue;
+            }
+
+            if (Directory.Exists(resolved) &&
+                !Path.GetFullPath(resolved).Equals(Path.GetFullPath(directory), StringComparison.OrdinalIgnoreCase))
+            {
+                modules.AddRange(DiscoverModuleFiles(resolved));
+            }
+        }
+
+        return modules
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    private static IReadOnlyList<string>? ReadPathArray(JsonElement element, string propertyName)
+    {
+        if (!element.TryGetProperty(propertyName, out var property))
+        {
+            return null;
+        }
+
+        if (property.ValueKind != JsonValueKind.Array)
+        {
+            return [];
+        }
+
+        return property.EnumerateArray()
+            .Where(static item => item.ValueKind == JsonValueKind.String)
+            .Select(static item => item.GetString() ?? string.Empty)
+            .Where(static item => !string.IsNullOrWhiteSpace(item))
+            .Select(static item => item.Trim())
+            .ToArray();
+    }
+
+    private static bool IsModuleFile(string file)
+    {
+        var extension = Path.GetExtension(file);
+        return extension.Equals(".ts", StringComparison.OrdinalIgnoreCase) ||
+            extension.Equals(".js", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static void AddModule(string filePath, string scope, ICollection<CodingAgentExtensionModule> modules)
+    {
+        modules.Add(new CodingAgentExtensionModule(
+            Path.GetFullPath(filePath),
+            scope,
+            Path.GetExtension(filePath).Equals(".ts", StringComparison.OrdinalIgnoreCase) ? "typescript" : "javascript",
+            "discovered; runtime pending"));
     }
 
     private sealed record CommandDefinition(

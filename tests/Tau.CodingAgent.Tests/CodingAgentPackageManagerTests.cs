@@ -46,6 +46,7 @@ public sealed class CodingAgentPackageManagerTests
         var packageRoot = Path.Combine(temp.Path, "pkg");
         Directory.CreateDirectory(packageRoot);
         Directory.CreateDirectory(Path.Combine(packageRoot, "ext"));
+        File.WriteAllText(Path.Combine(packageRoot, "ext", "index.ts"), "export default () => {};");
         Directory.CreateDirectory(Path.Combine(packageRoot, "skills"));
         Directory.CreateDirectory(Path.Combine(packageRoot, "prompts"));
         Directory.CreateDirectory(Path.Combine(packageRoot, "themes"));
@@ -71,10 +72,56 @@ public sealed class CodingAgentPackageManagerTests
         var resources = manager.ResolveResources();
 
         Assert.Empty(resources.Diagnostics);
-        Assert.Equal(Path.Combine(packageRoot, "ext"), Assert.Single(resources.ExtensionPaths));
+        Assert.Equal(Path.Combine(packageRoot, "ext", "index.ts"), Assert.Single(resources.ExtensionPaths));
         Assert.Equal(Path.Combine(packageRoot, "skills"), Assert.Single(resources.SkillPaths));
         Assert.Equal(Path.Combine(packageRoot, "prompts"), Assert.Single(resources.PromptPaths));
         Assert.Equal(Path.Combine(packageRoot, "themes"), Assert.Single(resources.ThemePaths));
+    }
+
+    [Fact]
+    public void ResolveResources_AutoDiscoversExtensionEntriesFromConventionDirectory()
+    {
+        using var temp = TempDirectory.Create();
+        var packageRoot = Path.Combine(temp.Path, "pkg");
+        var extensions = Path.Combine(packageRoot, "extensions");
+        Directory.CreateDirectory(extensions);
+        Directory.CreateDirectory(Path.Combine(extensions, "nested"));
+        Directory.CreateDirectory(Path.Combine(extensions, "package-ext", "src"));
+        Directory.CreateDirectory(Path.Combine(extensions, "deep", "ignored"));
+        File.WriteAllText(Path.Combine(extensions, "direct.ts"), "export default () => {};");
+        File.WriteAllText(Path.Combine(extensions, "nested", "index.js"), "export default () => {};");
+        File.WriteAllText(Path.Combine(extensions, "deep", "ignored", "not-discovered.ts"), "export default () => {};");
+        File.WriteAllText(
+            Path.Combine(extensions, "package-ext", "package.json"),
+            """
+            {
+              "pi": {
+                "extensions": ["src/main.ts"]
+              }
+            }
+            """);
+        File.WriteAllText(Path.Combine(extensions, "package-ext", "src", "main.ts"), "export default () => {};");
+
+        var settingsPath = Path.Combine(temp.Path, ".tau", "coding-agent-settings.json");
+        new CodingAgentSettingsStore(settingsPath).Save(new CodingAgentSettingsSnapshot(
+            null,
+            null,
+            Packages: [new CodingAgentPackageSource("./pkg")]));
+        var manager = new CodingAgentPackageManager(
+            cwd: temp.Path,
+            userSettingsPath: Path.Combine(temp.Path, "user-settings.json"),
+            projectSettingsPath: settingsPath);
+
+        var resources = manager.ResolveResources();
+
+        Assert.Empty(resources.Diagnostics);
+        Assert.Equal(
+            [
+                Path.Combine(extensions, "direct.ts"),
+                Path.Combine(extensions, "nested", "index.js"),
+                Path.Combine(extensions, "package-ext", "src", "main.ts")
+            ],
+            resources.ExtensionPaths.OrderBy(path => path, StringComparer.OrdinalIgnoreCase));
     }
 
     [Fact]

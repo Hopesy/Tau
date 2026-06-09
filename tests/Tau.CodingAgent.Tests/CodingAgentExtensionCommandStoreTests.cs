@@ -169,6 +169,57 @@ public class CodingAgentExtensionCommandStoreTests
     }
 
     [Fact]
+    public void LoadStatus_ReportsTypescriptAndJavascriptModuleEntries()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-modules-" + Guid.NewGuid().ToString("N"));
+        var extensions = Path.Combine(directory, ".tau", "extensions");
+        Directory.CreateDirectory(extensions);
+        Directory.CreateDirectory(Path.Combine(extensions, "nested"));
+        Directory.CreateDirectory(Path.Combine(extensions, "packaged", "src"));
+        Directory.CreateDirectory(Path.Combine(extensions, "deep", "ignored"));
+        File.WriteAllText(Path.Combine(extensions, "direct.ts"), "export default () => {};");
+        File.WriteAllText(Path.Combine(extensions, "nested", "index.js"), "export default () => {};");
+        File.WriteAllText(Path.Combine(extensions, "deep", "ignored", "not-discovered.ts"), "export default () => {};");
+        File.WriteAllText(
+            Path.Combine(extensions, "packaged", "package.json"),
+            """
+            {
+              "pi": {
+                "extensions": ["src/main.ts"]
+              }
+            }
+            """);
+        File.WriteAllText(Path.Combine(extensions, "packaged", "src", "main.ts"), "export default () => {};");
+
+        try
+        {
+            var store = new CodingAgentExtensionCommandStore(
+                cwd: directory,
+                userExtensionsDirectory: Path.Combine(directory, "missing-user-extensions"));
+
+            var status = store.LoadStatus();
+
+            Assert.Empty(status.Diagnostics);
+            Assert.Equal(
+                [
+                    Path.Combine(extensions, "direct.ts"),
+                    Path.Combine(extensions, "nested", "index.js"),
+                    Path.Combine(extensions, "packaged", "src", "main.ts")
+                ],
+                status.Modules.Select(static module => module.FilePath).OrderBy(path => path, StringComparer.OrdinalIgnoreCase));
+            Assert.All(status.Modules, static module => Assert.Equal("project", module.Scope));
+            Assert.Contains(status.Modules, static module =>
+                module.Runtime == "typescript" && module.Status == "discovered; runtime pending");
+            Assert.Contains(status.Modules, static module =>
+                module.Runtime == "javascript" && module.Status == "discovered; runtime pending");
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public void LoadStatus_ReportsFilesResourcesDuplicatesAndDiagnostics()
     {
         var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-status-details-" + Guid.NewGuid().ToString("N"));

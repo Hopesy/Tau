@@ -2185,6 +2185,13 @@ public sealed class CodingAgentCommandRouter
             lines.Add($"extension resources: {string.Join("; ", resources)}");
         }
 
+        if (status.Modules.Count > 0)
+        {
+            var modules = status.Modules.Select(static module =>
+                $"{module.FilePath} ({module.Scope}, {module.Runtime}, {module.Status})");
+            lines.Add($"extension modules: {string.Join("; ", modules)}");
+        }
+
         if (status.Diagnostics.Count > 0)
         {
             var issues = status.Diagnostics.Select(static diagnostic =>
