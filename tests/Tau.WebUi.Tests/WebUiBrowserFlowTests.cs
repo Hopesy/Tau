@@ -347,4 +347,47 @@ public sealed class WebUiBrowserFlowTests
         await page.ClickAsync("#artifacts-list .artifact-pill[data-file='repl-data.json']");
         await Assertions.Expect(page.Locator("#artifact-preview")).ToContainTextAsync("\"answer\": 42", new() { Timeout = 5000 });
     }
+
+    [Fact]
+    public async Task JavaScriptReplBridge_PollsPendingToolRequestAndPostsBrowserResult()
+    {
+        await using var context = await _fixture.NewContextAsync();
+        var page = await context.NewPageAsync();
+
+        await page.GotoAsync("/");
+        await page.WaitForFunctionAsync("document.querySelectorAll('#provider option').length > 0");
+
+        await page.FillAsync("#session-title", "JavaScript bridge");
+        await page.ClickAsync("#new-session");
+        var session = page.Locator("#sessions .session.active");
+        await Assertions.Expect(session).ToBeVisibleAsync(new() { Timeout = 5000 });
+        var sessionId = await session.GetAttributeAsync("data-id");
+        Assert.False(string.IsNullOrWhiteSpace(sessionId));
+        await page.EvaluateAsync(
+            "async sessionId => { await openSession(sessionId); startJavaScriptReplBridgeLoop(sessionId); }",
+            sessionId);
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var execution = _fixture.ReplBridge.ExecuteAsync(
+            sessionId!,
+            "call-browser-repl",
+            "Returning file",
+            """
+            console.log('bridge', 9);
+            await window.returnDownloadableFile('bridge.txt', 'hello bridge', 'text/plain');
+            return 9;
+            """,
+            cts.Token);
+
+        var result = await execution.WaitAsync(TimeSpan.FromSeconds(30));
+
+        Assert.False(result.IsError);
+        Assert.Contains("bridge 9", result.Output, StringComparison.Ordinal);
+        Assert.Contains("=> 9", result.Output, StringComparison.Ordinal);
+        var file = Assert.Single(result.Files);
+        Assert.Equal("bridge.txt", file.FileName);
+        Assert.Equal("text/plain", file.MimeType);
+        Assert.Equal(Encoding.UTF8.GetByteCount("hello bridge"), file.Size);
+        Assert.Equal("hello bridge", Encoding.UTF8.GetString(Convert.FromBase64String(file.ContentBase64)));
+    }
 }

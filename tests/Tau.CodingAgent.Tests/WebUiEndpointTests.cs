@@ -466,6 +466,7 @@ public class WebUiEndpointTests
             builder.Services.AddSingleton(new WebChatStore(storePath));
             builder.Services.AddSingleton(new WebArtifactStore(artifactStorePath));
             builder.Services.AddSingleton<WebArtifactService>();
+            builder.Services.AddSingleton<WebUiJavaScriptReplBridge>();
             builder.Services.AddSingleton<WebChatService>(sp => new WebChatService(
                 sp.GetRequiredService<WebChatStore>(),
                 (_, _, _) =>

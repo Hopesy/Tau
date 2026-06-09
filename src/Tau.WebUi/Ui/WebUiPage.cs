@@ -188,6 +188,9 @@ public static class WebUiPage
             let currentArtifacts = [];
             let activeArtifactFile = null;
             const activeReplSandboxes = new Map();
+            let replBridgeAbortController = null;
+            let replBridgeLoopRunning = false;
+            let replBridgeSessionId = null;
             const currentSessionStorageKey = 'tau.webui.currentSessionId';
 
             async function fetchJson(url, options) {
@@ -403,17 +406,20 @@ public static class WebUiPage
                 window.returnDownloadableFile = async (fileName, content, mimeType) => {
                   let finalContent;
                   let finalMimeType;
+                  let finalContentBase64 = null;
                   if (content instanceof Blob) {
                     if (!mimeType && !content.type) {
                       throw new Error("returnDownloadableFile: MIME type is required for Blob content. Please provide a mimeType parameter (e.g., 'image/png').");
                     }
                     finalContent = bytesToBase64(new Uint8Array(await content.arrayBuffer()));
+                    finalContentBase64 = finalContent;
                     finalMimeType = mimeType || content.type || 'application/octet-stream';
                   } else if (content instanceof Uint8Array) {
                     if (!mimeType) {
                       throw new Error("returnDownloadableFile: MIME type is required for Uint8Array content. Please provide a mimeType parameter (e.g., 'image/png').");
                     }
                     finalContent = bytesToBase64(content);
+                    finalContentBase64 = finalContent;
                     finalMimeType = mimeType;
                   } else if (typeof content === 'string') {
                     finalContent = content;
@@ -422,7 +428,14 @@ public static class WebUiPage
                     finalContent = JSON.stringify(content, null, 2);
                     finalMimeType = mimeType || 'application/json';
                   }
-                  const response = await window.sendRuntimeMessage({ type: 'file-returned', fileName, content: finalContent, mimeType: finalMimeType });
+                  const response = await window.sendRuntimeMessage({
+                    type: 'file-returned',
+                    fileName,
+                    content: finalContent,
+                    contentBase64: finalContentBase64,
+                    isBase64: finalContentBase64 !== null,
+                    mimeType: finalMimeType
+                  });
                   if (response.error) throw new Error(response.error);
                   return { fileName, mimeType: finalMimeType };
                 };
@@ -527,6 +540,50 @@ public static class WebUiPage
               return lines.join('\n').trim() || 'Code executed successfully (no output)';
             }
 
+            function bytesToBase64ForBridge(bytes) {
+              let binary = '';
+              const chunk = 0x8000;
+              for (let i = 0; i < bytes.length; i += chunk) {
+                binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+              }
+              return btoa(binary);
+            }
+
+            function encodeTextFileForBridge(content) {
+              const bytes = new TextEncoder().encode(String(content ?? ''));
+              return {
+                contentBase64: bytesToBase64ForBridge(bytes),
+                size: bytes.length
+              };
+            }
+
+            function estimateBase64SizeForBridge(contentBase64) {
+              const normalized = String(contentBase64 || '').replace(/\s/g, '');
+              if (!normalized) return 0;
+              const padding = normalized.endsWith('==') ? 2 : normalized.endsWith('=') ? 1 : 0;
+              return Math.max(0, Math.floor(normalized.length * 3 / 4) - padding);
+            }
+
+            function normalizeReplFileForBridge(file) {
+              const fileName = file?.fileName || 'file';
+              const mimeType = file?.mimeType || 'application/octet-stream';
+              if (file?.contentBase64 || file?.isBase64) {
+                const contentBase64 = file.contentBase64 || file.content || '';
+                return {
+                  fileName,
+                  mimeType,
+                  size: estimateBase64SizeForBridge(contentBase64),
+                  contentBase64
+                };
+              }
+
+              return {
+                fileName,
+                mimeType,
+                ...encodeTextFileForBridge(file?.content)
+              };
+            }
+
             function completeJavaScriptRepl(context, success, error) {
               if (context.completed) return;
               context.completed = true;
@@ -554,6 +611,7 @@ public static class WebUiPage
               if (!currentSessionId) throw new Error('JavaScript REPL requires an active session.');
               if (!code) throw new Error('Code parameter is required.');
 
+              const sessionId = currentSessionId;
               const sandboxId = `repl-${Date.now()}-${Math.random().toString(36).slice(2)}`;
               const iframe = document.createElement('iframe');
               iframe.sandbox.add('allow-scripts', 'allow-modals');
@@ -562,6 +620,7 @@ public static class WebUiPage
               const result = await new Promise((resolve, reject) => {
                 const context = {
                   sandboxId,
+                  sessionId,
                   code: String(code),
                   iframe,
                   console: [],
@@ -580,11 +639,101 @@ public static class WebUiPage
                 document.body.appendChild(iframe);
               });
 
-              await loadArtifacts(currentSessionId);
+              await loadArtifacts(sessionId);
               return result;
             }
 
             window.executeJavaScriptRepl = executeJavaScriptRepl;
+
+            function delay(ms, signal) {
+              return new Promise((resolve, reject) => {
+                const timeout = setTimeout(resolve, ms);
+                if (!signal) return;
+                const abort = () => {
+                  clearTimeout(timeout);
+                  reject(new DOMException('Aborted', 'AbortError'));
+                };
+                signal.addEventListener('abort', abort, { once: true });
+              });
+            }
+
+            async function postJavaScriptReplBridgeResult(sessionId, requestId, payload, signal) {
+              const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/javascript-repl/${encodeURIComponent(requestId)}/result`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+                signal
+              });
+              if (!response.ok) throw new Error(await response.text());
+            }
+
+            async function executeJavaScriptReplBridgeRequest(sessionId, request, signal) {
+              try {
+                const result = await executeJavaScriptRepl(request.code);
+                await postJavaScriptReplBridgeResult(sessionId, request.id, {
+                  output: result.output,
+                  isError: false,
+                  files: (result.files || []).map(normalizeReplFileForBridge)
+                }, signal);
+              } catch (error) {
+                const result = error?.result || {};
+                await postJavaScriptReplBridgeResult(sessionId, request.id, {
+                  output: result.output || error.message || String(error),
+                  isError: true,
+                  error: error.message || String(error),
+                  files: (result.files || []).map(normalizeReplFileForBridge)
+                }, signal);
+              }
+            }
+
+            async function runJavaScriptReplBridgeLoop(sessionId, controller) {
+              try {
+                while (!controller.signal.aborted && currentSessionId === sessionId) {
+                  try {
+                    const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/javascript-repl/next?timeoutMs=25000`, {
+                      signal: controller.signal
+                    });
+                    if (response.status === 204) continue;
+                    if (response.status === 404) {
+                      await delay(1000, controller.signal);
+                      continue;
+                    }
+                    if (!response.ok) throw new Error(await response.text());
+                    const request = await response.json();
+                    if (request?.id) {
+                      await executeJavaScriptReplBridgeRequest(sessionId, request, controller.signal);
+                    }
+                  } catch (error) {
+                    if (controller.signal.aborted) break;
+                    await delay(1000, controller.signal).catch(() => {});
+                  }
+                }
+              } finally {
+                if (replBridgeAbortController === controller) {
+                  replBridgeAbortController = null;
+                  replBridgeLoopRunning = false;
+                  replBridgeSessionId = null;
+                }
+              }
+            }
+
+            function startJavaScriptReplBridgeLoop(sessionId) {
+              if (!sessionId) {
+                if (replBridgeAbortController) replBridgeAbortController.abort();
+                replBridgeAbortController = null;
+                replBridgeLoopRunning = false;
+                replBridgeSessionId = null;
+                return;
+              }
+
+              if (replBridgeLoopRunning && replBridgeSessionId === sessionId) return;
+              if (replBridgeAbortController) replBridgeAbortController.abort();
+              const controller = new AbortController();
+              replBridgeAbortController = controller;
+              replBridgeLoopRunning = true;
+              replBridgeSessionId = sessionId;
+              runJavaScriptReplBridgeLoop(sessionId, controller);
+            }
 
             function formatBytes(size) {
               const value = Number(size || 0);
@@ -1359,7 +1508,7 @@ public static class WebUiPage
                   currentSession = session;
                   renderMessages(session);
                   applySessionSettings(session);
-                  if (event.type === 'tool_end' && event.toolCall?.toolName === 'artifacts') {
+                  if (event.type === 'tool_end' && ['artifacts', 'javascript_repl'].includes(event.toolCall?.toolName)) {
                     await loadArtifacts(sessionId);
                   }
                 }
@@ -1372,7 +1521,7 @@ public static class WebUiPage
                 currentSession = session;
                 renderMessages(session);
                 applySessionSettings(session);
-                if (event.type === 'tool_end' && event.toolCall?.toolName === 'artifacts') {
+                if (event.type === 'tool_end' && ['artifacts', 'javascript_repl'].includes(event.toolCall?.toolName)) {
                   await loadArtifacts(sessionId);
                 }
               }
@@ -1400,6 +1549,8 @@ public static class WebUiPage
                   context.files.push({
                     fileName: message.fileName || 'file',
                     content: message.content,
+                    contentBase64: message.contentBase64 || null,
+                    isBase64: Boolean(message.isBase64),
                     mimeType: message.mimeType || 'application/octet-stream'
                   });
                   respond({ success: true, result: { fileName: message.fileName, mimeType: message.mimeType } });
@@ -1419,13 +1570,14 @@ public static class WebUiPage
                   return;
                 }
 
-                const response = await fetchJson(`/api/sessions/${encodeURIComponent(currentSessionId)}/runtime/messages`, {
+                const sessionId = context.sessionId || currentSessionId;
+                const response = await fetchJson(`/api/sessions/${encodeURIComponent(sessionId)}/runtime/messages`, {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
                   body: JSON.stringify(message)
                 });
                 if (message.type === 'artifact-operation' && ['createOrUpdate', 'create', 'update', 'rewrite', 'delete'].includes(message.action)) {
-                  await loadArtifacts(currentSessionId);
+                  await loadArtifacts(sessionId);
                 }
                 source?.postMessage(response, '*');
               } catch (error) {
@@ -1602,6 +1754,7 @@ public static class WebUiPage
               if (currentSessionId === sessionId) {
                 currentSessionId = null;
                 currentSession = null;
+                startJavaScriptReplBridgeLoop(null);
                 rememberCurrentSession(null);
                 applySessionSettings(null);
                 renderMessages(null);
@@ -1699,6 +1852,7 @@ public static class WebUiPage
               } else {
                 currentSessionId = null;
                 currentSession = null;
+                startJavaScriptReplBridgeLoop(null);
                 rememberCurrentSession(null);
                 applySessionSettings(null);
                 renderMessages(null);
@@ -1708,6 +1862,7 @@ public static class WebUiPage
 
             async function openSession(id, knownSessions) {
               currentSessionId = id;
+              startJavaScriptReplBridgeLoop(id);
               rememberCurrentSession(id);
               const session = await fetchJson(`/api/sessions/${id}`);
               currentSession = session;
@@ -1728,6 +1883,7 @@ public static class WebUiPage
               });
               currentSessionId = session.id;
               currentSession = session;
+              startJavaScriptReplBridgeLoop(session.id);
               rememberCurrentSession(session.id);
               await loadStatus();
               await loadSessions();

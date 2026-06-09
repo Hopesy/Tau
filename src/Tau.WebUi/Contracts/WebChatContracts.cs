@@ -68,6 +68,33 @@ public sealed record WebRuntimeMessageRequest(
     [property: JsonPropertyName("old_str")] string? OldString = null,
     [property: JsonPropertyName("new_str")] string? NewString = null);
 
+public sealed record WebJavaScriptReplRequestDto(
+    string Id,
+    string ToolCallId,
+    string Title,
+    string Code,
+    DateTimeOffset CreatedAt);
+
+public sealed record WebJavaScriptReplFileDto(
+    string FileName,
+    string MimeType,
+    long Size,
+    string ContentBase64);
+
+public sealed record WebJavaScriptReplResultRequest(
+    string? Output = null,
+    bool IsError = false,
+    string? Error = null,
+    IReadOnlyList<WebJavaScriptReplFileDto>? Files = null);
+
+public sealed record WebJavaScriptReplResultDto(
+    string Output,
+    bool IsError,
+    IReadOnlyList<WebJavaScriptReplFileDto> Files);
+
+public sealed record WebJavaScriptReplToolDetails(
+    [property: JsonPropertyName("files")] IReadOnlyList<WebJavaScriptReplFileDto> Files);
+
 public sealed record WebChatToolCallDto(
     string Id,
     string ToolName,

@@ -44,6 +44,8 @@ public sealed class WebUiPageTests
         Assert.Contains("window.readBinaryAttachment", html, StringComparison.Ordinal);
         Assert.Contains("window.returnDownloadableFile", html, StringComparison.Ordinal);
         Assert.Contains("type: 'file-returned'", html, StringComparison.Ordinal);
+        Assert.Contains("contentBase64: finalContentBase64", html, StringComparison.Ordinal);
+        Assert.Contains("isBase64: finalContentBase64 !== null", html, StringComparison.Ordinal);
         Assert.Contains("action: 'htmlArtifactLogs'", html, StringComparison.Ordinal);
         Assert.Contains("old_str, new_str", html, StringComparison.Ordinal);
         Assert.Contains("function isMarkdownArtifact(artifact)", html, StringComparison.Ordinal);
@@ -55,7 +57,7 @@ public sealed class WebUiPageTests
         Assert.Contains("SVG preview", html, StringComparison.Ordinal);
         Assert.Contains("PDF preview", html, StringComparison.Ordinal);
         Assert.Contains("Generic file", html, StringComparison.Ordinal);
-        Assert.Contains("fileName, content: finalContent", html, StringComparison.Ordinal);
+        Assert.Contains("content: finalContent", html, StringComparison.Ordinal);
         Assert.Contains("/runtime/messages", html, StringComparison.Ordinal);
         Assert.Contains("isKnownArtifactSandbox", html, StringComparison.Ordinal);
     }
@@ -76,5 +78,10 @@ public sealed class WebUiPageTests
         Assert.Contains("message.type === 'execution-error'", html, StringComparison.Ordinal);
         Assert.Contains("window.__runtimePendingSends", html, StringComparison.Ordinal);
         Assert.Contains("returnValue: context.returnValue", html, StringComparison.Ordinal);
+        Assert.Contains("function startJavaScriptReplBridgeLoop(sessionId)", html, StringComparison.Ordinal);
+        Assert.Contains("/javascript-repl/next?timeoutMs=25000", html, StringComparison.Ordinal);
+        Assert.Contains("/javascript-repl/${encodeURIComponent(requestId)}/result", html, StringComparison.Ordinal);
+        Assert.Contains("normalizeReplFileForBridge", html, StringComparison.Ordinal);
+        Assert.Contains("sessionId,", html, StringComparison.Ordinal);
     }
 }

@@ -488,6 +488,60 @@ public sealed class WebUiEndpointTests
     }
 
     [Fact]
+    public async Task JavaScriptReplBridgeEndpoints_LongPollAndCompletePendingRequest()
+    {
+        await using var fixture = await WebUiEndpointFixture.StartAsync(StreamOk);
+        var created = await fixture.Client.PostAsync(
+            "/api/sessions",
+            JsonBody(
+                new CreateSessionRequest("JavaScript bridge", "openai", "gpt-5.4"),
+                WebUiEndpointJsonContext.Default.CreateSessionRequest));
+        created.EnsureSuccessStatusCode();
+        var session = JsonSerializer.Deserialize(
+            await created.Content.ReadAsStringAsync(),
+            WebUiEndpointJsonContext.Default.WebChatSessionDto);
+        Assert.NotNull(session);
+        var bridge = fixture.App.Services.GetRequiredService<WebUiJavaScriptReplBridge>();
+
+        var execution = bridge.ExecuteAsync(session!.Id, "call-repl", "Calculating sum", "return 2 + 3");
+        var next = await fixture.Client.GetAsync($"/api/sessions/{session.Id}/javascript-repl/next?timeoutMs=1000");
+
+        next.EnsureSuccessStatusCode();
+        var request = JsonSerializer.Deserialize(
+            await next.Content.ReadAsStringAsync(),
+            WebUiEndpointJsonContext.Default.WebJavaScriptReplRequestDto);
+        Assert.NotNull(request);
+        Assert.Equal("call-repl", request!.ToolCallId);
+        Assert.Equal("Calculating sum", request.Title);
+        Assert.Equal("return 2 + 3", request.Code);
+
+        var completed = await fixture.Client.PostAsync(
+            $"/api/sessions/{session.Id}/javascript-repl/{request.Id}/result",
+            JsonBody(
+                new WebJavaScriptReplResultRequest(
+                    Output: "=> 5",
+                    Files:
+                    [
+                        new WebJavaScriptReplFileDto(
+                            "sum.json",
+                            "application/json",
+                            9,
+                            Convert.ToBase64String(Encoding.UTF8.GetBytes("""{"sum":5}""")))
+                    ]),
+                WebUiEndpointJsonContext.Default.WebJavaScriptReplResultRequest));
+        completed.EnsureSuccessStatusCode();
+
+        var result = await execution;
+
+        Assert.False(result.IsError);
+        Assert.Equal("=> 5", result.Output);
+        var file = Assert.Single(result.Files);
+        Assert.Equal("sum.json", file.FileName);
+        Assert.Equal("application/json", file.MimeType);
+        Assert.Equal(9, file.Size);
+    }
+
+    [Fact]
     public async Task ExportJsonlEndpoint_ExportsSessionAndPreservesExistingJsonAndHtmlExports()
     {
         await using var fixture = await WebUiEndpointFixture.StartAsync(StreamOk);
@@ -1131,6 +1185,8 @@ public sealed class WebUiEndpointTests
         {
             return await StartAsync(sp => new WebChatService(
                     sp.GetRequiredService<WebChatStore>(),
+                    sp.GetRequiredService<WebArtifactService>(),
+                    sp.GetRequiredService<WebUiJavaScriptReplBridge>(),
                     logSink))
                 .ConfigureAwait(false);
         }
@@ -1147,6 +1203,7 @@ public sealed class WebUiEndpointTests
             builder.Services.AddSingleton(new WebChatStore(storePath));
             builder.Services.AddSingleton(new WebArtifactStore(artifactStorePath));
             builder.Services.AddSingleton<WebArtifactService>();
+            builder.Services.AddSingleton<WebUiJavaScriptReplBridge>();
             builder.Services.AddSingleton(chatFactory);
             var app = builder.Build();
             app.MapWebUiEndpoints();
@@ -1230,6 +1287,11 @@ public sealed class WebUiEndpointTests
 [JsonSerializable(typeof(SendMessageRequest))]
 [JsonSerializable(typeof(UpsertWebArtifactRequest))]
 [JsonSerializable(typeof(WebRuntimeMessageRequest))]
+[JsonSerializable(typeof(WebJavaScriptReplRequestDto))]
+[JsonSerializable(typeof(WebJavaScriptReplResultRequest))]
+[JsonSerializable(typeof(WebJavaScriptReplResultDto))]
+[JsonSerializable(typeof(WebJavaScriptReplFileDto))]
+[JsonSerializable(typeof(IReadOnlyList<WebJavaScriptReplFileDto>))]
 [JsonSerializable(typeof(WebChatSessionDto))]
 [JsonSerializable(typeof(WebArtifactDto))]
 [JsonSerializable(typeof(WebArtifactSummaryDto))]

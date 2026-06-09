@@ -22,6 +22,9 @@ public sealed class WebUiBrowserFixture : IAsyncLifetime
     public string StorePath { get; private set; } = string.Empty;
     public string ArtifactStorePath { get; private set; } = string.Empty;
     public IBrowser Browser => _browser ?? throw new InvalidOperationException("Browser not initialised.");
+    public WebUiJavaScriptReplBridge ReplBridge =>
+        _app?.Services.GetRequiredService<WebUiJavaScriptReplBridge>() ??
+        throw new InvalidOperationException("WebUi app not initialised.");
 
     public async Task InitializeAsync()
     {
@@ -36,6 +39,7 @@ public sealed class WebUiBrowserFixture : IAsyncLifetime
         builder.Services.AddSingleton(new WebChatStore(StorePath));
         builder.Services.AddSingleton(new WebArtifactStore(ArtifactStorePath));
         builder.Services.AddSingleton<WebArtifactService>();
+        builder.Services.AddSingleton<WebUiJavaScriptReplBridge>();
         builder.Services.AddSingleton<WebChatService>(sp => new WebChatService(
             sp.GetRequiredService<WebChatStore>(),
             (_, _, _) => new FakeWebUiRunner(StreamHello)));

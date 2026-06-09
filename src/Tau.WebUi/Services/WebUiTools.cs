@@ -7,12 +7,26 @@ namespace Tau.WebUi.Services;
 
 internal static class WebUiTools
 {
-    public static IAgentTool[] CreateSessionTools(string sessionId, WebArtifactService artifacts) =>
-        [
+    public static IAgentTool[] CreateSessionTools(
+        string sessionId,
+        WebArtifactService artifacts,
+        WebUiJavaScriptReplBridge? replBridge = null)
+    {
+        var tools = new List<IAgentTool>
+        {
             new WebUiArtifactsTool(sessionId, artifacts)
-        ];
+        };
 
-    public static WebUiJavaScriptReplTool CreateJavaScriptReplContractTool() => new();
+        if (replBridge is not null)
+        {
+            tools.Add(new WebUiJavaScriptReplTool(sessionId, replBridge));
+        }
+
+        return tools.ToArray();
+    }
+
+    public static WebUiJavaScriptReplTool CreateJavaScriptReplTool(string sessionId, WebUiJavaScriptReplBridge bridge) =>
+        new(sessionId, bridge);
 }
 
 internal static class WebUiToolPrompts
@@ -244,6 +258,17 @@ internal sealed class WebUiArtifactsTool : IAgentTool
 
 internal sealed class WebUiJavaScriptReplTool : IAgentTool
 {
+    private readonly string _sessionId;
+    private readonly WebUiJavaScriptReplBridge _bridge;
+
+    public WebUiJavaScriptReplTool(string sessionId, WebUiJavaScriptReplBridge bridge)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+        ArgumentNullException.ThrowIfNull(bridge);
+        _sessionId = sessionId;
+        _bridge = bridge;
+    }
+
     public string Name => "javascript_repl";
     public string Label => "JavaScript REPL";
     public string Description => WebUiToolPrompts.JavaScriptReplToolDescription(
@@ -270,19 +295,31 @@ internal sealed class WebUiJavaScriptReplTool : IAgentTool
         }
         """).RootElement.Clone();
 
-    public Task<ToolResult> ExecuteAsync(
+    public async Task<ToolResult> ExecuteAsync(
         string toolCallId,
         JsonElement args,
         CancellationToken ct,
         Func<ToolUpdate, Task>? onUpdate = null)
     {
         ct.ThrowIfCancellationRequested();
-        return Task.FromResult(new ToolResult(
-            [
-                new TextContent(
-                    "JavaScript REPL browser execution is not connected to server-side AgentTool execution yet. " +
-                    "Tau.WebUi currently exposes the browser-side window.executeJavaScriptRepl(code) host, but LLM-facing javascript_repl execution remains a parity gap.")
-            ],
-            IsError: true));
+        var title = RequiredString(args, "title");
+        var code = RequiredString(args, "code");
+        var result = await _bridge.ExecuteAsync(_sessionId, toolCallId, title, code, ct).ConfigureAwait(false);
+        return new ToolResult(
+            [new TextContent(result.Output)],
+            IsError: result.IsError,
+            Details: new WebJavaScriptReplToolDetails(result.Files));
+    }
+
+    private static string RequiredString(JsonElement args, string propertyName)
+    {
+        if (args.TryGetProperty(propertyName, out var value) &&
+            value.ValueKind == JsonValueKind.String &&
+            !string.IsNullOrWhiteSpace(value.GetString()))
+        {
+            return value.GetString()!;
+        }
+
+        throw new InvalidOperationException($"{propertyName} is required.");
     }
 }

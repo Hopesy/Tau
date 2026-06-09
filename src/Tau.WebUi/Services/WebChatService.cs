@@ -30,9 +30,14 @@ public sealed class WebChatService
     }
 
     public WebChatService(WebChatStore store, WebArtifactService artifacts, ITauLogSink? logSink = null)
+        : this(store, artifacts, new WebUiJavaScriptReplBridge(), logSink)
+    {
+    }
+
+    public WebChatService(WebChatStore store, WebArtifactService artifacts, WebUiJavaScriptReplBridge replBridge, ITauLogSink? logSink = null)
         : this(
             store,
-            (sessionId, provider, model, history, logContext) => WebUiRunnerFactory.Create(provider, model, history, artifacts, sessionId, logSink, logContext),
+            (sessionId, provider, model, history, logContext) => WebUiRunnerFactory.Create(provider, model, history, artifacts, replBridge, sessionId, logSink, logContext),
             logSink)
     {
     }

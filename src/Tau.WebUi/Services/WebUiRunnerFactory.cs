@@ -22,12 +22,13 @@ public static class WebUiRunnerFactory
         string model,
         IReadOnlyList<ChatMessage>? history,
         WebArtifactService artifacts,
+        WebUiJavaScriptReplBridge replBridge,
         string sessionId,
         ITauLogSink? logSink = null,
         TauRuntimeLogContext? logContext = null)
     {
         var tools = RuntimeCodingAgentRunner.CreateDefaultTools()
-            .Concat(WebUiTools.CreateSessionTools(sessionId, artifacts))
+            .Concat(WebUiTools.CreateSessionTools(sessionId, artifacts, replBridge))
             .ToArray();
 
         return RuntimeCodingAgentRunner.Create(

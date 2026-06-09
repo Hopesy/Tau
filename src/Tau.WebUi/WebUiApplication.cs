@@ -96,6 +96,37 @@ public static class WebUiApplication
 
             return Results.Json(artifacts.HandleRuntimeMessage(id, request));
         });
+        app.MapGet("/api/sessions/{id}/javascript-repl/next", async Task<IResult> (
+            string id,
+            int? timeoutMs,
+            WebChatService chat,
+            WebUiJavaScriptReplBridge replBridge,
+            CancellationToken cancellationToken) =>
+        {
+            if (!chat.HasSession(id))
+            {
+                return Results.NotFound();
+            }
+
+            var request = await replBridge.WaitForNextAsync(id, NormalizeReplPollTimeout(timeoutMs), cancellationToken).ConfigureAwait(false);
+            return request is null ? Results.NoContent() : Results.Ok(request);
+        });
+        app.MapPost("/api/sessions/{id}/javascript-repl/{requestId}/result", (
+            string id,
+            string requestId,
+            WebJavaScriptReplResultRequest request,
+            WebChatService chat,
+            WebUiJavaScriptReplBridge replBridge) =>
+        {
+            if (!chat.HasSession(id))
+            {
+                return Results.NotFound();
+            }
+
+            return replBridge.Complete(id, requestId, request)
+                ? Results.Ok(new { success = true })
+                : Results.NotFound();
+        });
         app.MapGet("/api/sessions/{id}/export", (string id, WebChatService chat) =>
         {
             var session = chat.GetSession(id);
@@ -272,7 +303,7 @@ public static class WebUiApplication
                     ex.LineNumber);
             }
         });
-        app.MapDelete("/api/sessions/{id}", (string id, WebChatService chat, WebArtifactService artifacts) =>
+        app.MapDelete("/api/sessions/{id}", (string id, WebChatService chat, WebArtifactService artifacts, WebUiJavaScriptReplBridge replBridge) =>
         {
             if (!chat.DeleteSession(id))
             {
@@ -280,6 +311,7 @@ public static class WebUiApplication
             }
 
             artifacts.DeleteSession(id);
+            replBridge.CancelSession(id, "JavaScript REPL request was cancelled because the WebUi session was deleted.");
             return Results.NoContent();
         });
         app.MapPut("/api/sessions/{id}", (string id, UpdateSessionSettingsRequest request, WebChatService chat) =>
@@ -348,6 +380,16 @@ public static class WebUiApplication
 
     private static bool HasMessageInput(SendMessageRequest request) =>
         !string.IsNullOrWhiteSpace(request.Text) || request.Attachments is { Count: > 0 };
+
+    private static TimeSpan NormalizeReplPollTimeout(int? timeoutMs)
+    {
+        if (timeoutMs is not { } value)
+        {
+            return WebUiJavaScriptReplBridge.DefaultPollTimeout;
+        }
+
+        return TimeSpan.FromMilliseconds(Math.Clamp(value, 100, 60000));
+    }
 
     private static IResult JsonlProblem(string title, string code, string detail, int statusCode, int? lineNumber = null)
     {

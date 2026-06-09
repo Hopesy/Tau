@@ -22,6 +22,7 @@ builder.Services.AddSingleton(sp =>
     return new WebArtifactStore(path);
 });
 builder.Services.AddSingleton<WebArtifactService>();
+builder.Services.AddSingleton<WebUiJavaScriptReplBridge>();
 builder.Services.AddSingleton<ITauLogSink>(_ =>
 {
     try
