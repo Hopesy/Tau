@@ -2130,8 +2130,9 @@ public sealed class CodingAgentCommandRouter
             {
                 var hint = string.IsNullOrWhiteSpace(command.ArgumentHint) ? string.Empty : $" {command.ArgumentHint}";
                 var description = string.IsNullOrWhiteSpace(command.Description) ? string.Empty : $" - {command.Description}";
+                var runtime = command.Runtime.Equals("json", StringComparison.Ordinal) ? string.Empty : $", {command.Runtime}";
                 var mode = command.SendToRunner ? ", runner" : string.Empty;
-                return $"/{command.InvocationName}{hint}{description} ({command.Scope}{mode})";
+                return $"/{command.InvocationName}{hint}{description} ({command.Scope}{runtime}{mode})";
             });
             lines.Add($"extensions: {string.Join("; ", commandList)}");
         }

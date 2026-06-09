@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Tau.CodingAgent.Runtime;
 
 namespace Tau.CodingAgent.Tests;
@@ -178,7 +179,7 @@ public class CodingAgentExtensionCommandStoreTests
         Directory.CreateDirectory(Path.Combine(extensions, "packaged", "src"));
         Directory.CreateDirectory(Path.Combine(extensions, "deep", "ignored"));
         File.WriteAllText(Path.Combine(extensions, "direct.ts"), "export default () => {};");
-        File.WriteAllText(Path.Combine(extensions, "nested", "index.js"), "export default () => {};");
+        File.WriteAllText(Path.Combine(extensions, "nested", "index.js"), "module.exports = () => {};");
         File.WriteAllText(Path.Combine(extensions, "deep", "ignored", "not-discovered.ts"), "export default () => {};");
         File.WriteAllText(
             Path.Combine(extensions, "packaged", "package.json"),
@@ -211,7 +212,165 @@ public class CodingAgentExtensionCommandStoreTests
             Assert.Contains(status.Modules, static module =>
                 module.Runtime == "typescript" && module.Status == "discovered; runtime pending");
             Assert.Contains(status.Modules, static module =>
-                module.Runtime == "javascript" && module.Status == "discovered; runtime pending");
+                module.Runtime == "javascript" && module.Status == "loaded; commands 0; limited runtime");
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void LoadStatus_LoadsJavascriptRegisteredCommands()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-js-load-" + Guid.NewGuid().ToString("N"));
+        var extensionDirectory = Path.Combine(directory, ".tau", "extensions", "hello");
+        Directory.CreateDirectory(extensionDirectory);
+        WriteJavaScriptExtension(
+            extensionDirectory,
+            """
+            export default function(pi) {
+              pi.registerCommand("hello", {
+                description: "Say hello",
+                argumentHint: "<name>",
+                handler: async (args, ctx) => {
+                  ctx.sendMessage(`Hello ${args}`);
+                }
+              });
+            }
+            """);
+
+        try
+        {
+            var store = CreateJavaScriptStore(directory);
+
+            var status = store.LoadStatus();
+
+            Assert.Empty(status.Diagnostics);
+            var command = Assert.Single(status.Commands);
+            Assert.Equal("hello", command.Name);
+            Assert.Equal("hello", command.InvocationName);
+            Assert.Equal("Say hello", command.Description);
+            Assert.Equal("<name>", command.ArgumentHint);
+            Assert.Equal("project", command.Scope);
+            Assert.Equal("javascript", command.Runtime);
+            Assert.False(command.SendToRunner);
+
+            var module = Assert.Single(status.Modules);
+            Assert.Equal(Path.Combine(extensionDirectory, "index.js"), module.FilePath);
+            Assert.Equal("javascript", module.Runtime);
+            Assert.Equal("loaded; commands 1; limited runtime", module.Status);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void TryInvoke_ExecutesJavascriptCommandAndSendsRunnerMessage()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-js-runner-" + Guid.NewGuid().ToString("N"));
+        var extensionDirectory = Path.Combine(directory, ".tau", "extensions", "hello");
+        Directory.CreateDirectory(extensionDirectory);
+        WriteJavaScriptExtension(
+            extensionDirectory,
+            """
+            export default function(pi) {
+              pi.registerCommand("hello", {
+                description: "Say hello",
+                handler: async (args) => {
+                  pi.sendMessage(`Hello ${args}`);
+                }
+              });
+            }
+            """);
+
+        try
+        {
+            var store = CreateJavaScriptStore(directory);
+
+            var handled = store.TryInvoke("/hello Ada Lovelace", out var invocation);
+
+            Assert.True(handled);
+            Assert.NotNull(invocation);
+            Assert.False(invocation.IsError);
+            Assert.True(invocation.SendToRunner);
+            Assert.Equal("Hello Ada Lovelace", invocation.Message);
+            Assert.Equal("javascript", invocation.Command.Runtime);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void TryInvoke_JavascriptCommandCanReturnStatusText()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-js-status-" + Guid.NewGuid().ToString("N"));
+        var extensionDirectory = Path.Combine(directory, ".tau", "extensions", "status");
+        Directory.CreateDirectory(extensionDirectory);
+        WriteJavaScriptExtension(
+            extensionDirectory,
+            """
+            export default function(pi) {
+              pi.registerCommand("status", {
+                description: "Return status",
+                handler: async (args) => `OK ${args}`
+              });
+            }
+            """);
+
+        try
+        {
+            var store = CreateJavaScriptStore(directory);
+
+            var handled = store.TryInvoke("/status ready", out var invocation);
+
+            Assert.True(handled);
+            Assert.NotNull(invocation);
+            Assert.False(invocation.IsError);
+            Assert.False(invocation.SendToRunner);
+            Assert.Equal("OK ready", invocation.Message);
+            Assert.Equal("javascript", invocation.Command.Runtime);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void LoadStatus_ReportsJavascriptLoadFailureDiagnostic()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-js-failure-" + Guid.NewGuid().ToString("N"));
+        var extensionDirectory = Path.Combine(directory, ".tau", "extensions", "broken");
+        Directory.CreateDirectory(extensionDirectory);
+        WriteJavaScriptExtension(
+            extensionDirectory,
+            """
+            export default function() {
+              throw new Error("boom");
+            }
+            """);
+
+        try
+        {
+            var store = CreateJavaScriptStore(directory);
+
+            var status = store.LoadStatus();
+
+            Assert.Empty(status.Commands);
+            var diagnostic = Assert.Single(status.Diagnostics);
+            Assert.Equal("error", diagnostic.Severity);
+            Assert.Equal(Path.Combine(extensionDirectory, "index.js"), diagnostic.Path);
+            Assert.Equal("project", diagnostic.Scope);
+            Assert.Contains("failed to load javascript extension:", diagnostic.Message, StringComparison.Ordinal);
+            Assert.Contains("boom", diagnostic.Message, StringComparison.Ordinal);
+            var module = Assert.Single(status.Modules);
+            Assert.Equal("javascript", module.Runtime);
+            Assert.Equal("load failed", module.Status);
         }
         finally
         {
@@ -282,6 +441,52 @@ public class CodingAgentExtensionCommandStoreTests
         finally
         {
             Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    private static CodingAgentExtensionCommandStore CreateJavaScriptStore(string directory)
+    {
+        Assert.True(IsNodeAvailable(), "node is required for javascript extension runtime tests");
+        return new CodingAgentExtensionCommandStore(
+            cwd: directory,
+            userExtensionsDirectory: Path.Combine(directory, "missing-user-extensions"),
+            javaScriptRuntime: new CodingAgentJavaScriptExtensionRuntime(directory, nodeExecutable: "node"));
+    }
+
+    private static void WriteJavaScriptExtension(string extensionDirectory, string source)
+    {
+        File.WriteAllText(
+            Path.Combine(extensionDirectory, "package.json"),
+            """
+            {
+              "type": "module",
+              "pi": {
+                "extensions": ["index.js"]
+              }
+            }
+            """);
+        File.WriteAllText(Path.Combine(extensionDirectory, "index.js"), source);
+    }
+
+    private static bool IsNodeAvailable()
+    {
+        using var process = new Process();
+        process.StartInfo = new ProcessStartInfo("node")
+        {
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true
+        };
+        process.StartInfo.ArgumentList.Add("--version");
+        try
+        {
+            process.Start();
+            return process.WaitForExit(2000) && process.ExitCode == 0;
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            return false;
         }
     }
 }

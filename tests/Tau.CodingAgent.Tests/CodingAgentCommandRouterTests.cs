@@ -1063,6 +1063,58 @@ public class CodingAgentCommandRouterTests
     }
 
     [Fact]
+    public async Task TryHandleAsync_ExtensionsCommand_ListsJavascriptRegisteredCommandsAndModuleStatus()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-router-js-" + Guid.NewGuid().ToString("N"));
+        var extensionDirectory = Path.Combine(directory, ".tau", "extensions", "hello-js");
+        Directory.CreateDirectory(extensionDirectory);
+        await File.WriteAllTextAsync(
+            Path.Combine(extensionDirectory, "package.json"),
+            """
+            {
+              "type": "module",
+              "pi": {
+                "extensions": ["index.js"]
+              }
+            }
+            """);
+        await File.WriteAllTextAsync(
+            Path.Combine(extensionDirectory, "index.js"),
+            """
+            export default function(pi) {
+              pi.registerCommand("hello-js", {
+                description: "Say hello from JS",
+                argumentHint: "<name>",
+                handler: async (args, ctx) => {
+                  ctx.sendMessage(`Hello ${args}`);
+                }
+              });
+            }
+            """);
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var extensionStore = new CodingAgentExtensionCommandStore(
+            cwd: directory,
+            userExtensionsDirectory: Path.Combine(directory, "missing-user-extensions"),
+            javaScriptRuntime: new CodingAgentJavaScriptExtensionRuntime(directory, nodeExecutable: "node"));
+        var router = new CodingAgentCommandRouter(runner, extensionCommandStore: extensionStore);
+
+        try
+        {
+            var result = await router.TryHandleAsync("/extensions");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.Contains("extensions: /hello-js <name> - Say hello from JS (project, javascript)", result.Message, StringComparison.Ordinal);
+            Assert.Contains($"extension modules: {Path.Combine(extensionDirectory, "index.js")} (project, javascript, loaded; commands 1; limited runtime)", result.Message, StringComparison.Ordinal);
+            Assert.Empty(runner.Inputs);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task TryHandleAsync_ExtensionsCommand_ShowsLoadDiagnostics()
     {
         var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-router-diagnostics-" + Guid.NewGuid().ToString("N"));

@@ -11,7 +11,8 @@ public sealed record CodingAgentExtensionCommand(
     string? Prompt,
     bool SendToRunner,
     string FilePath,
-    string Scope);
+    string Scope,
+    string Runtime = "json");
 
 public sealed record CodingAgentExtensionCommandInvocation(
     bool Handled,
@@ -79,13 +80,15 @@ public sealed class CodingAgentExtensionCommandStore
     private readonly IReadOnlyList<string> _explicitPaths;
     private readonly Func<IReadOnlyList<string>>? _additionalPathsProvider;
     private readonly bool _includeDefaults;
+    private readonly CodingAgentJavaScriptExtensionRuntime _javaScriptRuntime;
 
     public CodingAgentExtensionCommandStore(
         string? cwd = null,
         string? userExtensionsDirectory = null,
         IReadOnlyList<string>? explicitPaths = null,
         Func<IReadOnlyList<string>>? additionalPathsProvider = null,
-        bool includeDefaults = true)
+        bool includeDefaults = true,
+        CodingAgentJavaScriptExtensionRuntime? javaScriptRuntime = null)
     {
         _cwd = string.IsNullOrWhiteSpace(cwd) ? Environment.CurrentDirectory : Path.GetFullPath(cwd);
         _userExtensionsDirectory = string.IsNullOrWhiteSpace(userExtensionsDirectory)
@@ -94,6 +97,7 @@ public sealed class CodingAgentExtensionCommandStore
         _explicitPaths = explicitPaths ?? GetConfiguredExtensionPaths();
         _additionalPathsProvider = additionalPathsProvider;
         _includeDefaults = includeDefaults;
+        _javaScriptRuntime = javaScriptRuntime ?? new CodingAgentJavaScriptExtensionRuntime(_cwd);
     }
 
     public IReadOnlyList<CodingAgentExtensionCommand> Load()
@@ -117,8 +121,8 @@ public sealed class CodingAgentExtensionCommandStore
         var diagnostics = new List<CodingAgentExtensionDiagnostic>();
         if (_includeDefaults)
         {
-            LoadSourceDirectory(_userExtensionsDirectory, "user", definitions, skillPaths, promptPaths, themePaths, files, modules, diagnostics);
-            LoadSourceDirectory(Path.Combine(_cwd, ".tau", "extensions"), "project", definitions, skillPaths, promptPaths, themePaths, files, modules, diagnostics);
+            LoadSourceDirectory(_userExtensionsDirectory, "user", definitions, skillPaths, promptPaths, themePaths, files, modules, diagnostics, _javaScriptRuntime);
+            LoadSourceDirectory(Path.Combine(_cwd, ".tau", "extensions"), "project", definitions, skillPaths, promptPaths, themePaths, files, modules, diagnostics, _javaScriptRuntime);
         }
 
         foreach (var path in GetExplicitPaths())
@@ -126,7 +130,7 @@ public sealed class CodingAgentExtensionCommandStore
             var resolved = ResolvePath(path, _cwd);
             if (Directory.Exists(resolved))
             {
-                LoadSourceDirectory(resolved, "path", definitions, skillPaths, promptPaths, themePaths, files, modules, diagnostics, reportMissing: true);
+                LoadSourceDirectory(resolved, "path", definitions, skillPaths, promptPaths, themePaths, files, modules, diagnostics, _javaScriptRuntime, reportMissing: true);
             }
             else if (File.Exists(resolved) && Path.GetExtension(resolved).Equals(".json", StringComparison.OrdinalIgnoreCase))
             {
@@ -134,7 +138,7 @@ public sealed class CodingAgentExtensionCommandStore
             }
             else if (File.Exists(resolved) && IsModuleFile(resolved))
             {
-                AddModule(resolved, "path", modules);
+                AddModule(resolved, "path", modules, definitions, diagnostics, _javaScriptRuntime);
             }
             else if (File.Exists(resolved))
             {
@@ -210,6 +214,33 @@ public sealed class CodingAgentExtensionCommandStore
         }
 
         var argsText = spaceIndex < 0 ? string.Empty : input[(spaceIndex + 1)..];
+        if (command.Runtime.Equals("javascript", StringComparison.Ordinal))
+        {
+            var result = _javaScriptRuntime.Invoke(command.FilePath, command.Name, argsText);
+            if (!result.Success)
+            {
+                invocation = CodingAgentExtensionCommandInvocation.Error(
+                    command,
+                    $"extension command '/{command.InvocationName}' failed: {result.Error ?? "unknown javascript extension error"}");
+                return true;
+            }
+
+            if (result.RunnerMessages.Count > 0)
+            {
+                invocation = CodingAgentExtensionCommandInvocation.Runner(
+                    command,
+                    string.Join($"{Environment.NewLine}{Environment.NewLine}", result.RunnerMessages));
+                return true;
+            }
+
+            invocation = CodingAgentExtensionCommandInvocation.Status(
+                command,
+                string.IsNullOrWhiteSpace(result.StatusMessage)
+                    ? $"extension command '/{command.InvocationName}' completed"
+                    : result.StatusMessage);
+            return true;
+        }
+
         var args = CodingAgentPromptTemplateStore.ParseCommandArgs(argsText);
         var template = command.SendToRunner
             ? command.Prompt ?? command.Response
@@ -246,6 +277,7 @@ public sealed class CodingAgentExtensionCommandStore
         ICollection<CodingAgentExtensionFileStatus> fileStatuses,
         ICollection<CodingAgentExtensionModule> modules,
         ICollection<CodingAgentExtensionDiagnostic> diagnostics,
+        CodingAgentJavaScriptExtensionRuntime javaScriptRuntime,
         bool reportMissing = false)
     {
         if (!Directory.Exists(directory))
@@ -287,7 +319,7 @@ public sealed class CodingAgentExtensionCommandStore
 
         foreach (var module in DiscoverModuleFiles(directory))
         {
-            AddModule(module, scope, modules);
+            AddModule(module, scope, modules, definitions, diagnostics, javaScriptRuntime);
         }
     }
 
@@ -479,7 +511,8 @@ public sealed class CodingAgentExtensionCommandStore
             ReadString(element, "prompt"),
             ReadBool(element, "sendToRunner") ?? ReadBool(element, "send-to-runner") ?? false,
             Path.GetFullPath(filePath),
-            scope);
+            scope,
+            "json");
     }
 
     private static IReadOnlyList<CodingAgentExtensionCommand> ResolveInvocationNames(
@@ -524,7 +557,8 @@ public sealed class CodingAgentExtensionCommandStore
                 definition.Prompt,
                 definition.SendToRunner,
                 definition.FilePath,
-                definition.Scope));
+                definition.Scope,
+                definition.Runtime));
         }
 
         return commands.ToArray();
@@ -778,13 +812,120 @@ public sealed class CodingAgentExtensionCommandStore
             extension.Equals(".js", StringComparison.OrdinalIgnoreCase);
     }
 
-    private static void AddModule(string filePath, string scope, ICollection<CodingAgentExtensionModule> modules)
+    private static void AddModule(
+        string filePath,
+        string scope,
+        ICollection<CodingAgentExtensionModule> modules,
+        ICollection<CommandDefinition> definitions,
+        ICollection<CodingAgentExtensionDiagnostic> diagnostics,
+        CodingAgentJavaScriptExtensionRuntime javaScriptRuntime)
     {
+        var fullPath = Path.GetFullPath(filePath);
+        if (Path.GetExtension(filePath).Equals(".ts", StringComparison.OrdinalIgnoreCase))
+        {
+            modules.Add(new CodingAgentExtensionModule(
+                fullPath,
+                scope,
+                "typescript",
+                "discovered; runtime pending"));
+            return;
+        }
+
+        var result = javaScriptRuntime.Load(fullPath);
+        if (!result.Success)
+        {
+            diagnostics.Add(new CodingAgentExtensionDiagnostic(
+                "error",
+                $"failed to load javascript extension: {result.Error ?? "unknown javascript extension error"}",
+                fullPath,
+                scope));
+            modules.Add(new CodingAgentExtensionModule(
+                fullPath,
+                scope,
+                "javascript",
+                "load failed"));
+            return;
+        }
+
+        foreach (var command in result.Commands)
+        {
+            var name = NormalizeName(command.Name);
+            if (string.IsNullOrWhiteSpace(name))
+            {
+                diagnostics.Add(new CodingAgentExtensionDiagnostic(
+                    "warning",
+                    "javascript extension registered a command with an invalid name",
+                    fullPath,
+                    scope));
+                continue;
+            }
+
+            if (!command.HasHandler)
+            {
+                diagnostics.Add(new CodingAgentExtensionDiagnostic(
+                    "warning",
+                    $"javascript extension command '{name}' has no handler",
+                    fullPath,
+                    scope));
+                continue;
+            }
+
+            definitions.Add(new CommandDefinition(
+                name,
+                command.Description.Trim(),
+                command.ArgumentHint,
+                null,
+                null,
+                false,
+                fullPath,
+                scope,
+                "javascript"));
+        }
+
         modules.Add(new CodingAgentExtensionModule(
-            Path.GetFullPath(filePath),
+            fullPath,
             scope,
-            Path.GetExtension(filePath).Equals(".ts", StringComparison.OrdinalIgnoreCase) ? "typescript" : "javascript",
-            "discovered; runtime pending"));
+            "javascript",
+            FormatJavaScriptModuleStatus(result)));
+    }
+
+    private static string FormatJavaScriptModuleStatus(CodingAgentJavaScriptExtensionLoadResult result)
+    {
+        var status = $"loaded; commands {result.Commands.Count(static command => command.HasHandler)}; limited runtime";
+        var unsupported = new List<string>();
+        if (result.Unsupported.Tools > 0)
+        {
+            unsupported.Add($"tools {result.Unsupported.Tools}");
+        }
+
+        if (result.Unsupported.Flags > 0)
+        {
+            unsupported.Add($"flags {result.Unsupported.Flags}");
+        }
+
+        if (result.Unsupported.Shortcuts > 0)
+        {
+            unsupported.Add($"shortcuts {result.Unsupported.Shortcuts}");
+        }
+
+        if (result.Unsupported.Handlers > 0)
+        {
+            unsupported.Add($"events {result.Unsupported.Handlers}");
+        }
+
+        if (result.Unsupported.MessageRenderers > 0)
+        {
+            unsupported.Add($"message renderers {result.Unsupported.MessageRenderers}");
+        }
+
+        if (result.Unsupported.Providers > 0)
+        {
+            unsupported.Add($"providers {result.Unsupported.Providers}");
+        }
+
+        return unsupported.Count == 0
+            ? status
+            : $"{status}; unsupported {string.Join(", ", unsupported)}";
     }
 
     private sealed record CommandDefinition(
@@ -795,5 +936,6 @@ public sealed class CodingAgentExtensionCommandStore
         string? Prompt,
         bool SendToRunner,
         string FilePath,
-        string Scope);
+        string Scope,
+        string Runtime);
 }
