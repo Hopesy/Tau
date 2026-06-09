@@ -21,7 +21,8 @@ public static class PodsCli
         PodVllmCommandPlanner? vllmPlanner = null,
         PodVllmOrchestrationService? vllmService = null,
         PodSetupPlanner? setupPlanner = null,
-        PodSetupService? setupService = null)
+        PodSetupService? setupService = null,
+        PodAgentRunner? agentRunner = null)
     {
         var store = new PodsConfigStore();
         var validator = new PodsConfigValidator();
@@ -34,6 +35,7 @@ public static class PodsCli
         vllmService ??= new PodVllmOrchestrationService(execService, vllmPlanner, logSink: logSink);
         setupPlanner ??= new PodSetupPlanner();
         setupService ??= new PodSetupService(setupPlanner);
+        agentRunner ??= new PodAgentRunner();
 
         if (args.Length == 0 || IsHelp(args[0]))
         {
@@ -57,7 +59,7 @@ public static class PodsCli
             "exec" => await ExecAsync(args, path, store, validator, execService).ConfigureAwait(false),
             "ssh" => await SshAsync(args, path, store, validator, execService).ConfigureAwait(false),
             "shell" => await ShellAsync(args, store, validator, execService).ConfigureAwait(false),
-            "agent" => AgentAsync(args, store, validator),
+            "agent" => await AgentAsync(args, store, validator, agentRunner).ConfigureAwait(false),
             "health" => await HealthAsync(args, store, validator, lifecycleService).ConfigureAwait(false),
             "deploy" => await DeployAsync(args, path, store, validator, lifecycleService).ConfigureAwait(false),
             "start" => await StartAsync(args, store, validator, vllmPlanner, vllmService).ConfigureAwait(false),
@@ -406,6 +408,7 @@ public static class PodsCli
             api,
             apiKeySource,
             systemPrompt,
+            userArgs,
             agentArgs);
     }
 
@@ -439,9 +442,25 @@ public static class PodsCli
     private static void PrintAgentPromptPlan(PodAgentPromptPlan plan)
     {
         var redactedArgs = RedactAgentArguments(plan.AgentArgs);
-        Console.WriteLine($"pod={plan.PodId} | ok=False | operation=agent | model={plan.ModelName} | upstreamModel={plan.UpstreamModel} | baseUrl={plan.BaseUrl} | api={plan.Api} | apiKeySource={plan.ApiKeySource} | summary=agent prompt execution is not implemented");
-        Console.WriteLine("[agent-args]");
-        Console.WriteLine(string.Join(' ', redactedArgs.Select(QuoteArgumentForDisplay)));
+        Console.Error.WriteLine($"pod={plan.PodId} | operation=agent | model={plan.ModelName} | upstreamModel={plan.UpstreamModel} | baseUrl={plan.BaseUrl} | api={plan.Api} | apiKeySource={plan.ApiKeySource} | summary=starting pod agent runtime");
+        Console.Error.WriteLine("[agent-args]");
+        Console.Error.WriteLine(string.Join(' ', redactedArgs.Select(QuoteArgumentForDisplay)));
+    }
+
+    private static void PrintAgentRunResult(PodAgentRunResult result)
+    {
+        Console.Error.WriteLine($"pod={result.PodId} | ok={result.Success} | operation=agent | model={result.ModelName} | provider={result.ProviderId} | upstreamModel={result.ModelId} | exit={result.ExitCode} | summary={result.Summary}");
+        if (!string.IsNullOrWhiteSpace(result.StdOut))
+        {
+            Console.Error.WriteLine("[agent-stdout]");
+            Console.Error.WriteLine(result.StdOut.TrimEnd());
+        }
+
+        if (!string.IsNullOrWhiteSpace(result.StdErr))
+        {
+            Console.Error.WriteLine("[agent-stderr]");
+            Console.Error.WriteLine(result.StdErr.TrimEnd());
+        }
     }
 
     private static IReadOnlyList<string> RedactAgentArguments(IReadOnlyList<string> args)
@@ -769,7 +788,11 @@ public static class PodsCli
         return result.Success ? 0 : 1;
     }
 
-    private static int AgentAsync(string[] args, PodsConfigStore store, PodsConfigValidator validator)
+    private static async Task<int> AgentAsync(
+        string[] args,
+        PodsConfigStore store,
+        PodsConfigValidator validator,
+        PodAgentRunner agentRunner)
     {
         const string usage = "Usage: agent [--config path] [--pod pod-id] <model-name> [message/options...]";
         if (!TryParseAgentCommand(args, usage, out var parsed))
@@ -794,8 +817,14 @@ public static class PodsCli
 
         var plan = BuildAgentPromptPlan(pod, parsed.ModelName, modelConfig, parsed.UserArgs);
         PrintAgentPromptPlan(plan);
-        Console.Error.WriteLine("Agent prompt execution is not implemented in Tau.Pods yet.");
-        return 1;
+        var result = await agentRunner.RunAsync(plan).ConfigureAwait(false);
+        PrintAgentRunResult(result);
+        if (result.Success)
+        {
+            return 0;
+        }
+
+        return result.ExitCode > 0 ? result.ExitCode : 1;
     }
 
     private static async Task<int> RunRemoteCommandAsync(
@@ -4411,7 +4440,7 @@ public static class PodsCli
         Console.WriteLine("  stop [--json] [--config path] [--pod id] [name] Stop a vLLM deployment, or all deployments if no name is given");
         Console.WriteLine("  restart [--json] [path] <id> <name> Restart a deployment on a pod");
         Console.WriteLine("  logs [--json] [--follow|-f] [--config path] [--pod id] <name> [tail] Fetch or stream deployment logs from the active or specified pod");
-        Console.WriteLine("  agent [--config path] [--pod id] <name> [message/options...] Build the upstream pod-agent prompt mapping; execution is still open");
+        Console.WriteLine("  agent [--config path] [--pod id] <name> [message/options...] Run Tau.CodingAgent against a configured pod model endpoint");
         Console.WriteLine("  deployments [--json] [--config path] [--pod id] List deployments on a pod");
         Console.WriteLine("  setup plan [--json] [--mount <command>] [--models-path <path>] [--vllm release|nightly|gpt-oss] [path] <id> Print a plan-only pod setup command");
         Console.WriteLine("  setup run [--json] [--script <path>] [--mount <command>] [--models-path <path>] [--vllm release|nightly|gpt-oss] [path] <id> Execute pod setup over ssh/scp");
@@ -4451,17 +4480,6 @@ public static class PodsCli
     private sealed record ShellCommandArguments(string ConfigPath, string? PodId);
 
     private sealed record AgentCommandArguments(string ConfigPath, string? PodId, string ModelName, IReadOnlyList<string> UserArgs);
-
-    private sealed record PodAgentPromptPlan(
-        string PodId,
-        string ModelName,
-        string UpstreamModel,
-        int Port,
-        string BaseUrl,
-        string Api,
-        string ApiKeySource,
-        string SystemPrompt,
-        IReadOnlyList<string> AgentArgs);
 
     private sealed record VllmServeCommandArguments(
         string ConfigPath,

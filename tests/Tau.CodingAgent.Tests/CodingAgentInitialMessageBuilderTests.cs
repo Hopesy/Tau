@@ -16,6 +16,9 @@ public sealed class CodingAgentInitialMessageBuilderTests
                 "dark.json",
                 "--provider",
                 "openai",
+                "--model=gpt-5.4",
+                "--system-prompt",
+                "custom system",
                 "@prompt.md",
                 "first prompt",
                 "--extension",
@@ -23,12 +26,16 @@ public sealed class CodingAgentInitialMessageBuilderTests
                 "--unknown",
                 "value",
                 "--print",
+                "--json",
                 "second prompt"
             ]);
 
         Assert.True(parsed.PrintMode);
         Assert.False(parsed.RpcMode);
         Assert.Equal(["dark.json"], parsed.ThemePaths);
+        Assert.Equal("openai", parsed.Provider);
+        Assert.Equal("gpt-5.4", parsed.Model);
+        Assert.Equal("custom system", parsed.SystemPrompt);
         Assert.Equal(["prompt.md"], parsed.FileArguments);
         Assert.Equal(["first prompt", "second prompt"], parsed.Messages);
     }

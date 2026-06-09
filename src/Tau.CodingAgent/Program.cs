@@ -220,14 +220,15 @@ catch (Exception ex) when (ex is FileNotFoundException or IOException or Unautho
     return 1;
 }
 
-var providerId = Environment.GetEnvironmentVariable("TAU_PROVIDER") ?? session.Provider ?? settings.DefaultProvider;
-var modelId = Environment.GetEnvironmentVariable("TAU_MODEL")
+var providerId = cli.Provider ?? Environment.GetEnvironmentVariable("TAU_PROVIDER") ?? session.Provider ?? settings.DefaultProvider;
+var modelId = cli.Model ?? Environment.GetEnvironmentVariable("TAU_MODEL")
               ?? (string.Equals(providerId, session.Provider, StringComparison.OrdinalIgnoreCase) ? session.Model : null)
               ?? (string.Equals(providerId, settings.DefaultProvider, StringComparison.OrdinalIgnoreCase) ? settings.DefaultModel : null);
 var runner = RuntimeCodingAgentRunner.Create(
     providerId,
     modelId,
     session.Messages,
+    systemPromptOverride: cli.SystemPrompt,
     skills: skillStore.Load(),
     contextFiles: contextFileStore.Load(),
     logSink: logSink);

@@ -9,6 +9,9 @@ internal sealed record CodingAgentCliArguments(
     bool NoContextFiles,
     bool NoThemes,
     IReadOnlyList<string> ThemePaths,
+    string? Provider,
+    string? Model,
+    string? SystemPrompt,
     IReadOnlyList<string> Messages,
     IReadOnlyList<string> FileArguments)
 {
@@ -51,6 +54,7 @@ internal sealed record CodingAgentCliArguments(
         "--version",
         "-v",
         "--verbose",
+        "--json",
         "--offline"
     };
 
@@ -61,6 +65,9 @@ internal sealed record CodingAgentCliArguments(
         var noContextFiles = false;
         var noThemes = false;
         var themePaths = new List<string>();
+        string? provider = null;
+        string? model = null;
+        string? systemPrompt = null;
         var messages = new List<string>();
         var fileArguments = new List<string>();
 
@@ -133,6 +140,24 @@ internal sealed record CodingAgentCliArguments(
                 continue;
             }
 
+            if (TryConsumeStringOption(args, ref i, "--provider", out var providerValue))
+            {
+                provider = providerValue;
+                continue;
+            }
+
+            if (TryConsumeStringOption(args, ref i, "--model", out var modelValue))
+            {
+                model = modelValue;
+                continue;
+            }
+
+            if (TryConsumeStringOption(args, ref i, "--system-prompt", out var systemPromptValue))
+            {
+                systemPrompt = systemPromptValue;
+                continue;
+            }
+
             if (arg.StartsWith("@", StringComparison.Ordinal) && arg.Length > 1)
             {
                 fileArguments.Add(arg[1..]);
@@ -192,8 +217,40 @@ internal sealed record CodingAgentCliArguments(
             noContextFiles,
             noThemes,
             themePaths,
+            provider,
+            model,
+            systemPrompt,
             messages,
             fileArguments);
+    }
+
+    private static bool TryConsumeStringOption(
+        IReadOnlyList<string> args,
+        ref int index,
+        string option,
+        out string? value)
+    {
+        var arg = args[index];
+        if (arg.Equals(option, StringComparison.OrdinalIgnoreCase))
+        {
+            if (index + 1 >= args.Count)
+            {
+                throw new ArgumentException($"error: {option} requires an argument");
+            }
+
+            value = args[++index];
+            return true;
+        }
+
+        var prefix = option + "=";
+        if (arg.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+        {
+            value = arg[prefix.Length..];
+            return true;
+        }
+
+        value = null;
+        return false;
     }
 }
 

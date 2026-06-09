@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using Tau.Pods.Cli;
 using Tau.Pods.Models;
@@ -759,6 +760,16 @@ public class PodsCliTests
         var previousOut = Console.Out;
         var previousError = Console.Error;
         var previousApiKey = Environment.GetEnvironmentVariable("PI_API_KEY");
+        ProcessStartInfo? capturedStartInfo = null;
+        string? capturedModelsPath = null;
+        string? capturedModelsJson = null;
+        var agentRunner = new PodAgentRunner((startInfo, _) =>
+        {
+            capturedStartInfo = startInfo;
+            capturedModelsPath = startInfo.Environment["TAU_MODELS_FILE"];
+            capturedModelsJson = File.ReadAllText(capturedModelsPath!);
+            return Task.FromResult(new PodAgentRunner.ProcessExecutionResult(0, "agent ok\n", string.Empty));
+        });
 
         try
         {
@@ -776,20 +787,51 @@ public class PodsCliTests
             };
             new PodsConfigStore().Save(configPath, config);
 
-            var exitCode = await PodsCli.RunAsync(["agent", "--config", configPath, "served", "hello", "--json"]);
+            var exitCode = await PodsCli.RunAsync(
+                ["agent", "--config", configPath, "served", "hello", "--json"],
+                agentRunner: agentRunner);
 
             var output = stdout.ToString();
-            Assert.Equal(1, exitCode);
-            Assert.Contains("operation=agent", output, StringComparison.Ordinal);
-            Assert.Contains("baseUrl=http://pods.example.internal:8123/v1", output, StringComparison.Ordinal);
-            Assert.Contains("api=completions", output, StringComparison.Ordinal);
-            Assert.Contains("apiKeySource=PI_API_KEY", output, StringComparison.Ordinal);
-            Assert.Contains("--base-url http://pods.example.internal:8123/v1", output, StringComparison.Ordinal);
-            Assert.Contains("--model meta/llama-3", output, StringComparison.Ordinal);
-            Assert.Contains("--api-key [redacted]", output, StringComparison.Ordinal);
-            Assert.Contains("hello --json", output, StringComparison.Ordinal);
-            Assert.DoesNotContain("secret-pods-key", output, StringComparison.Ordinal);
-            Assert.Contains("Agent prompt execution is not implemented", stderr.ToString(), StringComparison.Ordinal);
+            var error = stderr.ToString();
+            Assert.Equal(0, exitCode);
+            Assert.Equal(string.Empty, output);
+            Assert.NotNull(capturedStartInfo);
+            Assert.NotNull(capturedModelsPath);
+            Assert.NotNull(capturedModelsJson);
+            Assert.False(File.Exists(capturedModelsPath!));
+            Assert.Contains("--provider", capturedStartInfo!.ArgumentList);
+            Assert.Contains("pod-ssh-pod", capturedStartInfo.ArgumentList);
+            Assert.Contains("--model", capturedStartInfo.ArgumentList);
+            Assert.Contains("meta/llama-3", capturedStartInfo.ArgumentList);
+            Assert.Contains("--system-prompt", capturedStartInfo.ArgumentList);
+            Assert.Contains("--print", capturedStartInfo.ArgumentList);
+            Assert.Contains("hello", capturedStartInfo.ArgumentList);
+            Assert.Contains("--json", capturedStartInfo.ArgumentList);
+            Assert.Equal(capturedModelsPath, capturedStartInfo.Environment["TAU_MODELS_FILE"]);
+            Assert.Equal("pod-ssh-pod", capturedStartInfo.Environment["TAU_PROVIDER"]);
+            Assert.Equal("meta/llama-3", capturedStartInfo.Environment["TAU_MODEL"]);
+
+            using var document = JsonDocument.Parse(capturedModelsJson!);
+            var provider = document.RootElement.GetProperty("providers").GetProperty("pod-ssh-pod");
+            Assert.Equal("http://pods.example.internal:8123/v1", provider.GetProperty("baseUrl").GetString());
+            Assert.Equal("openai-compatible", provider.GetProperty("api").GetString());
+            Assert.Equal("PI_API_KEY", provider.GetProperty("apiKey").GetString());
+            var model = provider.GetProperty("models")[0];
+            Assert.Equal("meta/llama-3", model.GetProperty("id").GetString());
+            Assert.Equal("served", model.GetProperty("name").GetString());
+            Assert.Equal("http://pods.example.internal:8123/v1", model.GetProperty("baseUrl").GetString());
+
+            Assert.Contains("operation=agent", error, StringComparison.Ordinal);
+            Assert.Contains("baseUrl=http://pods.example.internal:8123/v1", error, StringComparison.Ordinal);
+            Assert.Contains("api=completions", error, StringComparison.Ordinal);
+            Assert.Contains("apiKeySource=PI_API_KEY", error, StringComparison.Ordinal);
+            Assert.Contains("--base-url http://pods.example.internal:8123/v1", error, StringComparison.Ordinal);
+            Assert.Contains("--model meta/llama-3", error, StringComparison.Ordinal);
+            Assert.Contains("--api-key [redacted]", error, StringComparison.Ordinal);
+            Assert.Contains("hello --json", error, StringComparison.Ordinal);
+            Assert.Contains("agent runtime completed", error, StringComparison.Ordinal);
+            Assert.DoesNotContain("secret-pods-key", error, StringComparison.Ordinal);
+            Assert.DoesNotContain("secret-pods-key", capturedModelsJson, StringComparison.Ordinal);
         }
         finally
         {
@@ -822,6 +864,77 @@ public class PodsCliTests
         }
         finally
         {
+            Console.SetError(previousError);
+            tempDir.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Agent_WhenRuntimeFails_PropagatesExitCodeAndRedactsPlan()
+    {
+        var tempDir = Directory.CreateTempSubdirectory("tau-pods-cli-agent-failure-");
+        var configPath = Path.Combine(tempDir.FullName, "custom-pods.json");
+        var stdout = new StringWriter();
+        var stderr = new StringWriter();
+        var previousOut = Console.Out;
+        var previousError = Console.Error;
+        var previousApiKey = Environment.GetEnvironmentVariable("PI_API_KEY");
+        string? capturedModelsPath = null;
+        string? capturedModelsJson = null;
+        var agentRunner = new PodAgentRunner((startInfo, _) =>
+        {
+            capturedModelsPath = startInfo.Environment["TAU_MODELS_FILE"];
+            capturedModelsJson = File.ReadAllText(capturedModelsPath!);
+            return Task.FromResult(new PodAgentRunner.ProcessExecutionResult(17, string.Empty, "provider failed\n"));
+        });
+
+        try
+        {
+            Environment.SetEnvironmentVariable("PI_API_KEY", "secret-pods-key");
+            Console.SetOut(stdout);
+            Console.SetError(stderr);
+            var config = ConfigWithSshPod();
+            config.ActivePodId = "ssh-pod";
+            config.Pods[0].Models["served"] = new PodConfiguredModel
+            {
+                Model = "openai/gpt-oss-20b",
+                Port = 8123,
+                Gpu = [0],
+                Pid = 123
+            };
+            new PodsConfigStore().Save(configPath, config);
+
+            var exitCode = await PodsCli.RunAsync(
+                ["agent", "--config", configPath, "served", "hello"],
+                agentRunner: agentRunner);
+
+            var error = stderr.ToString();
+            Assert.Equal(17, exitCode);
+            Assert.Equal(string.Empty, stdout.ToString());
+            Assert.Contains("api=responses", error, StringComparison.Ordinal);
+            Assert.Contains("--api responses", error, StringComparison.Ordinal);
+            Assert.Contains("--api-key [redacted]", error, StringComparison.Ordinal);
+            Assert.Contains("agent runtime failed (17)", error, StringComparison.Ordinal);
+            Assert.Contains("[agent-stderr]", error, StringComparison.Ordinal);
+            Assert.Contains("provider failed", error, StringComparison.Ordinal);
+            Assert.NotNull(capturedModelsPath);
+            Assert.NotNull(capturedModelsJson);
+            Assert.False(File.Exists(capturedModelsPath!));
+
+            using var document = JsonDocument.Parse(capturedModelsJson!);
+            var provider = document.RootElement.GetProperty("providers").GetProperty("pod-ssh-pod");
+            Assert.Equal("openai-responses", provider.GetProperty("api").GetString());
+            Assert.Equal("http://pods.example.internal:8123/v1", provider.GetProperty("baseUrl").GetString());
+            var model = provider.GetProperty("models")[0];
+            Assert.Equal("openai/gpt-oss-20b", model.GetProperty("id").GetString());
+            Assert.Equal("openai-responses", model.GetProperty("api").GetString());
+            Assert.DoesNotContain("secret-pods-key", error, StringComparison.Ordinal);
+            Assert.DoesNotContain("secret-pods-key", capturedModelsJson, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("PI_API_KEY", previousApiKey);
+            Console.SetOut(previousOut);
             Console.SetError(previousError);
             tempDir.Delete(recursive: true);
         }
