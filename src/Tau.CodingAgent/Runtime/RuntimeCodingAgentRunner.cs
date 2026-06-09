@@ -715,9 +715,11 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner, ICodingAgentT
         return ModelCatalog.GetDefaultModelId(providerId);
     }
 
-    public static IAgentTool[] CreateDefaultTools(bool autoResizeImages = true)
+    public static IAgentTool[] CreateDefaultTools(
+        bool autoResizeImages = true,
+        IReadOnlyList<IAgentTool>? extensionTools = null)
     {
-        return
+        IAgentTool[] builtInTools =
         [
             new ReadFileTool(autoResizeImages),
             new WriteFileTool(),
@@ -727,6 +729,27 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner, ICodingAgentT
             new GrepTool(),
             new ListDirectoryTool()
         ];
+
+        if (extensionTools is not { Count: > 0 })
+        {
+            return builtInTools;
+        }
+
+        var toolsByName = new Dictionary<string, IAgentTool>(StringComparer.Ordinal);
+        foreach (var tool in builtInTools)
+        {
+            toolsByName[tool.Name] = tool;
+        }
+
+        foreach (var tool in extensionTools)
+        {
+            if (!string.IsNullOrWhiteSpace(tool.Name))
+            {
+                toolsByName[tool.Name] = tool;
+            }
+        }
+
+        return toolsByName.Values.ToArray();
     }
 
     private static string BuildSystemPrompt(

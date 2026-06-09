@@ -1,4 +1,7 @@
 using System.Diagnostics;
+using System.Text.Json;
+using Tau.Agent;
+using Tau.Ai;
 using Tau.CodingAgent.Runtime;
 
 namespace Tau.CodingAgent.Tests;
@@ -210,9 +213,9 @@ public class CodingAgentExtensionCommandStoreTests
                 status.Modules.Select(static module => module.FilePath).OrderBy(path => path, StringComparer.OrdinalIgnoreCase));
             Assert.All(status.Modules, static module => Assert.Equal("project", module.Scope));
             Assert.Contains(status.Modules, static module =>
-                module.Runtime == "typescript" && module.Status == "loaded; commands 0; limited runtime");
+                module.Runtime == "typescript" && module.Status == "loaded; commands 0; tools 0; limited runtime");
             Assert.Contains(status.Modules, static module =>
-                module.Runtime == "javascript" && module.Status == "loaded; commands 0; limited runtime");
+                module.Runtime == "javascript" && module.Status == "loaded; commands 0; tools 0; limited runtime");
         }
         finally
         {
@@ -272,7 +275,7 @@ public class CodingAgentExtensionCommandStoreTests
             var module = Assert.Single(status.Modules);
             Assert.Equal(Path.Combine(extensionDirectory, "index.ts"), module.FilePath);
             Assert.Equal("typescript", module.Runtime);
-            Assert.Equal("loaded; commands 1; limited runtime", module.Status);
+            Assert.Equal("loaded; commands 1; tools 0; limited runtime", module.Status);
         }
         finally
         {
@@ -359,7 +362,7 @@ public class CodingAgentExtensionCommandStoreTests
             var module = Assert.Single(status.Modules);
             Assert.Contains($"{Path.DirectorySeparatorChar}node_modules{Path.DirectorySeparatorChar}", module.FilePath, StringComparison.OrdinalIgnoreCase);
             Assert.Equal("typescript", module.Runtime);
-            Assert.Equal("loaded; commands 1; limited runtime", module.Status);
+            Assert.Equal("loaded; commands 1; tools 0; limited runtime", module.Status);
         }
         finally
         {
@@ -446,7 +449,7 @@ public class CodingAgentExtensionCommandStoreTests
             var module = Assert.Single(status.Modules);
             Assert.Equal(Path.Combine(extensionDirectory, "index.js"), module.FilePath);
             Assert.Equal("javascript", module.Runtime);
-            Assert.Equal("loaded; commands 1; limited runtime", module.Status);
+            Assert.Equal("loaded; commands 1; tools 0; limited runtime", module.Status);
         }
         finally
         {
@@ -521,6 +524,224 @@ public class CodingAgentExtensionCommandStoreTests
             Assert.False(invocation.SendToRunner);
             Assert.Equal("OK ready", invocation.Message);
             Assert.Equal("javascript", invocation.Command.Runtime);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void LoadStatus_LoadsJavascriptRegisteredTools()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-js-tool-load-" + Guid.NewGuid().ToString("N"));
+        var extensionDirectory = Path.Combine(directory, ".tau", "extensions", "hello-tool");
+        Directory.CreateDirectory(extensionDirectory);
+        WriteJavaScriptExtension(
+            extensionDirectory,
+            """
+            export default function(pi) {
+              pi.registerTool({
+                name: "hello_tool",
+                label: "Hello Tool",
+                description: "Say hello from an extension tool",
+                parameters: {
+                  type: "object",
+                  properties: {
+                    name: { type: "string" }
+                  },
+                  required: ["name"]
+                },
+                executionMode: "sequential",
+                execute: async (toolCallId, params) => {
+                  return { content: [{ type: "text", text: `Hello ${params.name} from ${toolCallId}` }] };
+                }
+              });
+            }
+            """);
+
+        try
+        {
+            var store = CreateJavaScriptStore(directory);
+
+            var status = store.LoadStatus();
+
+            Assert.Empty(status.Diagnostics);
+            Assert.Empty(status.Commands);
+            var tool = Assert.Single(status.Tools);
+            Assert.Equal("hello_tool", tool.Name);
+            Assert.Equal("Hello Tool", tool.Label);
+            Assert.Equal("Say hello from an extension tool", tool.Description);
+            Assert.Equal("project", tool.Scope);
+            Assert.Equal("javascript", tool.Runtime);
+            Assert.Equal("sequential", tool.ExecutionMode);
+            Assert.Equal("object", tool.ParameterSchema.GetProperty("type").GetString());
+            Assert.True(tool.ParameterSchema.GetProperty("properties").TryGetProperty("name", out _));
+            var module = Assert.Single(status.Modules);
+            Assert.Equal("loaded; commands 0; tools 1; limited runtime", module.Status);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task LoadTools_ExecutesJavascriptRegisteredTool()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-js-tool-run-" + Guid.NewGuid().ToString("N"));
+        var extensionDirectory = Path.Combine(directory, ".tau", "extensions", "hello-tool");
+        Directory.CreateDirectory(extensionDirectory);
+        WriteJavaScriptExtension(
+            extensionDirectory,
+            """
+            export default function(pi) {
+              pi.registerTool({
+                name: "hello_tool",
+                label: "Hello Tool",
+                description: "Say hello from an extension tool",
+                parameters: {
+                  type: "object",
+                  properties: {
+                    name: { type: "string" }
+                  },
+                  required: ["name"]
+                },
+                executionMode: "sequential",
+                execute: async (toolCallId, params, signal, onUpdate, ctx) => {
+                  return {
+                    content: [{ type: "text", text: `Hello ${params.name} from ${toolCallId} in ${ctx.cwd}` }],
+                    details: { source: "extension" }
+                  };
+                }
+              });
+            }
+            """);
+
+        try
+        {
+            var store = CreateJavaScriptStore(directory);
+            var tool = Assert.Single(store.LoadTools());
+            using var args = JsonDocument.Parse("""{"name":"Ada"}""");
+
+            var result = await tool.ExecuteAsync("tool-call-1", args.RootElement);
+
+            Assert.False(result.IsError);
+            Assert.Equal(ToolExecutionMode.Sequential, tool.ExecutionMode);
+            var text = Assert.IsType<TextContent>(Assert.Single(result.Content)).Text;
+            Assert.Contains("Hello Ada from tool-call-1", text, StringComparison.Ordinal);
+            Assert.Contains(directory, text, StringComparison.Ordinal);
+            var details = Assert.IsType<JsonElement>(result.Details);
+            Assert.Equal("extension", details.GetProperty("source").GetString());
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void LoadStatus_LoadsTypescriptRegisteredTools()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-ts-tool-load-" + Guid.NewGuid().ToString("N"));
+        var extensionDirectory = Path.Combine(directory, ".tau", "extensions", "ts-tool");
+        Directory.CreateDirectory(extensionDirectory);
+        WriteTypeScriptExtension(
+            extensionDirectory,
+            """
+            interface ToolParams {
+              name: string;
+            }
+
+            export default function(pi: any) {
+              pi.registerTool({
+                name: "ts_tool",
+                label: "TS Tool",
+                description: "Run a TypeScript tool",
+                parameters: {
+                  type: "object",
+                  properties: {
+                    name: { type: "string" }
+                  },
+                  required: ["name"]
+                },
+                execute: async (_toolCallId: string, params: ToolParams) => `TS ${params.name}`
+              });
+            }
+            """);
+
+        try
+        {
+            var store = CreateTypeScriptStore(directory);
+
+            var status = store.LoadStatus();
+
+            Assert.Empty(status.Diagnostics);
+            var tool = Assert.Single(status.Tools);
+            Assert.Equal("ts_tool", tool.Name);
+            Assert.Equal("TS Tool", tool.Label);
+            Assert.Equal("Run a TypeScript tool", tool.Description);
+            Assert.Equal("typescript", tool.Runtime);
+            Assert.Equal("object", tool.ParameterSchema.GetProperty("type").GetString());
+            var module = Assert.Single(status.Modules);
+            Assert.Equal("loaded; commands 0; tools 1; limited runtime", module.Status);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task LoadTools_UsesFirstRegisteredExtensionToolName()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-js-tool-duplicates-" + Guid.NewGuid().ToString("N"));
+        var firstExtension = Path.Combine(directory, ".tau", "extensions", "a-first");
+        var secondExtension = Path.Combine(directory, ".tau", "extensions", "b-second");
+        Directory.CreateDirectory(firstExtension);
+        Directory.CreateDirectory(secondExtension);
+        WriteJavaScriptExtension(
+            firstExtension,
+            """
+            export default function(pi) {
+              pi.registerTool({
+                name: "duplicate_tool",
+                label: "First",
+                description: "First tool",
+                parameters: { type: "object" },
+                execute: async () => "first"
+              });
+            }
+            """);
+        WriteJavaScriptExtension(
+            secondExtension,
+            """
+            export default function(pi) {
+              pi.registerTool({
+                name: "duplicate_tool",
+                label: "Second",
+                description: "Second tool",
+                parameters: { type: "object" },
+                execute: async () => "second"
+              });
+            }
+            """);
+
+        try
+        {
+            var store = CreateJavaScriptStore(directory);
+
+            var status = store.LoadStatus();
+
+            var definition = Assert.Single(status.Tools);
+            Assert.Equal("First", definition.Label);
+            Assert.Equal(2, status.Modules.Count);
+
+            var tool = Assert.Single(store.LoadTools());
+            using var args = JsonDocument.Parse("{}");
+            var result = await tool.ExecuteAsync("tool-call-1", args.RootElement);
+
+            Assert.Equal("first", Assert.IsType<TextContent>(Assert.Single(result.Content)).Text);
         }
         finally
         {

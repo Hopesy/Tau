@@ -252,10 +252,14 @@ var providerId = cli.Provider ?? Environment.GetEnvironmentVariable("TAU_PROVIDE
 var modelId = cli.Model ?? Environment.GetEnvironmentVariable("TAU_MODEL")
               ?? (string.Equals(providerId, session.Provider, StringComparison.OrdinalIgnoreCase) ? session.Model : null)
               ?? (string.Equals(providerId, settings.DefaultProvider, StringComparison.OrdinalIgnoreCase) ? settings.DefaultModel : null);
+var runnerTools = RuntimeCodingAgentRunner.CreateDefaultTools(
+    settings.ImagesAutoResize ?? true,
+    extensionCommandStore.LoadTools());
 var runner = RuntimeCodingAgentRunner.Create(
     providerId,
     modelId,
     session.Messages,
+    toolsOverride: runnerTools,
     systemPromptOverride: cli.SystemPrompt,
     skills: skillStore.Load(),
     contextFiles: contextFileStore.Load(),

@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Tau.Agent;
 
 namespace Tau.CodingAgent.Runtime;
 
@@ -30,6 +31,16 @@ public sealed record CodingAgentExtensionCommandInvocation(
     public static CodingAgentExtensionCommandInvocation Error(CodingAgentExtensionCommand command, string message) =>
         new(true, true, false, message, command);
 }
+
+public sealed record CodingAgentExtensionTool(
+    string Name,
+    string Label,
+    string Description,
+    JsonElement ParameterSchema,
+    string FilePath,
+    string Scope,
+    string Runtime,
+    string? ExecutionMode);
 
 public sealed record CodingAgentExtensionResources(
     IReadOnlyList<string> SkillPaths,
@@ -66,6 +77,7 @@ public sealed record CodingAgentExtensionDiagnostic(
 
 public sealed record CodingAgentExtensionStatus(
     IReadOnlyList<CodingAgentExtensionCommand> Commands,
+    IReadOnlyList<CodingAgentExtensionTool> Tools,
     CodingAgentExtensionResources Resources,
     IReadOnlyList<CodingAgentExtensionFileStatus> Files,
     IReadOnlyList<CodingAgentExtensionModule> Modules,
@@ -105,6 +117,18 @@ public sealed class CodingAgentExtensionCommandStore
         return LoadStatus().Commands;
     }
 
+    public IReadOnlyList<CodingAgentExtensionTool> LoadToolDefinitions()
+    {
+        return LoadStatus().Tools;
+    }
+
+    public IReadOnlyList<IAgentTool> LoadTools()
+    {
+        return LoadToolDefinitions()
+            .Select(tool => new CodingAgentExtensionToolAdapter(tool, _javaScriptRuntime))
+            .ToArray();
+    }
+
     public CodingAgentExtensionResources LoadResources()
     {
         return LoadStatus().Resources;
@@ -113,6 +137,7 @@ public sealed class CodingAgentExtensionCommandStore
     public CodingAgentExtensionStatus LoadStatus()
     {
         var definitions = new List<CommandDefinition>();
+        var tools = new List<CodingAgentExtensionTool>();
         var skillPaths = new List<string>();
         var promptPaths = new List<string>();
         var themePaths = new List<string>();
@@ -121,8 +146,8 @@ public sealed class CodingAgentExtensionCommandStore
         var diagnostics = new List<CodingAgentExtensionDiagnostic>();
         if (_includeDefaults)
         {
-            LoadSourceDirectory(_userExtensionsDirectory, "user", definitions, skillPaths, promptPaths, themePaths, files, modules, diagnostics, _javaScriptRuntime);
-            LoadSourceDirectory(Path.Combine(_cwd, ".tau", "extensions"), "project", definitions, skillPaths, promptPaths, themePaths, files, modules, diagnostics, _javaScriptRuntime);
+            LoadSourceDirectory(_userExtensionsDirectory, "user", definitions, tools, skillPaths, promptPaths, themePaths, files, modules, diagnostics, _javaScriptRuntime);
+            LoadSourceDirectory(Path.Combine(_cwd, ".tau", "extensions"), "project", definitions, tools, skillPaths, promptPaths, themePaths, files, modules, diagnostics, _javaScriptRuntime);
         }
 
         foreach (var path in GetExplicitPaths())
@@ -130,7 +155,7 @@ public sealed class CodingAgentExtensionCommandStore
             var resolved = ResolvePath(path, _cwd);
             if (Directory.Exists(resolved))
             {
-                LoadSourceDirectory(resolved, "path", definitions, skillPaths, promptPaths, themePaths, files, modules, diagnostics, _javaScriptRuntime, reportMissing: true);
+                LoadSourceDirectory(resolved, "path", definitions, tools, skillPaths, promptPaths, themePaths, files, modules, diagnostics, _javaScriptRuntime, reportMissing: true);
             }
             else if (File.Exists(resolved) && Path.GetExtension(resolved).Equals(".json", StringComparison.OrdinalIgnoreCase))
             {
@@ -138,7 +163,7 @@ public sealed class CodingAgentExtensionCommandStore
             }
             else if (File.Exists(resolved) && IsModuleFile(resolved))
             {
-                AddModule(resolved, "path", modules, definitions, diagnostics, _javaScriptRuntime);
+                AddModule(resolved, "path", modules, definitions, tools, diagnostics, _javaScriptRuntime);
             }
             else if (File.Exists(resolved))
             {
@@ -165,6 +190,7 @@ public sealed class CodingAgentExtensionCommandStore
 
         return new CodingAgentExtensionStatus(
             ResolveInvocationNames(definitions),
+            tools.ToArray(),
             resources,
             files,
             modules
@@ -275,6 +301,7 @@ public sealed class CodingAgentExtensionCommandStore
         string directory,
         string scope,
         ICollection<CommandDefinition> definitions,
+        ICollection<CodingAgentExtensionTool> tools,
         ICollection<string> skillPaths,
         ICollection<string> promptPaths,
         ICollection<string> themePaths,
@@ -323,7 +350,7 @@ public sealed class CodingAgentExtensionCommandStore
 
         foreach (var module in DiscoverModuleFiles(directory))
         {
-            AddModule(module, scope, modules, definitions, diagnostics, javaScriptRuntime);
+            AddModule(module, scope, modules, definitions, tools, diagnostics, javaScriptRuntime);
         }
     }
 
@@ -821,6 +848,7 @@ public sealed class CodingAgentExtensionCommandStore
         string scope,
         ICollection<CodingAgentExtensionModule> modules,
         ICollection<CommandDefinition> definitions,
+        ICollection<CodingAgentExtensionTool> tools,
         ICollection<CodingAgentExtensionDiagnostic> diagnostics,
         CodingAgentJavaScriptExtensionRuntime javaScriptRuntime)
     {
@@ -880,6 +908,45 @@ public sealed class CodingAgentExtensionCommandStore
                 runtime));
         }
 
+        foreach (var tool in result.Tools)
+        {
+            var name = NormalizeName(tool.Name);
+            if (string.IsNullOrWhiteSpace(name))
+            {
+                diagnostics.Add(new CodingAgentExtensionDiagnostic(
+                    "warning",
+                    $"{runtime} extension registered a tool with an invalid name",
+                    fullPath,
+                    scope));
+                continue;
+            }
+
+            if (!tool.HasHandler)
+            {
+                diagnostics.Add(new CodingAgentExtensionDiagnostic(
+                    "warning",
+                    $"{runtime} extension tool '{name}' has no execute handler",
+                    fullPath,
+                    scope));
+                continue;
+            }
+
+            if (tools.Any(existing => existing.Name.Equals(name, StringComparison.Ordinal)))
+            {
+                continue;
+            }
+
+            tools.Add(new CodingAgentExtensionTool(
+                name,
+                string.IsNullOrWhiteSpace(tool.Label) ? name : tool.Label.Trim(),
+                tool.Description.Trim(),
+                tool.ParameterSchema.Clone(),
+                fullPath,
+                scope,
+                runtime,
+                tool.ExecutionMode));
+        }
+
         modules.Add(new CodingAgentExtensionModule(
             fullPath,
             scope,
@@ -889,7 +956,7 @@ public sealed class CodingAgentExtensionCommandStore
 
     private static string FormatNodeModuleStatus(CodingAgentJavaScriptExtensionLoadResult result)
     {
-        var status = $"loaded; commands {result.Commands.Count(static command => command.HasHandler)}; limited runtime";
+        var status = $"loaded; commands {result.Commands.Count(static command => command.HasHandler)}; tools {result.Tools.Count(static tool => tool.HasHandler)}; limited runtime";
         var unsupported = new List<string>();
         if (result.Unsupported.Tools > 0)
         {

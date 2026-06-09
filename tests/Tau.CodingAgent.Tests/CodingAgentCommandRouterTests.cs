@@ -1105,7 +1105,7 @@ public class CodingAgentCommandRouterTests
             Assert.True(result.Handled);
             Assert.False(result.IsError);
             Assert.Contains("extensions: /hello-js <name> - Say hello from JS (project, javascript)", result.Message, StringComparison.Ordinal);
-            Assert.Contains($"extension modules: {Path.Combine(extensionDirectory, "index.js")} (project, javascript, loaded; commands 1; limited runtime)", result.Message, StringComparison.Ordinal);
+            Assert.Contains($"extension modules: {Path.Combine(extensionDirectory, "index.js")} (project, javascript, loaded; commands 1; tools 0; limited runtime)", result.Message, StringComparison.Ordinal);
             Assert.Empty(runner.Inputs);
         }
         finally
@@ -1735,7 +1735,7 @@ public class CodingAgentCommandRouterTests
             Assert.Contains("reload complete:", result.Message, StringComparison.Ordinal);
             Assert.Contains("settings: loaded, retry enabled 4 attempts, base 25ms, thinking high", result.Message, StringComparison.Ordinal);
             Assert.Contains("steering all, follow-up all", result.Message, StringComparison.Ordinal);
-            Assert.Contains("extensions: 1 commands, 1 files, 0 issues", result.Message, StringComparison.Ordinal);
+            Assert.Contains("extensions: 1 commands, 0 tools, 1 files, 0 issues", result.Message, StringComparison.Ordinal);
             Assert.Contains("prompts: 1", result.Message, StringComparison.Ordinal);
             Assert.Contains("skills: 1, runner prompt refreshed", result.Message, StringComparison.Ordinal);
             Assert.Contains("context files: 1, runner prompt refreshed", result.Message, StringComparison.Ordinal);

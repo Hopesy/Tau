@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using System.Text.Json;
 using Tau.Agent;
 using Tau.Ai;
 using Tau.Ai.Observability;
@@ -45,6 +46,19 @@ public class RuntimeCodingAgentRunnerTests
         Assert.Equal("gemini-2.5-pro", selected.Id, ignoreCase: true);
         Assert.Equal("google", runner.Model.Provider, ignoreCase: true);
         Assert.Equal("gemini-2.5-pro", runner.Model.Id, ignoreCase: true);
+    }
+
+    [Fact]
+    public void CreateDefaultTools_WithExtensionTools_OverridesBuiltInToolByName()
+    {
+        var readOverride = new StaticAgentTool("read_file", "Extension Read");
+        var customTool = new StaticAgentTool("extension_tool", "Extension Tool");
+
+        var tools = RuntimeCodingAgentRunner.CreateDefaultTools(extensionTools: [readOverride, customTool]);
+
+        Assert.Same(readOverride, Assert.Single(tools, static tool => tool.Name == "read_file"));
+        Assert.Same(customTool, Assert.Single(tools, static tool => tool.Name == "extension_tool"));
+        Assert.Contains(tools, static tool => tool.Name == "shell");
     }
 
     [Fact]
@@ -456,6 +470,29 @@ public class RuntimeCodingAgentRunnerTests
         });
         return catalog;
     }
+}
+
+file sealed class StaticAgentTool : IAgentTool
+{
+    public StaticAgentTool(string name, string label)
+    {
+        Name = name;
+        Label = label;
+        using var schema = JsonDocument.Parse("""{"type":"object"}""");
+        ParameterSchema = schema.RootElement.Clone();
+    }
+
+    public string Name { get; }
+    public string Label { get; }
+    public string Description => Label;
+    public JsonElement ParameterSchema { get; }
+
+    public Task<ToolResult> ExecuteAsync(
+        string toolCallId,
+        JsonElement args,
+        CancellationToken ct = default,
+        Func<ToolUpdate, Task>? onUpdate = null) =>
+        Task.FromResult(new ToolResult([new TextContent(Label)]));
 }
 
 file sealed class RecordingLogSink : ITauLogSink

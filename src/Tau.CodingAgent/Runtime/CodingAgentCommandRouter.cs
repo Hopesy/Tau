@@ -253,7 +253,7 @@ public sealed class CodingAgentCommandRouter
         {
             _extensionResourceState?.Update(extensionStatus.Resources);
             lines.Add(
-                $"extensions: {extensionStatus.Commands.Count} commands, {extensionStatus.Files.Count} files, {extensionStatus.Diagnostics.Count} issues");
+                $"extensions: {extensionStatus.Commands.Count} commands, {extensionStatus.Tools.Count} tools, {extensionStatus.Files.Count} files, {extensionStatus.Diagnostics.Count} issues");
         }
 
         var prompts = _promptTemplateStore?.Load();
@@ -2119,10 +2119,15 @@ public sealed class CodingAgentCommandRouter
 
         var status = _extensionCommandStore?.LoadStatus();
         var commands = status?.Commands ?? [];
+        var tools = status?.Tools ?? [];
         var lines = new List<string>();
-        if (commands.Count == 0)
+        if (commands.Count == 0 && tools.Count == 0)
         {
             lines.Add("extensions: none");
+        }
+        else if (commands.Count == 0)
+        {
+            lines.Add("extensions: no slash commands");
         }
         else
         {
@@ -2184,6 +2189,16 @@ public sealed class CodingAgentCommandRouter
         if (resources.Count > 0)
         {
             lines.Add($"extension resources: {string.Join("; ", resources)}");
+        }
+
+        if (status.Tools.Count > 0)
+        {
+            var tools = status.Tools.Select(static tool =>
+            {
+                var mode = string.IsNullOrWhiteSpace(tool.ExecutionMode) ? string.Empty : $", {tool.ExecutionMode}";
+                return $"{tool.Name} ({tool.Scope}, {tool.Runtime}{mode})";
+            });
+            lines.Add($"extension tools: {string.Join("; ", tools)}");
         }
 
         if (status.Modules.Count > 0)
