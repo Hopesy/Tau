@@ -210,9 +210,196 @@ public class CodingAgentExtensionCommandStoreTests
                 status.Modules.Select(static module => module.FilePath).OrderBy(path => path, StringComparer.OrdinalIgnoreCase));
             Assert.All(status.Modules, static module => Assert.Equal("project", module.Scope));
             Assert.Contains(status.Modules, static module =>
-                module.Runtime == "typescript" && module.Status == "discovered; runtime pending");
+                module.Runtime == "typescript" && module.Status == "loaded; commands 0; limited runtime");
             Assert.Contains(status.Modules, static module =>
                 module.Runtime == "javascript" && module.Status == "loaded; commands 0; limited runtime");
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void LoadStatus_LoadsTypescriptRegisteredCommands()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-ts-load-" + Guid.NewGuid().ToString("N"));
+        var extensionDirectory = Path.Combine(directory, ".tau", "extensions", "hello-ts");
+        Directory.CreateDirectory(extensionDirectory);
+        WriteTypeScriptExtension(
+            extensionDirectory,
+            """
+            import { greeting } from "./helper.ts";
+
+            interface CommandMetadata {
+              name: string;
+            }
+
+            type CommandArgs = string;
+
+            export default function(pi: { registerCommand: Function }) {
+              const metadata: CommandMetadata = { name: "hello-ts" };
+              pi.registerCommand(metadata.name, {
+                description: "Say hello from TS",
+                argumentHint: "<name>",
+                handler: async (args: CommandArgs, ctx: any) => {
+                  ctx.sendMessage(`${greeting} ${args}`);
+                }
+              });
+            }
+            """,
+            """
+            export type Greeting = string;
+            export const greeting: Greeting = "Hello";
+            """);
+
+        try
+        {
+            var store = CreateTypeScriptStore(directory);
+
+            var status = store.LoadStatus();
+
+            Assert.Empty(status.Diagnostics);
+            var command = Assert.Single(status.Commands);
+            Assert.Equal("hello-ts", command.Name);
+            Assert.Equal("hello-ts", command.InvocationName);
+            Assert.Equal("Say hello from TS", command.Description);
+            Assert.Equal("<name>", command.ArgumentHint);
+            Assert.Equal("project", command.Scope);
+            Assert.Equal("typescript", command.Runtime);
+            Assert.False(command.SendToRunner);
+
+            var module = Assert.Single(status.Modules);
+            Assert.Equal(Path.Combine(extensionDirectory, "index.ts"), module.FilePath);
+            Assert.Equal("typescript", module.Runtime);
+            Assert.Equal("loaded; commands 1; limited runtime", module.Status);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void TryInvoke_ExecutesTypescriptCommandAndSendsRunnerMessage()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-ts-runner-" + Guid.NewGuid().ToString("N"));
+        var extensionDirectory = Path.Combine(directory, ".tau", "extensions", "hello-ts");
+        Directory.CreateDirectory(extensionDirectory);
+        WriteTypeScriptExtension(
+            extensionDirectory,
+            """
+            interface PiApi {
+              registerCommand(name: string, options: unknown): void;
+              sendMessage(message: string): void;
+            }
+
+            export default function(pi: PiApi) {
+              pi.registerCommand("hello-ts", {
+                description: "Say hello from TS",
+                handler: async (args: string) => {
+                  pi.sendMessage(`Hello ${args}`);
+                }
+              });
+            }
+            """);
+
+        try
+        {
+            var store = CreateTypeScriptStore(directory);
+
+            var handled = store.TryInvoke("/hello-ts Ada Lovelace", out var invocation);
+
+            Assert.True(handled);
+            Assert.NotNull(invocation);
+            Assert.False(invocation.IsError);
+            Assert.True(invocation.SendToRunner);
+            Assert.Equal("Hello Ada Lovelace", invocation.Message);
+            Assert.Equal("typescript", invocation.Command.Runtime);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void LoadStatus_LoadsTypescriptPackageModuleUnderNodeModules()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-ts-node-modules-" + Guid.NewGuid().ToString("N"));
+        var extensionDirectory = Path.Combine(directory, ".tau", "npm", "node_modules", "hello-ts-package");
+        Directory.CreateDirectory(extensionDirectory);
+        WriteTypeScriptExtension(
+            extensionDirectory,
+            """
+            export default function(pi: any) {
+              pi.registerCommand("hello-package-ts", {
+                description: "Say hello from package TS",
+                handler: async () => "package ok"
+              });
+            }
+            """);
+
+        try
+        {
+            Assert.True(IsNodeTypeScriptRuntimeAvailable(), "node with TypeScript stripping hooks is required for typescript extension runtime tests");
+            var store = new CodingAgentExtensionCommandStore(
+                cwd: directory,
+                userExtensionsDirectory: Path.Combine(directory, "missing-user-extensions"),
+                explicitPaths: [extensionDirectory],
+                includeDefaults: false,
+                javaScriptRuntime: new CodingAgentJavaScriptExtensionRuntime(directory, nodeExecutable: "node"));
+
+            var status = store.LoadStatus();
+
+            Assert.Empty(status.Diagnostics);
+            var command = Assert.Single(status.Commands);
+            Assert.Equal("hello-package-ts", command.Name);
+            Assert.Equal("typescript", command.Runtime);
+            var module = Assert.Single(status.Modules);
+            Assert.Contains($"{Path.DirectorySeparatorChar}node_modules{Path.DirectorySeparatorChar}", module.FilePath, StringComparison.OrdinalIgnoreCase);
+            Assert.Equal("typescript", module.Runtime);
+            Assert.Equal("loaded; commands 1; limited runtime", module.Status);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void LoadStatus_ReportsTypescriptLoadFailureDiagnostic()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-ts-failure-" + Guid.NewGuid().ToString("N"));
+        var extensionDirectory = Path.Combine(directory, ".tau", "extensions", "broken-ts");
+        Directory.CreateDirectory(extensionDirectory);
+        WriteTypeScriptExtension(
+            extensionDirectory,
+            """
+            type Failure = Error;
+
+            export default function(): void {
+              const error: Failure = new Error("ts boom");
+              throw error;
+            }
+            """);
+
+        try
+        {
+            var store = CreateTypeScriptStore(directory);
+
+            var status = store.LoadStatus();
+
+            Assert.Empty(status.Commands);
+            var diagnostic = Assert.Single(status.Diagnostics);
+            Assert.Equal("error", diagnostic.Severity);
+            Assert.Equal(Path.Combine(extensionDirectory, "index.ts"), diagnostic.Path);
+            Assert.Equal("project", diagnostic.Scope);
+            Assert.Contains("failed to load typescript extension:", diagnostic.Message, StringComparison.Ordinal);
+            Assert.Contains("ts boom", diagnostic.Message, StringComparison.Ordinal);
+            var module = Assert.Single(status.Modules);
+            Assert.Equal("typescript", module.Runtime);
+            Assert.Equal("load failed", module.Status);
         }
         finally
         {
@@ -453,6 +640,15 @@ public class CodingAgentExtensionCommandStoreTests
             javaScriptRuntime: new CodingAgentJavaScriptExtensionRuntime(directory, nodeExecutable: "node"));
     }
 
+    private static CodingAgentExtensionCommandStore CreateTypeScriptStore(string directory)
+    {
+        Assert.True(IsNodeTypeScriptRuntimeAvailable(), "node with TypeScript stripping hooks is required for typescript extension runtime tests");
+        return new CodingAgentExtensionCommandStore(
+            cwd: directory,
+            userExtensionsDirectory: Path.Combine(directory, "missing-user-extensions"),
+            javaScriptRuntime: new CodingAgentJavaScriptExtensionRuntime(directory, nodeExecutable: "node"));
+    }
+
     private static void WriteJavaScriptExtension(string extensionDirectory, string source)
     {
         File.WriteAllText(
@@ -468,6 +664,25 @@ public class CodingAgentExtensionCommandStoreTests
         File.WriteAllText(Path.Combine(extensionDirectory, "index.js"), source);
     }
 
+    private static void WriteTypeScriptExtension(string extensionDirectory, string source, string? helperSource = null)
+    {
+        File.WriteAllText(
+            Path.Combine(extensionDirectory, "package.json"),
+            """
+            {
+              "type": "module",
+              "pi": {
+                "extensions": ["index.ts"]
+              }
+            }
+            """);
+        File.WriteAllText(Path.Combine(extensionDirectory, "index.ts"), source);
+        if (helperSource is not null)
+        {
+            File.WriteAllText(Path.Combine(extensionDirectory, "helper.ts"), helperSource);
+        }
+    }
+
     private static bool IsNodeAvailable()
     {
         using var process = new Process();
@@ -479,6 +694,29 @@ public class CodingAgentExtensionCommandStoreTests
             CreateNoWindow = true
         };
         process.StartInfo.ArgumentList.Add("--version");
+        try
+        {
+            process.Start();
+            return process.WaitForExit(2000) && process.ExitCode == 0;
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            return false;
+        }
+    }
+
+    private static bool IsNodeTypeScriptRuntimeAvailable()
+    {
+        using var process = new Process();
+        process.StartInfo = new ProcessStartInfo("node")
+        {
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true
+        };
+        process.StartInfo.ArgumentList.Add("-e");
+        process.StartInfo.ArgumentList.Add("const m = require('node:module'); process.exit(typeof m.registerHooks === 'function' && typeof m.stripTypeScriptTypes === 'function' ? 0 : 1);");
         try
         {
             process.Start();

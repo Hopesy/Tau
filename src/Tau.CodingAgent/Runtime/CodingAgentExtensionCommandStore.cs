@@ -214,14 +214,14 @@ public sealed class CodingAgentExtensionCommandStore
         }
 
         var argsText = spaceIndex < 0 ? string.Empty : input[(spaceIndex + 1)..];
-        if (command.Runtime.Equals("javascript", StringComparison.Ordinal))
+        if (IsNodeModuleRuntime(command.Runtime))
         {
             var result = _javaScriptRuntime.Invoke(command.FilePath, command.Name, argsText);
             if (!result.Success)
             {
                 invocation = CodingAgentExtensionCommandInvocation.Error(
                     command,
-                    $"extension command '/{command.InvocationName}' failed: {result.Error ?? "unknown javascript extension error"}");
+                    $"extension command '/{command.InvocationName}' failed: {result.Error ?? $"unknown {command.Runtime} extension error"}");
                 return true;
             }
 
@@ -266,6 +266,10 @@ public sealed class CodingAgentExtensionCommandStore
                 : message);
         return true;
     }
+
+    private static bool IsNodeModuleRuntime(string runtime) =>
+        runtime.Equals("javascript", StringComparison.Ordinal) ||
+        runtime.Equals("typescript", StringComparison.Ordinal);
 
     private static void LoadSourceDirectory(
         string directory,
@@ -821,28 +825,22 @@ public sealed class CodingAgentExtensionCommandStore
         CodingAgentJavaScriptExtensionRuntime javaScriptRuntime)
     {
         var fullPath = Path.GetFullPath(filePath);
-        if (Path.GetExtension(filePath).Equals(".ts", StringComparison.OrdinalIgnoreCase))
-        {
-            modules.Add(new CodingAgentExtensionModule(
-                fullPath,
-                scope,
-                "typescript",
-                "discovered; runtime pending"));
-            return;
-        }
+        var runtime = Path.GetExtension(filePath).Equals(".ts", StringComparison.OrdinalIgnoreCase)
+            ? "typescript"
+            : "javascript";
 
         var result = javaScriptRuntime.Load(fullPath);
         if (!result.Success)
         {
             diagnostics.Add(new CodingAgentExtensionDiagnostic(
                 "error",
-                $"failed to load javascript extension: {result.Error ?? "unknown javascript extension error"}",
+                $"failed to load {runtime} extension: {result.Error ?? $"unknown {runtime} extension error"}",
                 fullPath,
                 scope));
             modules.Add(new CodingAgentExtensionModule(
                 fullPath,
                 scope,
-                "javascript",
+                runtime,
                 "load failed"));
             return;
         }
@@ -854,7 +852,7 @@ public sealed class CodingAgentExtensionCommandStore
             {
                 diagnostics.Add(new CodingAgentExtensionDiagnostic(
                     "warning",
-                    "javascript extension registered a command with an invalid name",
+                    $"{runtime} extension registered a command with an invalid name",
                     fullPath,
                     scope));
                 continue;
@@ -864,7 +862,7 @@ public sealed class CodingAgentExtensionCommandStore
             {
                 diagnostics.Add(new CodingAgentExtensionDiagnostic(
                     "warning",
-                    $"javascript extension command '{name}' has no handler",
+                    $"{runtime} extension command '{name}' has no handler",
                     fullPath,
                     scope));
                 continue;
@@ -879,17 +877,17 @@ public sealed class CodingAgentExtensionCommandStore
                 false,
                 fullPath,
                 scope,
-                "javascript"));
+                runtime));
         }
 
         modules.Add(new CodingAgentExtensionModule(
             fullPath,
             scope,
-            "javascript",
-            FormatJavaScriptModuleStatus(result)));
+            runtime,
+            FormatNodeModuleStatus(result)));
     }
 
-    private static string FormatJavaScriptModuleStatus(CodingAgentJavaScriptExtensionLoadResult result)
+    private static string FormatNodeModuleStatus(CodingAgentJavaScriptExtensionLoadResult result)
     {
         var status = $"loaded; commands {result.Commands.Count(static command => command.HasHandler)}; limited runtime";
         var unsupported = new List<string>();

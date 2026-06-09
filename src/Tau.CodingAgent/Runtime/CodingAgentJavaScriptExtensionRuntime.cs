@@ -88,7 +88,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
                 false,
                 [],
                 EmptyUnsupported,
-                $"invalid javascript extension runtime output: {ex.Message}");
+                $"invalid node extension runtime output: {ex.Message}");
         }
     }
 
@@ -128,7 +128,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
                 false,
                 [],
                 null,
-                $"invalid javascript extension runtime output: {ex.Message}");
+                $"invalid node extension runtime output: {ex.Message}");
         }
     }
 
@@ -157,7 +157,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
         }
         catch (Exception ex) when (ex is InvalidOperationException or Win32Exception)
         {
-            return ProcessExecutionResult.Failed($"javascript extension runtime unavailable: {ex.Message}");
+            return ProcessExecutionResult.Failed($"node extension runtime unavailable: {ex.Message}");
         }
 
         process.StandardInput.Write(payloadJson);
@@ -168,7 +168,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
         {
             TryKill(process);
             Task.WaitAll([stdoutTask, stderrTask], TimeSpan.FromSeconds(1));
-            return ProcessExecutionResult.Failed("javascript extension runtime timed out");
+            return ProcessExecutionResult.Failed("node extension runtime timed out");
         }
 
         Task.WaitAll(stdoutTask, stderrTask);
@@ -185,7 +185,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
                 suffix = $"{suffix}: {TrimForDiagnostic(stderr)}";
             }
 
-            return ProcessExecutionResult.Failed($"invalid javascript extension runtime output: {suffix}");
+            return ProcessExecutionResult.Failed($"invalid node extension runtime output: {suffix}");
         }
 
         return ProcessExecutionResult.Succeeded(resultJson);
@@ -379,8 +379,12 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
     }
 
     private const string NodeScript = """
-        const { pathToFileURL } = require("node:url");
+        const fs = require("node:fs");
+        const path = require("node:path");
+        const moduleApi = require("node:module");
+        const { fileURLToPath, pathToFileURL } = require("node:url");
         const resultPrefix = "__TAU_EXTENSION_RESULT__";
+        let typeScriptHookInstalled = false;
 
         let input = "";
         process.stdin.setEncoding("utf8");
@@ -395,6 +399,60 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
 
         function formatError(error) {
           return error && error.message ? String(error.message) : String(error);
+        }
+
+        function isTypeScriptFile(filePath) {
+          return typeof filePath === "string" && filePath.toLowerCase().endsWith(".ts");
+        }
+
+        function hasModuleSyntax(source) {
+          return /(^|\s)(import|export)\s/.test(source);
+        }
+
+        function readNearestPackageType(directory) {
+          let current = directory;
+          while (current && current !== path.dirname(current)) {
+            const packageJsonPath = path.join(current, "package.json");
+            try {
+              const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
+              if (packageJson && packageJson.type === "module") return "module";
+              if (packageJson && packageJson.type === "commonjs") return "commonjs";
+            } catch {
+            }
+            current = path.dirname(current);
+          }
+          return undefined;
+        }
+
+        function inferTypeScriptFormat(url, source) {
+          const packageType = readNearestPackageType(path.dirname(fileURLToPath(url)));
+          if (packageType === "module" || packageType === "commonjs") return packageType;
+          return hasModuleSyntax(source) ? "module" : "commonjs";
+        }
+
+        function installTypeScriptHook() {
+          if (typeScriptHookInstalled) return;
+          if (typeof moduleApi.registerHooks !== "function" || typeof moduleApi.stripTypeScriptTypes !== "function") {
+            throw new Error("typescript extension runtime unavailable: Node.js type stripping hooks are not available");
+          }
+
+          moduleApi.registerHooks({
+            load(url, context, nextLoad) {
+              const parsed = new URL(url);
+              if (parsed.protocol === "file:" && parsed.pathname.toLowerCase().endsWith(".ts")) {
+                const source = fs.readFileSync(parsed, "utf8");
+                const stripped = moduleApi.stripTypeScriptTypes(source, { mode: "strip", sourceUrl: url });
+                return {
+                  format: inferTypeScriptFormat(url, source),
+                  shortCircuit: true,
+                  source: stripped
+                };
+              }
+
+              return nextLoad(url, context);
+            }
+          });
+          typeScriptHookInstalled = true;
         }
 
         function toText(value) {
@@ -503,6 +561,9 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
         }
 
         async function loadFactory(filePath) {
+          if (isTypeScriptFile(filePath)) {
+            installTypeScriptHook();
+          }
           const url = pathToFileURL(filePath).href + "?tauCacheBust=" + Date.now() + "-" + Math.random();
           const module = await import(url);
           let factory = module.default;
