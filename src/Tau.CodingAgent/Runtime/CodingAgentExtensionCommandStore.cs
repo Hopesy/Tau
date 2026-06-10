@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Tau.Agent;
+using Tau.Tui.Abstractions;
 
 namespace Tau.CodingAgent.Runtime;
 
@@ -59,6 +60,27 @@ public sealed record CodingAgentExtensionShortcut(
     string FilePath,
     string Scope,
     string Runtime);
+
+public sealed record CodingAgentResolvedExtensionShortcut(
+    KeyBinding KeyBinding,
+    CodingAgentExtensionShortcut Shortcut);
+
+public sealed record CodingAgentExtensionShortcutInvocation(
+    bool Handled,
+    bool IsError,
+    bool SendToRunner,
+    string Message,
+    CodingAgentExtensionShortcut Shortcut)
+{
+    public static CodingAgentExtensionShortcutInvocation Status(CodingAgentExtensionShortcut shortcut, string message) =>
+        new(true, false, false, message, shortcut);
+
+    public static CodingAgentExtensionShortcutInvocation Runner(CodingAgentExtensionShortcut shortcut, string message) =>
+        new(true, false, true, message, shortcut);
+
+    public static CodingAgentExtensionShortcutInvocation Error(CodingAgentExtensionShortcut shortcut, string message) =>
+        new(true, true, false, message, shortcut);
+}
 
 public sealed record CodingAgentExtensionResources(
     IReadOnlyList<string> SkillPaths,
@@ -187,7 +209,7 @@ public sealed class CodingAgentExtensionCommandStore
         return LoadStatus().Resources;
     }
 
-    public CodingAgentExtensionStatus LoadStatus()
+    public CodingAgentExtensionStatus LoadStatus(IKeyBindingMap? keyBindings = null)
     {
         var definitions = new List<CommandDefinition>();
         var tools = new List<CodingAgentExtensionTool>();
@@ -244,11 +266,17 @@ public sealed class CodingAgentExtensionCommandStore
             promptPaths.Distinct(StringComparer.OrdinalIgnoreCase).ToArray(),
             themePaths.Distinct(StringComparer.OrdinalIgnoreCase).ToArray());
 
+        var resolvedShortcuts = keyBindings is null
+            ? shortcuts.ToArray()
+            : ResolveShortcuts(shortcuts, keyBindings, diagnostics)
+                .Select(static resolved => resolved.Shortcut)
+                .ToArray();
+
         return new CodingAgentExtensionStatus(
             ResolveInvocationNames(definitions),
             tools.ToArray(),
             flags.ToArray(),
-            shortcuts.ToArray(),
+            resolvedShortcuts,
             resources,
             files,
             modules
@@ -256,6 +284,12 @@ public sealed class CodingAgentExtensionCommandStore
                 .ToArray(),
             eventHandlers,
             diagnostics);
+    }
+
+    public IReadOnlyList<CodingAgentResolvedExtensionShortcut> LoadResolvedShortcuts(IKeyBindingMap? keyBindings = null)
+    {
+        var diagnostics = new List<CodingAgentExtensionDiagnostic>();
+        return ResolveShortcuts(LoadStatus().Shortcuts, keyBindings, diagnostics);
     }
 
     private IEnumerable<string> GetExplicitPaths()
@@ -352,6 +386,52 @@ public sealed class CodingAgentExtensionCommandStore
         return true;
     }
 
+    public bool TryInvokeShortcut(
+        CodingAgentExtensionShortcut shortcut,
+        out CodingAgentExtensionShortcutInvocation? invocation)
+    {
+        invocation = null;
+        if (!shortcut.HasHandler)
+        {
+            invocation = CodingAgentExtensionShortcutInvocation.Error(
+                shortcut,
+                $"extension shortcut '{shortcut.Shortcut}' has no handler");
+            return true;
+        }
+
+        if (!IsNodeModuleRuntime(shortcut.Runtime))
+        {
+            invocation = CodingAgentExtensionShortcutInvocation.Error(
+                shortcut,
+                $"extension shortcut '{shortcut.Shortcut}' uses unsupported runtime '{shortcut.Runtime}'");
+            return true;
+        }
+
+        var result = _javaScriptRuntime.InvokeShortcut(shortcut.FilePath, shortcut.Shortcut);
+        if (!result.Success)
+        {
+            invocation = CodingAgentExtensionShortcutInvocation.Error(
+                shortcut,
+                $"extension shortcut '{shortcut.Shortcut}' failed: {result.Error ?? $"unknown {shortcut.Runtime} extension error"}");
+            return true;
+        }
+
+        if (result.RunnerMessages.Count > 0)
+        {
+            invocation = CodingAgentExtensionShortcutInvocation.Runner(
+                shortcut,
+                string.Join($"{Environment.NewLine}{Environment.NewLine}", result.RunnerMessages));
+            return true;
+        }
+
+        invocation = CodingAgentExtensionShortcutInvocation.Status(
+            shortcut,
+            string.IsNullOrWhiteSpace(result.StatusMessage)
+                ? $"extension shortcut '{shortcut.Shortcut}' completed"
+                : result.StatusMessage);
+        return true;
+    }
+
     /// <summary>
     /// Validates CLI-supplied extension flag tokens against currently registered extension flags and
     /// seeds the resolved values into the JavaScript/TypeScript runtime so <c>pi.getFlag(...)</c> returns
@@ -422,6 +502,150 @@ public sealed class CodingAgentExtensionCommandStore
     private static bool IsNodeModuleRuntime(string runtime) =>
         runtime.Equals("javascript", StringComparison.Ordinal) ||
         runtime.Equals("typescript", StringComparison.Ordinal);
+
+    private static IReadOnlyList<CodingAgentResolvedExtensionShortcut> ResolveShortcuts(
+        IReadOnlyList<CodingAgentExtensionShortcut> shortcuts,
+        IKeyBindingMap? keyBindings,
+        ICollection<CodingAgentExtensionDiagnostic> diagnostics)
+    {
+        var resolved = new Dictionary<KeyBinding, CodingAgentExtensionShortcut>();
+        foreach (var shortcut in shortcuts)
+        {
+            if (!TryParseShortcutKey(shortcut.Shortcut, out var keyBinding))
+            {
+                diagnostics.Add(new CodingAgentExtensionDiagnostic(
+                    "warning",
+                    $"Extension shortcut '{shortcut.Shortcut}' from {shortcut.FilePath} uses an unsupported key format. Skipping.",
+                    shortcut.FilePath,
+                    shortcut.Scope));
+                continue;
+            }
+
+            if (keyBindings is not null &&
+                keyBindings.Bindings.TryGetValue(keyBinding, out var builtInAction) &&
+                builtInAction != EditorAction.None)
+            {
+                if (IsReservedBuiltInShortcutAction(builtInAction))
+                {
+                    diagnostics.Add(new CodingAgentExtensionDiagnostic(
+                        "warning",
+                        $"Extension shortcut '{shortcut.Shortcut}' from {shortcut.FilePath} conflicts with built-in shortcut. Skipping.",
+                        shortcut.FilePath,
+                        shortcut.Scope));
+                    continue;
+                }
+
+                diagnostics.Add(new CodingAgentExtensionDiagnostic(
+                    "warning",
+                    $"Extension shortcut conflict: '{shortcut.Shortcut}' is built-in shortcut for {builtInAction} and {shortcut.FilePath}. Using {shortcut.FilePath}.",
+                    shortcut.FilePath,
+                    shortcut.Scope));
+            }
+
+            if (resolved.TryGetValue(keyBinding, out var existing))
+            {
+                diagnostics.Add(new CodingAgentExtensionDiagnostic(
+                    "warning",
+                    $"Extension shortcut conflict: '{shortcut.Shortcut}' registered by both {existing.FilePath} and {shortcut.FilePath}. Using {shortcut.FilePath}.",
+                    shortcut.FilePath,
+                    shortcut.Scope));
+            }
+
+            resolved[keyBinding] = shortcut;
+        }
+
+        return resolved
+            .Select(static pair => new CodingAgentResolvedExtensionShortcut(pair.Key, pair.Value))
+            .ToArray();
+    }
+
+    private static bool IsReservedBuiltInShortcutAction(EditorAction action) =>
+        action is EditorAction.Cancel
+            or EditorAction.Submit
+            or EditorAction.CycleModelForward
+            or EditorAction.CycleModelBackward
+            or EditorAction.SelectModel
+            or EditorAction.KillToLineEnd;
+
+    public static bool TryParseShortcutKey(string shortcut, out KeyBinding keyBinding)
+    {
+        keyBinding = default;
+        if (string.IsNullOrWhiteSpace(shortcut))
+        {
+            return false;
+        }
+
+        var parts = shortcut
+            .Split('+', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(static part => part.ToLowerInvariant())
+            .ToArray();
+        if (parts.Length == 0)
+        {
+            return false;
+        }
+
+        var modifiers = ConsoleModifiers.None;
+        for (var index = 0; index < parts.Length - 1; index++)
+        {
+            modifiers |= parts[index] switch
+            {
+                "ctrl" or "control" => ConsoleModifiers.Control,
+                "shift" => ConsoleModifiers.Shift,
+                "alt" or "option" => ConsoleModifiers.Alt,
+                _ => (ConsoleModifiers)(-1)
+            };
+
+            if ((int)modifiers < 0)
+            {
+                return false;
+            }
+        }
+
+        if (!TryParseConsoleKey(parts[^1], out var key))
+        {
+            return false;
+        }
+
+        keyBinding = new KeyBinding(key, modifiers);
+        return true;
+    }
+
+    private static bool TryParseConsoleKey(string keyName, out ConsoleKey key)
+    {
+        key = default;
+        if (keyName.Length == 1)
+        {
+            var ch = keyName[0];
+            if (ch is >= 'a' and <= 'z')
+            {
+                key = Enum.Parse<ConsoleKey>(ch.ToString().ToUpperInvariant());
+                return true;
+            }
+
+            if (ch is >= '0' and <= '9')
+            {
+                key = Enum.Parse<ConsoleKey>($"D{ch}");
+                return true;
+            }
+        }
+
+        keyName = keyName switch
+        {
+            "enter" or "return" => nameof(ConsoleKey.Enter),
+            "esc" or "escape" => nameof(ConsoleKey.Escape),
+            "tab" => nameof(ConsoleKey.Tab),
+            "space" or "spacebar" => nameof(ConsoleKey.Spacebar),
+            "backspace" => nameof(ConsoleKey.Backspace),
+            "delete" or "del" => nameof(ConsoleKey.Delete),
+            "left" => nameof(ConsoleKey.LeftArrow),
+            "right" => nameof(ConsoleKey.RightArrow),
+            "up" => nameof(ConsoleKey.UpArrow),
+            "down" => nameof(ConsoleKey.DownArrow),
+            _ => keyName
+        };
+
+        return Enum.TryParse(keyName, ignoreCase: true, out key);
+    }
 
     private static void LoadSourceDirectory(
         string directory,

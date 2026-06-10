@@ -12,6 +12,7 @@ public sealed class InteractiveInputEditor
     private IKeyBindingMap _bindings;
     private ITuiAutocompleteProvider? _autocompleteProvider;
     private AutocompleteSession? _autocompleteSession;
+    private Func<ConsoleKeyInfo, CancellationToken, Task<bool>>? _shortcutHandler;
     private LastEditAction _lastEditAction = LastEditAction.None;
     private int _lastYankStart = -1;
     private string _lastYankedText = string.Empty;
@@ -47,6 +48,11 @@ public sealed class InteractiveInputEditor
         _autocompleteSession = null;
     }
 
+    public void SetShortcutHandler(Func<ConsoleKeyInfo, CancellationToken, Task<bool>>? shortcutHandler)
+    {
+        _shortcutHandler = shortcutHandler;
+    }
+
     public async Task<InputResult> ReadLineAsync(
         string prompt,
         ConsoleColor? promptColor = null,
@@ -65,6 +71,13 @@ public sealed class InteractiveInputEditor
         {
             cancellationToken.ThrowIfCancellationRequested();
             var key = await _reader.ReadKeyAsync(cancellationToken).ConfigureAwait(false);
+            if (_shortcutHandler is not null &&
+                await _shortcutHandler(key, cancellationToken).ConfigureAwait(false))
+            {
+                _renderer.Render(new string(chars.ToArray()), cursor);
+                continue;
+            }
+
             var action = _bindings.Resolve(key);
 
             if (ShouldInsertNewLine(key, action))

@@ -18,6 +18,7 @@ public sealed class InteractiveConsoleSession
 
     public InputBuffer InputBuffer { get; } = new();
     public IReadOnlyList<TranscriptEntry> Transcript => _transcript;
+    public IKeyBindingMap? InputKeyBindings => _editor?.KeyBindings;
     public event Action? TranscriptChanged;
 
     public InteractiveConsoleSession(
@@ -102,6 +103,11 @@ public sealed class InteractiveConsoleSession
     {
         InputBuffer.SetDraft(value);
         _editor?.Buffer.SetDraft(value);
+    }
+
+    public void SetInputShortcutHandler(Func<ConsoleKeyInfo, CancellationToken, Task<bool>>? shortcutHandler)
+    {
+        _editor?.SetShortcutHandler(shortcutHandler);
     }
 
     public void WriteUserMessage(string message)

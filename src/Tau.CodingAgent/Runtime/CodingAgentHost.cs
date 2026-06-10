@@ -29,6 +29,8 @@ public sealed class CodingAgentHost
     private readonly IReadOnlyList<string> _initialMessages;
     private readonly CodingAgentStartupNoticeService? _startupNoticeService;
     private readonly IDisposable? _compositionBinding;
+    private IReadOnlyDictionary<KeyBinding, CodingAgentExtensionShortcut> _extensionShortcuts =
+        new Dictionary<KeyBinding, CodingAgentExtensionShortcut>();
     private CodingAgentRetryOptions _retryOptions;
     private bool _shutdownRendered;
 
@@ -124,6 +126,8 @@ public sealed class CodingAgentHost
             keyBindings: keyBindings,
             extensionResourceState: extensionResourceState,
             reloadKeyBindings: reloadKeyBindings);
+        RefreshExtensionShortcuts();
+        _ui.SetInputShortcutHandler(TryHandleExtensionShortcutAsync);
     }
 
     public async Task<int> RunAsync(CancellationToken cancellationToken = default)
@@ -281,7 +285,67 @@ public sealed class CodingAgentHost
         }
 
         RenderCommandResult(result);
+        if (!result.IsError && IsReloadCommand(input))
+        {
+            RefreshExtensionShortcuts();
+        }
+
         return true;
+    }
+
+    private async Task<bool> TryHandleExtensionShortcutAsync(
+        ConsoleKeyInfo key,
+        CancellationToken cancellationToken)
+    {
+        if (_extensionCommandStore is null ||
+            !_extensionShortcuts.TryGetValue(KeyBinding.From(key), out var shortcut))
+        {
+            return false;
+        }
+
+        if (!_extensionCommandStore.TryInvokeShortcut(shortcut, out var invocation) || invocation is null)
+        {
+            return false;
+        }
+
+        if (invocation.IsError)
+        {
+            WriteRuntimeError(invocation.Message);
+            return true;
+        }
+
+        if (invocation.SendToRunner)
+        {
+            await TryAutoCompactAsync(invocation.Message, cancellationToken).ConfigureAwait(false);
+            await RunTurnWithRetryAsync(invocation.Message, cancellationToken).ConfigureAwait(false);
+            PersistSession();
+            return true;
+        }
+
+        WriteStatus(invocation.Message);
+        return true;
+    }
+
+    private void RefreshExtensionShortcuts()
+    {
+        if (_extensionCommandStore is null || _ui.InputKeyBindings is null)
+        {
+            _extensionShortcuts = new Dictionary<KeyBinding, CodingAgentExtensionShortcut>();
+            return;
+        }
+
+        _extensionShortcuts = _extensionCommandStore
+            .LoadResolvedShortcuts(_ui.InputKeyBindings)
+            .ToDictionary(
+                static resolved => resolved.KeyBinding,
+                static resolved => resolved.Shortcut);
+    }
+
+    private static bool IsReloadCommand(string input)
+    {
+        var trimmed = input.Trim();
+        return trimmed.Equals("/reload", StringComparison.Ordinal) ||
+               trimmed.StartsWith("/reload ", StringComparison.Ordinal);
     }
 
     private async Task TryAutoCompactAsync(string pendingInput, CancellationToken cancellationToken)

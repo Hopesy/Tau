@@ -3,6 +3,7 @@ using System.Text.Json;
 using Tau.Agent;
 using Tau.Ai;
 using Tau.CodingAgent.Runtime;
+using Tau.Tui.Runtime;
 
 namespace Tau.CodingAgent.Tests;
 
@@ -724,6 +725,114 @@ public class CodingAgentExtensionCommandStoreTests
             Assert.Equal("javascript", shortcut.Runtime);
             var module = Assert.Single(status.Modules);
             Assert.Equal("loaded; commands 0; tools 0; shortcuts 1; limited runtime", module.Status);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void TryInvokeShortcut_JavascriptHandlerCanSendRunnerMessage()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-js-shortcut-invoke-" + Guid.NewGuid().ToString("N"));
+        var extensionDirectory = Path.Combine(directory, ".tau", "extensions", "shortcuts");
+        Directory.CreateDirectory(extensionDirectory);
+        WriteJavaScriptExtension(
+            extensionDirectory,
+            """
+            export default function(pi) {
+              pi.registerShortcut("ctrl+x", {
+                description: "Run extension shortcut",
+                handler: async (ctx) => {
+                  ctx.sendMessage("shortcut handled");
+                  return "shortcut status";
+                }
+              });
+            }
+            """);
+
+        try
+        {
+            var store = CreateJavaScriptStore(directory);
+            var shortcut = Assert.Single(store.LoadStatus().Shortcuts);
+
+            Assert.True(store.TryInvokeShortcut(shortcut, out var invocation));
+
+            Assert.NotNull(invocation);
+            Assert.False(invocation.IsError);
+            Assert.True(invocation.SendToRunner);
+            Assert.Equal("shortcut handled", invocation.Message);
+            Assert.Equal("ctrl+x", invocation.Shortcut.Shortcut);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void LoadStatus_WithKeyBindingsSkipsBuiltInShortcutConflict()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-js-shortcut-conflict-" + Guid.NewGuid().ToString("N"));
+        var extensionDirectory = Path.Combine(directory, ".tau", "extensions", "shortcuts");
+        Directory.CreateDirectory(extensionDirectory);
+        WriteJavaScriptExtension(
+            extensionDirectory,
+            """
+            export default function(pi) {
+              pi.registerShortcut("ctrl+p", {
+                description: "Conflicts with built-in model cycle",
+                handler: async () => {}
+              });
+            }
+            """);
+
+        try
+        {
+            var store = CreateJavaScriptStore(directory);
+
+            var status = store.LoadStatus(KeyBindingMap.Default);
+
+            Assert.Empty(status.Shortcuts);
+            var diagnostic = Assert.Single(status.Diagnostics);
+            Assert.Equal("warning", diagnostic.Severity);
+            Assert.Contains("conflicts with built-in shortcut", diagnostic.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void LoadStatus_WithKeyBindingsAllowsNonReservedBuiltInShortcutOverride()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-js-shortcut-nonreserved-" + Guid.NewGuid().ToString("N"));
+        var extensionDirectory = Path.Combine(directory, ".tau", "extensions", "shortcuts");
+        Directory.CreateDirectory(extensionDirectory);
+        WriteJavaScriptExtension(
+            extensionDirectory,
+            """
+            export default function(pi) {
+              pi.registerShortcut("ctrl+u", {
+                description: "Override non-reserved edit binding",
+                handler: async () => {}
+              });
+            }
+            """);
+
+        try
+        {
+            var store = CreateJavaScriptStore(directory);
+
+            var status = store.LoadStatus(KeyBindingMap.Default);
+
+            var shortcut = Assert.Single(status.Shortcuts);
+            Assert.Equal("ctrl+u", shortcut.Shortcut);
+            var diagnostic = Assert.Single(status.Diagnostics);
+            Assert.Equal("warning", diagnostic.Severity);
+            Assert.Contains("Using", diagnostic.Message, StringComparison.Ordinal);
         }
         finally
         {

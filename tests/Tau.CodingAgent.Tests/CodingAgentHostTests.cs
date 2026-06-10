@@ -989,6 +989,70 @@ public class CodingAgentHostTests
     }
 
     [Fact]
+    public async Task RunAsync_ExtensionShortcutInvokesRunnerMessage()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-host-shortcut-" + Guid.NewGuid().ToString("N"));
+        var extensionDirectory = Path.Combine(directory, ".tau", "extensions", "shortcut");
+        Directory.CreateDirectory(extensionDirectory);
+        await File.WriteAllTextAsync(
+            Path.Combine(extensionDirectory, "package.json"),
+            """
+            {
+              "type": "module",
+              "pi": {
+                "extensions": ["index.js"]
+              }
+            }
+            """);
+        await File.WriteAllTextAsync(
+            Path.Combine(extensionDirectory, "index.js"),
+            """
+            export default function(pi) {
+              pi.registerShortcut("ctrl+x", {
+                description: "Run shortcut",
+                handler: async (ctx) => {
+                  ctx.sendMessage("shortcut handled");
+                }
+              });
+            }
+            """);
+
+        var terminal = new FakeTerminal();
+        var keyReader = new ScriptedKeyReader();
+        keyReader.EnqueueRaw(new ConsoleKeyInfo('\x18', ConsoleKey.X, shift: false, alt: false, control: true));
+        keyReader.EnqueueRaw(new ConsoleKeyInfo('e', ConsoleKey.E, shift: false, alt: false, control: false));
+        keyReader.EnqueueRaw(new ConsoleKeyInfo('x', ConsoleKey.X, shift: false, alt: false, control: false));
+        keyReader.EnqueueRaw(new ConsoleKeyInfo('i', ConsoleKey.I, shift: false, alt: false, control: false));
+        keyReader.EnqueueRaw(new ConsoleKeyInfo('t', ConsoleKey.T, shift: false, alt: false, control: false));
+        keyReader.EnqueueRaw(new ConsoleKeyInfo('\r', ConsoleKey.Enter, shift: false, alt: false, control: false));
+        var editor = new InteractiveInputEditor(keyReader, new CapturingRenderer());
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var extensionStore = new CodingAgentExtensionCommandStore(
+            cwd: directory,
+            userExtensionsDirectory: Path.Combine(directory, "missing-user-extensions"),
+            javaScriptRuntime: new CodingAgentJavaScriptExtensionRuntime(directory, nodeExecutable: "node"));
+        var host = new CodingAgentHost(
+            new InteractiveConsoleSession(terminal, editor),
+            runner,
+            extensionCommandStore: extensionStore,
+            keyBindings: editor.KeyBindings);
+
+        try
+        {
+            await host.RunAsync();
+
+            Assert.Equal(["shortcut handled"], runner.Inputs);
+            var output = terminal.FlattenedText();
+            Assert.Contains("you> shortcut handled\n", output);
+            Assert.Contains("Goodbye!\n", output);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task RunAsync_BuiltInCommandWinsOverExtensionCommand()
     {
         var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-host-help-" + Guid.NewGuid().ToString("N"));

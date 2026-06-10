@@ -2116,7 +2116,7 @@ public sealed class CodingAgentCommandRouter
             return CodingAgentCommandResult.Error(CodingAgentCommandCatalog.Usage("/extensions"));
         }
 
-        var status = _extensionCommandStore?.LoadStatus();
+        var status = _extensionCommandStore?.LoadStatus(_keyBindings);
         var commands = status?.Commands ?? [];
         var tools = status?.Tools ?? [];
         var flags = status?.Flags ?? [];

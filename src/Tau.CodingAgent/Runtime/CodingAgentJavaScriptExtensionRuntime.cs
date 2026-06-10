@@ -57,6 +57,12 @@ public sealed record CodingAgentJavaScriptExtensionInvokeResult(
     string? StatusMessage,
     string? Error);
 
+public sealed record CodingAgentJavaScriptExtensionShortcutInvokeResult(
+    bool Success,
+    IReadOnlyList<string> RunnerMessages,
+    string? StatusMessage,
+    string? Error);
+
 public sealed record CodingAgentJavaScriptExtensionToolInvokeResult(
     bool Success,
     IReadOnlyList<string> Content,
@@ -204,6 +210,45 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
         catch (JsonException ex)
         {
             return new CodingAgentJavaScriptExtensionInvokeResult(
+                false,
+                [],
+                null,
+                $"invalid node extension runtime output: {ex.Message}");
+        }
+    }
+
+    public CodingAgentJavaScriptExtensionShortcutInvokeResult InvokeShortcut(
+        string filePath,
+        string shortcut)
+    {
+        var execution = Execute(BuildPayload("invokeShortcut", filePath, _cwd, shortcut: shortcut));
+        if (!execution.Success)
+        {
+            return new CodingAgentJavaScriptExtensionShortcutInvokeResult(false, [], null, execution.Error);
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(execution.ResultJson);
+            var root = document.RootElement;
+            if (!ReadBool(root, "ok"))
+            {
+                return new CodingAgentJavaScriptExtensionShortcutInvokeResult(
+                    false,
+                    [],
+                    null,
+                    ReadString(root, "error") ?? "javascript extension shortcut failed");
+            }
+
+            return new CodingAgentJavaScriptExtensionShortcutInvokeResult(
+                true,
+                ReadRunnerMessages(root),
+                ReadString(root, "returnText"),
+                null);
+        }
+        catch (JsonException ex)
+        {
+            return new CodingAgentJavaScriptExtensionShortcutInvokeResult(
                 false,
                 [],
                 null,
@@ -478,6 +523,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
         string cwd,
         string? commandName = null,
         string? args = null,
+        string? shortcut = null,
         string? toolName = null,
         string? toolCallId = null,
         JsonElement? toolArgs = null,
@@ -498,6 +544,11 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
             if (args is not null)
             {
                 writer.WriteString("args", args);
+            }
+
+            if (shortcut is not null)
+            {
+                writer.WriteString("shortcut", shortcut);
             }
 
             if (toolName is not null)
@@ -1273,6 +1324,23 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
 
           if (payload.mode === "load") {
             write({ ok: true, commands, tools, flags, shortcuts, eventHandlers, unsupported });
+            return;
+          }
+
+          if (payload.mode === "invokeShortcut") {
+            const shortcut = shortcutMap.get(String(payload.shortcut ?? ""));
+            if (!shortcut) {
+              write({ ok: false, error: "Extension shortcut was not registered: " + String(payload.shortcut ?? "") });
+              return;
+            }
+            if (typeof shortcut.options.handler !== "function") {
+              write({ ok: false, error: "Extension shortcut has no handler: " + shortcut.shortcut });
+              return;
+            }
+
+            const returnValue = await shortcut.options.handler(createCommandContext(api, payload));
+            const returnText = returnValue === undefined || returnValue === null ? undefined : toText(returnValue);
+            write({ ok: true, actions, returnText, unsupported });
             return;
           }
 
