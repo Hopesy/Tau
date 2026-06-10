@@ -352,6 +352,73 @@ public sealed class CodingAgentExtensionCommandStore
         return true;
     }
 
+    /// <summary>
+    /// Validates CLI-supplied extension flag tokens against currently registered extension flags and
+    /// seeds the resolved values into the JavaScript/TypeScript runtime so <c>pi.getFlag(...)</c> returns
+    /// them. Mirrors upstream <c>applyExtensionFlagValues</c>: boolean flags resolve to <c>true</c> when
+    /// present, string flags require a value, unknown flags and value-less string flags produce error
+    /// diagnostics. A <c>null</c> dictionary value means the flag was supplied without an <c>=value</c>.
+    /// </summary>
+    public IReadOnlyList<CodingAgentExtensionDiagnostic> ApplyExtensionFlagValues(
+        IReadOnlyDictionary<string, string?> cliFlags)
+    {
+        ArgumentNullException.ThrowIfNull(cliFlags);
+        if (cliFlags.Count == 0)
+        {
+            return [];
+        }
+
+        var registered = LoadStatus().Flags;
+        var registeredByName = new Dictionary<string, CodingAgentExtensionFlag>(StringComparer.Ordinal);
+        foreach (var flag in registered)
+        {
+            registeredByName[flag.Name] = flag;
+        }
+
+        var diagnostics = new List<CodingAgentExtensionDiagnostic>();
+        var resolved = new Dictionary<string, object>(StringComparer.Ordinal);
+        var unknownFlags = new List<string>();
+        foreach (var (rawName, value) in cliFlags)
+        {
+            var name = NormalizeName(rawName);
+            if (!registeredByName.TryGetValue(name, out var flag))
+            {
+                unknownFlags.Add(name);
+                continue;
+            }
+
+            if (flag.Type.Equals("boolean", StringComparison.Ordinal))
+            {
+                resolved[name] = true;
+                continue;
+            }
+
+            if (value is not null)
+            {
+                resolved[name] = value;
+                continue;
+            }
+
+            diagnostics.Add(new CodingAgentExtensionDiagnostic(
+                "error",
+                $"Extension flag \"--{name}\" requires a value",
+                flag.FilePath,
+                flag.Scope));
+        }
+
+        if (unknownFlags.Count > 0)
+        {
+            diagnostics.Add(new CodingAgentExtensionDiagnostic(
+                "error",
+                $"Unknown option{(unknownFlags.Count == 1 ? string.Empty : "s")}: {string.Join(", ", unknownFlags.Select(static name => $"--{name}"))}",
+                string.Empty,
+                "cli"));
+        }
+
+        _javaScriptRuntime.SetFlagValues(resolved);
+        return diagnostics;
+    }
+
     private static bool IsNodeModuleRuntime(string runtime) =>
         runtime.Equals("javascript", StringComparison.Ordinal) ||
         runtime.Equals("typescript", StringComparison.Ordinal);

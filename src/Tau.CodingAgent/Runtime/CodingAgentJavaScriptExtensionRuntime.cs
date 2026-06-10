@@ -94,6 +94,10 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
     private readonly string _cwd;
     private readonly string? _nodeExecutable;
     private readonly TimeSpan _timeout;
+    private IReadOnlyDictionary<string, object> _flagValues = EmptyFlagValues;
+
+    private static readonly IReadOnlyDictionary<string, object> EmptyFlagValues =
+        new Dictionary<string, object>(StringComparer.Ordinal);
 
     public CodingAgentJavaScriptExtensionRuntime(
         string? cwd = null,
@@ -105,6 +109,17 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
             ? Environment.GetEnvironmentVariable(NodeExecutableEnvironmentVariable)
             : nodeExecutable;
         _timeout = timeout ?? DefaultTimeout;
+    }
+
+    /// <summary>
+    /// Seeds resolved CLI flag values that are injected into every extension invocation before the
+    /// extension factory runs. Values supplied here win over <c>registerFlag</c> defaults, matching
+    /// upstream <c>applyExtensionFlagValues</c>. Boolean flags use <see cref="bool"/>, string flags use
+    /// <see cref="string"/>.
+    /// </summary>
+    public void SetFlagValues(IReadOnlyDictionary<string, object> flagValues)
+    {
+        _flagValues = flagValues ?? EmptyFlagValues;
     }
 
     public CodingAgentJavaScriptExtensionLoadResult Load(string filePath)
@@ -457,7 +472,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
         return ProcessExecutionResult.Succeeded(resultJson);
     }
 
-    private static string BuildPayload(
+    private string BuildPayload(
         string mode,
         string filePath,
         string cwd,
@@ -505,6 +520,26 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
             {
                 writer.WritePropertyName("toolResult");
                 WriteToolResult(writer, toolResult);
+            }
+
+            if (_flagValues.Count > 0)
+            {
+                writer.WritePropertyName("flagValues");
+                writer.WriteStartObject();
+                foreach (var (name, value) in _flagValues)
+                {
+                    switch (value)
+                    {
+                        case bool boolValue:
+                            writer.WriteBoolean(name, boolValue);
+                            break;
+                        case string stringValue:
+                            writer.WriteString(name, stringValue);
+                            break;
+                    }
+                }
+
+                writer.WriteEndObject();
             }
 
             writer.WriteEndObject();
@@ -1182,6 +1217,14 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
           const flagMap = new Map();
           const shortcutMap = new Map();
           const flagValues = new Map();
+          if (payload.flagValues && typeof payload.flagValues === "object") {
+            for (const key of Object.keys(payload.flagValues)) {
+              const value = payload.flagValues[key];
+              if (typeof value === "boolean" || typeof value === "string") {
+                flagValues.set(key, value);
+              }
+            }
+          }
           const handlerMap = new Map();
           const unsupported = { tools: 0, flags: 0, shortcuts: 0, handlers: 0, messageRenderers: 0, providers: 0 };
           const actions = [];

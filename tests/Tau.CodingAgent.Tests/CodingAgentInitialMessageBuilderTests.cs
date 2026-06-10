@@ -39,6 +39,32 @@ public sealed class CodingAgentInitialMessageBuilderTests
         Assert.Equal("custom system", parsed.SystemPrompt);
         Assert.Equal(["prompt.md"], parsed.FileArguments);
         Assert.Equal(["first prompt", "second prompt"], parsed.Messages);
+        Assert.True(parsed.ExtensionFlags.TryGetValue("unknown", out var unknownValue));
+        Assert.Equal("value", unknownValue);
+    }
+
+    [Fact]
+    public void Parse_CapturesUnknownFlagsAsExtensionFlags()
+    {
+        var parsed = CodingAgentCliArguments.Parse(
+            [
+                "--plan",
+                "--mode-name=fast",
+                "--label",
+                "release",
+                "--toggle"
+            ]);
+
+        Assert.Equal(4, parsed.ExtensionFlags.Count);
+        Assert.True(parsed.ExtensionFlags.TryGetValue("plan", out var plan));
+        Assert.Null(plan);
+        Assert.True(parsed.ExtensionFlags.TryGetValue("mode-name", out var modeName));
+        Assert.Equal("fast", modeName);
+        Assert.True(parsed.ExtensionFlags.TryGetValue("label", out var label));
+        Assert.Equal("release", label);
+        Assert.True(parsed.ExtensionFlags.TryGetValue("toggle", out var toggle));
+        Assert.Null(toggle);
+        Assert.Empty(parsed.Messages);
     }
 
     [Fact]

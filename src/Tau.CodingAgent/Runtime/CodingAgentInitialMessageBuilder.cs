@@ -13,7 +13,8 @@ internal sealed record CodingAgentCliArguments(
     string? Model,
     string? SystemPrompt,
     IReadOnlyList<string> Messages,
-    IReadOnlyList<string> FileArguments)
+    IReadOnlyList<string> FileArguments,
+    IReadOnlyDictionary<string, string?> ExtensionFlags)
 {
     private static readonly HashSet<string> OptionsWithValue = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -70,6 +71,7 @@ internal sealed record CodingAgentCliArguments(
         string? systemPrompt = null;
         var messages = new List<string>();
         var fileArguments = new List<string>();
+        var extensionFlags = new Dictionary<string, string?>(StringComparer.Ordinal);
 
         for (var i = 0; i < args.Count; i++)
         {
@@ -192,12 +194,33 @@ internal sealed record CodingAgentCliArguments(
 
             if (arg.StartsWith("--", StringComparison.Ordinal))
             {
-                if (!arg.Contains('=', StringComparison.Ordinal) &&
-                    i + 1 < args.Count &&
+                var equalsIndex = arg.IndexOf('=', StringComparison.Ordinal);
+                if (equalsIndex >= 0)
+                {
+                    var inlineName = arg[2..equalsIndex];
+                    if (inlineName.Length > 0)
+                    {
+                        extensionFlags[inlineName] = arg[(equalsIndex + 1)..];
+                    }
+
+                    continue;
+                }
+
+                var flagName = arg[2..];
+                if (flagName.Length == 0)
+                {
+                    continue;
+                }
+
+                if (i + 1 < args.Count &&
                     !args[i + 1].StartsWith("-", StringComparison.Ordinal) &&
                     !args[i + 1].StartsWith("@", StringComparison.Ordinal))
                 {
-                    i++;
+                    extensionFlags[flagName] = args[++i];
+                }
+                else
+                {
+                    extensionFlags[flagName] = null;
                 }
 
                 continue;
@@ -221,7 +244,8 @@ internal sealed record CodingAgentCliArguments(
             model,
             systemPrompt,
             messages,
-            fileArguments);
+            fileArguments,
+            extensionFlags);
     }
 
     private static bool TryConsumeStringOption(

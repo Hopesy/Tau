@@ -208,6 +208,27 @@ var settingsStore = new CodingAgentSettingsStore();
 var packageResourceState = new CodingAgentPackageResourceState(packageManager.ResolveResources());
 var extensionCommandStore = new CodingAgentExtensionCommandStore(
     additionalPathsProvider: () => packageResourceState.ExtensionPaths);
+if (cli.ExtensionFlags.Count > 0)
+{
+    var hasExtensionFlagErrors = false;
+    foreach (var diagnostic in extensionCommandStore.ApplyExtensionFlagValues(cli.ExtensionFlags))
+    {
+        if (diagnostic.Severity.Equals("error", StringComparison.Ordinal))
+        {
+            hasExtensionFlagErrors = true;
+            Console.Error.WriteLine($"error: {diagnostic.Message}");
+        }
+        else
+        {
+            Console.Error.WriteLine($"warning: {diagnostic.Message}");
+        }
+    }
+
+    if (hasExtensionFlagErrors)
+    {
+        return 1;
+    }
+}
 var extensionResourceState = new CodingAgentExtensionResourceState(extensionCommandStore.LoadResources());
 var promptTemplateStore = new CodingAgentPromptTemplateStore(
     additionalPathsProvider: () => CombineResourcePaths(packageResourceState.PromptPaths, extensionResourceState.PromptPaths));

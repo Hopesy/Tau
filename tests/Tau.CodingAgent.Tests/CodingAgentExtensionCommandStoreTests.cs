@@ -599,6 +599,98 @@ public class CodingAgentExtensionCommandStoreTests
     }
 
     [Fact]
+    public void ApplyExtensionFlagValues_InjectsCliFlagValuesIntoGetFlag()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-js-cli-flags-" + Guid.NewGuid().ToString("N"));
+        var extensionDirectory = Path.Combine(directory, ".tau", "extensions", "flags");
+        Directory.CreateDirectory(extensionDirectory);
+        WriteJavaScriptExtension(
+            extensionDirectory,
+            """
+            export default function(pi) {
+              pi.registerFlag("plan", {
+                description: "Enable plan mode",
+                type: "boolean",
+                default: false
+              });
+              pi.registerFlag("mode", {
+                description: "Execution mode",
+                type: "string",
+                default: "slow"
+              });
+              pi.registerCommand("flag-check", {
+                description: "Read flags",
+                handler: async () => {
+                  return `plan=${pi.getFlag("plan")}; mode=${pi.getFlag("mode")}`;
+                }
+              });
+            }
+            """);
+
+        try
+        {
+            var store = CreateJavaScriptStore(directory);
+
+            var diagnostics = store.ApplyExtensionFlagValues(new Dictionary<string, string?>(StringComparer.Ordinal)
+            {
+                ["plan"] = null,
+                ["mode"] = "fast"
+            });
+
+            Assert.Empty(diagnostics);
+
+            var handled = store.TryInvoke("/flag-check", out var invocation);
+            Assert.True(handled);
+            Assert.NotNull(invocation);
+            Assert.False(invocation.IsError);
+            Assert.Equal("plan=true; mode=fast", invocation.Message);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void ApplyExtensionFlagValues_ReportsUnknownAndValuelessStringFlags()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-js-cli-flag-errors-" + Guid.NewGuid().ToString("N"));
+        var extensionDirectory = Path.Combine(directory, ".tau", "extensions", "flags");
+        Directory.CreateDirectory(extensionDirectory);
+        WriteJavaScriptExtension(
+            extensionDirectory,
+            """
+            export default function(pi) {
+              pi.registerFlag("mode", {
+                description: "Execution mode",
+                type: "string"
+              });
+            }
+            """);
+
+        try
+        {
+            var store = CreateJavaScriptStore(directory);
+
+            var diagnostics = store.ApplyExtensionFlagValues(new Dictionary<string, string?>(StringComparer.Ordinal)
+            {
+                ["mode"] = null,
+                ["unknown"] = null
+            });
+
+            Assert.Equal(2, diagnostics.Count);
+            Assert.Contains(diagnostics, static d =>
+                d.Severity == "error" && d.Message == "Extension flag \"--mode\" requires a value");
+            Assert.Contains(diagnostics, static d =>
+                d.Severity == "error" && d.Message == "Unknown option: --unknown");
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public void LoadStatus_LoadsJavascriptRegisteredShortcuts()
     {
         var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-js-shortcuts-" + Guid.NewGuid().ToString("N"));
