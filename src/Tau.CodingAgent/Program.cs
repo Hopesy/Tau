@@ -21,6 +21,13 @@ catch (ArgumentException ex)
     return 1;
 }
 
+// Mirrors upstream main.ts: `--offline` forces PI_OFFLINE=1 so all downstream startup network
+// guards (package manager update, startup changelog telemetry) observe offline mode.
+if (cli.Offline)
+{
+    Environment.SetEnvironmentVariable("PI_OFFLINE", "1");
+}
+
 if (cli.Diagnostics.Count > 0)
 {
     var hasError = false;

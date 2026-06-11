@@ -241,6 +241,25 @@ public sealed class CodingAgentInitialMessageBuilderTests
     }
 
     [Fact]
+    public void Parse_RecognizesOfflineFlag()
+    {
+        var parsed = CodingAgentCliArguments.Parse(["--offline", "prompt"]);
+
+        Assert.True(parsed.Offline);
+        Assert.Empty(parsed.Diagnostics);
+        Assert.Empty(parsed.ExtensionFlags);
+        Assert.Equal(["prompt"], parsed.Messages);
+    }
+
+    [Fact]
+    public void Parse_OfflineDefaultsToFalse()
+    {
+        var parsed = CodingAgentCliArguments.Parse(["prompt"]);
+
+        Assert.False(parsed.Offline);
+    }
+
+    [Fact]
     public void ResolveCommandName_PrefersEnvironmentOverride()
     {
         var original = Environment.GetEnvironmentVariable("TAU_CODING_AGENT_COMMAND_NAME");

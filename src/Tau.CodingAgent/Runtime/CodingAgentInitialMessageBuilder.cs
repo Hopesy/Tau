@@ -23,6 +23,7 @@ internal sealed record CodingAgentCliArguments(
     string? SystemPrompt,
     IReadOnlyList<string> AppendSystemPrompt,
     string? Thinking,
+    bool Offline,
     bool NoTools,
     IReadOnlyList<string>? Tools,
     IReadOnlyList<CodingAgentCliDiagnostic> Diagnostics,
@@ -77,8 +78,7 @@ internal sealed record CodingAgentCliArguments(
         "--no-prompt-templates",
         "-np",
         "--verbose",
-        "--json",
-        "--offline"
+        "--json"
     };
 
     private static readonly string ValidToolNames = string.Join(", ", CliToolNameToTauToolName.Keys);
@@ -106,6 +106,7 @@ internal sealed record CodingAgentCliArguments(
         var messages = new List<string>();
         var fileArguments = new List<string>();
         var extensionFlags = new Dictionary<string, string?>(StringComparer.Ordinal);
+        var offline = false;
         var noTools = false;
         List<string>? tools = null;
         string? thinking = null;
@@ -141,6 +142,12 @@ internal sealed record CodingAgentCliArguments(
                 arg.Equals("-v", StringComparison.OrdinalIgnoreCase))
             {
                 version = true;
+                continue;
+            }
+
+            if (arg.Equals("--offline", StringComparison.OrdinalIgnoreCase))
+            {
+                offline = true;
                 continue;
             }
 
@@ -386,6 +393,7 @@ internal sealed record CodingAgentCliArguments(
             systemPrompt,
             appendSystemPrompt,
             thinking,
+            offline,
             noTools,
             tools,
             diagnostics,
