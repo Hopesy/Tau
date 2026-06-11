@@ -1,4 +1,5 @@
 using System.Text;
+using System.Runtime.CompilerServices;
 using Tau.Agent;
 using Tau.Agent.Runtime;
 using Tau.Ai;
@@ -17,6 +18,7 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner, ICodingAgentT
     private readonly ModelCatalog _modelCatalog;
     private readonly ProviderAuthResolver _authResolver;
     private readonly ITauLogSink _logSink;
+    private readonly CodingAgentExtensionLifecycleEventSink? _extensionLifecycleEventSink;
     private readonly Dictionary<string, object?> _toolResultDetailsByToolCallId = new(StringComparer.OrdinalIgnoreCase);
     private readonly bool _refreshesGeneratedSystemPrompt;
     private AgentLoopConfig _config;
@@ -31,7 +33,8 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner, ICodingAgentT
         ITauLogSink? logSink = null,
         TauRuntimeLogContext? logContext = null,
         bool refreshesGeneratedSystemPrompt = false,
-        IReadOnlyList<CodingAgentContextFile>? contextFiles = null)
+        IReadOnlyList<CodingAgentContextFile>? contextFiles = null,
+        CodingAgentExtensionLifecycleEventSink? extensionLifecycleEventSink = null)
     {
         _runtime = runtime;
         var effectiveLogSink = logSink ?? config.LogSink;
@@ -43,6 +46,7 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner, ICodingAgentT
         _modelCatalog = modelCatalog;
         _authResolver = authResolver ?? new ProviderAuthResolver(logSink: effectiveLogSink);
         _logSink = effectiveLogSink;
+        _extensionLifecycleEventSink = extensionLifecycleEventSink;
         _refreshesGeneratedSystemPrompt = refreshesGeneratedSystemPrompt;
         _contextFiles = contextFiles ?? [];
     }
@@ -506,7 +510,8 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner, ICodingAgentT
         return InstrumentRun(
             _runtime.RunAsync(_config with { LogContext = runLogContext }, cancellationToken),
             inputBytes: input?.Length ?? 0,
-            runLogContext);
+            runLogContext,
+            cancellationToken);
     }
 
     public IAsyncEnumerable<AgentEvent> RunAsync(
@@ -530,7 +535,8 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner, ICodingAgentT
         return InstrumentRun(
             _runtime.RunAsync(_config with { LogContext = runLogContext }, cancellationToken),
             inputBytes: sizeHint,
-            runLogContext);
+            runLogContext,
+            cancellationToken);
     }
 
     private TauRuntimeLogContext CreateRunLogContext(TauRuntimeLogContext? logContext = null)
@@ -551,7 +557,8 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner, ICodingAgentT
     private async IAsyncEnumerable<AgentEvent> InstrumentRun(
         IAsyncEnumerable<AgentEvent> inner,
         int inputBytes,
-        TauRuntimeLogContext logContext)
+        TauRuntimeLogContext logContext,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         var startedAt = DateTimeOffset.UtcNow;
         _logSink.Log(new TauLogEvent(
@@ -567,7 +574,7 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner, ICodingAgentT
 
         var hadError = false;
         var hadCancel = false;
-        await using var enumerator = inner.GetAsyncEnumerator();
+        await using var enumerator = inner.GetAsyncEnumerator(cancellationToken);
         try
         {
             while (true)
@@ -585,17 +592,7 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner, ICodingAgentT
                 catch (Exception ex)
                 {
                     hadError = true;
-                    _logSink.Log(new TauLogEvent(
-                        "agent",
-                        "run.error",
-                        DateTimeOffset.UtcNow,
-                        new Dictionary<string, string?>
-                        {
-                            ["provider"] = _config.Model.Provider,
-                            ["model"] = _config.Model.Id,
-                            ["error"] = ex.GetType().Name,
-                            ["message"] = ex.Message
-                        }.WithLogContext(logContext)));
+                    LogRunError(ex, logContext);
                     throw;
                 }
 
@@ -603,6 +600,31 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner, ICodingAgentT
                 if (enumerator.Current is ToolExecutionEndEvent toolEnd)
                 {
                     CaptureToolResultDetails(toolEnd);
+                }
+
+                if (_extensionLifecycleEventSink is not null)
+                {
+                    try
+                    {
+                        var extensionErrors = await _extensionLifecycleEventSink
+                            .PublishAsync(enumerator.Current, cancellationToken)
+                            .ConfigureAwait(false);
+                        foreach (var extensionError in extensionErrors)
+                        {
+                            LogExtensionEventError(extensionError, logContext);
+                        }
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        hadCancel = true;
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        hadError = true;
+                        LogRunError(ex, logContext);
+                        throw;
+                    }
                 }
 
                 yield return enumerator.Current;
@@ -625,6 +647,41 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner, ICodingAgentT
                     }.WithLogContext(logContext)));
             }
         }
+    }
+
+    private void LogExtensionEventError(
+        CodingAgentExtensionLifecycleEventError error,
+        TauRuntimeLogContext logContext)
+    {
+        _logSink.Log(new TauLogEvent(
+            "extension",
+            "event.error",
+            DateTimeOffset.UtcNow,
+            new Dictionary<string, string?>
+            {
+                ["provider"] = _config.Model.Provider,
+                ["model"] = _config.Model.Id,
+                ["eventType"] = error.EventType,
+                ["path"] = error.FilePath,
+                ["scope"] = error.Scope,
+                ["runtime"] = error.Runtime,
+                ["error"] = error.Error
+            }.WithLogContext(logContext)));
+    }
+
+    private void LogRunError(Exception ex, TauRuntimeLogContext logContext)
+    {
+        _logSink.Log(new TauLogEvent(
+            "agent",
+            "run.error",
+            DateTimeOffset.UtcNow,
+            new Dictionary<string, string?>
+            {
+                ["provider"] = _config.Model.Provider,
+                ["model"] = _config.Model.Id,
+                ["error"] = ex.GetType().Name,
+                ["message"] = ex.Message
+            }.WithLogContext(logContext)));
     }
 
     private void CaptureToolResultDetails(ToolExecutionEndEvent toolEnd)
@@ -661,7 +718,8 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner, ICodingAgentT
         ProviderRegistry? providerRegistryOverride = null,
         ModelCatalog? modelCatalogOverride = null,
         bool autoResizeImages = true,
-        IReadOnlyList<IToolInterceptor>? interceptors = null)
+        IReadOnlyList<IToolInterceptor>? interceptors = null,
+        CodingAgentExtensionLifecycleEventSink? extensionLifecycleEventSink = null)
     {
         var registry = providerRegistryOverride ?? new ProviderRegistry();
         if (providerRegistryOverride is null)
@@ -707,7 +765,8 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner, ICodingAgentT
             logSink: logSink,
             logContext: logContext,
             refreshesGeneratedSystemPrompt: string.IsNullOrWhiteSpace(systemPromptOverride),
-            contextFiles: contextFiles ?? []);
+            contextFiles: contextFiles ?? [],
+            extensionLifecycleEventSink: extensionLifecycleEventSink);
     }
 
     public static string GetDefaultProviderId() => ModelCatalog.GetDefaultProviderId();

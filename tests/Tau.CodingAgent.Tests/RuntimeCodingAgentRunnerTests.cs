@@ -342,6 +342,59 @@ public class RuntimeCodingAgentRunnerTests
     }
 
     [Fact]
+    public async Task RunAsync_LogsJavascriptLifecycleHandlerErrorWithoutFailingRun()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-runtime-lifecycle-error-" + Guid.NewGuid().ToString("N"));
+        var extensionDirectory = Path.Combine(directory, ".tau", "extensions", "lifecycle");
+        Directory.CreateDirectory(extensionDirectory);
+        WriteJavaScriptExtension(
+            extensionDirectory,
+            """
+            export default function(pi) {
+              pi.on("message_start", () => {
+                throw new Error("lifecycle boom");
+              });
+            }
+            """);
+
+        try
+        {
+            var sink = new RecordingLogSink();
+            var extensionStore = new CodingAgentExtensionCommandStore(
+                cwd: directory,
+                userExtensionsDirectory: Path.Combine(directory, "missing-user-extensions"),
+                javaScriptRuntime: new CodingAgentJavaScriptExtensionRuntime(directory, nodeExecutable: "node"));
+            var runner = RuntimeCodingAgentRunner.Create(
+                "test-provider",
+                "test-model",
+                toolsOverride: [],
+                logSink: sink,
+                providerRegistryOverride: CreatePromptCapturingRegistry(_ => { }),
+                modelCatalogOverride: CreatePromptCapturingModelCatalog(),
+                extensionLifecycleEventSink: extensionStore.LoadLifecycleEventSink());
+
+            var events = new List<AgentEvent>();
+            await foreach (var evt in runner.RunAsync("hello"))
+            {
+                events.Add(evt);
+            }
+
+            Assert.NotEmpty(events);
+            Assert.Contains(sink.Events, e => e.Category == "agent" && e.Event == "run.end");
+            Assert.DoesNotContain(sink.Events, e => e.Category == "agent" && e.Event == "run.error");
+            var errorEvent = Assert.Single(sink.Events, e => e.Category == "extension" && e.Event == "event.error");
+            Assert.Equal("message_start", errorEvent.Fields["eventType"]);
+            Assert.Equal("project", errorEvent.Fields["scope"]);
+            Assert.Equal("javascript", errorEvent.Fields["runtime"]);
+            Assert.Contains("lifecycle boom", errorEvent.Fields["error"], StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task RunAsync_IncludesContextFilesInGeneratedSystemPrompt()
     {
         string? capturedPrompt = null;
@@ -407,6 +460,59 @@ public class RuntimeCodingAgentRunnerTests
         Assert.Equal("custom system prompt", capturedPrompt);
     }
 
+    [Fact]
+    public async Task RunAsync_EmitsJavascriptLifecycleEvents()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-runtime-lifecycle-" + Guid.NewGuid().ToString("N"));
+        var extensionDirectory = Path.Combine(directory, ".tau", "extensions", "lifecycle");
+        Directory.CreateDirectory(extensionDirectory);
+        WriteJavaScriptExtension(
+            extensionDirectory,
+            """
+            import fs from "node:fs";
+
+            export default function(pi) {
+              pi.on("agent_start", (event) => fs.appendFileSync("events.log", `${event.type}\n`));
+              pi.on("message_start", (event) => {
+                const first = event.message?.content?.[0]?.text ?? "";
+                fs.appendFileSync("events.log", `${event.type}:${event.message.role}:${first}\n`);
+              });
+              pi.on("message_end", (event) => {
+                const first = event.message?.content?.[0]?.text ?? "";
+                fs.appendFileSync("events.log", `${event.type}:${event.message.role}:${first}\n`);
+              });
+              pi.on("agent_end", (event) => fs.appendFileSync("events.log", `${event.type}:${event.messages.length}\n`));
+            }
+            """);
+
+        try
+        {
+            var extensionStore = new CodingAgentExtensionCommandStore(
+                cwd: directory,
+                userExtensionsDirectory: Path.Combine(directory, "missing-user-extensions"),
+                javaScriptRuntime: new CodingAgentJavaScriptExtensionRuntime(directory, nodeExecutable: "node"));
+            var runner = RuntimeCodingAgentRunner.Create(
+                "test-provider",
+                "test-model",
+                toolsOverride: [],
+                providerRegistryOverride: CreatePromptCapturingRegistry(_ => { }),
+                modelCatalogOverride: CreatePromptCapturingModelCatalog(),
+                extensionLifecycleEventSink: extensionStore.LoadLifecycleEventSink());
+
+            await foreach (var _ in runner.RunAsync("hello")) { }
+
+            var log = File.ReadAllText(Path.Combine(directory, "events.log")).ReplaceLineEndings("\n");
+            Assert.Contains("agent_start\n", log, StringComparison.Ordinal);
+            Assert.Contains("message_start:assistant:summary result\n", log, StringComparison.Ordinal);
+            Assert.Contains("message_end:assistant:summary result\n", log, StringComparison.Ordinal);
+            Assert.Contains("agent_end:2\n", log, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
     private static RuntimeCodingAgentRunner CreateInstrumentedRunner(
         ITauLogSink sink,
         Func<AssistantMessageStream> streamFactory,
@@ -469,6 +575,21 @@ public class RuntimeCodingAgentRunnerTests
             Api = "prompt-capture-test"
         });
         return catalog;
+    }
+
+    private static void WriteJavaScriptExtension(string extensionDirectory, string source)
+    {
+        File.WriteAllText(
+            Path.Combine(extensionDirectory, "package.json"),
+            """
+            {
+              "type": "module",
+              "pi": {
+                "extensions": ["index.js"]
+              }
+            }
+            """);
+        File.WriteAllText(Path.Combine(extensionDirectory, "index.js"), source);
     }
 }
 

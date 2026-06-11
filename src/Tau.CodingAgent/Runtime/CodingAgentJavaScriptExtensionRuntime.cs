@@ -63,6 +63,18 @@ public sealed record CodingAgentJavaScriptExtensionShortcutInvokeResult(
     string? StatusMessage,
     string? Error);
 
+public sealed record CodingAgentJavaScriptExtensionUiAction(
+    string Method,
+    string? Message,
+    string? NotifyType,
+    string? StatusKey,
+    string? StatusText,
+    string? WidgetKey,
+    IReadOnlyList<string>? WidgetLines,
+    string? WidgetPlacement,
+    string? Title,
+    string? Text);
+
 public sealed record CodingAgentJavaScriptExtensionToolInvokeResult(
     bool Success,
     IReadOnlyList<string> Content,
@@ -89,6 +101,11 @@ public sealed record CodingAgentJavaScriptExtensionToolResultEventResult(
     JsonElement? Details,
     string? Error);
 
+public sealed record CodingAgentJavaScriptExtensionEventEmitResult(
+    bool Success,
+    IReadOnlyList<string> HandlerErrors,
+    string? Error);
+
 public sealed class CodingAgentJavaScriptExtensionRuntime
 {
     public const string NodeExecutableEnvironmentVariable = "TAU_CODING_AGENT_NODE";
@@ -101,6 +118,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
     private readonly string? _nodeExecutable;
     private readonly TimeSpan _timeout;
     private IReadOnlyDictionary<string, object> _flagValues = EmptyFlagValues;
+    private CodingAgentRpcExtensionUiBridge? _extensionUiBridge;
 
     private static readonly IReadOnlyDictionary<string, object> EmptyFlagValues =
         new Dictionary<string, object>(StringComparer.Ordinal);
@@ -126,6 +144,11 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
     public void SetFlagValues(IReadOnlyDictionary<string, object> flagValues)
     {
         _flagValues = flagValues ?? EmptyFlagValues;
+    }
+
+    public void SetExtensionUiBridge(CodingAgentRpcExtensionUiBridge? extensionUiBridge)
+    {
+        _extensionUiBridge = extensionUiBridge;
     }
 
     public CodingAgentJavaScriptExtensionLoadResult Load(string filePath)
@@ -201,6 +224,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
                     ReadString(root, "error") ?? "javascript extension command failed");
             }
 
+            DispatchUiActions(root);
             return new CodingAgentJavaScriptExtensionInvokeResult(
                 true,
                 ReadRunnerMessages(root),
@@ -240,6 +264,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
                     ReadString(root, "error") ?? "javascript extension shortcut failed");
             }
 
+            DispatchUiActions(root);
             return new CodingAgentJavaScriptExtensionShortcutInvokeResult(
                 true,
                 ReadRunnerMessages(root),
@@ -288,6 +313,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
                     ReadString(root, "error") ?? "javascript extension tool failed");
             }
 
+            DispatchUiActions(root);
             return new CodingAgentJavaScriptExtensionToolInvokeResult(
                 true,
                 ReadStringArray(root, "content"),
@@ -388,6 +414,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
                     ReadString(root, "error") ?? "javascript extension tool_call handler failed");
             }
 
+            DispatchUiActions(root);
             return new CodingAgentJavaScriptExtensionToolCallEventResult(
                 true,
                 ReadBool(root, "block"),
@@ -440,6 +467,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
                     ReadString(root, "error") ?? "javascript extension tool_result handler failed");
             }
 
+            DispatchUiActions(root);
             return new CodingAgentJavaScriptExtensionToolResultEventResult(
                 true,
                 ReadStringArray(root, "content"),
@@ -454,6 +482,47 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
                 [],
                 result.IsError,
                 null,
+                $"invalid node extension runtime output: {ex.Message}");
+        }
+    }
+
+    public CodingAgentJavaScriptExtensionEventEmitResult EmitEvent(
+        string filePath,
+        JsonElement extensionEvent)
+    {
+        var execution = Execute(BuildPayload(
+            "emitEvent",
+            filePath,
+            _cwd,
+            extensionEvent: extensionEvent));
+        if (!execution.Success)
+        {
+            return new CodingAgentJavaScriptExtensionEventEmitResult(false, [], execution.Error);
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(execution.ResultJson);
+            var root = document.RootElement;
+            if (!ReadBool(root, "ok"))
+            {
+                return new CodingAgentJavaScriptExtensionEventEmitResult(
+                    false,
+                    [],
+                    ReadString(root, "error") ?? "javascript extension event handler failed");
+            }
+
+            DispatchUiActions(root);
+            return new CodingAgentJavaScriptExtensionEventEmitResult(
+                true,
+                ReadStringArray(root, "handlerErrors"),
+                null);
+        }
+        catch (JsonException ex)
+        {
+            return new CodingAgentJavaScriptExtensionEventEmitResult(
+                false,
+                [],
                 $"invalid node extension runtime output: {ex.Message}");
         }
     }
@@ -527,7 +596,8 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
         string? toolName = null,
         string? toolCallId = null,
         JsonElement? toolArgs = null,
-        ToolResult? toolResult = null)
+        ToolResult? toolResult = null,
+        JsonElement? extensionEvent = null)
     {
         using var stream = new MemoryStream();
         using (var writer = new Utf8JsonWriter(stream))
@@ -573,6 +643,12 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
                 WriteToolResult(writer, toolResult);
             }
 
+            if (extensionEvent.HasValue)
+            {
+                writer.WritePropertyName("event");
+                extensionEvent.Value.WriteTo(writer);
+            }
+
             if (_flagValues.Count > 0)
             {
                 writer.WritePropertyName("flagValues");
@@ -591,6 +667,11 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
                 }
 
                 writer.WriteEndObject();
+            }
+
+            if (_extensionUiBridge is not null)
+            {
+                writer.WriteBoolean("hasExtensionUi", true);
             }
 
             writer.WriteEndObject();
@@ -864,6 +945,123 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
         return messages.ToArray();
     }
 
+    private void DispatchUiActions(JsonElement root)
+    {
+        var bridge = _extensionUiBridge;
+        if (bridge is null)
+        {
+            return;
+        }
+
+        foreach (var action in ReadUiActions(root))
+        {
+            switch (action.Method)
+            {
+                case "notify":
+                    if (!string.IsNullOrWhiteSpace(action.Message))
+                    {
+                        bridge.NotifyAsync(action.Message, action.NotifyType, CancellationToken.None)
+                            .GetAwaiter()
+                            .GetResult();
+                    }
+                    break;
+                case "setStatus":
+                    if (!string.IsNullOrWhiteSpace(action.StatusKey))
+                    {
+                        bridge.SetStatusAsync(action.StatusKey, action.StatusText, CancellationToken.None)
+                            .GetAwaiter()
+                            .GetResult();
+                    }
+                    break;
+                case "setWidget":
+                    if (!string.IsNullOrWhiteSpace(action.WidgetKey))
+                    {
+                        bridge.SetWidgetAsync(action.WidgetKey, action.WidgetLines, action.WidgetPlacement, CancellationToken.None)
+                            .GetAwaiter()
+                            .GetResult();
+                    }
+                    break;
+                case "setTitle":
+                    if (!string.IsNullOrWhiteSpace(action.Title))
+                    {
+                        bridge.SetTitleAsync(action.Title, CancellationToken.None)
+                            .GetAwaiter()
+                            .GetResult();
+                    }
+                    break;
+                case "set_editor_text":
+                    bridge.SetEditorTextAsync(action.Text ?? string.Empty, CancellationToken.None)
+                        .GetAwaiter()
+                        .GetResult();
+                    break;
+            }
+        }
+    }
+
+    private static IReadOnlyList<CodingAgentJavaScriptExtensionUiAction> ReadUiActions(JsonElement root)
+    {
+        if (!root.TryGetProperty("actions", out var actionsElement) ||
+            actionsElement.ValueKind != JsonValueKind.Array)
+        {
+            return [];
+        }
+
+        var actions = new List<CodingAgentJavaScriptExtensionUiAction>();
+        foreach (var action in actionsElement.EnumerateArray())
+        {
+            if (action.ValueKind != JsonValueKind.Object ||
+                !string.Equals(ReadString(action, "type"), "ui", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var method = ReadString(action, "method");
+            if (string.IsNullOrWhiteSpace(method))
+            {
+                continue;
+            }
+
+            actions.Add(new CodingAgentJavaScriptExtensionUiAction(
+                method,
+                ReadString(action, "message"),
+                ReadString(action, "notifyType"),
+                ReadString(action, "statusKey"),
+                ReadString(action, "statusText"),
+                ReadString(action, "widgetKey"),
+                ReadOptionalStringArray(action, "widgetLines"),
+                ReadString(action, "widgetPlacement"),
+                ReadString(action, "title"),
+                ReadString(action, "text")));
+        }
+
+        return actions.ToArray();
+    }
+
+    private static IReadOnlyList<string>? ReadOptionalStringArray(JsonElement root, string propertyName)
+    {
+        if (!root.TryGetProperty(propertyName, out var arrayElement) ||
+            arrayElement.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+        {
+            return null;
+        }
+
+        if (arrayElement.ValueKind != JsonValueKind.Array)
+        {
+            return null;
+        }
+
+        var values = new List<string>();
+        foreach (var item in arrayElement.EnumerateArray())
+        {
+            if (item.ValueKind == JsonValueKind.String)
+            {
+                values.Add(item.GetString() ?? string.Empty);
+            }
+        }
+
+        return values.ToArray();
+    }
+
     private static IReadOnlyList<string> ReadStringArray(JsonElement root, string propertyName)
     {
         if (!root.TryGetProperty(propertyName, out var arrayElement) ||
@@ -988,7 +1186,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
         const moduleApi = require("node:module");
         const { fileURLToPath, pathToFileURL } = require("node:url");
         const resultPrefix = "__TAU_EXTENSION_RESULT__";
-        let typeScriptHookInstalled = false;
+        let extensionImportHookInstalled = false;
 
         let input = "";
         process.stdin.setEncoding("utf8");
@@ -1007,6 +1205,248 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
 
         function isTypeScriptFile(filePath) {
           return typeof filePath === "string" && filePath.toLowerCase().endsWith(".ts");
+        }
+
+        function mergeSchemaOptions(schema, options) {
+          const result = { ...schema };
+          if (options && typeof options === "object") Object.assign(result, options);
+          return result;
+        }
+
+        const typeBoxModuleSource = String.raw`
+        function mergeSchemaOptions(schema, options) {
+          const result = { ...schema };
+          if (options && typeof options === "object") Object.assign(result, options);
+          return result;
+        }
+        function markOptional(schema) {
+          const result = { ...(schema || {}) };
+          Object.defineProperty(result, "__tauOptional", { value: true, enumerable: false });
+          return result;
+        }
+        function stripOptional(schema) {
+          const result = { ...(schema || {}) };
+          return result;
+        }
+        function literalType(value) {
+          if (value === null) return "null";
+          if (Array.isArray(value)) return "array";
+          return typeof value;
+        }
+        export const Type = {
+          Any(options = {}) { return mergeSchemaOptions({}, options); },
+          Unknown(options = {}) { return mergeSchemaOptions({}, options); },
+          Null(options = {}) { return mergeSchemaOptions({ type: "null" }, options); },
+          String(options = {}) { return mergeSchemaOptions({ type: "string" }, options); },
+          Number(options = {}) { return mergeSchemaOptions({ type: "number" }, options); },
+          Integer(options = {}) { return mergeSchemaOptions({ type: "integer" }, options); },
+          Boolean(options = {}) { return mergeSchemaOptions({ type: "boolean" }, options); },
+          Literal(value, options = {}) { return mergeSchemaOptions({ const: value, enum: [value], type: literalType(value) }, options); },
+          Array(items = {}, options = {}) { return mergeSchemaOptions({ type: "array", items }, options); },
+          Union(items = [], options = {}) { return mergeSchemaOptions({ anyOf: items }, options); },
+          Optional(schema = {}) { return markOptional(schema); },
+          Record(_keySchema = {}, valueSchema = {}, options = {}) {
+            return mergeSchemaOptions({ type: "object", additionalProperties: stripOptional(valueSchema) }, options);
+          },
+          Object(properties = {}, options = {}) {
+            const normalized = {};
+            const required = [];
+            for (const [key, value] of Object.entries(properties || {})) {
+              const propertySchema = stripOptional(value);
+              normalized[key] = propertySchema;
+              if (!value || value.__tauOptional !== true) required.push(key);
+            }
+            const schema = { type: "object", properties: normalized };
+            if (required.length > 0) schema.required = required;
+            return mergeSchemaOptions(schema, options);
+          }
+        };
+        export default { Type };
+        `;
+
+        const piAiModuleSource = typeBoxModuleSource + String.raw`
+        const apiProviders = new Map();
+        const modelRegistry = new Map();
+        const oauthRegistryKey = Symbol.for("@tau/pi-ai/oauth-registry");
+        const oauthProviders = globalThis[oauthRegistryKey] ??= new Map();
+        export function registerApiProvider(provider, sourceId) {
+          if (provider && provider.api) apiProviders.set(provider.api, { provider, sourceId });
+        }
+        export function getApiProvider(api) { return apiProviders.get(api)?.provider; }
+        export function getApiProviders() { return Array.from(apiProviders.values(), entry => entry.provider); }
+        export function unregisterApiProviders(sourceId) {
+          for (const [api, entry] of apiProviders.entries()) if (entry.sourceId === sourceId) apiProviders.delete(api);
+        }
+        export function clearApiProviders() { apiProviders.clear(); }
+        export function registerModel(provider, model) {
+          if (!modelRegistry.has(provider)) modelRegistry.set(provider, new Map());
+          modelRegistry.get(provider).set(model.id, { ...model, provider });
+        }
+        export function getModel(provider, modelId) { return modelRegistry.get(provider)?.get(modelId); }
+        export function getProviders() { return Array.from(modelRegistry.keys()); }
+        export function getModels(provider) { return Array.from(modelRegistry.get(provider)?.values() ?? []); }
+        export function calculateCost(model, usage) {
+          const cost = usage.cost ?? {};
+          const rates = model?.cost ?? {};
+          cost.input = ((rates.input ?? 0) / 1000000) * (usage.input ?? 0);
+          cost.output = ((rates.output ?? 0) / 1000000) * (usage.output ?? 0);
+          cost.cacheRead = ((rates.cacheRead ?? 0) / 1000000) * (usage.cacheRead ?? 0);
+          cost.cacheWrite = ((rates.cacheWrite ?? 0) / 1000000) * (usage.cacheWrite ?? 0);
+          cost.total = cost.input + cost.output + cost.cacheRead + cost.cacheWrite;
+          usage.cost = cost;
+          return cost;
+        }
+        export function supportsXhigh(model) {
+          const id = String(model?.id ?? "");
+          return id.includes("gpt-5.2") || id.includes("gpt-5.3") || id.includes("gpt-5.4") ||
+            id.includes("opus-4-6") || id.includes("opus-4.6") ||
+            id.includes("opus-4-7") || id.includes("opus-4.7");
+        }
+        export function modelsAreEqual(a, b) { return !!a && !!b && a.id === b.id && a.provider === b.provider; }
+        export function getOAuthProvider(id) { return oauthProviders.get(id); }
+        export function registerOAuthProvider(provider) { if (provider && provider.id) oauthProviders.set(provider.id, provider); }
+        export function unregisterOAuthProvider(id) { oauthProviders.delete(id); }
+        export function resetOAuthProviders() { oauthProviders.clear(); }
+        export function getOAuthProviders() { return Array.from(oauthProviders.values()); }
+        export function getOAuthProviderInfoList() {
+          return getOAuthProviders().map(provider => ({ id: provider.id, name: provider.name, available: true }));
+        }
+        export async function refreshOAuthToken(providerId, credentials) {
+          const provider = getOAuthProvider(providerId);
+          if (!provider || typeof provider.refreshToken !== "function") throw new Error("Unknown OAuth provider: " + providerId);
+          return provider.refreshToken(credentials);
+        }
+        export async function getOAuthApiKey(providerId, credentials) {
+          const provider = getOAuthProvider(providerId);
+          const credential = credentials ? credentials[providerId] : undefined;
+          if (!provider || !credential) return null;
+          if (typeof provider.getApiKey !== "function") return null;
+          return { newCredentials: credential, apiKey: provider.getApiKey(credential) };
+        }
+        `;
+
+        const piAiOAuthModuleSource = String.raw`
+        const oauthRegistryKey = Symbol.for("@tau/pi-ai/oauth-registry");
+        const providers = globalThis[oauthRegistryKey] ??= new Map();
+        export function getOAuthProvider(id) { return providers.get(id); }
+        export function registerOAuthProvider(provider) { if (provider && provider.id) providers.set(provider.id, provider); }
+        export function unregisterOAuthProvider(id) { providers.delete(id); }
+        export function resetOAuthProviders() { providers.clear(); }
+        export function getOAuthProviders() { return Array.from(providers.values()); }
+        export function getOAuthProviderInfoList() {
+          return getOAuthProviders().map(provider => ({ id: provider.id, name: provider.name, available: true }));
+        }
+        export async function refreshOAuthToken(providerId, credentials) {
+          const provider = getOAuthProvider(providerId);
+          if (!provider || typeof provider.refreshToken !== "function") throw new Error("Unknown OAuth provider: " + providerId);
+          return provider.refreshToken(credentials);
+        }
+        export async function getOAuthApiKey(providerId, credentials) {
+          const provider = getOAuthProvider(providerId);
+          const credential = credentials ? credentials[providerId] : undefined;
+          if (!provider || !credential) return null;
+          if (typeof provider.getApiKey !== "function") return null;
+          return { newCredentials: credential, apiKey: provider.getApiKey(credential) };
+        }
+        `;
+
+        const piAgentCoreModuleSource = String.raw`
+        export const ToolExecutionMode = Object.freeze({ Sequential: "sequential", Parallel: "parallel" });
+        export class EventStream {
+          constructor() { this.events = []; }
+          push(event) { this.events.push(event); }
+          async *[Symbol.asyncIterator]() { for (const event of this.events) yield event; }
+        }
+        export class Agent {
+          constructor(options = {}) { this.options = options; }
+        }
+        `;
+
+        const piTuiModuleSource = String.raw`
+        export class Container {
+          constructor() { this.children = []; }
+          addChild(child) { this.children.push(child); return child; }
+          clear() { this.children = []; }
+          render(width = 80) { return this.children.flatMap(child => typeof child?.render === "function" ? child.render(width) : []); }
+        }
+        export class Text {
+          constructor(text = "", paddingX = 1, paddingY = 1) { this.text = String(text ?? ""); this.paddingX = paddingX; this.paddingY = paddingY; }
+          setText(text) { this.text = String(text ?? ""); }
+          render() { return this.text.trim().length === 0 ? [] : [this.text]; }
+        }
+        export class Spacer { constructor(lines = 1) { this.lines = lines; } render() { return Array.from({ length: Math.max(0, this.lines) }, () => ""); } }
+        export class Box extends Container {}
+        export class Markdown extends Text {}
+        export class TruncatedText extends Text {}
+        export class Input extends Text {}
+        export class Loader extends Text {}
+        export class CancellableLoader extends Loader {}
+        export class SelectList extends Container {}
+        export class SettingsList extends Container {}
+        export class Image extends Text {}
+        export class TUI {}
+        export class ProcessTerminal {}
+        export class KeybindingsManager { matches() { return false; } }
+        export const CURSOR_MARKER = "";
+        export const TUI_KEYBINDINGS = {};
+        export function getKeybindings() { return new KeybindingsManager(); }
+        export function setKeybindings() {}
+        export function matchesKey(actual, expected) { return actual === expected; }
+        export function parseKey(value) { return String(value ?? ""); }
+        export function visibleWidth(value) { return String(value ?? "").replace(/\x1b\[[0-9;]*m/g, "").length; }
+        export function truncateToWidth(value, width) { return String(value ?? "").slice(0, Math.max(0, width)); }
+        export function wrapTextWithAnsi(value) { return [String(value ?? "")]; }
+        export function fuzzyMatch(query, value) { return String(value ?? "").toLowerCase().includes(String(query ?? "").toLowerCase()) ? { score: 1 } : undefined; }
+        export function fuzzyFilter(items, query) { return (items ?? []).filter(item => fuzzyMatch(query, String(item))); }
+        export function getCapabilities() { return {}; }
+        export function getImageDimensions() { return undefined; }
+        export function imageFallback() { return ""; }
+        `;
+
+        const piCodingAgentModuleSource = String.raw`
+        export function defineTool(tool) { return tool; }
+        export function createEventBus() {
+          const listeners = new Map();
+          return {
+            on(type, handler) {
+              const list = listeners.get(type) ?? [];
+              list.push(handler);
+              listeners.set(type, list);
+              return () => listeners.set(type, (listeners.get(type) ?? []).filter(candidate => candidate !== handler));
+            },
+            async emit(type, payload) {
+              for (const handler of listeners.get(type) ?? []) await handler(payload);
+            }
+          };
+        }
+        export class ModelRegistry {}
+        export class SessionManager {}
+        export class CustomEditor {
+          constructor(...args) { this.args = args; this.actionHandlers = new Map(); }
+          onAction(action, handler) { this.actionHandlers.set(action, handler); }
+          handleInput() {}
+          getText() { return ""; }
+          isShowingAutocomplete() { return false; }
+          render() { return []; }
+          dispose() {}
+        }
+        export function createSyntheticSourceInfo(path, options = {}) { return { path, ...options }; }
+        `;
+
+        const virtualModuleSources = new Map([
+          ["@sinclair/typebox", typeBoxModuleSource],
+          ["@mariozechner/pi-agent-core", piAgentCoreModuleSource],
+          ["@mariozechner/pi-tui", piTuiModuleSource],
+          ["@mariozechner/pi-ai", piAiModuleSource],
+          ["@mariozechner/pi-ai/oauth", piAiOAuthModuleSource],
+          ["@mariozechner/pi-coding-agent", piCodingAgentModuleSource]
+        ]);
+
+        function virtualModuleUrl(specifier) {
+          const source = virtualModuleSources.get(specifier);
+          return source === undefined
+            ? undefined
+            : "data:text/javascript;charset=utf-8," + encodeURIComponent(source);
         }
 
         function hasModuleSyntax(source) {
@@ -1034,16 +1474,29 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
           return hasModuleSyntax(source) ? "module" : "commonjs";
         }
 
-        function installTypeScriptHook() {
-          if (typeScriptHookInstalled) return;
-          if (typeof moduleApi.registerHooks !== "function" || typeof moduleApi.stripTypeScriptTypes !== "function") {
-            throw new Error("typescript extension runtime unavailable: Node.js type stripping hooks are not available");
+        function installExtensionImportHook(requireHooks) {
+          if (extensionImportHookInstalled) return;
+          if (typeof moduleApi.registerHooks !== "function") {
+            if (requireHooks) {
+              throw new Error("typescript extension runtime unavailable: Node.js module hooks are not available");
+            }
+            return;
           }
 
           moduleApi.registerHooks({
+            resolve(specifier, context, nextResolve) {
+              const url = virtualModuleUrl(specifier);
+              if (url) {
+                return { url, shortCircuit: true };
+              }
+              return nextResolve(specifier, context);
+            },
             load(url, context, nextLoad) {
               const parsed = new URL(url);
               if (parsed.protocol === "file:" && parsed.pathname.toLowerCase().endsWith(".ts")) {
+                if (typeof moduleApi.stripTypeScriptTypes !== "function") {
+                  throw new Error("typescript extension runtime unavailable: Node.js type stripping hooks are not available");
+                }
                 const source = fs.readFileSync(parsed, "utf8");
                 const stripped = moduleApi.stripTypeScriptTypes(source, { mode: "strip", sourceUrl: url });
                 return {
@@ -1056,7 +1509,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
               return nextLoad(url, context);
             }
           });
-          typeScriptHookInstalled = true;
+          extensionImportHookInstalled = true;
         }
 
         function toText(value) {
@@ -1111,9 +1564,30 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
           };
         }
 
+        function normalizeStringArray(value) {
+          if (value === undefined || value === null) return undefined;
+          if (!Array.isArray(value)) return undefined;
+          return value.map(item => toText(item));
+        }
+
+        const supportedEventNames = new Set([
+          "tool_call",
+          "tool_result",
+          "agent_start",
+          "agent_end",
+          "turn_start",
+          "turn_end",
+          "message_start",
+          "message_update",
+          "message_end",
+          "tool_execution_start",
+          "tool_execution_update",
+          "tool_execution_end"
+        ]);
+
         function addHandler(handlerMap, unsupported, eventName, handler) {
           const key = String(eventName ?? "");
-          if ((key !== "tool_call" && key !== "tool_result") || typeof handler !== "function") {
+          if (!supportedEventNames.has(key) || typeof handler !== "function") {
             unsupported.handlers++;
             return () => {};
           }
@@ -1200,28 +1674,50 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
           };
         }
 
-        function createCommandContext(api, payload) {
+        function createUiContext(actions) {
+          const addUiAction = (method, fields = {}) => {
+            actions.push({ type: "ui", method, ...fields });
+          };
           return {
-            ui: {
-              select: async () => undefined,
-              confirm: async () => false,
-              input: async () => undefined,
-              notify: () => {},
-              onTerminalInput: () => () => {},
-              setStatus: () => {},
-              setWorkingMessage: () => {},
-              setHiddenThinkingLabel: () => {},
-              setWidget: () => {},
-              setFooter: () => {},
-              setHeader: () => {},
-              setTitle: () => {},
-              custom: async () => undefined,
-              pasteToEditor: () => {},
-              setEditorText: () => {},
-              getEditorText: () => "",
-              editor: async () => undefined
+            select: async () => undefined,
+            confirm: async () => false,
+            input: async () => undefined,
+            notify: (message, type) => addUiAction("notify", {
+              message: toText(message),
+              notifyType: typeof type === "string" ? type : undefined
+            }),
+            onTerminalInput: () => () => {},
+            setStatus: (key, text) => addUiAction("setStatus", {
+              statusKey: String(key ?? ""),
+              statusText: text === undefined ? undefined : toText(text)
+            }),
+            setWorkingMessage: () => {},
+            setHiddenThinkingLabel: () => {},
+            setWidget: (key, content, options = {}) => {
+              const widgetLines = normalizeStringArray(content);
+              if (content === undefined || widgetLines !== undefined) {
+                addUiAction("setWidget", {
+                  widgetKey: String(key ?? ""),
+                  widgetLines,
+                  widgetPlacement: typeof options?.placement === "string" ? options.placement : undefined
+                });
+              }
             },
-            hasUI: false,
+            setFooter: () => {},
+            setHeader: () => {},
+            setTitle: title => addUiAction("setTitle", { title: toText(title) }),
+            custom: async () => undefined,
+            pasteToEditor(text) { this.setEditorText(text); },
+            setEditorText: text => addUiAction("set_editor_text", { text: toText(text) }),
+            getEditorText: () => "",
+            editor: async () => undefined
+          };
+        }
+
+        function createCommandContext(api, payload, actions) {
+          return {
+            ui: createUiContext(actions),
+            hasUI: payload.hasExtensionUi === true,
             cwd: payload.cwd,
             sessionManager: {},
             modelRegistry: {},
@@ -1246,9 +1742,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
         }
 
         async function loadFactory(filePath) {
-          if (isTypeScriptFile(filePath)) {
-            installTypeScriptHook();
-          }
+          installExtensionImportHook(isTypeScriptFile(filePath));
           const url = pathToFileURL(filePath).href + "?tauCacheBust=" + Date.now() + "-" + Math.random();
           const module = await import(url);
           let factory = module.default;
@@ -1338,7 +1832,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
               return;
             }
 
-            const returnValue = await shortcut.options.handler(createCommandContext(api, payload));
+            const returnValue = await shortcut.options.handler(createCommandContext(api, payload, actions));
             const returnText = returnValue === undefined || returnValue === null ? undefined : toText(returnValue);
             write({ ok: true, actions, returnText, unsupported });
             return;
@@ -1355,7 +1849,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
 
             let result = undefined;
             for (const handler of handlers) {
-              const handlerResult = await handler(event, createCommandContext(api, payload));
+              const handlerResult = await handler(event, createCommandContext(api, payload, actions));
               if (handlerResult) {
                 result = handlerResult;
                 if (result.block) break;
@@ -1366,7 +1860,8 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
               ok: true,
               block: result && result.block === true,
               reason: result && typeof result.reason === "string" ? result.reason : undefined,
-              input: event.input
+              input: event.input,
+              actions
             });
             return;
           }
@@ -1387,7 +1882,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
 
             for (const handler of handlers) {
               try {
-                const handlerResult = await handler(event, createCommandContext(api, payload));
+                const handlerResult = await handler(event, createCommandContext(api, payload, actions));
                 if (!handlerResult) continue;
                 if (Object.prototype.hasOwnProperty.call(handlerResult, "content")) {
                   event.content = normalizeContentBlocks(handlerResult.content);
@@ -1406,8 +1901,26 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
               ok: true,
               content: normalizeToolEventContent(event.content),
               isError: event.isError,
-              details: event.details
+              details: event.details,
+              actions
             });
+            return;
+          }
+
+          if (payload.mode === "emitEvent") {
+            const event = payload.event && typeof payload.event === "object" ? payload.event : { type: "" };
+            const eventType = String(event.type ?? "");
+            const handlers = handlerMap.get(eventType) ?? [];
+            const handlerErrors = [];
+            for (const handler of handlers) {
+              try {
+                await handler(event, createCommandContext(api, payload, actions));
+              } catch (error) {
+                handlerErrors.push(formatError(error));
+              }
+            }
+
+            write({ ok: true, handlerErrors, actions, unsupported });
             return;
           }
 
@@ -1448,7 +1961,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
               payload.toolArgs && typeof payload.toolArgs === "object" ? payload.toolArgs : {},
               undefined,
               onUpdate,
-              createCommandContext(api, payload));
+              createCommandContext(api, payload, actions));
             const result = normalizeToolResult(returnValue);
             write({ ok: true, content: result.content, isError: result.isError, details: result.details, actions, unsupported });
             return;
@@ -1464,7 +1977,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
             return;
           }
 
-          const returnValue = await command.options.handler(String(payload.args ?? ""), createCommandContext(api, payload));
+          const returnValue = await command.options.handler(String(payload.args ?? ""), createCommandContext(api, payload, actions));
           const returnText = returnValue === undefined || returnValue === null ? undefined : toText(returnValue);
           write({ ok: true, actions, returnText, unsupported });
         }

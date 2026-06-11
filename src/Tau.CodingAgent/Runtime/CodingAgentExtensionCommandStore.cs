@@ -166,6 +166,11 @@ public sealed class CodingAgentExtensionCommandStore
         return LoadStatus().Commands;
     }
 
+    public void SetExtensionUiBridge(CodingAgentRpcExtensionUiBridge? extensionUiBridge)
+    {
+        _javaScriptRuntime.SetExtensionUiBridge(extensionUiBridge);
+    }
+
     public IReadOnlyList<CodingAgentExtensionTool> LoadToolDefinitions()
     {
         return LoadStatus().Tools;
@@ -202,6 +207,32 @@ public sealed class CodingAgentExtensionCommandStore
         return modules.Length == 0
             ? []
             : [new CodingAgentExtensionToolEventInterceptor(modules, _javaScriptRuntime)];
+    }
+
+    public CodingAgentExtensionLifecycleEventSink? LoadLifecycleEventSink()
+    {
+        var modules = LoadStatus()
+            .EventHandlers
+            .Where(static handler => CodingAgentExtensionLifecycleEventSink.IsSupportedEventType(handler.EventType))
+            .GroupBy(static handler => Path.GetFullPath(handler.FilePath), StringComparer.OrdinalIgnoreCase)
+            .Select(static group =>
+            {
+                var handlers = group.ToArray();
+                var first = handlers[0];
+                return new CodingAgentExtensionLifecycleEventModule(
+                    first.FilePath,
+                    first.Scope,
+                    first.Runtime,
+                    handlers
+                        .Select(static handler => handler.EventType)
+                        .Distinct(StringComparer.Ordinal)
+                        .ToArray());
+            })
+            .ToArray();
+
+        return modules.Length == 0
+            ? null
+            : new CodingAgentExtensionLifecycleEventSink(modules, _javaScriptRuntime);
     }
 
     public CodingAgentExtensionResources LoadResources()

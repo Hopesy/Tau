@@ -751,6 +751,76 @@ public sealed class CodingAgentRpcHostTests
     }
 
     [Fact]
+    public async Task ExtensionToolUiFireAndForgetActionsEmitRpcRequests()
+    {
+        Assert.True(IsNodeAvailable(), "node is required for javascript extension runtime tests");
+        using var temp = TempDirectory.Create();
+        var extensionDirectory = System.IO.Path.Combine(temp.Path, ".tau", "extensions", "ui-tool");
+        Directory.CreateDirectory(extensionDirectory);
+        WriteJavaScriptExtension(
+            extensionDirectory,
+            """
+            export default function(pi) {
+              pi.registerTool({
+                name: "ui_tool",
+                label: "UI Tool",
+                description: "Exercise extension UI actions",
+                parameters: { type: "object" },
+                execute: async (_toolCallId, _params, _signal, _onUpdate, ctx) => {
+                  if (ctx.hasUI) {
+                    ctx.ui.notify("Build finished", "warning");
+                    ctx.ui.setStatus("build", "done");
+                    ctx.ui.setWidget("summary", ["one", "two"], { placement: "belowEditor" });
+                    ctx.ui.setTitle("Tau UI");
+                    ctx.ui.setEditorText("draft text");
+                    ctx.ui.pasteToEditor("pasted text");
+                  }
+                  return "ui done";
+                }
+              });
+            }
+            """);
+        var store = new CodingAgentExtensionCommandStore(
+            cwd: temp.Path,
+            userExtensionsDirectory: System.IO.Path.Combine(temp.Path, "missing-user-extensions"),
+            javaScriptRuntime: new CodingAgentJavaScriptExtensionRuntime(temp.Path, nodeExecutable: "node"));
+        var output = new JsonLineWriter();
+        var bridge = new CodingAgentRpcExtensionUiBridge();
+        _ = new CodingAgentRpcHost(
+            new FakeCodingAgentRunner((_, _) => EmptyRun()),
+            new StringReader(string.Empty),
+            output,
+            extensionCommandStore: store,
+            extensionUi: bridge);
+        var tool = Assert.Single(store.LoadTools());
+        using var args = JsonDocument.Parse("{}");
+
+        var result = await tool.ExecuteAsync("tool-call-1", args.RootElement);
+
+        Assert.Equal("ui done", Assert.IsType<TextContent>(Assert.Single(result.Content)).Text);
+        var lines = ReadJsonLines(output);
+        var notify = lines.Single(line => line.GetProperty("method").GetString() == "notify");
+        Assert.Equal("Build finished", notify.GetProperty("message").GetString());
+        Assert.Equal("warning", notify.GetProperty("notifyType").GetString());
+        var status = lines.Single(line => line.GetProperty("method").GetString() == "setStatus");
+        Assert.Equal("build", status.GetProperty("statusKey").GetString());
+        Assert.Equal("done", status.GetProperty("statusText").GetString());
+        var widget = lines.Single(line => line.GetProperty("method").GetString() == "setWidget");
+        Assert.Equal("summary", widget.GetProperty("widgetKey").GetString());
+        Assert.Equal("belowEditor", widget.GetProperty("widgetPlacement").GetString());
+        Assert.Equal(
+            ["one", "two"],
+            widget.GetProperty("widgetLines").EnumerateArray().Select(line => line.GetString()!).ToArray());
+        Assert.Equal("Tau UI", lines.Single(line => line.GetProperty("method").GetString() == "setTitle").GetProperty("title").GetString());
+        Assert.Equal(
+            ["draft text", "pasted text"],
+            lines
+                .Where(line => line.GetProperty("method").GetString() == "set_editor_text")
+                .Select(line => line.GetProperty("text").GetString()!)
+                .ToArray());
+    }
+
+    [Fact]
     public async Task RunAsync_GetAvailableModelsAndSetModelRequireConfiguredAuth()
     {
         var runner = new FakeCodingAgentRunner((_, _) => EmptyRun());
@@ -2770,6 +2840,43 @@ public sealed class CodingAgentRpcHostTests
         var image = Assert.IsType<ImageContent>(blocks[1]);
         Assert.Equal("aGVsbG8=", image.Data);
         Assert.Equal("image/png", image.MimeType);
+    }
+
+    private static void WriteJavaScriptExtension(string extensionDirectory, string source)
+    {
+        File.WriteAllText(
+            System.IO.Path.Combine(extensionDirectory, "package.json"),
+            """
+            {
+              "type": "module",
+              "pi": {
+                "extensions": ["index.js"]
+              }
+            }
+            """);
+        File.WriteAllText(System.IO.Path.Combine(extensionDirectory, "index.js"), source);
+    }
+
+    private static bool IsNodeAvailable()
+    {
+        using var process = new System.Diagnostics.Process();
+        process.StartInfo = new System.Diagnostics.ProcessStartInfo("node")
+        {
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true
+        };
+        process.StartInfo.ArgumentList.Add("--version");
+        try
+        {
+            process.Start();
+            return process.WaitForExit(2000) && process.ExitCode == 0;
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            return false;
+        }
     }
 
     private static string ReadText(ChatMessage message)

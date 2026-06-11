@@ -277,6 +277,7 @@ var runnerTools = RuntimeCodingAgentRunner.CreateDefaultTools(
     settings.ImagesAutoResize ?? true,
     extensionCommandStore.LoadTools());
 var runnerInterceptors = extensionCommandStore.LoadToolInterceptors();
+var runnerExtensionLifecycleEvents = extensionCommandStore.LoadLifecycleEventSink();
 var runner = RuntimeCodingAgentRunner.Create(
     providerId,
     modelId,
@@ -287,7 +288,8 @@ var runner = RuntimeCodingAgentRunner.Create(
     contextFiles: contextFileStore.Load(),
     logSink: logSink,
     autoResizeImages: settings.ImagesAutoResize ?? true,
-    interceptors: runnerInterceptors);
+    interceptors: runnerInterceptors,
+    extensionLifecycleEventSink: runnerExtensionLifecycleEvents);
 runner.SessionName = session.Name;
 runner.SteeringMode = CodingAgentQueueModes.ToAgentQueueMode(settings.SteeringMode);
 runner.FollowUpMode = CodingAgentQueueModes.ToAgentQueueMode(settings.FollowUpMode);

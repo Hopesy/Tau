@@ -76,6 +76,7 @@ public sealed class CodingAgentRpcHost
         _extensionCommandStore = extensionCommandStore;
         ExtensionUi = extensionUi ?? new CodingAgentRpcExtensionUiBridge();
         ExtensionUi.Attach(WriteJsonLineAsync);
+        _extensionCommandStore?.SetExtensionUiBridge(ExtensionUi);
         _shellRunner = shellRunner ?? new SystemCodingAgentShellRunner();
         _autoCompaction = autoCompaction ?? CodingAgentAutoCompactionOptions.Disabled;
         _sessionSwitchCoordinator = new CodingAgentSessionSwitchCoordinator(

@@ -459,6 +459,94 @@ public class CodingAgentExtensionCommandStoreTests
     }
 
     [Fact]
+    public async Task LoadStatus_LoadsJavascriptExtensionWithVirtualPackageImports()
+    {
+        Assert.True(IsNodeTypeScriptRuntimeAvailable(), "node module hooks are required for virtual extension package imports");
+        var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-js-virtual-imports-" + Guid.NewGuid().ToString("N"));
+        var extensionDirectory = Path.Combine(directory, ".tau", "extensions", "virtual-imports");
+        Directory.CreateDirectory(extensionDirectory);
+        WriteJavaScriptExtension(
+            extensionDirectory,
+            """
+            import { Type, calculateCost, getModels, registerModel } from "@mariozechner/pi-ai";
+            import { getOAuthProviders, registerOAuthProvider } from "@mariozechner/pi-ai/oauth";
+            import { ToolExecutionMode } from "@mariozechner/pi-agent-core";
+            import { defineTool } from "@mariozechner/pi-coding-agent";
+            import { Text } from "@mariozechner/pi-tui";
+
+            export default function(pi) {
+              registerModel("tau", { id: "tau-model", cost: { input: 1000000, output: 0 } });
+              registerOAuthProvider({ id: "tau-oauth", name: "Tau OAuth" });
+              const text = new Text("Tau").render().join("");
+              const parameters = Type.Object({
+                name: Type.String(),
+                optional: Type.Optional(Type.Boolean())
+              });
+
+              pi.registerCommand("virtual-info", {
+                description: "Read virtual extension package state",
+                handler: async () => {
+                  const cost = calculateCost({ cost: { input: 1000000, output: 0 } }, { input: 2, output: 0 });
+                  return [
+                    parameters.required.join(","),
+                    getModels("tau").map(model => model.id).join(","),
+                    getOAuthProviders().map(provider => provider.id).join(","),
+                    String(cost.total),
+                    text
+                  ].join(":");
+                }
+              });
+
+              pi.registerTool(defineTool({
+                name: "virtual_tool",
+                label: "Virtual Tool",
+                description: "Exercise virtual package imports",
+                parameters,
+                executionMode: ToolExecutionMode.Sequential,
+                execute: async (_toolCallId, params) => `virtual ${params.name}`
+              }));
+            }
+            """);
+
+        try
+        {
+            var store = CreateJavaScriptStore(directory);
+
+            var status = store.LoadStatus();
+
+            Assert.Empty(status.Diagnostics);
+            var command = Assert.Single(status.Commands);
+            Assert.Equal("virtual-info", command.Name);
+            var toolDefinition = Assert.Single(status.Tools);
+            Assert.Equal("virtual_tool", toolDefinition.Name);
+            Assert.Equal("object", toolDefinition.ParameterSchema.GetProperty("type").GetString());
+            Assert.Equal(
+                ["name"],
+                toolDefinition.ParameterSchema.GetProperty("required").EnumerateArray().Select(static item => item.GetString()!).ToArray());
+            var module = Assert.Single(status.Modules);
+            Assert.Equal("loaded; commands 1; tools 1; limited runtime", module.Status);
+
+            var handled = store.TryInvoke("/virtual-info", out var invocation);
+
+            Assert.True(handled);
+            Assert.NotNull(invocation);
+            Assert.False(invocation.IsError);
+            Assert.Equal("name:tau-model:tau-oauth:2:Tau", invocation.Message);
+
+            var tool = Assert.Single(store.LoadTools());
+            using var args = JsonDocument.Parse("""{"name":"Ada"}""");
+            var result = await tool.ExecuteAsync("tool-call-1", args.RootElement);
+
+            Assert.False(result.IsError);
+            Assert.Equal("virtual Ada", Assert.IsType<TextContent>(Assert.Single(result.Content)).Text);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public void TryInvoke_ExecutesJavascriptCommandAndSendsRunnerMessage()
     {
         var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-js-runner-" + Guid.NewGuid().ToString("N"));
@@ -1148,6 +1236,47 @@ public class CodingAgentExtensionCommandStoreTests
             var resultDetails = Assert.IsType<JsonElement>(result.Details);
             Assert.True(resultDetails.GetProperty("patched").GetBoolean());
             Assert.Equal("extension", resultDetails.GetProperty("original").GetString());
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task LoadLifecycleEventSink_EmitsJavascriptMessageLifecycleHandler()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-js-lifecycle-" + Guid.NewGuid().ToString("N"));
+        var extensionDirectory = Path.Combine(directory, ".tau", "extensions", "lifecycle");
+        Directory.CreateDirectory(extensionDirectory);
+        WriteJavaScriptExtension(
+            extensionDirectory,
+            """
+            import fs from "node:fs";
+
+            export default function(pi) {
+              pi.on("message_start", (event) => {
+                const first = event.message?.content?.[0]?.text ?? "";
+                fs.appendFileSync("events.log", `${event.type}:${event.message.role}:${first}\n`);
+              });
+            }
+            """);
+
+        try
+        {
+            var store = CreateJavaScriptStore(directory);
+            var status = store.LoadStatus();
+
+            Assert.Empty(status.Diagnostics);
+            Assert.Equal("message_start", Assert.Single(status.EventHandlers).EventType);
+            Assert.Equal("loaded; commands 0; tools 0; events 1; limited runtime", Assert.Single(status.Modules).Status);
+
+            var sink = store.LoadLifecycleEventSink();
+            Assert.NotNull(sink);
+            await sink!.PublishAsync(new MessageStartEvent(new UserMessage("hello lifecycle")));
+
+            var logPath = Path.Combine(directory, "events.log");
+            Assert.Equal("message_start:user:hello lifecycle\n", File.ReadAllText(logPath).ReplaceLineEndings("\n"));
         }
         finally
         {
