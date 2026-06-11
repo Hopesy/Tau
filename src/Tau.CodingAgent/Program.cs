@@ -413,7 +413,8 @@ var runner = RuntimeCodingAgentRunner.Create(
     autoResizeImages: settings.ImagesAutoResize ?? true,
     interceptors: runnerInterceptors,
     extensionLifecycleEventSink: runnerExtensionLifecycleEvents,
-    appendSystemPrompt: resolvedAppendSystemPrompt);
+    appendSystemPrompt: resolvedAppendSystemPrompt,
+    apiKey: cli.ApiKey);
 runner.SessionName = session.Name;
 runner.SteeringMode = CodingAgentQueueModes.ToAgentQueueMode(settings.SteeringMode);
 runner.FollowUpMode = CodingAgentQueueModes.ToAgentQueueMode(settings.FollowUpMode);

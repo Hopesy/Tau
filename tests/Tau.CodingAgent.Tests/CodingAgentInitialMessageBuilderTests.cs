@@ -233,6 +233,24 @@ public sealed class CodingAgentInitialMessageBuilderTests
         Assert.Empty(parsed.Messages);
     }
 
+    [Fact]
+    public void Parse_CapturesApiKey()
+    {
+        var parsed = CodingAgentCliArguments.Parse(["--api-key", "sk-test-123", "prompt"]);
+
+        Assert.Equal("sk-test-123", parsed.ApiKey);
+        Assert.Equal(["prompt"], parsed.Messages);
+    }
+
+    [Fact]
+    public void Parse_CapturesInlineApiKey()
+    {
+        var parsed = CodingAgentCliArguments.Parse(["--api-key=sk-inline-456"]);
+
+        Assert.Equal("sk-inline-456", parsed.ApiKey);
+        Assert.Empty(parsed.Messages);
+    }
+
     [Theory]
     [InlineData("--thinking", "high", "high")]
     [InlineData("--thinking", "OFF", "off")]

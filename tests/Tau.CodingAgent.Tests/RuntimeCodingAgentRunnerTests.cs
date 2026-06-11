@@ -111,6 +111,34 @@ public class RuntimeCodingAgentRunnerTests
     }
 
     [Fact]
+    public async Task Create_WithApiKey_PassesExplicitKeyToProvider()
+    {
+        string? capturedApiKey = null;
+        var registry = new ProviderRegistry();
+        registry.Register("options-capture-test", () => new OptionsCapturingProvider(key => capturedApiKey = key), sourceId: "test");
+        var catalog = new Tau.Ai.Registry.ModelCatalog();
+        catalog.RegisterModel(new Model
+        {
+            Provider = "test-provider",
+            Id = "test-model",
+            Name = "Test Model",
+            Api = "options-capture-test"
+        });
+
+        var runner = RuntimeCodingAgentRunner.Create(
+            "test-provider",
+            "test-model",
+            toolsOverride: [],
+            providerRegistryOverride: registry,
+            modelCatalogOverride: catalog,
+            apiKey: "sk-cli-supplied-key");
+
+        await foreach (var _ in runner.RunAsync("hello")) { }
+
+        Assert.Equal("sk-cli-supplied-key", capturedApiKey);
+    }
+
+    [Fact]
     public void Create_WithInitialMessages_RehydratesConversationState()
     {
         var runner = RuntimeCodingAgentRunner.Create(
@@ -757,6 +785,32 @@ file sealed class PromptCapturingProvider : IStreamProvider
         _capture(context);
         var stream = new AssistantMessageStream();
         stream.Push(new DoneEvent(new AssistantMessage([new TextContent("summary result")])));
+        return stream;
+    }
+}
+
+file sealed class OptionsCapturingProvider : IStreamProvider
+{
+    private readonly Action<string?> _captureApiKey;
+    public OptionsCapturingProvider(Action<string?> captureApiKey) => _captureApiKey = captureApiKey;
+    public string Api => "options-capture-test";
+
+    public AssistantMessageStream Stream(Model model, LlmContext context, StreamOptions options)
+    {
+        _captureApiKey(options.ApiKey);
+        return CreateStream();
+    }
+
+    public AssistantMessageStream StreamSimple(Model model, LlmContext context, SimpleStreamOptions options)
+    {
+        _captureApiKey(options.ApiKey);
+        return CreateStream();
+    }
+
+    private static AssistantMessageStream CreateStream()
+    {
+        var stream = new AssistantMessageStream();
+        stream.Push(new DoneEvent(new AssistantMessage([new TextContent("ok")])));
         return stream;
     }
 }

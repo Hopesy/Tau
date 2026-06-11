@@ -20,6 +20,7 @@ internal sealed record CodingAgentCliArguments(
     IReadOnlyList<string> ThemePaths,
     string? Provider,
     string? Model,
+    string? ApiKey,
     string? SystemPrompt,
     IReadOnlyList<string> AppendSystemPrompt,
     string? Thinking,
@@ -52,7 +53,6 @@ internal sealed record CodingAgentCliArguments(
     {
         "--provider",
         "--model",
-        "--api-key",
         "--system-prompt",
         "--session",
         "--fork",
@@ -102,6 +102,7 @@ internal sealed record CodingAgentCliArguments(
         string? provider = null;
         string? model = null;
         string? systemPrompt = null;
+        string? apiKey = null;
         var appendSystemPrompt = new List<string>();
         string? export = null;
         var messages = new List<string>();
@@ -302,6 +303,12 @@ internal sealed record CodingAgentCliArguments(
                 continue;
             }
 
+            if (TryConsumeStringOption(args, ref i, "--api-key", out var apiKeyValue))
+            {
+                apiKey = apiKeyValue;
+                continue;
+            }
+
             if (TryConsumeStringOption(args, ref i, "--append-system-prompt", out var appendValue))
             {
                 if (!string.IsNullOrWhiteSpace(appendValue))
@@ -397,6 +404,7 @@ internal sealed record CodingAgentCliArguments(
             themePaths,
             provider,
             model,
+            apiKey,
             systemPrompt,
             appendSystemPrompt,
             thinking,

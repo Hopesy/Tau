@@ -723,7 +723,8 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner, ICodingAgentT
         bool autoResizeImages = true,
         IReadOnlyList<IToolInterceptor>? interceptors = null,
         CodingAgentExtensionLifecycleEventSink? extensionLifecycleEventSink = null,
-        string? appendSystemPrompt = null)
+        string? appendSystemPrompt = null,
+        string? apiKey = null)
     {
         var registry = providerRegistryOverride ?? new ProviderRegistry();
         if (providerRegistryOverride is null)
@@ -750,7 +751,11 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner, ICodingAgentT
             SystemPrompt = string.IsNullOrWhiteSpace(systemPromptOverride)
                 ? BuildSystemPrompt(tools, skills ?? [], contextFiles ?? [], appendSystemPrompt)
                 : AppendToSystemPrompt(systemPromptOverride, appendSystemPrompt),
-            StreamOptions = new SimpleStreamOptions { MaxTokens = 16_384 }
+            StreamOptions = new SimpleStreamOptions
+            {
+                MaxTokens = 16_384,
+                ApiKey = string.IsNullOrWhiteSpace(apiKey) ? null : apiKey
+            }
         };
 
         var runtime = new AgentRuntime();
