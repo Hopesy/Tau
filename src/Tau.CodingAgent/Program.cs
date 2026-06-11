@@ -159,6 +159,49 @@ static IReadOnlyList<string> CombineResourcePaths(
     return first.Concat(second).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
 }
 
+// Mirrors upstream resolvePromptInput (core/resource-loader.ts): if the value names an existing
+// file, read its contents; otherwise treat it as literal prompt text.
+static string? ResolvePromptInput(string? input)
+{
+    if (string.IsNullOrWhiteSpace(input))
+    {
+        return null;
+    }
+
+    try
+    {
+        if (File.Exists(input))
+        {
+            return File.ReadAllText(input);
+        }
+    }
+    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+    {
+        Console.Error.WriteLine($"warning: could not read prompt file {input}: {ex.Message}");
+        return input;
+    }
+
+    return input;
+}
+
+// Mirrors upstream append-system-prompt resolution: each --append-system-prompt value is resolved
+// as a file path or literal, then non-empty results are joined with a blank line.
+static string? CombineAppendSystemPrompt(IReadOnlyList<string> values)
+{
+    if (values.Count == 0)
+    {
+        return null;
+    }
+
+    var resolved = values
+        .Select(ResolvePromptInput)
+        .Where(static text => !string.IsNullOrWhiteSpace(text))
+        .Select(static text => text!)
+        .ToArray();
+
+    return resolved.Length == 0 ? null : string.Join("\n\n", resolved);
+}
+
 static Func<IReadOnlyList<CodingAgentTreeViewItem>, string?, CancellationToken, Task<CodingAgentTreeInteractiveNavigator.Result>> CreateTreeNavigator(
     IConsoleKeyReader keyReader,
     CodingAgentSettingsStore settingsStore,
@@ -292,18 +335,21 @@ var runnerTools = RuntimeCodingAgentRunner.CreateDefaultTools(
     extensionCommandStore.LoadTools());
 var runnerInterceptors = extensionCommandStore.LoadToolInterceptors();
 var runnerExtensionLifecycleEvents = extensionCommandStore.LoadLifecycleEventSink();
+var resolvedSystemPrompt = ResolvePromptInput(cli.SystemPrompt);
+var resolvedAppendSystemPrompt = CombineAppendSystemPrompt(cli.AppendSystemPrompt);
 var runner = RuntimeCodingAgentRunner.Create(
     providerId,
     modelId,
     session.Messages,
     toolsOverride: runnerTools,
-    systemPromptOverride: cli.SystemPrompt,
+    systemPromptOverride: resolvedSystemPrompt,
     skills: skillStore.Load(),
     contextFiles: contextFileStore.Load(),
     logSink: logSink,
     autoResizeImages: settings.ImagesAutoResize ?? true,
     interceptors: runnerInterceptors,
-    extensionLifecycleEventSink: runnerExtensionLifecycleEvents);
+    extensionLifecycleEventSink: runnerExtensionLifecycleEvents,
+    appendSystemPrompt: resolvedAppendSystemPrompt);
 runner.SessionName = session.Name;
 runner.SteeringMode = CodingAgentQueueModes.ToAgentQueueMode(settings.SteeringMode);
 runner.FollowUpMode = CodingAgentQueueModes.ToAgentQueueMode(settings.FollowUpMode);

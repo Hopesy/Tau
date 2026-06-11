@@ -178,6 +178,21 @@ public sealed class CodingAgentInitialMessageBuilderTests
     }
 
     [Fact]
+    public void Parse_CollectsRepeatableAppendSystemPrompt()
+    {
+        var parsed = CodingAgentCliArguments.Parse(
+            [
+                "--append-system-prompt",
+                "first append",
+                "--append-system-prompt=second append",
+                "message"
+            ]);
+
+        Assert.Equal(["first append", "second append"], parsed.AppendSystemPrompt);
+        Assert.Equal(["message"], parsed.Messages);
+    }
+
+    [Fact]
     public async Task BuildAsync_MergesTextFilesAndFirstMessage()
     {
         using var temp = TempDirectory.Create();

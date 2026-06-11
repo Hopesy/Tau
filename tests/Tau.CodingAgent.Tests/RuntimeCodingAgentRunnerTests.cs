@@ -461,6 +461,67 @@ public class RuntimeCodingAgentRunnerTests
     }
 
     [Fact]
+    public async Task Create_AppendsAppendSystemPromptToGeneratedPrompt()
+    {
+        string? capturedPrompt = null;
+        var runner = RuntimeCodingAgentRunner.Create(
+            "test-provider",
+            "test-model",
+            toolsOverride: [],
+            providerRegistryOverride: CreatePromptCapturingRegistry(context => capturedPrompt = context.SystemPrompt),
+            modelCatalogOverride: CreatePromptCapturingModelCatalog(),
+            appendSystemPrompt: "EXTRA SYSTEM RULE");
+
+        await foreach (var _ in runner.RunAsync("hello")) { }
+
+        Assert.NotNull(capturedPrompt);
+        Assert.Contains("You are Tau", capturedPrompt, StringComparison.Ordinal);
+        Assert.EndsWith("EXTRA SYSTEM RULE", capturedPrompt!.TrimEnd(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Create_AppendsAppendSystemPromptToCustomPrompt()
+    {
+        string? capturedPrompt = null;
+        var runner = RuntimeCodingAgentRunner.Create(
+            "test-provider",
+            "test-model",
+            toolsOverride: [],
+            systemPromptOverride: "custom system prompt",
+            providerRegistryOverride: CreatePromptCapturingRegistry(context => capturedPrompt = context.SystemPrompt),
+            modelCatalogOverride: CreatePromptCapturingModelCatalog(),
+            appendSystemPrompt: "EXTRA RULE");
+
+        await foreach (var _ in runner.RunAsync("hello")) { }
+
+        Assert.Equal("custom system prompt\n\nEXTRA RULE", capturedPrompt);
+    }
+
+    [Fact]
+    public async Task RefreshSystemPromptResources_PreservesAppendSystemPrompt()
+    {
+        string? capturedPrompt = null;
+        var runner = RuntimeCodingAgentRunner.Create(
+            "test-provider",
+            "test-model",
+            toolsOverride: [],
+            providerRegistryOverride: CreatePromptCapturingRegistry(context => capturedPrompt = context.SystemPrompt),
+            modelCatalogOverride: CreatePromptCapturingModelCatalog(),
+            appendSystemPrompt: "PERSISTENT APPEND");
+
+        var refreshed = runner.RefreshSystemPromptResources(
+            [],
+            [new CodingAgentContextFile(Path.Combine(Path.GetTempPath(), "CLAUDE.md"), "new context", "project")]);
+
+        Assert.True(refreshed);
+        await foreach (var _ in runner.RunAsync("hello")) { }
+
+        Assert.NotNull(capturedPrompt);
+        Assert.Contains("new context", capturedPrompt, StringComparison.Ordinal);
+        Assert.Contains("PERSISTENT APPEND", capturedPrompt, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task RunAsync_EmitsJavascriptLifecycleEvents()
     {
         var directory = Path.Combine(Path.GetTempPath(), "tau-runtime-lifecycle-" + Guid.NewGuid().ToString("N"));

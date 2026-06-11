@@ -21,6 +21,7 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner, ICodingAgentT
     private readonly CodingAgentExtensionLifecycleEventSink? _extensionLifecycleEventSink;
     private readonly Dictionary<string, object?> _toolResultDetailsByToolCallId = new(StringComparer.OrdinalIgnoreCase);
     private readonly bool _refreshesGeneratedSystemPrompt;
+    private readonly string? _appendSystemPrompt;
     private AgentLoopConfig _config;
     private IReadOnlyList<CodingAgentContextFile> _contextFiles;
     private int _activeCompactionCount;
@@ -34,7 +35,8 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner, ICodingAgentT
         TauRuntimeLogContext? logContext = null,
         bool refreshesGeneratedSystemPrompt = false,
         IReadOnlyList<CodingAgentContextFile>? contextFiles = null,
-        CodingAgentExtensionLifecycleEventSink? extensionLifecycleEventSink = null)
+        CodingAgentExtensionLifecycleEventSink? extensionLifecycleEventSink = null,
+        string? appendSystemPrompt = null)
     {
         _runtime = runtime;
         var effectiveLogSink = logSink ?? config.LogSink;
@@ -49,6 +51,7 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner, ICodingAgentT
         _extensionLifecycleEventSink = extensionLifecycleEventSink;
         _refreshesGeneratedSystemPrompt = refreshesGeneratedSystemPrompt;
         _contextFiles = contextFiles ?? [];
+        _appendSystemPrompt = string.IsNullOrWhiteSpace(appendSystemPrompt) ? null : appendSystemPrompt;
     }
 
     public IReadOnlyList<ChatMessage> Messages => _runtime.State.Messages;
@@ -124,7 +127,7 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner, ICodingAgentT
         }
 
         _contextFiles = contextFiles;
-        _config = _config with { SystemPrompt = BuildSystemPrompt(_config.Tools, skills, _contextFiles) };
+        _config = _config with { SystemPrompt = BuildSystemPrompt(_config.Tools, skills, _contextFiles, _appendSystemPrompt) };
         return true;
     }
 
@@ -719,7 +722,8 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner, ICodingAgentT
         ModelCatalog? modelCatalogOverride = null,
         bool autoResizeImages = true,
         IReadOnlyList<IToolInterceptor>? interceptors = null,
-        CodingAgentExtensionLifecycleEventSink? extensionLifecycleEventSink = null)
+        CodingAgentExtensionLifecycleEventSink? extensionLifecycleEventSink = null,
+        string? appendSystemPrompt = null)
     {
         var registry = providerRegistryOverride ?? new ProviderRegistry();
         if (providerRegistryOverride is null)
@@ -744,8 +748,8 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner, ICodingAgentT
             LogSink = logSink ?? NullTauLogSink.Instance,
             LogContext = logContext,
             SystemPrompt = string.IsNullOrWhiteSpace(systemPromptOverride)
-                ? BuildSystemPrompt(tools, skills ?? [], contextFiles ?? [])
-                : systemPromptOverride,
+                ? BuildSystemPrompt(tools, skills ?? [], contextFiles ?? [], appendSystemPrompt)
+                : AppendToSystemPrompt(systemPromptOverride, appendSystemPrompt),
             StreamOptions = new SimpleStreamOptions { MaxTokens = 16_384 }
         };
 
@@ -766,7 +770,8 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner, ICodingAgentT
             logContext: logContext,
             refreshesGeneratedSystemPrompt: string.IsNullOrWhiteSpace(systemPromptOverride),
             contextFiles: contextFiles ?? [],
-            extensionLifecycleEventSink: extensionLifecycleEventSink);
+            extensionLifecycleEventSink: extensionLifecycleEventSink,
+            appendSystemPrompt: appendSystemPrompt);
     }
 
     public static string GetDefaultProviderId() => ModelCatalog.GetDefaultProviderId();
@@ -816,7 +821,8 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner, ICodingAgentT
     private static string BuildSystemPrompt(
         IReadOnlyList<IAgentTool> tools,
         IReadOnlyList<CodingAgentSkill> skills,
-        IReadOnlyList<CodingAgentContextFile> contextFiles)
+        IReadOnlyList<CodingAgentContextFile> contextFiles,
+        string? appendSystemPrompt = null)
     {
         var cwd = Directory.GetCurrentDirectory().Replace('\\', '/');
         var date = DateTimeOffset.Now.ToString("yyyy-MM-dd");
@@ -839,9 +845,20 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner, ICodingAgentT
             Current working directory: {cwd}
             Platform: {Environment.OSVersion}
             """;
-        return prompt
+        return AppendToSystemPrompt(prompt, appendSystemPrompt)
                + CodingAgentContextFileStore.FormatForSystemPrompt(contextFiles)
                + CodingAgentSkillStore.FormatForSystemPrompt(skills);
+    }
+
+    /// <summary>
+    /// Appends <paramref name="appendSystemPrompt"/> to <paramref name="basePrompt"/> separated by a
+    /// blank line, mirroring upstream <c>buildSystemPrompt</c>'s <c>appendSection</c> (<c>\n\n</c>).
+    /// </summary>
+    internal static string AppendToSystemPrompt(string basePrompt, string? appendSystemPrompt)
+    {
+        return string.IsNullOrWhiteSpace(appendSystemPrompt)
+            ? basePrompt
+            : basePrompt + "\n\n" + appendSystemPrompt;
     }
 
     private static string ExtractCompactionSummary(AssistantMessage message)

@@ -14,6 +14,7 @@ internal sealed record CodingAgentCliArguments(
     string? Provider,
     string? Model,
     string? SystemPrompt,
+    IReadOnlyList<string> AppendSystemPrompt,
     IReadOnlyList<string> Messages,
     IReadOnlyList<string> FileArguments,
     IReadOnlyDictionary<string, string?> ExtensionFlags)
@@ -24,7 +25,6 @@ internal sealed record CodingAgentCliArguments(
         "--model",
         "--api-key",
         "--system-prompt",
-        "--append-system-prompt",
         "--session",
         "--fork",
         "--session-dir",
@@ -69,6 +69,7 @@ internal sealed record CodingAgentCliArguments(
         string? provider = null;
         string? model = null;
         string? systemPrompt = null;
+        var appendSystemPrompt = new List<string>();
         var messages = new List<string>();
         var fileArguments = new List<string>();
         var extensionFlags = new Dictionary<string, string?>(StringComparer.Ordinal);
@@ -174,6 +175,16 @@ internal sealed record CodingAgentCliArguments(
                 continue;
             }
 
+            if (TryConsumeStringOption(args, ref i, "--append-system-prompt", out var appendValue))
+            {
+                if (!string.IsNullOrWhiteSpace(appendValue))
+                {
+                    appendSystemPrompt.Add(appendValue);
+                }
+
+                continue;
+            }
+
             if (arg.StartsWith("@", StringComparison.Ordinal) && arg.Length > 1)
             {
                 fileArguments.Add(arg[1..]);
@@ -259,6 +270,7 @@ internal sealed record CodingAgentCliArguments(
             provider,
             model,
             systemPrompt,
+            appendSystemPrompt,
             messages,
             fileArguments,
             extensionFlags);
