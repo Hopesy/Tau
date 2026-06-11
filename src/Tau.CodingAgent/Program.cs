@@ -21,6 +21,12 @@ catch (ArgumentException ex)
     return 1;
 }
 
+if (cli.Version)
+{
+    Console.Out.WriteLine(CodingAgentCliHelp.ResolveVersion());
+    return 0;
+}
+
 var printMode = cli.PrintMode;
 var rpcMode = cli.RpcMode;
 var noContextFiles = cli.NoContextFiles;
@@ -208,6 +214,14 @@ var settingsStore = new CodingAgentSettingsStore();
 var packageResourceState = new CodingAgentPackageResourceState(packageManager.ResolveResources());
 var extensionCommandStore = new CodingAgentExtensionCommandStore(
     additionalPathsProvider: () => packageResourceState.ExtensionPaths);
+if (cli.Help)
+{
+    Console.Out.WriteLine(CodingAgentCliHelp.BuildHelpText(
+        CodingAgentCliHelp.ResolveCommandName(),
+        extensionCommandStore.LoadStatus().Flags));
+    return 0;
+}
+
 if (cli.ExtensionFlags.Count > 0)
 {
     var hasExtensionFlagErrors = false;

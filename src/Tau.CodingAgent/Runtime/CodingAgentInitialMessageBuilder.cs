@@ -6,6 +6,8 @@ namespace Tau.CodingAgent.Runtime;
 internal sealed record CodingAgentCliArguments(
     bool PrintMode,
     bool RpcMode,
+    bool Help,
+    bool Version,
     bool NoContextFiles,
     bool NoThemes,
     IReadOnlyList<string> ThemePaths,
@@ -50,10 +52,6 @@ internal sealed record CodingAgentCliArguments(
         "-ns",
         "--no-prompt-templates",
         "-np",
-        "--help",
-        "-h",
-        "--version",
-        "-v",
         "--verbose",
         "--json",
         "--offline"
@@ -63,6 +61,8 @@ internal sealed record CodingAgentCliArguments(
     {
         var printMode = false;
         var rpcMode = false;
+        var help = false;
+        var version = false;
         var noContextFiles = false;
         var noThemes = false;
         var themePaths = new List<string>();
@@ -89,6 +89,20 @@ internal sealed record CodingAgentCliArguments(
             if (arg.StartsWith("--mode=", StringComparison.OrdinalIgnoreCase))
             {
                 rpcMode = arg["--mode=".Length..].Equals("rpc", StringComparison.OrdinalIgnoreCase);
+                continue;
+            }
+
+            if (arg.Equals("--help", StringComparison.OrdinalIgnoreCase) ||
+                arg.Equals("-h", StringComparison.OrdinalIgnoreCase))
+            {
+                help = true;
+                continue;
+            }
+
+            if (arg.Equals("--version", StringComparison.OrdinalIgnoreCase) ||
+                arg.Equals("-v", StringComparison.OrdinalIgnoreCase))
+            {
+                version = true;
                 continue;
             }
 
@@ -237,6 +251,8 @@ internal sealed record CodingAgentCliArguments(
         return new CodingAgentCliArguments(
             printMode,
             rpcMode,
+            help,
+            version,
             noContextFiles,
             noThemes,
             themePaths,

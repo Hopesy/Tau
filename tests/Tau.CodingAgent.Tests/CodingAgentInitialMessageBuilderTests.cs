@@ -67,6 +67,116 @@ public sealed class CodingAgentInitialMessageBuilderTests
         Assert.Empty(parsed.Messages);
     }
 
+    [Theory]
+    [InlineData("--help")]
+    [InlineData("-h")]
+    public void Parse_RecognizesHelpFlag(string flag)
+    {
+        var parsed = CodingAgentCliArguments.Parse([flag]);
+
+        Assert.True(parsed.Help);
+        Assert.False(parsed.Version);
+        Assert.Empty(parsed.ExtensionFlags);
+        Assert.Empty(parsed.Messages);
+    }
+
+    [Theory]
+    [InlineData("--version")]
+    [InlineData("-v")]
+    public void Parse_RecognizesVersionFlag(string flag)
+    {
+        var parsed = CodingAgentCliArguments.Parse([flag]);
+
+        Assert.True(parsed.Version);
+        Assert.False(parsed.Help);
+        Assert.Empty(parsed.ExtensionFlags);
+        Assert.Empty(parsed.Messages);
+    }
+
+    [Fact]
+    public void Parse_DoesNotTreatHelpOrVersionAsExtensionFlags()
+    {
+        var parsed = CodingAgentCliArguments.Parse(["--help", "--version", "extra prompt"]);
+
+        Assert.True(parsed.Help);
+        Assert.True(parsed.Version);
+        Assert.Empty(parsed.ExtensionFlags);
+        Assert.Equal(["extra prompt"], parsed.Messages);
+    }
+
+    [Fact]
+    public void BuildHelpText_IncludesUsageCommandsAndOptions()
+    {
+        var help = CodingAgentCliHelp.BuildHelpText("pi", []);
+
+        Assert.Contains("pi - AI coding assistant", help, StringComparison.Ordinal);
+        Assert.Contains("Usage:", help, StringComparison.Ordinal);
+        Assert.Contains("pi [options] [@files...] [messages...]", help, StringComparison.Ordinal);
+        Assert.Contains("pi install <source>", help, StringComparison.Ordinal);
+        Assert.Contains("--provider <name>", help, StringComparison.Ordinal);
+        Assert.Contains("--help, -h", help, StringComparison.Ordinal);
+        Assert.Contains("--version, -v", help, StringComparison.Ordinal);
+        Assert.DoesNotContain("Extension CLI Flags:", help, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BuildHelpText_ListsRegisteredExtensionFlags()
+    {
+        var flags = new[]
+        {
+            new CodingAgentExtensionFlag(
+                Name: "plan",
+                Description: "Enable plan mode",
+                Type: "boolean",
+                DefaultValue: null,
+                FilePath: "/ext/plan.js",
+                Scope: "user",
+                Runtime: "javascript"),
+            new CodingAgentExtensionFlag(
+                Name: "label",
+                Description: string.Empty,
+                Type: "string",
+                DefaultValue: null,
+                FilePath: "/ext/label.js",
+                Scope: "project",
+                Runtime: "javascript"),
+        };
+
+        var help = CodingAgentCliHelp.BuildHelpText("pi", flags);
+
+        Assert.Contains("Extension CLI Flags:", help, StringComparison.Ordinal);
+        Assert.Contains("--plan", help, StringComparison.Ordinal);
+        Assert.Contains("Enable plan mode", help, StringComparison.Ordinal);
+        Assert.Contains("--label <value>", help, StringComparison.Ordinal);
+        Assert.Contains("Registered by /ext/label.js", help, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ResolveCommandName_PrefersEnvironmentOverride()
+    {
+        var original = Environment.GetEnvironmentVariable("TAU_CODING_AGENT_COMMAND_NAME");
+        try
+        {
+            Environment.SetEnvironmentVariable("TAU_CODING_AGENT_COMMAND_NAME", "tau-coding-agent");
+            Assert.Equal("tau-coding-agent", CodingAgentCliHelp.ResolveCommandName());
+
+            Environment.SetEnvironmentVariable("TAU_CODING_AGENT_COMMAND_NAME", null);
+            Assert.Equal("pi", CodingAgentCliHelp.ResolveCommandName());
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("TAU_CODING_AGENT_COMMAND_NAME", original);
+        }
+    }
+
+    [Fact]
+    public void ResolveVersion_ReturnsSemanticVersion()
+    {
+        var version = CodingAgentCliHelp.ResolveVersion();
+
+        Assert.Matches(@"^\d+\.\d+\.\d+", version);
+    }
+
     [Fact]
     public async Task BuildAsync_MergesTextFilesAndFirstMessage()
     {
