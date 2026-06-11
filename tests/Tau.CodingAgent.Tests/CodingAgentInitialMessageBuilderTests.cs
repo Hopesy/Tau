@@ -215,6 +215,31 @@ public sealed class CodingAgentInitialMessageBuilderTests
         Assert.Equal(["prompt"], parsed.Messages);
     }
 
+    [Theory]
+    [InlineData("--thinking", "high", "high")]
+    [InlineData("--thinking", "OFF", "off")]
+    [InlineData("--thinking=xhigh", null, "xhigh")]
+    public void Parse_AcceptsValidThinkingLevel(string flag, string? value, string expected)
+    {
+        var args = value is null ? new[] { flag } : [flag, value];
+        var parsed = CodingAgentCliArguments.Parse(args);
+
+        Assert.Equal(expected, parsed.Thinking);
+        Assert.Empty(parsed.Diagnostics);
+    }
+
+    [Fact]
+    public void Parse_WarnsOnInvalidThinkingLevel()
+    {
+        var parsed = CodingAgentCliArguments.Parse(["--thinking", "bogus"]);
+
+        Assert.Null(parsed.Thinking);
+        var diagnostic = Assert.Single(parsed.Diagnostics);
+        Assert.Equal("warning", diagnostic.Type);
+        Assert.Contains("Invalid thinking level \"bogus\"", diagnostic.Message, StringComparison.Ordinal);
+        Assert.Contains("off, minimal, low, medium, high, xhigh", diagnostic.Message, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void ResolveCommandName_PrefersEnvironmentOverride()
     {

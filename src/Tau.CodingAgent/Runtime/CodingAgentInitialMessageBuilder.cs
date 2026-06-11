@@ -22,6 +22,7 @@ internal sealed record CodingAgentCliArguments(
     string? Model,
     string? SystemPrompt,
     IReadOnlyList<string> AppendSystemPrompt,
+    string? Thinking,
     bool NoTools,
     IReadOnlyList<string>? Tools,
     IReadOnlyList<CodingAgentCliDiagnostic> Diagnostics,
@@ -55,7 +56,6 @@ internal sealed record CodingAgentCliArguments(
         "--fork",
         "--session-dir",
         "--models",
-        "--thinking",
         "--extension",
         "-e",
         "--skill",
@@ -83,6 +83,13 @@ internal sealed record CodingAgentCliArguments(
 
     private static readonly string ValidToolNames = string.Join(", ", CliToolNameToTauToolName.Keys);
 
+    /// <summary>
+    /// Valid <c>--thinking</c> levels, mirroring upstream <c>cli/args.ts</c>
+    /// <c>VALID_THINKING_LEVELS</c>.
+    /// </summary>
+    private static readonly IReadOnlyList<string> ValidThinkingLevels =
+        ["off", "minimal", "low", "medium", "high", "xhigh"];
+
     public static CodingAgentCliArguments Parse(IReadOnlyList<string> args)
     {
         var printMode = false;
@@ -101,6 +108,7 @@ internal sealed record CodingAgentCliArguments(
         var extensionFlags = new Dictionary<string, string?>(StringComparer.Ordinal);
         var noTools = false;
         List<string>? tools = null;
+        string? thinking = null;
         var diagnostics = new List<CodingAgentCliDiagnostic>();
 
         for (var i = 0; i < args.Count; i++)
@@ -208,6 +216,38 @@ internal sealed record CodingAgentCliArguments(
                             "warning",
                             $"Unknown tool \"{name}\". Valid tools: {ValidToolNames}"));
                     }
+                }
+
+                continue;
+            }
+
+            if (arg.Equals("--thinking", StringComparison.OrdinalIgnoreCase) ||
+                arg.StartsWith("--thinking=", StringComparison.OrdinalIgnoreCase))
+            {
+                string rawThinking;
+                if (arg.StartsWith("--thinking=", StringComparison.OrdinalIgnoreCase))
+                {
+                    rawThinking = arg["--thinking=".Length..];
+                }
+                else if (i + 1 < args.Count)
+                {
+                    rawThinking = args[++i];
+                }
+                else
+                {
+                    throw new ArgumentException("error: --thinking requires a level argument");
+                }
+
+                var normalizedThinking = rawThinking.Trim().ToLowerInvariant();
+                if (ValidThinkingLevels.Contains(normalizedThinking, StringComparer.Ordinal))
+                {
+                    thinking = normalizedThinking;
+                }
+                else
+                {
+                    diagnostics.Add(new CodingAgentCliDiagnostic(
+                        "warning",
+                        $"Invalid thinking level \"{rawThinking}\". Valid values: {string.Join(", ", ValidThinkingLevels)}"));
                 }
 
                 continue;
@@ -345,6 +385,7 @@ internal sealed record CodingAgentCliArguments(
             model,
             systemPrompt,
             appendSystemPrompt,
+            thinking,
             noTools,
             tools,
             diagnostics,

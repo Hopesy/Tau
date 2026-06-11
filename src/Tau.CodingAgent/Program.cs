@@ -391,11 +391,14 @@ runner.SessionName = session.Name;
 runner.SteeringMode = CodingAgentQueueModes.ToAgentQueueMode(settings.SteeringMode);
 runner.FollowUpMode = CodingAgentQueueModes.ToAgentQueueMode(settings.FollowUpMode);
 var autoCompaction = CodingAgentAutoCompactionOptions.FromEnvironment();
-if (!string.IsNullOrWhiteSpace(settings.DefaultThinkingLevel))
+// An explicit --thinking flag overrides the persisted defaultThinkingLevel, mirroring upstream
+// main.ts where parsed.thinking takes precedence over saved/scoped thinking levels.
+var startupThinkingLevel = cli.Thinking ?? settings.DefaultThinkingLevel;
+if (!string.IsNullOrWhiteSpace(startupThinkingLevel))
 {
     runner.ThinkingLevel = CodingAgentThinkingLevels.ClampForModel(
         runner.Model,
-        CodingAgentThinkingLevels.ParseOrNull(settings.DefaultThinkingLevel));
+        CodingAgentThinkingLevels.ParseOrNull(startupThinkingLevel));
 }
 using var cts = new CancellationTokenSource();
 
