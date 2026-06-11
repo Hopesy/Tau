@@ -152,6 +152,70 @@ public sealed class CodingAgentInitialMessageBuilderTests
     }
 
     [Fact]
+    public void Parse_MapsToolNamesToTauBuiltInTools()
+    {
+        var parsed = CodingAgentCliArguments.Parse(["--tools", "read,bash,find,ls"]);
+
+        Assert.False(parsed.NoTools);
+        Assert.NotNull(parsed.Tools);
+        Assert.Equal(["read_file", "shell", "glob", "ls"], parsed.Tools);
+        Assert.Empty(parsed.Diagnostics);
+    }
+
+    [Fact]
+    public void Parse_AcceptsInlineToolsValueAndDeduplicates()
+    {
+        var parsed = CodingAgentCliArguments.Parse(["--tools=read,read,edit"]);
+
+        Assert.NotNull(parsed.Tools);
+        Assert.Equal(["read_file", "edit_file"], parsed.Tools);
+        Assert.Empty(parsed.Diagnostics);
+    }
+
+    [Fact]
+    public void Parse_WarnsOnUnknownToolName()
+    {
+        var parsed = CodingAgentCliArguments.Parse(["--tools", "read,bogus"]);
+
+        Assert.NotNull(parsed.Tools);
+        Assert.Equal(["read_file"], parsed.Tools);
+        var diagnostic = Assert.Single(parsed.Diagnostics);
+        Assert.Equal("warning", diagnostic.Type);
+        Assert.Contains("Unknown tool \"bogus\"", diagnostic.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Parse_RecognizesNoToolsFlag()
+    {
+        var parsed = CodingAgentCliArguments.Parse(["--no-tools"]);
+
+        Assert.True(parsed.NoTools);
+        Assert.Null(parsed.Tools);
+        Assert.Empty(parsed.Diagnostics);
+    }
+
+    [Fact]
+    public void Parse_NoToolsWithExplicitToolsKeepsSelection()
+    {
+        var parsed = CodingAgentCliArguments.Parse(["--no-tools", "--tools", "read"]);
+
+        Assert.True(parsed.NoTools);
+        Assert.NotNull(parsed.Tools);
+        Assert.Equal(["read_file"], parsed.Tools);
+    }
+
+    [Fact]
+    public void Parse_ReportsUnknownSingleDashOptionAsError()
+    {
+        var parsed = CodingAgentCliArguments.Parse(["-x", "prompt"]);
+
+        var diagnostic = Assert.Single(parsed.Diagnostics);
+        Assert.Equal("error", diagnostic.Type);
+        Assert.Equal("Unknown option: -x", diagnostic.Message);
+        Assert.Equal(["prompt"], parsed.Messages);
+    }
+
+    [Fact]
     public void ResolveCommandName_PrefersEnvironmentOverride()
     {
         var original = Environment.GetEnvironmentVariable("TAU_CODING_AGENT_COMMAND_NAME");

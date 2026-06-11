@@ -21,6 +21,28 @@ catch (ArgumentException ex)
     return 1;
 }
 
+if (cli.Diagnostics.Count > 0)
+{
+    var hasError = false;
+    foreach (var diagnostic in cli.Diagnostics)
+    {
+        if (diagnostic.Type.Equals("error", StringComparison.Ordinal))
+        {
+            hasError = true;
+            Console.Error.WriteLine($"Error: {diagnostic.Message}");
+        }
+        else
+        {
+            Console.Error.WriteLine($"Warning: {diagnostic.Message}");
+        }
+    }
+
+    if (hasError)
+    {
+        return 1;
+    }
+}
+
 if (cli.Version)
 {
     Console.Out.WriteLine(CodingAgentCliHelp.ResolveVersion());
@@ -202,6 +224,19 @@ static string? CombineAppendSystemPrompt(IReadOnlyList<string> values)
     return resolved.Length == 0 ? null : string.Join("\n\n", resolved);
 }
 
+// Mirrors upstream --tools / --no-tools selection (main.ts): a null result keeps Tau's full default
+// built-in tool set; an explicit (possibly empty) list enables only the named built-ins. Extension
+// tools always load regardless of this selection.
+static IReadOnlyList<string>? ResolveSelectedBuiltInToolNames(CodingAgentCliArguments cli)
+{
+    if (cli.NoTools)
+    {
+        return cli.Tools ?? [];
+    }
+
+    return cli.Tools;
+}
+
 static Func<IReadOnlyList<CodingAgentTreeViewItem>, string?, CancellationToken, Task<CodingAgentTreeInteractiveNavigator.Result>> CreateTreeNavigator(
     IConsoleKeyReader keyReader,
     CodingAgentSettingsStore settingsStore,
@@ -330,9 +365,11 @@ var providerId = cli.Provider ?? Environment.GetEnvironmentVariable("TAU_PROVIDE
 var modelId = cli.Model ?? Environment.GetEnvironmentVariable("TAU_MODEL")
               ?? (string.Equals(providerId, session.Provider, StringComparison.OrdinalIgnoreCase) ? session.Model : null)
               ?? (string.Equals(providerId, settings.DefaultProvider, StringComparison.OrdinalIgnoreCase) ? settings.DefaultModel : null);
+var selectedBuiltInToolNames = ResolveSelectedBuiltInToolNames(cli);
 var runnerTools = RuntimeCodingAgentRunner.CreateDefaultTools(
     settings.ImagesAutoResize ?? true,
-    extensionCommandStore.LoadTools());
+    extensionCommandStore.LoadTools(),
+    selectedBuiltInToolNames);
 var runnerInterceptors = extensionCommandStore.LoadToolInterceptors();
 var runnerExtensionLifecycleEvents = extensionCommandStore.LoadLifecycleEventSink();
 var resolvedSystemPrompt = ResolvePromptInput(cli.SystemPrompt);

@@ -3,6 +3,13 @@ using Tau.Ai;
 
 namespace Tau.CodingAgent.Runtime;
 
+/// <summary>
+/// A non-fatal warning or fatal error produced while parsing CLI arguments. Mirrors upstream
+/// <c>cli/args.ts</c> <c>diagnostics</c>: <c>warning</c> entries are printed and execution continues,
+/// <c>error</c> entries are printed and the process exits with code 1.
+/// </summary>
+internal sealed record CodingAgentCliDiagnostic(string Type, string Message);
+
 internal sealed record CodingAgentCliArguments(
     bool PrintMode,
     bool RpcMode,
@@ -15,10 +22,29 @@ internal sealed record CodingAgentCliArguments(
     string? Model,
     string? SystemPrompt,
     IReadOnlyList<string> AppendSystemPrompt,
+    bool NoTools,
+    IReadOnlyList<string>? Tools,
+    IReadOnlyList<CodingAgentCliDiagnostic> Diagnostics,
     IReadOnlyList<string> Messages,
     IReadOnlyList<string> FileArguments,
     IReadOnlyDictionary<string, string?> ExtensionFlags)
 {
+    /// <summary>
+    /// Upstream CLI tool names (<c>cli/args.ts</c> <c>allTools</c>) mapped to the Tau tool
+    /// <see cref="IAgentTool.Name"/> values they select.
+    /// </summary>
+    internal static readonly IReadOnlyDictionary<string, string> CliToolNameToTauToolName =
+        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["read"] = "read_file",
+            ["bash"] = "shell",
+            ["edit"] = "edit_file",
+            ["write"] = "write_file",
+            ["grep"] = "grep",
+            ["find"] = "glob",
+            ["ls"] = "ls"
+        };
+
     private static readonly HashSet<string> OptionsWithValue = new(StringComparer.OrdinalIgnoreCase)
     {
         "--provider",
@@ -29,7 +55,6 @@ internal sealed record CodingAgentCliArguments(
         "--fork",
         "--session-dir",
         "--models",
-        "--tools",
         "--thinking",
         "--extension",
         "-e",
@@ -45,7 +70,6 @@ internal sealed record CodingAgentCliArguments(
         "--resume",
         "-r",
         "--no-session",
-        "--no-tools",
         "--no-extensions",
         "-ne",
         "--no-skills",
@@ -56,6 +80,8 @@ internal sealed record CodingAgentCliArguments(
         "--json",
         "--offline"
     };
+
+    private static readonly string ValidToolNames = string.Join(", ", CliToolNameToTauToolName.Keys);
 
     public static CodingAgentCliArguments Parse(IReadOnlyList<string> args)
     {
@@ -73,6 +99,9 @@ internal sealed record CodingAgentCliArguments(
         var messages = new List<string>();
         var fileArguments = new List<string>();
         var extensionFlags = new Dictionary<string, string?>(StringComparer.Ordinal);
+        var noTools = false;
+        List<string>? tools = null;
+        var diagnostics = new List<CodingAgentCliDiagnostic>();
 
         for (var i = 0; i < args.Count; i++)
         {
@@ -137,6 +166,50 @@ internal sealed record CodingAgentCliArguments(
                 arg.Equals("-nt", StringComparison.OrdinalIgnoreCase))
             {
                 noThemes = true;
+                continue;
+            }
+
+            if (arg.Equals("--no-tools", StringComparison.OrdinalIgnoreCase))
+            {
+                noTools = true;
+                continue;
+            }
+
+            if (arg.Equals("--tools", StringComparison.OrdinalIgnoreCase) ||
+                arg.StartsWith("--tools=", StringComparison.OrdinalIgnoreCase))
+            {
+                string? rawTools;
+                if (arg.StartsWith("--tools=", StringComparison.OrdinalIgnoreCase))
+                {
+                    rawTools = arg["--tools=".Length..];
+                }
+                else if (i + 1 < args.Count)
+                {
+                    rawTools = args[++i];
+                }
+                else
+                {
+                    throw new ArgumentException("error: --tools requires a comma-separated tool list");
+                }
+
+                tools ??= new List<string>();
+                foreach (var name in rawTools.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                {
+                    if (CliToolNameToTauToolName.TryGetValue(name, out var tauToolName))
+                    {
+                        if (!tools.Contains(tauToolName, StringComparer.Ordinal))
+                        {
+                            tools.Add(tauToolName);
+                        }
+                    }
+                    else
+                    {
+                        diagnostics.Add(new CodingAgentCliDiagnostic(
+                            "warning",
+                            $"Unknown tool \"{name}\". Valid tools: {ValidToolNames}"));
+                    }
+                }
+
                 continue;
             }
 
@@ -253,6 +326,7 @@ internal sealed record CodingAgentCliArguments(
 
             if (arg.StartsWith("-", StringComparison.Ordinal))
             {
+                diagnostics.Add(new CodingAgentCliDiagnostic("error", $"Unknown option: {arg}"));
                 continue;
             }
 
@@ -271,6 +345,9 @@ internal sealed record CodingAgentCliArguments(
             model,
             systemPrompt,
             appendSystemPrompt,
+            noTools,
+            tools,
+            diagnostics,
             messages,
             fileArguments,
             extensionFlags);

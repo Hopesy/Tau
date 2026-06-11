@@ -783,9 +783,10 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner, ICodingAgentT
 
     public static IAgentTool[] CreateDefaultTools(
         bool autoResizeImages = true,
-        IReadOnlyList<IAgentTool>? extensionTools = null)
+        IReadOnlyList<IAgentTool>? extensionTools = null,
+        IReadOnlyList<string>? selectedBuiltInToolNames = null)
     {
-        IAgentTool[] builtInTools =
+        IAgentTool[] allBuiltInTools =
         [
             new ReadFileTool(autoResizeImages),
             new WriteFileTool(),
@@ -795,6 +796,15 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner, ICodingAgentT
             new GrepTool(),
             new ListDirectoryTool()
         ];
+
+        // A null selection keeps Tau's full default tool set. An explicit (possibly empty) selection
+        // mirrors upstream `--tools` / `--no-tools`, which only enables the named built-ins; extension
+        // tools always load regardless, matching upstream `createAgentSession` behavior.
+        IAgentTool[] builtInTools = selectedBuiltInToolNames is null
+            ? allBuiltInTools
+            : allBuiltInTools
+                .Where(tool => selectedBuiltInToolNames.Contains(tool.Name, StringComparer.Ordinal))
+                .ToArray();
 
         if (extensionTools is not { Count: > 0 })
         {

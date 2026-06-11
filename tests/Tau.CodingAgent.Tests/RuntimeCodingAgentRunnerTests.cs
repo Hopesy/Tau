@@ -62,6 +62,55 @@ public class RuntimeCodingAgentRunnerTests
     }
 
     [Fact]
+    public void CreateDefaultTools_WithNullSelection_ReturnsFullBuiltInSet()
+    {
+        var tools = RuntimeCodingAgentRunner.CreateDefaultTools(selectedBuiltInToolNames: null);
+
+        Assert.Equal(7, tools.Length);
+        Assert.Contains(tools, static tool => tool.Name == "read_file");
+        Assert.Contains(tools, static tool => tool.Name == "shell");
+        Assert.Contains(tools, static tool => tool.Name == "glob");
+    }
+
+    [Fact]
+    public void CreateDefaultTools_WithExplicitSelection_EnablesOnlyNamedBuiltIns()
+    {
+        var tools = RuntimeCodingAgentRunner.CreateDefaultTools(
+            selectedBuiltInToolNames: ["read_file", "grep"]);
+
+        Assert.Equal(2, tools.Length);
+        Assert.Contains(tools, static tool => tool.Name == "read_file");
+        Assert.Contains(tools, static tool => tool.Name == "grep");
+        Assert.DoesNotContain(tools, static tool => tool.Name == "shell");
+    }
+
+    [Fact]
+    public void CreateDefaultTools_WithEmptySelection_DropsBuiltInsButKeepsExtensions()
+    {
+        var customTool = new StaticAgentTool("extension_tool", "Extension Tool");
+
+        var tools = RuntimeCodingAgentRunner.CreateDefaultTools(
+            extensionTools: [customTool],
+            selectedBuiltInToolNames: []);
+
+        Assert.Same(customTool, Assert.Single(tools));
+    }
+
+    [Fact]
+    public void CliToolNameToTauToolName_MapsUpstreamNamesToTauTools()
+    {
+        var map = CodingAgentCliArguments.CliToolNameToTauToolName;
+
+        Assert.Equal("read_file", map["read"]);
+        Assert.Equal("shell", map["bash"]);
+        Assert.Equal("edit_file", map["edit"]);
+        Assert.Equal("write_file", map["write"]);
+        Assert.Equal("glob", map["find"]);
+        Assert.Equal("grep", map["grep"]);
+        Assert.Equal("ls", map["ls"]);
+    }
+
+    [Fact]
     public void Create_WithInitialMessages_RehydratesConversationState()
     {
         var runner = RuntimeCodingAgentRunner.Create(
