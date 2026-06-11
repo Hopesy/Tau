@@ -215,6 +215,24 @@ public sealed class CodingAgentInitialMessageBuilderTests
         Assert.Equal(["prompt"], parsed.Messages);
     }
 
+    [Fact]
+    public void Parse_CapturesExportPathAndOptionalOutput()
+    {
+        var parsed = CodingAgentCliArguments.Parse(["--export", "session.jsonl", "output.html"]);
+
+        Assert.Equal("session.jsonl", parsed.Export);
+        Assert.Equal(["output.html"], parsed.Messages);
+    }
+
+    [Fact]
+    public void Parse_CapturesInlineExportPath()
+    {
+        var parsed = CodingAgentCliArguments.Parse(["--export=session.jsonl"]);
+
+        Assert.Equal("session.jsonl", parsed.Export);
+        Assert.Empty(parsed.Messages);
+    }
+
     [Theory]
     [InlineData("--thinking", "high", "high")]
     [InlineData("--thinking", "OFF", "off")]

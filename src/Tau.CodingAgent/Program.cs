@@ -56,6 +56,11 @@ if (cli.Version)
     return 0;
 }
 
+if (!string.IsNullOrWhiteSpace(cli.Export))
+{
+    return ExportSessionFile(cli.Export, cli.Messages.Count > 0 ? cli.Messages[0] : null);
+}
+
 var printMode = cli.PrintMode;
 var rpcMode = cli.RpcMode;
 var noContextFiles = cli.NoContextFiles;
@@ -242,6 +247,21 @@ static IReadOnlyList<string>? ResolveSelectedBuiltInToolNames(CodingAgentCliArgu
     }
 
     return cli.Tools;
+}
+
+// Mirrors upstream --export (core/export-html/index.ts exportFromFile): read a JSONL session file,
+// render it to standalone HTML and exit. Output path defaults to pi-session-<input>.html when omitted.
+static int ExportSessionFile(string inputPath, string? outputPath)
+{
+    var result = CodingAgentSessionFileExporter.Export(inputPath, outputPath);
+    if (result.Success)
+    {
+        Console.Out.WriteLine($"Exported to: {result.OutputPath}");
+        return 0;
+    }
+
+    Console.Error.WriteLine($"Error: {result.ErrorMessage}");
+    return 1;
 }
 
 static Func<IReadOnlyList<CodingAgentTreeViewItem>, string?, CancellationToken, Task<CodingAgentTreeInteractiveNavigator.Result>> CreateTreeNavigator(

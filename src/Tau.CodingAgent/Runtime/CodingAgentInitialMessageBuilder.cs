@@ -23,6 +23,7 @@ internal sealed record CodingAgentCliArguments(
     string? SystemPrompt,
     IReadOnlyList<string> AppendSystemPrompt,
     string? Thinking,
+    string? Export,
     bool Offline,
     bool NoTools,
     IReadOnlyList<string>? Tools,
@@ -60,8 +61,7 @@ internal sealed record CodingAgentCliArguments(
         "--extension",
         "-e",
         "--skill",
-        "--prompt-template",
-        "--export"
+        "--prompt-template"
     };
 
     private static readonly HashSet<string> BooleanOptions = new(StringComparer.OrdinalIgnoreCase)
@@ -103,6 +103,7 @@ internal sealed record CodingAgentCliArguments(
         string? model = null;
         string? systemPrompt = null;
         var appendSystemPrompt = new List<string>();
+        string? export = null;
         var messages = new List<string>();
         var fileArguments = new List<string>();
         var extensionFlags = new Dictionary<string, string?>(StringComparer.Ordinal);
@@ -295,6 +296,12 @@ internal sealed record CodingAgentCliArguments(
                 continue;
             }
 
+            if (TryConsumeStringOption(args, ref i, "--export", out var exportValue))
+            {
+                export = exportValue;
+                continue;
+            }
+
             if (TryConsumeStringOption(args, ref i, "--append-system-prompt", out var appendValue))
             {
                 if (!string.IsNullOrWhiteSpace(appendValue))
@@ -393,6 +400,7 @@ internal sealed record CodingAgentCliArguments(
             systemPrompt,
             appendSystemPrompt,
             thinking,
+            export,
             offline,
             noTools,
             tools,
