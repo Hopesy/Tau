@@ -199,6 +199,7 @@ function New-CommandWrapper {
         $content = @"
 @echo off
 setlocal
+set "TAU_AI_CLI_COMMAND_NAME=%~n0"
 set "SCRIPT_DIR=%~dp0"
 "%SCRIPT_DIR%..\$Entrypoint" %*
 exit /b %ERRORLEVEL%
@@ -212,7 +213,9 @@ exit /b %ERRORLEVEL%
     $content = @"
 #!/usr/bin/env sh
 set -eu
-SCRIPT_DIR=`$(CDPATH= cd -- "`$(dirname -- "`$0")" && pwd)
+TAU_COMMAND_NAME=`${0##*/}
+export TAU_AI_CLI_COMMAND_NAME="`$TAU_COMMAND_NAME"
+SCRIPT_DIR=`$(CDPATH= cd "`$(dirname "`$0")" && pwd)
 exec "`$SCRIPT_DIR/../$shellEntrypoint" "`$@"
 "@
     [System.IO.File]::WriteAllText($wrapperPath, $content.Replace("`r`n", "`n"), [System.Text.UTF8Encoding]::new($false))
@@ -590,7 +593,7 @@ $manifest = [ordered]@{
     )
     remainingGaps = @(
         'Non-host runner executable smoke for Linux and macOS release artifacts',
-        'Upstream examples, Photon image pipeline, interactive raster assets and external export-html vendor/template files are not copied because current Tau equivalents are compiled inline, represented by docs, or not yet ported',
+        'Photon image pipeline, interactive raster assets and external export-html vendor/template files are not copied because current Tau equivalents are compiled inline, represented by docs, or not yet ported',
         'Version bump, changelog release section, commit, tag and publish automation parity with upstream release.mjs',
         'Exact auth backup parity with upstream test.sh and pi-test.sh; Tau currently has PowerShell no-env child-process isolation scripts',
         'Real external provider, Slack, Docker, SSH, HF, GPU and vLLM e2e release smoke'

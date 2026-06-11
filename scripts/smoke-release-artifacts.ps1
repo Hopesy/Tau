@@ -507,7 +507,7 @@ $requiredPayloads = @(
     @{ Name = 'readme'; Status = 'included'; Destination = 'README.md' },
     @{ Name = 'license'; Status = 'included'; Destination = 'LICENSE' },
     @{ Name = 'docs'; Status = 'included'; Destination = 'docs' },
-    @{ Name = 'examples'; Status = 'missing' },
+    @{ Name = 'examples'; Status = 'included'; Destination = 'examples' },
     @{ Name = 'changelog'; Status = 'tau-native-docs'; Destination = 'docs/releases/feature-release-notes.md' },
     @{ Name = 'package-json'; Status = 'tau-native-manifest'; Destination = 'manifest.json' },
     @{ Name = 'photon-wasm'; Status = 'missing' },
@@ -548,6 +548,10 @@ Write-Host "==> smoke pi-ai alias"
 $piAi = Resolve-CommandWrapper -Name 'pi-ai'
 $piAiResult = Invoke-ArtifactProcess -FilePath $piAi -Arguments @('list') -TimeoutSeconds 20
 Assert-SuccessOutput -Result $piAiResult -Label 'pi-ai list' -Patterns @('Available OAuth providers:', 'anthropic', 'openai-codex')
+
+Write-Host "==> smoke pi-ai help"
+$piAiHelpResult = Invoke-ArtifactProcess -FilePath $piAi -Arguments @('--help') -TimeoutSeconds 20
+Assert-SuccessOutput -Result $piAiHelpResult -Label 'pi-ai --help' -Patterns @('Usage: pi-ai <command> \[provider\] \[options\]', 'Commands:', 'login \[provider\]')
 
 Write-Host "==> smoke pi rpc"
 Invoke-CodingAgentRpcSmoke

@@ -25,6 +25,31 @@ public sealed class AiCliRunnerTests
     }
 
     [Fact]
+    public void GetDefaultCommandName_UsesEnvironmentOverride()
+    {
+        using var scope = EnvironmentVariableScope.Acquire();
+        scope.Set("TAU_AI_CLI_COMMAND_NAME", "pi-ai");
+
+        Assert.Equal("pi-ai", AiCliRunner.GetDefaultCommandName());
+    }
+
+    [Fact]
+    public async Task RunAsync_HelpUsesProvidedCommandName()
+    {
+        var provider = new FakeOAuthProvider("anthropic", "Anthropic (Claude Pro/Max)");
+        var console = new FakeConsole();
+        var runner = CreateRunner(console, "pi-ai", provider);
+
+        var exitCode = await runner.RunAsync(["--help"]);
+
+        Assert.Equal(0, exitCode);
+        Assert.Contains("Usage: pi-ai <command> [provider] [options]", console.Output);
+        Assert.Contains("pi-ai login", console.Output);
+        Assert.Contains("pi-ai list", console.Output);
+        Assert.Empty(console.Error);
+    }
+
+    [Fact]
     public async Task RunAsync_ListShowsRegisteredOAuthProviders()
     {
         var provider = new FakeOAuthProvider("google-gemini-cli", "Google Cloud Code Assist (Gemini CLI)");
@@ -120,6 +145,24 @@ public sealed class AiCliRunnerTests
     }
 
     [Fact]
+    public async Task RunAsync_LoginUnknownProviderUsesProvidedCommandNameInError()
+    {
+        using var temp = new TempDir();
+        var authPath = Path.Combine(temp.Path, "auth.json");
+        var provider = new FakeOAuthProvider("anthropic", "Anthropic");
+        var console = new FakeConsole();
+        var runner = CreateRunner(console, "pi-ai", provider);
+
+        var exitCode = await runner.RunAsync(["login", "missing", "--auth-file", authPath]);
+
+        Assert.Equal(1, exitCode);
+        Assert.Equal(0, provider.LoginCalls);
+        Assert.False(File.Exists(authPath));
+        Assert.Contains("Unknown provider: missing", console.Error);
+        Assert.Contains("Use 'pi-ai list' to see available providers.", console.Error);
+    }
+
+    [Fact]
     public async Task RunAsync_LoginWithoutAuthFileUsesTauDefaultAuthStore()
     {
         using var temp = new TempDir();
@@ -149,6 +192,16 @@ public sealed class AiCliRunnerTests
 
     private static AiCliRunner CreateRunner(FakeConsole console, params IOAuthProvider[] providers) =>
         new(new OAuthProviderRegistry(providers), console, paths => new OAuthCredentialStoreWriter(paths));
+
+    private static AiCliRunner CreateRunner(
+        FakeConsole console,
+        string commandName,
+        params IOAuthProvider[] providers) =>
+        new(
+            new OAuthProviderRegistry(providers),
+            console,
+            paths => new OAuthCredentialStoreWriter(paths),
+            commandName: commandName);
 
     private static AiCliRunner CreateRunner(
         FakeConsole console,

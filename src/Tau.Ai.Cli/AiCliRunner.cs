@@ -4,6 +4,8 @@ namespace Tau.Ai.Cli;
 
 internal sealed class AiCliRunner
 {
+    private const string CommandNameEnvironmentVariable = "TAU_AI_CLI_COMMAND_NAME";
+
     private readonly OAuthProviderRegistry _providers;
     private readonly IAiCliConsole _console;
     private readonly Func<IReadOnlyList<string>, IAiCliCredentialStore> _credentialStoreFactory;
@@ -24,11 +26,18 @@ internal sealed class AiCliRunner
         _commandName = commandName;
     }
 
-    public static AiCliRunner CreateDefault() =>
+    public static AiCliRunner CreateDefault(string? commandName = null) =>
         new(
             new OAuthProviderRegistry(),
             new SystemAiCliConsole(),
-            paths => new OAuthCredentialStoreWriter(paths));
+            paths => new OAuthCredentialStoreWriter(paths),
+            commandName: commandName ?? GetDefaultCommandName());
+
+    internal static string GetDefaultCommandName()
+    {
+        var commandName = Environment.GetEnvironmentVariable(CommandNameEnvironmentVariable);
+        return string.IsNullOrWhiteSpace(commandName) ? "tau-ai" : commandName.Trim();
+    }
 
     public async Task<int> RunAsync(string[] args, CancellationToken cancellationToken = default)
     {
