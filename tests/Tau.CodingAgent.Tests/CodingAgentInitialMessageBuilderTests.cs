@@ -251,6 +251,161 @@ public sealed class CodingAgentInitialMessageBuilderTests
         Assert.Empty(parsed.Messages);
     }
 
+    [Fact]
+    public void Parse_CapturesSessionPath()
+    {
+        var parsed = CodingAgentCliArguments.Parse(["--session", "work.jsonl", "prompt"]);
+
+        Assert.Equal("work.jsonl", parsed.Session);
+        Assert.Equal(["prompt"], parsed.Messages);
+    }
+
+    [Fact]
+    public void Parse_CapturesInlineSessionPath()
+    {
+        var parsed = CodingAgentCliArguments.Parse(["--session=work.jsonl"]);
+
+        Assert.Equal("work.jsonl", parsed.Session);
+        Assert.Empty(parsed.Messages);
+    }
+
+    [Fact]
+    public void Parse_CapturesForkPath()
+    {
+        var parsed = CodingAgentCliArguments.Parse(["--fork", "source.jsonl", "prompt"]);
+
+        Assert.Equal("source.jsonl", parsed.Fork);
+        Assert.Equal(["prompt"], parsed.Messages);
+    }
+
+    [Fact]
+    public void Parse_CapturesInlineForkPath()
+    {
+        var parsed = CodingAgentCliArguments.Parse(["--fork=source.jsonl"]);
+
+        Assert.Equal("source.jsonl", parsed.Fork);
+        Assert.Empty(parsed.Messages);
+    }
+
+    [Fact]
+    public void Parse_RequiresForkPath()
+    {
+        var ex = Assert.Throws<ArgumentException>(() => CodingAgentCliArguments.Parse(["--fork"]));
+
+        Assert.Equal("error: --fork requires an argument", ex.Message);
+    }
+
+    [Fact]
+    public void Parse_RequiresInlineForkPathValue()
+    {
+        var ex = Assert.Throws<ArgumentException>(() => CodingAgentCliArguments.Parse(["--fork="]));
+
+        Assert.Equal("error: --fork requires an argument", ex.Message);
+    }
+
+    [Fact]
+    public void Parse_DoesNotConsumeOptionAsForkPath()
+    {
+        var ex = Assert.Throws<ArgumentException>(() => CodingAgentCliArguments.Parse(["--fork", "--continue"]));
+
+        Assert.Equal("error: --fork requires an argument", ex.Message);
+    }
+
+    [Fact]
+    public void Parse_CapturesNoSessionFlag()
+    {
+        var parsed = CodingAgentCliArguments.Parse(["--no-session", "prompt"]);
+
+        Assert.True(parsed.NoSession);
+        Assert.Equal(["prompt"], parsed.Messages);
+    }
+
+    [Fact]
+    public void Parse_CapturesContinueFlag()
+    {
+        var parsed = CodingAgentCliArguments.Parse(["--continue", "prompt"]);
+
+        Assert.True(parsed.Continue);
+        Assert.Equal(["prompt"], parsed.Messages);
+    }
+
+    [Theory]
+    [InlineData("--resume")]
+    [InlineData("-r")]
+    public void Parse_CapturesResumeFlag(string flag)
+    {
+        var parsed = CodingAgentCliArguments.Parse([flag]);
+
+        Assert.True(parsed.Resume);
+        Assert.Empty(parsed.Messages);
+    }
+
+    [Fact]
+    public void Parse_CapturesShortContinueFlag()
+    {
+        var parsed = CodingAgentCliArguments.Parse(["-c"]);
+
+        Assert.True(parsed.Continue);
+        Assert.Empty(parsed.Messages);
+    }
+
+    [Fact]
+    public void Parse_CapturesSessionDirectory()
+    {
+        var parsed = CodingAgentCliArguments.Parse(["--session-dir", ".tau/sessions", "prompt"]);
+
+        Assert.Equal(".tau/sessions", parsed.SessionDir);
+        Assert.Equal(["prompt"], parsed.Messages);
+    }
+
+    [Fact]
+    public void Parse_CapturesInlineSessionDirectory()
+    {
+        var parsed = CodingAgentCliArguments.Parse(["--session-dir=.tau/sessions"]);
+
+        Assert.Equal(".tau/sessions", parsed.SessionDir);
+        Assert.Empty(parsed.Messages);
+    }
+
+    [Fact]
+    public void Parse_CapturesModelsList()
+    {
+        var parsed = CodingAgentCliArguments.Parse(["--models", "google/gemini-2.5-pro:low, openai/gpt-5.4"]);
+
+        Assert.Equal(["google/gemini-2.5-pro:low", "openai/gpt-5.4"], parsed.Models);
+        Assert.Empty(parsed.Messages);
+    }
+
+    [Fact]
+    public void Parse_CapturesInlineModelsList()
+    {
+        var parsed = CodingAgentCliArguments.Parse(["--models=google/gemini-2.5-pro"]);
+
+        Assert.Equal(["google/gemini-2.5-pro"], parsed.Models);
+        Assert.Empty(parsed.Messages);
+    }
+
+    [Fact]
+    public void Parse_CapturesListModelsWithoutSearch()
+    {
+        var parsed = CodingAgentCliArguments.Parse(["--list-models", "--verbose"]);
+
+        Assert.NotNull(parsed.ListModels);
+        Assert.Null(parsed.ListModels.SearchPattern);
+        Assert.True(parsed.Verbose);
+        Assert.Empty(parsed.Messages);
+    }
+
+    [Fact]
+    public void Parse_CapturesListModelsSearch()
+    {
+        var parsed = CodingAgentCliArguments.Parse(["--list-models", "gemini", "prompt"]);
+
+        Assert.NotNull(parsed.ListModels);
+        Assert.Equal("gemini", parsed.ListModels.SearchPattern);
+        Assert.Equal(["prompt"], parsed.Messages);
+    }
+
     [Theory]
     [InlineData("--thinking", "high", "high")]
     [InlineData("--thinking", "OFF", "off")]

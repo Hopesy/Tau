@@ -51,14 +51,7 @@ public sealed class WebChatStore
             try
             {
                 File.WriteAllText(tempPath, json);
-                if (File.Exists(_path))
-                {
-                    File.Replace(tempPath, _path, null);
-                }
-                else
-                {
-                    File.Move(tempPath, _path);
-                }
+                File.Move(tempPath, _path, overwrite: true);
             }
             finally
             {

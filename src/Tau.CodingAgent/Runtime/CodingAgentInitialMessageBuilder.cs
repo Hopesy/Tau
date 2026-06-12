@@ -10,6 +10,8 @@ namespace Tau.CodingAgent.Runtime;
 /// </summary>
 internal sealed record CodingAgentCliDiagnostic(string Type, string Message);
 
+internal sealed record CodingAgentListModelsRequest(string? SearchPattern);
+
 internal sealed record CodingAgentCliArguments(
     bool PrintMode,
     bool RpcMode,
@@ -25,6 +27,15 @@ internal sealed record CodingAgentCliArguments(
     IReadOnlyList<string> AppendSystemPrompt,
     string? Thinking,
     string? Export,
+    string? Session,
+    string? Fork,
+    bool Continue,
+    bool Resume,
+    string? SessionDir,
+    bool NoSession,
+    IReadOnlyList<string>? Models,
+    CodingAgentListModelsRequest? ListModels,
+    bool Verbose,
     bool Offline,
     bool NoTools,
     IReadOnlyList<string>? Tools,
@@ -54,10 +65,7 @@ internal sealed record CodingAgentCliArguments(
         "--provider",
         "--model",
         "--system-prompt",
-        "--session",
-        "--fork",
         "--session-dir",
-        "--models",
         "--extension",
         "-e",
         "--skill",
@@ -77,7 +85,6 @@ internal sealed record CodingAgentCliArguments(
         "-ns",
         "--no-prompt-templates",
         "-np",
-        "--verbose",
         "--json"
     };
 
@@ -105,6 +112,15 @@ internal sealed record CodingAgentCliArguments(
         string? apiKey = null;
         var appendSystemPrompt = new List<string>();
         string? export = null;
+        string? session = null;
+        string? fork = null;
+        var continueSession = false;
+        var resumeSession = false;
+        string? sessionDir = null;
+        var noSession = false;
+        List<string>? models = null;
+        CodingAgentListModelsRequest? listModels = null;
+        var verbose = false;
         var messages = new List<string>();
         var fileArguments = new List<string>();
         var extensionFlags = new Dictionary<string, string?>(StringComparer.Ordinal);
@@ -309,6 +325,36 @@ internal sealed record CodingAgentCliArguments(
                 continue;
             }
 
+            if (TryConsumeRequiredStringOption(args, ref i, "--session", out var sessionValue))
+            {
+                session = sessionValue;
+                continue;
+            }
+
+            if (TryConsumeRequiredStringOption(args, ref i, "--fork", out var forkValue))
+            {
+                fork = forkValue;
+                continue;
+            }
+
+            if (TryConsumeRequiredStringOption(args, ref i, "--session-dir", out var sessionDirValue))
+            {
+                sessionDir = sessionDirValue;
+                continue;
+            }
+
+            if (arg.Equals("--no-session", StringComparison.OrdinalIgnoreCase))
+            {
+                noSession = true;
+                continue;
+            }
+
+            if (TryConsumeRequiredStringOption(args, ref i, "--models", out var modelsValue))
+            {
+                models = ParseCommaSeparatedList(modelsValue);
+                continue;
+            }
+
             if (TryConsumeStringOption(args, ref i, "--append-system-prompt", out var appendValue))
             {
                 if (!string.IsNullOrWhiteSpace(appendValue))
@@ -325,20 +371,51 @@ internal sealed record CodingAgentCliArguments(
                 continue;
             }
 
-            if (OptionsWithValue.Contains(arg))
+            if (arg.Equals("--list-models", StringComparison.OrdinalIgnoreCase))
             {
-                if (i + 1 < args.Count)
+                if (i + 1 < args.Count && !args[i + 1].StartsWith("-", StringComparison.Ordinal) &&
+                    !args[i + 1].StartsWith("@", StringComparison.Ordinal))
                 {
-                    i++;
+                    listModels = new CodingAgentListModelsRequest(args[++i]);
+                }
+                else
+                {
+                    listModels = new CodingAgentListModelsRequest(null);
                 }
 
                 continue;
             }
 
-            if (arg.Equals("--list-models", StringComparison.OrdinalIgnoreCase))
+            if (arg.StartsWith("--list-models=", StringComparison.OrdinalIgnoreCase))
             {
-                if (i + 1 < args.Count && !args[i + 1].StartsWith("-", StringComparison.Ordinal) &&
-                    !args[i + 1].StartsWith("@", StringComparison.Ordinal))
+                var search = arg["--list-models=".Length..];
+                listModels = new CodingAgentListModelsRequest(string.IsNullOrWhiteSpace(search) ? null : search);
+                continue;
+            }
+
+            if (arg.Equals("--verbose", StringComparison.OrdinalIgnoreCase))
+            {
+                verbose = true;
+                continue;
+            }
+
+            if (arg.Equals("--continue", StringComparison.OrdinalIgnoreCase) ||
+                arg.Equals("-c", StringComparison.OrdinalIgnoreCase))
+            {
+                continueSession = true;
+                continue;
+            }
+
+            if (arg.Equals("--resume", StringComparison.OrdinalIgnoreCase) ||
+                arg.Equals("-r", StringComparison.OrdinalIgnoreCase))
+            {
+                resumeSession = true;
+                continue;
+            }
+
+            if (OptionsWithValue.Contains(arg))
+            {
+                if (i + 1 < args.Count)
                 {
                     i++;
                 }
@@ -409,6 +486,15 @@ internal sealed record CodingAgentCliArguments(
             appendSystemPrompt,
             thinking,
             export,
+            session,
+            fork,
+            continueSession,
+            resumeSession,
+            sessionDir,
+            noSession,
+            models,
+            listModels,
+            verbose,
             offline,
             noTools,
             tools,
@@ -445,6 +531,58 @@ internal sealed record CodingAgentCliArguments(
 
         value = null;
         return false;
+    }
+
+    private static bool TryConsumeRequiredStringOption(
+        IReadOnlyList<string> args,
+        ref int index,
+        string option,
+        out string value)
+    {
+        var arg = args[index];
+        if (arg.Equals(option, StringComparison.OrdinalIgnoreCase))
+        {
+            if (index + 1 >= args.Count || IsOptionOrFileArgument(args[index + 1]))
+            {
+                throw new ArgumentException($"error: {option} requires an argument");
+            }
+
+            value = args[++index];
+            return true;
+        }
+
+        var prefix = option + "=";
+        if (arg.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+        {
+            value = arg[prefix.Length..];
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                throw new ArgumentException($"error: {option} requires an argument");
+            }
+
+            return true;
+        }
+
+        value = string.Empty;
+        return false;
+    }
+
+    private static bool IsOptionOrFileArgument(string value) =>
+        value.StartsWith("-", StringComparison.Ordinal) ||
+        value.StartsWith("@", StringComparison.Ordinal);
+
+    private static List<string>? ParseCommaSeparatedList(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return null;
+        }
+
+        var values = raw
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(static value => !string.IsNullOrWhiteSpace(value))
+            .ToList();
+        return values.Count == 0 ? null : values;
     }
 }
 

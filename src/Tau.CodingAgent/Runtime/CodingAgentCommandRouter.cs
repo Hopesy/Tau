@@ -41,6 +41,7 @@ public sealed class CodingAgentCommandRouter
     private readonly Func<Tau.Ai.Auth.OAuth.IOAuthLoginCallbacks> _oauthLoginCallbacksFactory;
     private readonly CodingAgentExtensionResourceState? _extensionResourceState;
     private readonly Func<IKeyBindingMap?>? _reloadKeyBindings;
+    private readonly IReadOnlyList<string>? _scopedModelsOverride;
     private readonly string? _sessionFile;
     private CodingAgentRetryOptions _retryOptions;
     private IKeyBindingMap? _keyBindings;
@@ -83,7 +84,8 @@ public sealed class CodingAgentCommandRouter
         Func<Tau.Ai.Auth.OAuth.IOAuthLoginCallbacks>? oauthLoginCallbacksFactory = null,
         IKeyBindingMap? keyBindings = null,
         CodingAgentExtensionResourceState? extensionResourceState = null,
-        Func<IKeyBindingMap?>? reloadKeyBindings = null)
+        Func<IKeyBindingMap?>? reloadKeyBindings = null,
+        IReadOnlyList<string>? scopedModelsOverride = null)
     {
         _runner = runner;
         _settingsStore = settingsStore;
@@ -125,6 +127,7 @@ public sealed class CodingAgentCommandRouter
         _keyBindings = keyBindings;
         _extensionResourceState = extensionResourceState;
         _reloadKeyBindings = reloadKeyBindings;
+        _scopedModelsOverride = scopedModelsOverride is { Count: > 0 } ? scopedModelsOverride.ToArray() : null;
         _sessionFile = sessionFile;
     }
 
@@ -1749,41 +1752,11 @@ public sealed class CodingAgentCommandRouter
         IReadOnlyList<Model> availableModels,
         out bool isScoped)
     {
-        var enabledModels = _settingsStore?.Load().EnabledModels;
-        if (enabledModels is null || enabledModels.Count == 0)
-        {
-            isScoped = false;
-            return availableModels
-                .Select(static model => new CodingAgentScopedModelEntry(model, null))
-                .ToList();
-        }
-
-        var candidates = new List<CodingAgentScopedModelEntry>();
-        foreach (var enabledModel in enabledModels)
-        {
-            if (!CodingAgentScopedModelPatterns.TryResolve(enabledModel, registeredModels, out var entry, out _))
-            {
-                continue;
-            }
-
-            var model = availableModels.FirstOrDefault(candidate =>
-                SameModel(candidate, entry.Model));
-            if (model is not null && !candidates.Any(candidate => SameModel(candidate.Model, model)))
-            {
-                candidates.Add(new CodingAgentScopedModelEntry(model, entry.ThinkingLevel));
-            }
-        }
-
-        if (candidates.Count == 0)
-        {
-            isScoped = false;
-            return availableModels
-                .Select(static model => new CodingAgentScopedModelEntry(model, null))
-                .ToList();
-        }
-
-        isScoped = true;
-        return candidates;
+        return CodingAgentModelAvailability.GetModelCycleCandidates(
+            _scopedModelsOverride ?? _settingsStore?.Load().EnabledModels,
+            registeredModels,
+            availableModels,
+            out isScoped);
     }
 
     private Model SelectConfiguredModel(string modelReference)

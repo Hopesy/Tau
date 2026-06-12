@@ -52,18 +52,27 @@ public sealed class WebUiBrowserFixture : IAsyncLifetime
             .Get<IServerAddressesFeature>();
         BaseAddress = (addresses?.Addresses ?? []).Single();
 
-        var installExit = Microsoft.Playwright.Program.Main(["install", "chromium", "--with-deps"]);
-        if (installExit != 0)
+        _playwright = await Playwright.CreateAsync();
+        try
+        {
+            _browser = await _playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions
+            {
+                Headless = true
+            });
+        }
+        catch (PlaywrightException ex) when (ex.Message.Contains("Executable doesn't exist", StringComparison.OrdinalIgnoreCase) ||
+                                           ex.Message.Contains("playwright install", StringComparison.OrdinalIgnoreCase))
         {
             throw new InvalidOperationException(
-                $"playwright install chromium exited with code {installExit}. Run 'pwsh tests/Tau.WebUi.Tests/bin/Debug/net10.0/playwright.ps1 install chromium' manually.");
+                "Playwright Chromium is not installed. Run 'pwsh tests/Tau.WebUi.Tests/bin/Debug/net10.0/playwright.ps1 install chromium' once outside dotnet test.",
+                ex);
         }
-
-        _playwright = await Playwright.CreateAsync();
-        _browser = await _playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions
+        catch (PlaywrightException ex) when (ex.Message.Contains("spawn EPERM", StringComparison.OrdinalIgnoreCase))
         {
-            Headless = true
-        });
+            throw new InvalidOperationException(
+                "Playwright Chromium is installed but cannot be launched in this environment. Run the WebUi browser flow tests in a context that permits launching the cached Chromium executable.",
+                ex);
+        }
     }
 
     public async Task DisposeAsync()

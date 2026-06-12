@@ -1,4 +1,6 @@
+using Tau.Ai;
 using Tau.Ai.Observability;
+using Tau.Ai.Registry;
 using Tau.CodingAgent.Runtime;
 using Tau.Tui.Abstractions;
 using Tau.Tui.Rendering;
@@ -61,6 +63,36 @@ if (!string.IsNullOrWhiteSpace(cli.Export))
     return ExportSessionFile(cli.Export, cli.Messages.Count > 0 ? cli.Messages[0] : null);
 }
 
+if (!string.IsNullOrWhiteSpace(cli.Fork))
+{
+    var conflictingSessionFlags = new List<string>();
+    if (!string.IsNullOrWhiteSpace(cli.Session))
+    {
+        conflictingSessionFlags.Add("--session");
+    }
+
+    if (cli.Continue)
+    {
+        conflictingSessionFlags.Add("--continue");
+    }
+
+    if (cli.Resume)
+    {
+        conflictingSessionFlags.Add("--resume");
+    }
+
+    if (cli.NoSession)
+    {
+        conflictingSessionFlags.Add("--no-session");
+    }
+
+    if (conflictingSessionFlags.Count > 0)
+    {
+        Console.Error.WriteLine($"error: --fork cannot be combined with {string.Join(", ", conflictingSessionFlags)}");
+        return 1;
+    }
+}
+
 var printMode = cli.PrintMode;
 var rpcMode = cli.RpcMode;
 var noContextFiles = cli.NoContextFiles;
@@ -106,6 +138,13 @@ catch
     // A misconfigured log path must not prevent the CLI from starting.
     logSink = null;
 }
+using var cts = new CancellationTokenSource();
+
+Console.CancelKeyPress += (_, e) =>
+{
+    e.Cancel = true;
+    cts.Cancel();
+};
 
 static bool ShouldUseCompositionUi(bool printMode, bool rpcMode) =>
     !printMode &&
@@ -310,11 +349,119 @@ static Func<IReadOnlyList<CodingAgentTreeViewItem>, string?, CancellationToken, 
             cancellationToken).ConfigureAwait(false);
     };
 }
-var sessionFile = Environment.GetEnvironmentVariable("TAU_CODING_AGENT_SESSION_FILE");
-var sessionStore = CodingAgentTreeSessionStore.IsJsonlPath(sessionFile)
-    ? null
-    : new CodingAgentSessionStore();
-var treeSessionController = CodingAgentTreeSessionController.OpenOrCreate();
+
+static Model? TryResolveStartupModel(ModelCatalog modelCatalog, string? providerId, string? modelId)
+{
+    try
+    {
+        var selection = modelCatalog.ResolveSelection(
+            providerId,
+            modelId,
+            defaultProvider: Environment.GetEnvironmentVariable("TAU_PROVIDER"));
+        return modelCatalog.GetModel(selection.Provider, selection.ModelId);
+    }
+    catch (Exception ex) when (ex is KeyNotFoundException or InvalidOperationException)
+    {
+        return null;
+    }
+}
+
+static CodingAgentScopedModelEntry? FindScopedModelEntry(
+    IReadOnlyList<CodingAgentScopedModelEntry> entries,
+    Model model)
+{
+    foreach (var entry in entries)
+    {
+        if (entry.Model.Provider.Equals(model.Provider, StringComparison.OrdinalIgnoreCase) &&
+            entry.Model.Id.Equals(model.Id, StringComparison.OrdinalIgnoreCase))
+        {
+            return entry;
+        }
+    }
+
+    return null;
+}
+
+static bool HasExplicitStartupModelSelection(CodingAgentCliArguments cli) =>
+    !string.IsNullOrWhiteSpace(cli.Provider) ||
+    !string.IsNullOrWhiteSpace(cli.Model) ||
+    !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("TAU_PROVIDER")) ||
+    !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("TAU_MODEL"));
+
+static string FormatModelScopeNotice(IReadOnlyList<CodingAgentScopedModelEntry> entries) =>
+    "Model scope: " + string.Join(", ", entries.Select(static entry => entry.Pattern)) + " (Ctrl+P to cycle)";
+
+var modelCatalog = new ModelCatalog();
+var registeredModels = CodingAgentModelAvailability.GetRegisteredModels(modelCatalog);
+if (cli.ListModels is not null)
+{
+    Console.Out.WriteLine(CodingAgentModelListFormatter.Format(registeredModels, cli.ListModels.SearchPattern));
+    return 0;
+}
+
+if (!CodingAgentModelAvailability.TryResolveScopedModelEntries(
+        cli.Models,
+        registeredModels,
+        out var cliScopedModels,
+        out var modelScopeError))
+{
+    Console.Error.WriteLine($"error: --models {modelScopeError}");
+    return 1;
+}
+var scopedModelsOverride = cliScopedModels.Count == 0
+    ? cli.Models
+    : cliScopedModels.Select(static entry => entry.Pattern).ToArray();
+
+var startupResume = await CodingAgentStartupResumeResolver.ResolveAsync(
+        cli.Resume && !cli.NoSession,
+        cli.Session,
+        printMode,
+        rpcMode,
+        cli.SessionDir,
+        CodingAgentTreeSessionStore.GetDefaultPath(),
+        editor is null
+            ? null
+            : compositionSession is null
+                ? CodingAgentResumeSelector.CreateConsoleSelector(keyReader)
+                : CodingAgentResumeSelector.CreateCompositionSelector(compositionSession),
+        cts.Token)
+    .ConfigureAwait(false);
+if (startupResume.ExitCode is { } startupResumeExitCode)
+{
+    if (!string.IsNullOrWhiteSpace(startupResume.Message))
+    {
+        if (startupResume.IsError)
+        {
+            Console.Error.WriteLine(startupResume.Message);
+        }
+        else
+        {
+            Console.Out.WriteLine(startupResume.Message);
+        }
+    }
+
+    return startupResumeExitCode;
+}
+
+CodingAgentSessionTarget sessionTarget;
+try
+{
+    var explicitSessionReference = cli.Session ?? startupResume.SelectedPath;
+    var continueRecent = string.IsNullOrWhiteSpace(explicitSessionReference) && cli.Continue;
+    sessionTarget = CodingAgentSessionTarget.Resolve(
+        explicitSessionReference,
+        continueRecent,
+        cli.SessionDir,
+        cli.Fork,
+        cli.NoSession);
+}
+catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or ArgumentException or System.Text.Json.JsonException)
+{
+    Console.Error.WriteLine($"error: {ex.Message}");
+    return 1;
+}
+var sessionStore = sessionTarget.SessionStore;
+var treeSessionController = sessionTarget.TreeSessionController;
 var settingsStore = new CodingAgentSettingsStore();
 var packageResourceState = new CodingAgentPackageResourceState(packageManager.ResolveResources());
 var extensionCommandStore = new CodingAgentExtensionCommandStore(
@@ -362,11 +509,7 @@ editor?.SetAutocompleteProvider(CodingAgentAutocompleteProviderFactory.Create(
     promptTemplateStore,
     skillStore,
     extensionCommandStore));
-var flatSession = sessionStore?.Load() ?? new CodingAgentSessionSnapshot([], null, null, null);
-var treeSession = treeSessionController.LoadSnapshot();
-var session = CodingAgentTreeSessionStore.HasExplicitTreeSessionPath || treeSession.Messages.Count > 0
-    ? treeSession.ToFlatSnapshot()
-    : flatSession;
+var session = sessionTarget.LoadInitialSnapshot();
 var settings = settingsStore.Load();
 var changelogStore = new CodingAgentChangelogStore();
 CodingAgentInitialPrompt? initialPrompt = null;
@@ -392,6 +535,25 @@ var providerId = cli.Provider ?? Environment.GetEnvironmentVariable("TAU_PROVIDE
 var modelId = cli.Model ?? Environment.GetEnvironmentVariable("TAU_MODEL")
               ?? (string.Equals(providerId, session.Provider, StringComparison.OrdinalIgnoreCase) ? session.Model : null)
               ?? (string.Equals(providerId, settings.DefaultProvider, StringComparison.OrdinalIgnoreCase) ? settings.DefaultModel : null);
+var startupThinkingLevel = cli.Thinking ?? settings.DefaultThinkingLevel;
+if (cliScopedModels.Count > 0)
+{
+    var startupModel = TryResolveStartupModel(modelCatalog, providerId, modelId);
+    var scopedEntry = startupModel is null ? null : FindScopedModelEntry(cliScopedModels, startupModel);
+    if (scopedEntry is null && !HasExplicitStartupModelSelection(cli))
+    {
+        var first = cliScopedModels[0];
+        providerId = first.Model.Provider;
+        modelId = first.Model.Id;
+        scopedEntry = first;
+    }
+
+    if (cli.Thinking is null && scopedEntry is { ThinkingLevel: not null } thinkingEntry)
+    {
+        startupThinkingLevel = thinkingEntry.ThinkingLevel;
+    }
+}
+
 var selectedBuiltInToolNames = ResolveSelectedBuiltInToolNames(cli);
 var runnerTools = RuntimeCodingAgentRunner.CreateDefaultTools(
     settings.ImagesAutoResize ?? true,
@@ -414,27 +576,20 @@ var runner = RuntimeCodingAgentRunner.Create(
     interceptors: runnerInterceptors,
     extensionLifecycleEventSink: runnerExtensionLifecycleEvents,
     appendSystemPrompt: resolvedAppendSystemPrompt,
-    apiKey: cli.ApiKey);
+    apiKey: cli.ApiKey,
+    modelCatalogOverride: modelCatalog);
 runner.SessionName = session.Name;
 runner.SteeringMode = CodingAgentQueueModes.ToAgentQueueMode(settings.SteeringMode);
 runner.FollowUpMode = CodingAgentQueueModes.ToAgentQueueMode(settings.FollowUpMode);
 var autoCompaction = CodingAgentAutoCompactionOptions.FromEnvironment();
 // An explicit --thinking flag overrides the persisted defaultThinkingLevel, mirroring upstream
 // main.ts where parsed.thinking takes precedence over saved/scoped thinking levels.
-var startupThinkingLevel = cli.Thinking ?? settings.DefaultThinkingLevel;
 if (!string.IsNullOrWhiteSpace(startupThinkingLevel))
 {
     runner.ThinkingLevel = CodingAgentThinkingLevels.ClampForModel(
         runner.Model,
         CodingAgentThinkingLevels.ParseOrNull(startupThinkingLevel));
 }
-using var cts = new CancellationTokenSource();
-
-Console.CancelKeyPress += (_, e) =>
-{
-    e.Cancel = true;
-    cts.Cancel();
-};
 
 if (printMode)
 {
@@ -458,11 +613,22 @@ if (rpcMode)
         settingsStore: settingsStore,
         treeSessionController: treeSessionController,
         autoCompaction: autoCompaction,
-        retryOptions: CodingAgentRetryOptions.FromSettingsOrEnvironment(settings),
-        promptTemplateStore: promptTemplateStore,
-        skillStore: skillStore,
-        extensionCommandStore: extensionCommandStore);
+            retryOptions: CodingAgentRetryOptions.FromSettingsOrEnvironment(settings),
+            promptTemplateStore: promptTemplateStore,
+            skillStore: skillStore,
+            extensionCommandStore: extensionCommandStore,
+            scopedModelsOverride: scopedModelsOverride);
     return await rpcHost.RunAsync(cts.Token).ConfigureAwait(false);
+}
+
+var scopedModelsForNotice = CodingAgentModelAvailability.GetModelCycleCandidates(
+    scopedModelsOverride ?? settings.EnabledModels,
+    registeredModels,
+    registeredModels,
+    out var hasScopedModelsForNotice);
+if (!printMode && !rpcMode && hasScopedModelsForNotice && (cli.Verbose || settings.QuietStartup != true))
+{
+    Console.Out.WriteLine(FormatModelScopeNotice(scopedModelsForNotice));
 }
 
 var host = new CodingAgentHost(
@@ -488,7 +654,9 @@ var host = new CodingAgentHost(
             ? new SystemConsoleCodingAgentTurnInputSource()
             : new CompositionCodingAgentTurnInputSource(keyReader, compositionSession, editor.KeyBindings),
     historySnapshotProvider: editor is null ? null : limit => editor.History.Snapshot(limit),
-    treeNavigator: editor is null ? null : CreateTreeNavigator(keyReader, settingsStore, treeSessionController, compositionSession),
+    treeNavigator: editor is null || treeSessionController is null
+        ? null
+        : CreateTreeNavigator(keyReader, settingsStore, treeSessionController, compositionSession),
     themeSelector: editor is null
         ? null
         : compositionSession is null
@@ -533,6 +701,7 @@ var host = new CodingAgentHost(
     extensionResourceState: extensionResourceState,
     compositionSession: compositionSession,
     startupNoticeService: new CodingAgentStartupNoticeService(settingsStore, changelogStore),
+    scopedModelsOverride: scopedModelsOverride,
     reloadKeyBindings: editor is null
         ? null
         : () =>

@@ -1,6 +1,7 @@
 param(
     [switch]$SkipRestore,
-    [switch]$RunSmoke
+    [switch]$RunSmoke,
+    [switch]$SkipWebUiBrowserTests
 )
 
 $ErrorActionPreference = 'Stop'
@@ -272,20 +273,28 @@ if (-not $SkipRestore) {
 
 Write-Host '==> build src'
 foreach ($project in $sourceProjects) {
-    Write-Host "dotnet build $project"
-    Invoke-DotnetCommand -Arguments @('build', $project, '--no-restore', '--verbosity', 'minimal')
+    Write-Host "dotnet build $project -m:1"
+    Invoke-DotnetCommand -Arguments @('build', $project, '--no-restore', '--verbosity', 'minimal', '-m:1')
 }
 
 Write-Host '==> build tests'
 foreach ($project in $testProjects) {
-    Write-Host "dotnet build $project"
-    Invoke-DotnetCommand -Arguments @('build', $project, '--no-restore', '--verbosity', 'minimal')
+    Write-Host "dotnet build $project -m:1"
+    Invoke-DotnetCommand -Arguments @('build', $project, '--no-restore', '--verbosity', 'minimal', '-m:1')
 }
 
 Write-Host '==> test'
 foreach ($project in $testProjects) {
-    Write-Host "dotnet test $project"
-    Invoke-DotnetCommand -Arguments @('test', $project, '--no-build', '--no-restore', '--verbosity', 'minimal')
+    $arguments = @('test', $project, '--no-build', '--no-restore', '--verbosity', 'minimal', '-m:1')
+    if ($SkipWebUiBrowserTests -and $project -eq 'tests/Tau.WebUi.Tests/Tau.WebUi.Tests.csproj') {
+        $arguments += @('--filter', 'FullyQualifiedName!~WebUiBrowserFlowTests')
+        Write-Host "dotnet test $project -m:1 --filter FullyQualifiedName!~WebUiBrowserFlowTests"
+    }
+    else {
+        Write-Host "dotnet test $project -m:1"
+    }
+
+    Invoke-DotnetCommand -Arguments $arguments
 }
 
 if ($RunSmoke) {

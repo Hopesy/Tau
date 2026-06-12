@@ -30,6 +30,7 @@ public sealed class CodingAgentRpcHost
     private readonly ICodingAgentShellRunner _shellRunner;
     private readonly CodingAgentAutoCompactionOptions _autoCompaction;
     private readonly CodingAgentSessionSwitchCoordinator _sessionSwitchCoordinator;
+    private readonly IReadOnlyList<string>? _scopedModelsOverride;
     private CodingAgentRetryOptions _retryOptions;
     private bool? _autoCompactionEnabled;
     private readonly SemaphoreSlim _writeLock = new(1, 1);
@@ -59,7 +60,8 @@ public sealed class CodingAgentRpcHost
         CodingAgentPromptTemplateStore? promptTemplateStore = null,
         CodingAgentSkillStore? skillStore = null,
         CodingAgentExtensionCommandStore? extensionCommandStore = null,
-        CodingAgentRpcExtensionUiBridge? extensionUi = null)
+        CodingAgentRpcExtensionUiBridge? extensionUi = null,
+        IReadOnlyList<string>? scopedModelsOverride = null)
     {
         ArgumentNullException.ThrowIfNull(runner);
         ArgumentNullException.ThrowIfNull(input);
@@ -84,6 +86,7 @@ public sealed class CodingAgentRpcHost
             treeSessionController,
             sessionSwitchPrompt: null,
             sessionSwitchHook: sessionSwitchHook);
+        _scopedModelsOverride = scopedModelsOverride is { Count: > 0 } ? scopedModelsOverride.ToArray() : null;
         _retryOptions = retryOptions ?? CodingAgentRetryOptions.Disabled;
         _autoCompactionEnabled = settingsStore?.Load().AutoCompactionEnabled;
     }
@@ -1707,40 +1710,11 @@ public sealed class CodingAgentRpcHost
     {
         var registeredModels = GetRegisteredModels();
         var availableModels = GetAuthConfiguredModels(registeredModels);
-        var enabledModels = _settingsStore?.Load().EnabledModels;
-        if (enabledModels is null || enabledModels.Count == 0)
-        {
-            isScoped = false;
-            return availableModels
-                .Select(static model => new CodingAgentScopedModelEntry(model, null))
-                .ToList();
-        }
-
-        var candidates = new List<CodingAgentScopedModelEntry>();
-        foreach (var enabledModel in enabledModels)
-        {
-            if (!CodingAgentScopedModelPatterns.TryResolve(enabledModel, registeredModels, out var entry, out _))
-            {
-                continue;
-            }
-
-            var model = availableModels.FirstOrDefault(candidate => SameModel(candidate, entry.Model));
-            if (model is not null && !candidates.Any(candidate => SameModel(candidate.Model, model)))
-            {
-                candidates.Add(new CodingAgentScopedModelEntry(model, entry.ThinkingLevel));
-            }
-        }
-
-        if (candidates.Count == 0)
-        {
-            isScoped = false;
-            return availableModels
-                .Select(static model => new CodingAgentScopedModelEntry(model, null))
-                .ToList();
-        }
-
-        isScoped = true;
-        return candidates;
+        return CodingAgentModelAvailability.GetModelCycleCandidates(
+            _scopedModelsOverride ?? _settingsStore?.Load().EnabledModels,
+            registeredModels,
+            availableModels,
+            out isScoped);
     }
 
     private IReadOnlyList<Model> GetRegisteredModels()

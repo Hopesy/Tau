@@ -42,7 +42,8 @@ public sealed record CodingAgentResumeSessionInfo(
     DateTimeOffset LastModifiedUtc,
     string Cwd,
     bool IsCurrent,
-    string? ParentSessionPath = null);
+    string? ParentSessionPath = null,
+    string? SessionId = null);
 
 public enum CodingAgentTreeFilterMode
 {
@@ -2175,7 +2176,8 @@ public sealed class CodingAgentTreeSessionStore
                 summary.Cwd,
                 !string.IsNullOrWhiteSpace(currentPath) &&
                 fullPath.Equals(System.IO.Path.GetFullPath(currentPath), StringComparison.OrdinalIgnoreCase),
-                NormalizeParentSessionPath(summary.ParentSession));
+                NormalizeParentSessionPath(summary.ParentSession),
+                snapshot.SessionId);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException)
         {

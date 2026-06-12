@@ -70,7 +70,8 @@ public sealed class CodingAgentHost
         TuiCompositionSession? compositionSession = null,
         CodingAgentInitialPrompt? initialPrompt = null,
         IReadOnlyList<string>? initialMessages = null,
-        CodingAgentStartupNoticeService? startupNoticeService = null)
+        CodingAgentStartupNoticeService? startupNoticeService = null,
+        IReadOnlyList<string>? scopedModelsOverride = null)
     {
         _ui = ui;
         _runner = runner;
@@ -125,7 +126,8 @@ public sealed class CodingAgentHost
             oauthLoginCallbacksFactory: oauthLoginCallbacksFactory,
             keyBindings: keyBindings,
             extensionResourceState: extensionResourceState,
-            reloadKeyBindings: reloadKeyBindings);
+            reloadKeyBindings: reloadKeyBindings,
+            scopedModelsOverride: scopedModelsOverride);
         RefreshExtensionShortcuts();
         _ui.SetInputShortcutHandler(TryHandleExtensionShortcutAsync);
     }
