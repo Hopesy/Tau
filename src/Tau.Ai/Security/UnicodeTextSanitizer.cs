@@ -19,8 +19,13 @@ internal static class UnicodeTextSanitizer
             {
                 if (i + 1 < text.Length && char.IsLowSurrogate(text[i + 1]))
                 {
+                    // Advance past the low surrogate unconditionally. A null-conditional
+                    // `builder?.Append(text[++i])` would short-circuit the `++i` side effect when
+                    // builder is null (no unpaired surrogate seen yet), leaving the loop to treat
+                    // the low surrogate as unpaired and drop it.
                     builder?.Append(current);
-                    builder?.Append(text[++i]);
+                    builder?.Append(text[i + 1]);
+                    i++;
                     continue;
                 }
 
