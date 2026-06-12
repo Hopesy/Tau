@@ -2311,6 +2311,33 @@ public sealed class CodingAgentRpcHost
         }
     }
 
+    /// <summary>
+    /// Serializes a single <see cref="AgentEvent"/> to the same JSON shape RPC mode streams over
+    /// stdout. Shared with <c>--mode json</c> print mode so both surfaces emit one identical event
+    /// schema (mirrors upstream <c>modes/print-mode.ts</c> reusing <c>session.subscribe</c> events).
+    /// </summary>
+    internal static string SerializeEventLine(AgentEvent evt) =>
+        JsonSerializer.Serialize(ToRpcEvent(evt), JsonOptions);
+
+    /// <summary>
+    /// Serializes the upstream-compatible session header line emitted first in <c>--mode json</c>
+    /// (mirrors <c>modes/print-mode.ts</c> writing <c>sessionManager.getHeader()</c> before events).
+    /// </summary>
+    internal static string SerializeHeaderLine(CodingAgentTreeSessionHeaderInfo header)
+    {
+        ArgumentNullException.ThrowIfNull(header);
+        var payload = new
+        {
+            type = header.Type,
+            version = header.Version,
+            id = header.Id,
+            timestamp = header.Timestamp.ToString("o"),
+            cwd = header.Cwd,
+            parentSession = header.ParentSession
+        };
+        return JsonSerializer.Serialize(payload, JsonOptions);
+    }
+
     private static object ToRpcEvent(AgentEvent evt) => evt switch
     {
         AgentStartEvent => new { type = evt.Type },

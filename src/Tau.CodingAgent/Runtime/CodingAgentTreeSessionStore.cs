@@ -32,6 +32,21 @@ public sealed record CodingAgentTreeSessionSummary(
     string Cwd,
     string? ParentSession);
 
+/// <summary>
+/// The JSONL session header, mirroring upstream <c>SessionHeader</c>
+/// (<c>packages/coding-agent/src/core/session/types.ts</c>). Emitted as the first JSON line by
+/// <c>--mode json</c> print mode.
+/// </summary>
+public sealed record CodingAgentTreeSessionHeaderInfo(
+    int? Version,
+    string Id,
+    DateTimeOffset Timestamp,
+    string Cwd,
+    string? ParentSession)
+{
+    public string Type => "session";
+}
+
 public sealed record CodingAgentResumeSessionInfo(
     string FilePath,
     string? Name,
@@ -355,6 +370,8 @@ public sealed class CodingAgentTreeSessionController
 
     public CodingAgentTreeSessionSummary GetSummary() => Store.GetSummary();
 
+    public CodingAgentTreeSessionHeaderInfo GetSessionHeader() => Store.GetSessionHeader();
+
     public CodingAgentSessionUsageSummary GetCurrentBranchUsageSummary() =>
         Store.GetCurrentBranchUsageSummary();
 
@@ -496,6 +513,17 @@ public sealed class CodingAgentTreeSessionStore
         var state = ReadState();
         var branch = state.GetBranch(state.LeafId);
         return BuildSnapshot(state, branch);
+    }
+
+    public CodingAgentTreeSessionHeaderInfo GetSessionHeader()
+    {
+        var state = ReadState();
+        return new CodingAgentTreeSessionHeaderInfo(
+            state.Header.Version <= 0 ? null : state.Header.Version,
+            state.Header.Id,
+            state.Header.Timestamp,
+            string.IsNullOrWhiteSpace(state.Header.Cwd) ? _cwd : state.Header.Cwd,
+            state.Header.ParentSession);
     }
 
     public CodingAgentTreeSessionSummary GetSummary()

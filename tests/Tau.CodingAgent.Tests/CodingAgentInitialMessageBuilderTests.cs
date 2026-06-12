@@ -463,6 +463,31 @@ public sealed class CodingAgentInitialMessageBuilderTests
         Assert.Empty(parsed.Messages);
     }
 
+    [Theory]
+    [InlineData("--mode", "json")]
+    [InlineData("--mode=json", null)]
+    public void Parse_RecognizesJsonMode(string flag, string? value)
+    {
+        var args = value is null ? new[] { flag } : [flag, value];
+        var parsed = CodingAgentCliArguments.Parse(args);
+
+        Assert.True(parsed.JsonMode);
+        Assert.False(parsed.RpcMode);
+        Assert.Empty(parsed.ExtensionFlags);
+    }
+
+    [Theory]
+    [InlineData("--mode", "rpc")]
+    [InlineData("--mode=rpc", null)]
+    public void Parse_RpcModeIsNotJsonMode(string flag, string? value)
+    {
+        var args = value is null ? new[] { flag } : [flag, value];
+        var parsed = CodingAgentCliArguments.Parse(args);
+
+        Assert.True(parsed.RpcMode);
+        Assert.False(parsed.JsonMode);
+    }
+
     [Fact]
     public void Parse_CapturesModelsList()
     {

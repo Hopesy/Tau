@@ -8,8 +8,14 @@ public sealed class CodingAgentPrintMode
     private readonly ICodingAgentRunner _runner;
     private readonly TextWriter _output;
     private readonly TextWriter _error;
+    private readonly bool _jsonMode;
 
     public CodingAgentPrintMode(ICodingAgentRunner runner, TextWriter output, TextWriter error)
+        : this(runner, output, error, jsonMode: false)
+    {
+    }
+
+    public CodingAgentPrintMode(ICodingAgentRunner runner, TextWriter output, TextWriter error, bool jsonMode)
     {
         ArgumentNullException.ThrowIfNull(runner);
         ArgumentNullException.ThrowIfNull(output);
@@ -17,6 +23,7 @@ public sealed class CodingAgentPrintMode
         _runner = runner;
         _output = output;
         _error = error;
+        _jsonMode = jsonMode;
     }
 
     public async Task<int> RunAsync(string prompt, CancellationToken cancellationToken = default)
@@ -57,6 +64,19 @@ public sealed class CodingAgentPrintMode
 
             await foreach (var evt in run().ConfigureAwait(false))
             {
+                if (_jsonMode)
+                {
+                    // Mirrors upstream print-mode.ts `--mode json`: emit every agent event as a
+                    // JSON line using the same schema the RPC mode produces.
+                    _output.WriteLine(CodingAgentRpcHost.SerializeEventLine(evt));
+                    if (evt is AgentEndEvent { ErrorMessage: not null } jsonEnd)
+                    {
+                        errorMessage = jsonEnd.ErrorMessage;
+                    }
+
+                    continue;
+                }
+
                 switch (evt)
                 {
                     case MessageUpdateEvent { StreamEvent: TextDeltaEvent delta }:
@@ -69,7 +89,7 @@ public sealed class CodingAgentPrintMode
                 }
             }
 
-            if (hasText)
+            if (!_jsonMode && hasText)
             {
                 _output.WriteLine();
             }
@@ -78,7 +98,13 @@ public sealed class CodingAgentPrintMode
 
             if (errorMessage is not null)
             {
-                _error.WriteLine(errorMessage);
+                // Upstream json mode keeps the error visible on the event stream but still exits
+                // non-zero; the human-readable message stays on stderr only for text mode.
+                if (!_jsonMode)
+                {
+                    _error.WriteLine(errorMessage);
+                }
+
                 return 1;
             }
 

@@ -131,4 +131,55 @@ public class CodingAgentPrintModeTests
             yield break;
         }
     }
+
+    [Fact]
+    public async Task RunAsync_JsonMode_EmitsEachEventAsJsonLine()
+    {
+        var runner = new FakeCodingAgentRunner((_, _) => GetEvents());
+        var output = new StringWriter();
+        var error = new StringWriter();
+        var printMode = new CodingAgentPrintMode(runner, output, error, jsonMode: true);
+
+        var exitCode = await printMode.RunAsync("hello");
+
+        Assert.Equal(0, exitCode);
+        Assert.Empty(error.ToString());
+        var lines = output.ToString()
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        Assert.Equal(2, lines.Length);
+        // Each line is a standalone JSON object carrying the upstream event "type".
+        Assert.Contains("\"type\":\"message_update\"", lines[0], StringComparison.Ordinal);
+        Assert.Contains("\"delta\":\"Hi\"", lines[0], StringComparison.Ordinal);
+        Assert.Contains("\"type\":\"agent_end\"", lines[1], StringComparison.Ordinal);
+
+        static async IAsyncEnumerable<AgentEvent> GetEvents()
+        {
+            var partial = new AssistantMessage();
+            yield return new MessageUpdateEvent(new TextDeltaEvent(0, "Hi", partial));
+            yield return new AgentEndEvent();
+            await Task.CompletedTask;
+        }
+    }
+
+    [Fact]
+    public async Task RunAsync_JsonMode_AgentEndError_ReturnsOneWithoutStderr()
+    {
+        var runner = new FakeCodingAgentRunner((_, _) => GetEvents());
+        var output = new StringWriter();
+        var error = new StringWriter();
+        var printMode = new CodingAgentPrintMode(runner, output, error, jsonMode: true);
+
+        var exitCode = await printMode.RunAsync("hello");
+
+        Assert.Equal(1, exitCode);
+        // Upstream json mode keeps the error on the event stream and leaves stderr quiet.
+        Assert.Empty(error.ToString());
+        Assert.Contains("\"errorMessage\":\"provider rate limited\"", output.ToString(), StringComparison.Ordinal);
+
+        static async IAsyncEnumerable<AgentEvent> GetEvents()
+        {
+            yield return new AgentEndEvent("provider rate limited");
+            await Task.CompletedTask;
+        }
+    }
 }

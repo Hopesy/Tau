@@ -93,7 +93,10 @@ if (!string.IsNullOrWhiteSpace(cli.Fork))
     }
 }
 
-var printMode = cli.PrintMode;
+var jsonMode = cli.JsonMode;
+// Mirrors upstream resolveAppMode: `--mode json` is a non-interactive single-shot mode that emits
+// the agent event stream as JSON, so it implies print mode.
+var printMode = cli.PrintMode || jsonMode;
 var rpcMode = cli.RpcMode;
 var noContextFiles = cli.NoContextFiles;
 var noThemes = cli.NoThemes;
@@ -605,11 +608,25 @@ if (!string.IsNullOrWhiteSpace(startupThinkingLevel))
 
 if (printMode)
 {
-    var printRunner = new CodingAgentPrintMode(runner, Console.Out, Console.Error);
+    var printRunner = new CodingAgentPrintMode(runner, Console.Out, Console.Error, jsonMode: jsonMode);
     if (initialPrompt is null)
     {
         Console.Error.WriteLine("error: --print requires a prompt, stdin, or @file argument");
         return 1;
+    }
+
+    // Mirrors upstream print-mode.ts: json mode emits the session header as the first JSONL line
+    // before any agent event, when a tree session is available.
+    if (jsonMode && treeSessionController is not null)
+    {
+        try
+        {
+            Console.Out.WriteLine(CodingAgentRpcHost.SerializeHeaderLine(treeSessionController.GetSessionHeader()));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Text.Json.JsonException)
+        {
+            // A header read failure must not block the json event stream.
+        }
     }
 
     return await printRunner.RunAsync(initialPrompt, cts.Token).ConfigureAwait(false);

@@ -15,6 +15,7 @@ internal sealed record CodingAgentListModelsRequest(string? SearchPattern);
 internal sealed record CodingAgentCliArguments(
     bool PrintMode,
     bool RpcMode,
+    bool JsonMode,
     bool Help,
     bool Version,
     bool NoContextFiles,
@@ -97,6 +98,7 @@ internal sealed record CodingAgentCliArguments(
     {
         var printMode = false;
         var rpcMode = false;
+        var jsonMode = false;
         var help = false;
         var version = false;
         var noContextFiles = false;
@@ -139,7 +141,9 @@ internal sealed record CodingAgentCliArguments(
             {
                 if (i + 1 < args.Count)
                 {
-                    rpcMode = args[++i].Equals("rpc", StringComparison.OrdinalIgnoreCase);
+                    var mode = args[++i];
+                    rpcMode = mode.Equals("rpc", StringComparison.OrdinalIgnoreCase);
+                    jsonMode = mode.Equals("json", StringComparison.OrdinalIgnoreCase);
                 }
 
                 continue;
@@ -147,7 +151,9 @@ internal sealed record CodingAgentCliArguments(
 
             if (arg.StartsWith("--mode=", StringComparison.OrdinalIgnoreCase))
             {
-                rpcMode = arg["--mode=".Length..].Equals("rpc", StringComparison.OrdinalIgnoreCase);
+                var mode = arg["--mode=".Length..];
+                rpcMode = mode.Equals("rpc", StringComparison.OrdinalIgnoreCase);
+                jsonMode = mode.Equals("json", StringComparison.OrdinalIgnoreCase);
                 continue;
             }
 
@@ -515,6 +521,7 @@ internal sealed record CodingAgentCliArguments(
         return new CodingAgentCliArguments(
             printMode,
             rpcMode,
+            jsonMode,
             help,
             version,
             noContextFiles,
