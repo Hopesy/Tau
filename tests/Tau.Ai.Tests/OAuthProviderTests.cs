@@ -31,6 +31,76 @@ public sealed class OAuthProviderTests
         Assert.NotEqual(v1, v2);
     }
 
+    [Fact]
+    public void Pkce_Generate_VerifierDecodesTo32EntropyBytes()
+    {
+        // RFC 7636 §4.1: the verifier carries 32 bytes of entropy, base64url-encoded.
+        var (verifier, _) = OAuthPkce.Generate();
+
+        var decoded = Base64UrlDecode(verifier);
+
+        Assert.Equal(32, decoded.Length);
+    }
+
+    [Fact]
+    public void Pkce_Generate_ChallengeDecodesTo32Sha256Bytes()
+    {
+        // RFC 7636 §4.2: challenge = BASE64URL(SHA-256(ASCII(verifier))) -> 32 bytes -> 43 chars.
+        var (_, challenge) = OAuthPkce.Generate();
+
+        var decoded = Base64UrlDecode(challenge);
+
+        Assert.Equal(32, decoded.Length);
+        Assert.Equal(43, challenge.Length);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void Pkce_Generate_UsesBase64UrlAlphabetWithoutPadding(bool checkVerifier)
+    {
+        var (verifier, challenge) = OAuthPkce.Generate();
+        var value = checkVerifier ? verifier : challenge;
+
+        Assert.All(value, c => Assert.True(
+            (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_',
+            $"Unexpected base64url character '{c}' in '{value}'."));
+        Assert.DoesNotContain('+', value);
+        Assert.DoesNotContain('/', value);
+        Assert.DoesNotContain('=', value);
+    }
+
+    [Fact]
+    public void Pkce_Generate_ChallengeMatchesVerifierOverManyIterations()
+    {
+        // Pin determinism of the challenge derivation and uniqueness of the verifier across runs.
+        var seenVerifiers = new HashSet<string>(StringComparer.Ordinal);
+
+        for (var iteration = 0; iteration < 200; iteration++)
+        {
+            var (verifier, challenge) = OAuthPkce.Generate();
+
+            Assert.Equal(43, verifier.Length);
+            Assert.True(seenVerifiers.Add(verifier), "PKCE verifier collision across iterations.");
+
+            var expectedChallenge = Convert.ToBase64String(SHA256.HashData(Encoding.UTF8.GetBytes(verifier)))
+                .Replace('+', '-').Replace('/', '_').TrimEnd('=');
+            Assert.Equal(expectedChallenge, challenge);
+        }
+    }
+
+    private static byte[] Base64UrlDecode(string value)
+    {
+        var padded = value.Replace('-', '+').Replace('_', '/');
+        padded = (padded.Length % 4) switch
+        {
+            2 => padded + "==",
+            3 => padded + "=",
+            _ => padded
+        };
+        return Convert.FromBase64String(padded);
+    }
+
     [Theory]
     [InlineData("github.com", "github.com")]
     [InlineData("https://company.ghe.com", "company.ghe.com")]
