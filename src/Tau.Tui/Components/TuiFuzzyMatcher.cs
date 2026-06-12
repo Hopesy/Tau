@@ -1,8 +1,20 @@
 namespace Tau.Tui.Components;
 
-internal readonly record struct TuiFuzzyMatch(bool Matches, double Score);
+/// <summary>
+/// The result of a fuzzy match: whether the query matched and a ranking score (lower is better).
+/// Mirrors upstream <c>packages/tui/src/fuzzy.ts</c> <c>FuzzyMatch</c>.
+/// </summary>
+public readonly record struct TuiFuzzyMatch(bool Matches, double Score);
 
-internal static class TuiFuzzyMatcher
+/// <summary>
+/// Fuzzy matching utilities mirroring upstream <c>packages/tui/src/fuzzy.ts</c>: a query matches when
+/// all of its characters appear in order (not necessarily consecutively), with scored ranking
+/// (word-boundary and consecutive-match bonuses, gap penalties) and an alphanumeric-swap fallback so
+/// queries like <c>4o</c> still match <c>gpt-4o</c>. Exposed publicly so other Tau modules (e.g. the
+/// CodingAgent <c>--list-models</c> listing) can reuse the same ranking as the upstream <c>pi-tui</c>
+/// <c>fuzzyFilter</c> consumers.
+/// </summary>
+public static class TuiFuzzyMatcher
 {
     private static readonly char[] TokenSeparators = [' ', '\t', '\r', '\n'];
 

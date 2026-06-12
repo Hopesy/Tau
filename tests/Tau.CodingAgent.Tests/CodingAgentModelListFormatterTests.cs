@@ -72,6 +72,35 @@ public sealed class CodingAgentModelListFormatterTests
     }
 
     [Fact]
+    public void Format_FuzzySearchMatchesAlphanumericSwap()
+    {
+        // Mirrors upstream pi-tui fuzzyMatch: a transposed alphanumeric query like "4g" still
+        // matches "gpt-4o" through the digits/letters swap fallback ("g4"), which a plain in-order
+        // subsequence match would miss.
+        var output = CodingAgentModelListFormatter.Format(
+            [
+                new Model
+                {
+                    Provider = "openai",
+                    Id = "gpt-4o",
+                    Name = "GPT-4o",
+                    Api = "openai-responses"
+                },
+                new Model
+                {
+                    Provider = "google",
+                    Id = "gemini-2.5-pro",
+                    Name = "Gemini 2.5 Pro",
+                    Api = "google-gemini"
+                }
+            ],
+            "4g");
+
+        Assert.Contains("gpt-4o", output, StringComparison.Ordinal);
+        Assert.DoesNotContain("gemini-2.5-pro", output, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Format_ReportsNoSearchMatches()
     {
         var output = CodingAgentModelListFormatter.Format(

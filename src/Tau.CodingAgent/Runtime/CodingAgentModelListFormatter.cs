@@ -1,5 +1,6 @@
 using System.Text;
 using Tau.Ai;
+using Tau.Tui.Components;
 
 namespace Tau.CodingAgent.Runtime;
 
@@ -14,10 +15,16 @@ internal static class CodingAgentModelListFormatter
             return "No models available. Set API keys in environment variables.";
         }
 
+        // Mirrors upstream cli/list-models.ts: membership is decided by the shared pi-tui fuzzy
+        // matcher (so queries like "4o" match "gpt-4o" via the alphanumeric-swap fallback), then the
+        // surviving rows are sorted alphabetically by provider/id regardless of fuzzy score.
         var filtered = string.IsNullOrWhiteSpace(searchPattern)
             ? models
             : models
-                .Where(model => IsFuzzyMatch(searchPattern, $"{model.Provider} {model.Id} {model.Name}"))
+                .Where(model => TuiFuzzyMatcher.Filter(
+                    [$"{model.Provider} {model.Id}"],
+                    searchPattern,
+                    static text => text).Count > 0)
                 .ToArray();
         if (filtered.Count == 0)
         {
@@ -121,39 +128,6 @@ internal static class CodingAgentModelListFormatter
         }
 
         return count.Value.ToString();
-    }
-
-    private static bool IsFuzzyMatch(string? query, string? text)
-    {
-        if (string.IsNullOrWhiteSpace(query))
-        {
-            return true;
-        }
-
-        var normalizedText = (text ?? string.Empty).ToLowerInvariant();
-        foreach (var token in query.Split([' ', '\t', '\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
-        {
-            if (!IsSubsequence(token.ToLowerInvariant(), normalizedText))
-            {
-                return false;
-            }
-        }
-
-        return true;
-    }
-
-    private static bool IsSubsequence(string query, string text)
-    {
-        var index = 0;
-        foreach (var ch in text)
-        {
-            if (index < query.Length && ch == query[index])
-            {
-                index++;
-            }
-        }
-
-        return index == query.Length;
     }
 
     private readonly record struct ModelRow(
