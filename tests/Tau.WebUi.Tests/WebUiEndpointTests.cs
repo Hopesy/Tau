@@ -741,6 +741,42 @@ public sealed class WebUiEndpointTests
     }
 
     [Fact]
+    public async Task CodingAgentJsonlPreviewEndpoint_RejectsUnsupportedContentTypeWithProblemDetails()
+    {
+        await using var fixture = await WebUiEndpointFixture.StartAsync(StreamOk);
+
+        var response = await fixture.Client.PostAsync(
+            "/api/sessions/import.coding-agent-jsonl/preview",
+            new StringContent("{}", Encoding.UTF8, "application/json"));
+
+        await AssertJsonlProblemAsync(
+            response,
+            HttpStatusCode.UnsupportedMediaType,
+            "unsupported_content_type",
+            null,
+            "Use application/x-ndjson",
+            expectedTitle: "Invalid CodingAgent JSONL preview");
+    }
+
+    [Fact]
+    public async Task CodingAgentJsonlImportEndpoint_RejectsUnsupportedContentTypeWithProblemDetails()
+    {
+        await using var fixture = await WebUiEndpointFixture.StartAsync(StreamOk);
+
+        var response = await fixture.Client.PostAsync(
+            "/api/sessions/import.coding-agent-jsonl",
+            new StringContent("{}", Encoding.UTF8, "application/json"));
+
+        await AssertJsonlProblemAsync(
+            response,
+            HttpStatusCode.UnsupportedMediaType,
+            "unsupported_content_type",
+            null,
+            "Use application/x-ndjson",
+            expectedTitle: "Invalid CodingAgent JSONL import");
+    }
+
+    [Fact]
     public async Task CodingAgentJsonlPreviewEndpoint_ReturnsHeaderAndMessageTimelineWithoutPersisting()
     {
         await using var fixture = await WebUiEndpointFixture.StartAsync(StreamOk);
