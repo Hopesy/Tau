@@ -67,6 +67,102 @@ public sealed class CodingAgentInitialMessageBuilderTests
         Assert.Empty(parsed.Messages);
     }
 
+    [Fact]
+    public void Parse_CapturesRepeatableResourcePaths()
+    {
+        var parsed = CodingAgentCliArguments.Parse(
+            [
+                "--extension",
+                "ext-one.ts",
+                "-e",
+                "ext-two.js",
+                "--skill",
+                "skills/dir",
+                "--prompt-template",
+                "prompts/review.md",
+                "--theme=theme.json"
+            ]);
+
+        Assert.Equal(["ext-one.ts", "ext-two.js"], parsed.ExtensionPaths);
+        Assert.Equal(["skills/dir"], parsed.SkillPaths);
+        Assert.Equal(["prompts/review.md"], parsed.PromptTemplatePaths);
+        Assert.Equal(["theme.json"], parsed.ThemePaths);
+        Assert.Empty(parsed.ExtensionFlags);
+        Assert.Empty(parsed.Messages);
+    }
+
+    [Fact]
+    public void Parse_RecognizesResourceDiscoveryToggles()
+    {
+        var parsed = CodingAgentCliArguments.Parse(
+            [
+                "--no-extensions",
+                "--no-skills",
+                "--no-prompt-templates",
+                "--no-themes",
+                "--no-context-files"
+            ]);
+
+        Assert.True(parsed.NoExtensions);
+        Assert.True(parsed.NoSkills);
+        Assert.True(parsed.NoPromptTemplates);
+        Assert.True(parsed.NoThemes);
+        Assert.True(parsed.NoContextFiles);
+        Assert.Empty(parsed.ExtensionFlags);
+    }
+
+    [Theory]
+    [InlineData("-ne", "extensions")]
+    [InlineData("-ns", "skills")]
+    [InlineData("-np", "prompts")]
+    [InlineData("-nt", "themes")]
+    public void Parse_RecognizesResourceToggleShortFlags(string flag, string kind)
+    {
+        var parsed = CodingAgentCliArguments.Parse([flag]);
+
+        switch (kind)
+        {
+            case "extensions":
+                Assert.True(parsed.NoExtensions);
+                break;
+            case "skills":
+                Assert.True(parsed.NoSkills);
+                break;
+            case "prompts":
+                Assert.True(parsed.NoPromptTemplates);
+                break;
+            case "themes":
+                Assert.True(parsed.NoThemes);
+                break;
+        }
+
+        Assert.Empty(parsed.ExtensionFlags);
+        Assert.Empty(parsed.Messages);
+    }
+
+    [Fact]
+    public void Parse_InlineRepeatableResourcePathsUseEqualsForm()
+    {
+        var parsed = CodingAgentCliArguments.Parse(
+            [
+                "--extension=ext.ts",
+                "--skill=skill.md",
+                "--prompt-template=prompt.md"
+            ]);
+
+        Assert.Equal(["ext.ts"], parsed.ExtensionPaths);
+        Assert.Equal(["skill.md"], parsed.SkillPaths);
+        Assert.Equal(["prompt.md"], parsed.PromptTemplatePaths);
+        Assert.Empty(parsed.ExtensionFlags);
+    }
+
+    [Fact]
+    public void Parse_RepeatableResourcePathRequiresValue()
+    {
+        var ex = Assert.Throws<ArgumentException>(() => CodingAgentCliArguments.Parse(["--skill"]));
+        Assert.Contains("--skill requires", ex.Message, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData("--help")]
     [InlineData("-h")]

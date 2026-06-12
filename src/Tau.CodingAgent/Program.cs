@@ -97,7 +97,13 @@ var printMode = cli.PrintMode;
 var rpcMode = cli.RpcMode;
 var noContextFiles = cli.NoContextFiles;
 var noThemes = cli.NoThemes;
+var noExtensions = cli.NoExtensions;
+var noSkills = cli.NoSkills;
+var noPromptTemplates = cli.NoPromptTemplates;
 var explicitThemePaths = cli.ThemePaths;
+var explicitExtensionPaths = cli.ExtensionPaths;
+var explicitSkillPaths = cli.SkillPaths;
+var explicitPromptTemplatePaths = cli.PromptTemplatePaths;
 if (rpcMode && cli.FileArguments.Count > 0)
 {
     Console.Error.WriteLine("error: @file arguments are not supported in RPC mode");
@@ -465,7 +471,9 @@ var treeSessionController = sessionTarget.TreeSessionController;
 var settingsStore = new CodingAgentSettingsStore();
 var packageResourceState = new CodingAgentPackageResourceState(packageManager.ResolveResources());
 var extensionCommandStore = new CodingAgentExtensionCommandStore(
-    additionalPathsProvider: () => packageResourceState.ExtensionPaths);
+    explicitPaths: explicitExtensionPaths.Count == 0 ? null : explicitExtensionPaths,
+    additionalPathsProvider: () => packageResourceState.ExtensionPaths,
+    includeDefaults: !noExtensions);
 if (cli.Help)
 {
     Console.Out.WriteLine(CodingAgentCliHelp.BuildHelpText(
@@ -497,9 +505,13 @@ if (cli.ExtensionFlags.Count > 0)
 }
 var extensionResourceState = new CodingAgentExtensionResourceState(extensionCommandStore.LoadResources());
 var promptTemplateStore = new CodingAgentPromptTemplateStore(
-    additionalPathsProvider: () => CombineResourcePaths(packageResourceState.PromptPaths, extensionResourceState.PromptPaths));
+    explicitPaths: explicitPromptTemplatePaths.Count == 0 ? null : explicitPromptTemplatePaths,
+    additionalPathsProvider: () => CombineResourcePaths(packageResourceState.PromptPaths, extensionResourceState.PromptPaths),
+    includeDefaults: !noPromptTemplates);
 var skillStore = new CodingAgentSkillStore(
-    additionalPathsProvider: () => CombineResourcePaths(packageResourceState.SkillPaths, extensionResourceState.SkillPaths));
+    explicitPaths: explicitSkillPaths.Count == 0 ? null : explicitSkillPaths,
+    additionalPathsProvider: () => CombineResourcePaths(packageResourceState.SkillPaths, extensionResourceState.SkillPaths),
+    includeDefaults: !noSkills);
 var contextFileStore = new CodingAgentContextFileStore(includeDefaults: !noContextFiles);
 var themeStore = new CodingAgentThemeStore(
     explicitPaths: explicitThemePaths.Count == 0 ? null : explicitThemePaths,

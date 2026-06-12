@@ -20,6 +20,12 @@ internal sealed record CodingAgentCliArguments(
     bool NoContextFiles,
     bool NoThemes,
     IReadOnlyList<string> ThemePaths,
+    bool NoExtensions,
+    IReadOnlyList<string> ExtensionPaths,
+    bool NoSkills,
+    IReadOnlyList<string> SkillPaths,
+    bool NoPromptTemplates,
+    IReadOnlyList<string> PromptTemplatePaths,
     string? Provider,
     string? Model,
     string? ApiKey,
@@ -65,11 +71,7 @@ internal sealed record CodingAgentCliArguments(
         "--provider",
         "--model",
         "--system-prompt",
-        "--session-dir",
-        "--extension",
-        "-e",
-        "--skill",
-        "--prompt-template"
+        "--session-dir"
     };
 
     private static readonly HashSet<string> BooleanOptions = new(StringComparer.OrdinalIgnoreCase)
@@ -79,12 +81,6 @@ internal sealed record CodingAgentCliArguments(
         "--resume",
         "-r",
         "--no-session",
-        "--no-extensions",
-        "-ne",
-        "--no-skills",
-        "-ns",
-        "--no-prompt-templates",
-        "-np",
         "--json"
     };
 
@@ -106,6 +102,12 @@ internal sealed record CodingAgentCliArguments(
         var noContextFiles = false;
         var noThemes = false;
         var themePaths = new List<string>();
+        var noExtensions = false;
+        var extensionPaths = new List<string>();
+        var noSkills = false;
+        var skillPaths = new List<string>();
+        var noPromptTemplates = false;
+        var promptTemplatePaths = new List<string>();
         string? provider = null;
         string? model = null;
         string? systemPrompt = null;
@@ -202,6 +204,27 @@ internal sealed record CodingAgentCliArguments(
                 continue;
             }
 
+            if (arg.Equals("--no-extensions", StringComparison.OrdinalIgnoreCase) ||
+                arg.Equals("-ne", StringComparison.OrdinalIgnoreCase))
+            {
+                noExtensions = true;
+                continue;
+            }
+
+            if (arg.Equals("--no-skills", StringComparison.OrdinalIgnoreCase) ||
+                arg.Equals("-ns", StringComparison.OrdinalIgnoreCase))
+            {
+                noSkills = true;
+                continue;
+            }
+
+            if (arg.Equals("--no-prompt-templates", StringComparison.OrdinalIgnoreCase) ||
+                arg.Equals("-np", StringComparison.OrdinalIgnoreCase))
+            {
+                noPromptTemplates = true;
+                continue;
+            }
+
             if (arg.Equals("--no-tools", StringComparison.OrdinalIgnoreCase))
             {
                 noTools = true;
@@ -292,6 +315,24 @@ internal sealed record CodingAgentCliArguments(
             if (arg.StartsWith("--theme=", StringComparison.OrdinalIgnoreCase))
             {
                 themePaths.Add(arg["--theme=".Length..]);
+                continue;
+            }
+
+            if (TryConsumeRepeatablePathOption(args, ref i, "--extension", "-e", out var extensionPathValue))
+            {
+                extensionPaths.Add(extensionPathValue);
+                continue;
+            }
+
+            if (TryConsumeRepeatablePathOption(args, ref i, "--skill", null, out var skillPathValue))
+            {
+                skillPaths.Add(skillPathValue);
+                continue;
+            }
+
+            if (TryConsumeRepeatablePathOption(args, ref i, "--prompt-template", null, out var promptTemplatePathValue))
+            {
+                promptTemplatePaths.Add(promptTemplatePathValue);
                 continue;
             }
 
@@ -479,6 +520,12 @@ internal sealed record CodingAgentCliArguments(
             noContextFiles,
             noThemes,
             themePaths,
+            noExtensions,
+            extensionPaths,
+            noSkills,
+            skillPaths,
+            noPromptTemplates,
+            promptTemplatePaths,
             provider,
             model,
             apiKey,
@@ -530,6 +577,45 @@ internal sealed record CodingAgentCliArguments(
         }
 
         value = null;
+        return false;
+    }
+
+    // Mirrors upstream repeatable resource path flags (cli/args.ts --extension/-e, --skill,
+    // --prompt-template): each occurrence appends the next argument as a path. Both the
+    // space-separated and inline "=" forms are accepted, matching the Tau --theme handler.
+    private static bool TryConsumeRepeatablePathOption(
+        IReadOnlyList<string> args,
+        ref int index,
+        string option,
+        string? shortOption,
+        out string value)
+    {
+        var arg = args[index];
+        if (arg.Equals(option, StringComparison.OrdinalIgnoreCase) ||
+            (shortOption is not null && arg.Equals(shortOption, StringComparison.OrdinalIgnoreCase)))
+        {
+            if (index + 1 >= args.Count)
+            {
+                throw new ArgumentException($"error: {option} requires a path argument");
+            }
+
+            value = args[++index];
+            return true;
+        }
+
+        var prefix = option + "=";
+        if (arg.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+        {
+            value = arg[prefix.Length..];
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                throw new ArgumentException($"error: {option} requires a path argument");
+            }
+
+            return true;
+        }
+
+        value = string.Empty;
         return false;
     }
 
