@@ -103,6 +103,56 @@ internal static partial class CodingAgentCliHelp
             }
         }
 
+        builder.AppendLine();
+        builder.AppendLine("Examples:");
+        builder.AppendLine($"  {commandName}");
+        builder.AppendLine($"  {commandName} \"List all .ts files in src/\"");
+        builder.AppendLine($"  {commandName} @prompt.md @image.png \"What color is the sky?\"");
+        builder.AppendLine($"  {commandName} -p \"List all .ts files in src/\"");
+        builder.AppendLine($"  {commandName} --continue \"What did we discuss?\"");
+        builder.AppendLine($"  {commandName} --model openai/gpt-4o \"Help me refactor this code\"");
+        builder.AppendLine($"  {commandName} --model sonnet:high \"Solve this complex problem\"");
+        builder.AppendLine($"  {commandName} --tools read,grep,find,ls -p \"Review the code in src/\"");
+        builder.AppendLine($"  {commandName} --export session.jsonl output.html");
+
+        // Environment variables Tau actually honors (Tau.Ai EnvironmentApiKeyResolver and the
+        // CodingAgent runtime); upstream-only vars without a Tau consumer are intentionally omitted.
+        builder.AppendLine();
+        builder.AppendLine("Environment Variables:");
+        builder.AppendLine("  ANTHROPIC_API_KEY              - Anthropic Claude API key");
+        builder.AppendLine("  ANTHROPIC_OAUTH_TOKEN          - Anthropic OAuth token (alternative to API key)");
+        builder.AppendLine("  OPENAI_API_KEY                 - OpenAI GPT API key");
+        builder.AppendLine("  AZURE_OPENAI_API_KEY           - Azure OpenAI API key");
+        builder.AppendLine("  GEMINI_API_KEY                 - Google Gemini API key (GOOGLE_API_KEY also accepted)");
+        builder.AppendLine("  GROQ_API_KEY                   - Groq API key");
+        builder.AppendLine("  CEREBRAS_API_KEY               - Cerebras API key");
+        builder.AppendLine("  XAI_API_KEY                    - xAI Grok API key");
+        builder.AppendLine("  OPENROUTER_API_KEY             - OpenRouter API key");
+        builder.AppendLine("  AI_GATEWAY_API_KEY             - Vercel AI Gateway API key");
+        builder.AppendLine("  ZAI_API_KEY                    - ZAI API key");
+        builder.AppendLine("  MISTRAL_API_KEY                - Mistral API key");
+        builder.AppendLine("  MINIMAX_API_KEY                - MiniMax API key");
+        builder.AppendLine("  OPENCODE_API_KEY               - OpenCode Zen/OpenCode Go API key");
+        builder.AppendLine("  KIMI_API_KEY                   - Kimi For Coding API key");
+        builder.AppendLine("  COPILOT_GITHUB_TOKEN           - GitHub Copilot token (GH_TOKEN/GITHUB_TOKEN also accepted)");
+        builder.AppendLine("  AWS_PROFILE                    - AWS profile for Amazon Bedrock");
+        builder.AppendLine("  AWS_ACCESS_KEY_ID              - AWS access key for Amazon Bedrock");
+        builder.AppendLine("  AWS_SECRET_ACCESS_KEY          - AWS secret key for Amazon Bedrock");
+        builder.AppendLine("  AWS_BEARER_TOKEN_BEDROCK       - Bedrock API key (bearer token)");
+        builder.AppendLine("  AWS_REGION                     - AWS region for Amazon Bedrock (e.g., us-east-1)");
+        builder.AppendLine("  PI_OFFLINE                     - Disable startup network operations when set to 1/true/yes");
+        builder.AppendLine("  PI_TELEMETRY                   - Override install telemetry when set to 1/true/yes or 0/false/no");
+
+        builder.AppendLine();
+        builder.AppendLine("Available Tools (default: read, bash, edit, write):");
+        builder.AppendLine("  read   - Read file contents");
+        builder.AppendLine("  bash   - Execute bash commands");
+        builder.AppendLine("  edit   - Edit files with find/replace");
+        builder.AppendLine("  write  - Write files (creates/overwrites)");
+        builder.AppendLine("  grep   - Search file contents (read-only, off by default)");
+        builder.AppendLine("  find   - Find files by glob pattern (read-only, off by default)");
+        builder.AppendLine("  ls     - List directory contents (read-only, off by default)");
+
         return builder.ToString().TrimEnd('\r', '\n');
     }
 

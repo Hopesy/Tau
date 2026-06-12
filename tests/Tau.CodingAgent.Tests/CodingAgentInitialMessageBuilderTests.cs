@@ -216,6 +216,20 @@ public sealed class CodingAgentInitialMessageBuilderTests
     }
 
     [Fact]
+    public void BuildHelpText_IncludesExamplesEnvironmentAndTools()
+    {
+        var help = CodingAgentCliHelp.BuildHelpText("pi", []);
+
+        Assert.Contains("Examples:", help, StringComparison.Ordinal);
+        Assert.Contains("pi --export session.jsonl output.html", help, StringComparison.Ordinal);
+        Assert.Contains("Environment Variables:", help, StringComparison.Ordinal);
+        Assert.Contains("ANTHROPIC_API_KEY", help, StringComparison.Ordinal);
+        Assert.Contains("PI_OFFLINE", help, StringComparison.Ordinal);
+        Assert.Contains("Available Tools (default: read, bash, edit, write):", help, StringComparison.Ordinal);
+        Assert.Contains("read   - Read file contents", help, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void BuildHelpText_ListsRegisteredExtensionFlags()
     {
         var flags = new[]
