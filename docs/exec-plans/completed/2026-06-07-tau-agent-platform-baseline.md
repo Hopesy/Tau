@@ -103,7 +103,7 @@
 | Redaction | JSONL sink 默认 string-value redaction 已有，provider run 和 tool trace 只写 provider/model/usage/cost/bytes/failureKind 等摘要 | 首版完成；非标准 secret pattern 仍是长期安全 backlog | log assertion + redaction docs |
 | Console example | `examples/Tau.Agent.ConsoleExample` 已存在 | 首版完成 | smoke command |
 | ASP.NET Core / Worker example | `examples/Tau.Agent.HttpExample` 已存在 | 首版完成 | smoke command |
-| Package boundary | release scripts 已有库包 publish baseline；examples 已进 solution；`README.md`、`next.md` 和质量文档明确 `Tau.Ai` / `Tau.Agent` 默认 library boundary、examples 源码模板边界和 CI/smoke 入口 | baseline 完成；真实 registry 发布演练继续留作后续外部验证 | docs + full gate + RunSmoke |
+| Package boundary | release scripts 已有库包 publish baseline；examples 已进 solution；`README.md`、`next.md` 和质量文档明确 `Tau.Ai` / `Tau.Agent` 默认 library boundary、examples 源码模板边界和 CI/smoke 入口；2026-06-12 后续补上本地 NuGet-style package consumer smoke | 本地 package consumer boundary 完成；真实 registry 发布、签名/溯源和外部 provider/proxy e2e 继续留作后续外部验证 | docs + full gate + RunSmoke + `verify-agent-package-consumer.ps1` |
 | TUI/UI parity | 已有独立 WIP | baseline 阶段 defer，不纳入 SDK/API 提交 | plan/next 保持后置 |
 
 ## 第一版 API 骨架候选
@@ -228,3 +228,4 @@ var result = await app.PromptAsync("hello", cancellationToken);
 - 2026-06-07：进一步把计划从方向声明收紧为 WP1/WP2 可执行入口：默认优先在 `Tau.Agent` 增加薄平台层，候选类型为 `AgentApplication`、`AgentApplicationBuilder`、`AgentRunResult`、`DelegateAgentTool`、`IAgentSessionStore`、`AgentSessionSnapshot` 和 `InMemoryAgentSessionStore`。这些类型只作为应用底座包装现有 Agent/Ai 内核，不引入 CLI/TUI product public dependency。
 - 2026-06-07：首版 Agent platform API 已落地到 `src/Tau.Agent/Platform/**`，并新增 Console / HTTP examples 与 dedicated smoke。随后把 `verify-agent-platform-examples.ps1` 接入 `verify-dotnet.ps1 -RunSmoke`，让 Agent 底座示例进入仓库级运行态验证链。
 - 2026-06-07：Agent platform baseline 完成本地验收并进入 completed plan 状态。验收证据包括 targeted platform tests 5/5、provider run + tool execution runtime log assertions、Console/HTTP example smoke、`Tau.Agent.Tests` 119/119、`Tau.Ai.Tests` 280/280、仓库级 `verify-dotnet.ps1 -SkipRestore` 和 `verify-dotnet.ps1 -SkipRestore -RunSmoke`；真实 provider/OAuth e2e、真实 package registry 发布演练、真实 signing/provenance 演练和后续 product parity 接回仍保留为后续计划，不被 fake provider smoke 覆盖。
+- 2026-06-12：completed plan 追加后续事实，不改写 2026-06-07 当时结论。`scripts/verify-agent-package-consumer.ps1` 已补上本地 package consumer smoke：pack `Tau.Ai` / `Tau.Agent`、验证 `Tau.Agent` 对 `Tau.Ai` 的 package 依赖和 README/description 元数据、再用临时外部 app 只引用 `Tau.Agent` 并运行 Agent platform + Faux provider 回合。该事实关闭本地 NuGet-style 外部引用边界，但仍不关闭真实 registry 发布、签名/溯源、真实 provider/OAuth 或真实 proxy/e2e。

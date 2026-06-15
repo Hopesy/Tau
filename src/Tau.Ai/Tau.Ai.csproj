@@ -4,6 +4,7 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <Description>Tau AI provider, model, auth, streaming, validation and observability foundation for .NET agent applications.</Description>
   </PropertyGroup>
 
   <ItemGroup>

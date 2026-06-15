@@ -460,7 +460,9 @@ public class WebUiEndpointTests
             var runners = new List<FakeCodingAgentRunner>();
             var builder = WebApplication.CreateBuilder(new WebApplicationOptions
             {
-                EnvironmentName = "Development"
+                EnvironmentName = "Development",
+                // Other CodingAgent tests temporarily switch the process cwd; keep this host independent.
+                ContentRootPath = AppContext.BaseDirectory
             });
             builder.WebHost.UseUrls("http://127.0.0.1:0");
             builder.Services.AddSingleton(new WebChatStore(storePath));

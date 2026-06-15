@@ -151,6 +151,7 @@ try {
     $execute = Invoke-JsonScript -Name 'execute-release' -ScriptPath 'scripts/execute-release.ps1' -Arguments $prepareArgs
     $finalize = Invoke-JsonScript -Name 'release-finalize-smoke' -ScriptPath 'scripts/verify-release-finalize.ps1' -Arguments @('-Json')
     $packagePublish = Invoke-JsonScript -Name 'release-package-publish-smoke' -ScriptPath 'scripts/verify-release-package-publish.ps1' -Arguments @('-Json')
+    $agentPackageConsumer = Invoke-JsonScript -Name 'agent-package-consumer-smoke' -ScriptPath 'scripts/verify-agent-package-consumer.ps1' -Arguments @('-SkipRestore', '-Json')
     $provenance = Invoke-JsonScript -Name 'release-provenance-smoke' -ScriptPath 'scripts/verify-release-provenance.ps1' -Arguments @('-Json')
     $aiTestImage = Invoke-JsonScript -Name 'ai-test-image-smoke' -ScriptPath 'scripts/verify-ai-test-image.ps1' -Arguments @('-Json')
 
@@ -198,6 +199,16 @@ try {
         packageCount = $packagePublish.results.apply.packageCount
         dirtyApplyExitCode = $packagePublish.results.dirtyApply.exitCode
     }
+    $script:results.agentPackageConsumer = [ordered]@{
+        succeeded = $agentPackageConsumer.succeeded
+        assertionCount = @($agentPackageConsumer.assertions).Count
+        aiRestoreExitCode = $agentPackageConsumer.results.aiConsumer.restoreExitCode
+        aiBuildExitCode = $agentPackageConsumer.results.aiConsumer.buildExitCode
+        aiRunExitCode = $agentPackageConsumer.results.aiConsumer.runExitCode
+        agentRestoreExitCode = $agentPackageConsumer.results.agentConsumer.restoreExitCode
+        agentBuildExitCode = $agentPackageConsumer.results.agentConsumer.buildExitCode
+        agentRunExitCode = $agentPackageConsumer.results.agentConsumer.runExitCode
+    }
     $script:results.provenance = [ordered]@{
         succeeded = $provenance.succeeded
         assertionCount = @($provenance.assertions).Count
@@ -222,6 +233,7 @@ try {
         'release-contract-smoke',
         'release-finalize-smoke',
         'release-package-publish-smoke',
+        'agent-package-consumer-smoke',
         'release-provenance-smoke',
         'ai-test-image-smoke',
         'session-audit-script-smoke',
@@ -332,6 +344,16 @@ try {
     Assert-Equal -Name 'release package publish apply exit code' -Actual $packagePublish.results.apply.exitCode -Expected 0
     Assert-Equal -Name 'release package publish default package count' -Actual $packagePublish.results.apply.packageCount -Expected 3
     Assert-Equal -Name 'release package publish dirty apply blocked' -Actual ($packagePublish.results.dirtyApply.exitCode -ne 0) -Expected $true
+
+    Assert-Equal -Name 'agent package consumer smoke succeeded' -Actual $agentPackageConsumer.succeeded -Expected $true
+    Assert-Equal -Name 'ai package consumer restore exit code' -Actual $agentPackageConsumer.results.aiConsumer.restoreExitCode -Expected 0
+    Assert-Equal -Name 'ai package consumer build exit code' -Actual $agentPackageConsumer.results.aiConsumer.buildExitCode -Expected 0
+    Assert-Equal -Name 'ai package consumer run exit code' -Actual $agentPackageConsumer.results.aiConsumer.runExitCode -Expected 0
+    Assert-Matches -Name 'ai package consumer output' -Actual $agentPackageConsumer.results.aiConsumer.output -Pattern 'assistant=ai package complete'
+    Assert-Equal -Name 'agent package consumer restore exit code' -Actual $agentPackageConsumer.results.agentConsumer.restoreExitCode -Expected 0
+    Assert-Equal -Name 'agent package consumer build exit code' -Actual $agentPackageConsumer.results.agentConsumer.buildExitCode -Expected 0
+    Assert-Equal -Name 'agent package consumer run exit code' -Actual $agentPackageConsumer.results.agentConsumer.runExitCode -Expected 0
+    Assert-Matches -Name 'agent package consumer output' -Actual $agentPackageConsumer.results.agentConsumer.output -Pattern 'assistant=package consumer complete'
 
     Assert-Equal -Name 'release provenance smoke succeeded' -Actual $provenance.succeeded -Expected $true
     Assert-Equal -Name 'release provenance dry-run exit code' -Actual $provenance.results.provenanceDryRun.exitCode -Expected 0

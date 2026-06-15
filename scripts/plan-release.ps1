@@ -397,6 +397,7 @@ $requiredScripts = @(
     'scripts/verify-release-finalize.ps1',
     'scripts/publish-release-packages.ps1',
     'scripts/verify-release-package-publish.ps1',
+    'scripts/verify-agent-package-consumer.ps1',
     'scripts/generate-release-provenance.ps1',
     'scripts/sign-release-packages.ps1',
     'scripts/verify-release-provenance.ps1',
@@ -445,6 +446,11 @@ $plannedCommands = @(
         name = 'release-package-publish-smoke'
         command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-release-package-publish.ps1'
         purpose = 'Validate guarded NuGet/package publish synchronization against a temp fixture and fake dotnet command without touching real package registries.'
+    },
+    [ordered]@{
+        name = 'agent-package-consumer-smoke'
+        command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-agent-package-consumer.ps1 -SkipRestore'
+        purpose = 'Pack Tau.Ai and Tau.Agent into a local package source, then restore/build/run temp external console apps that reference Tau.Ai directly and Tau.Agent with transitive Tau.Ai consumption.'
     },
     [ordered]@{
         name = 'release-provenance-smoke'

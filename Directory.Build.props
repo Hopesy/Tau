@@ -8,5 +8,18 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
     <IsAotCompatible>true</IsAotCompatible>
+    <Authors>Tau contributors</Authors>
+    <Company>Tau</Company>
+    <PackageProjectUrl>https://github.com/Hopesy/Tau</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/Hopesy/Tau</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageTags>tau;agent;ai;llm;pi-mono</PackageTags>
+    <Description>Tau .NET libraries and applications for pi-mono parity.</Description>
   </PropertyGroup>
+
+  <ItemGroup Condition="'$(IsPackable)' != 'false'">
+    <None Include="$(MSBuildThisFileDirectory)README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
 </Project>

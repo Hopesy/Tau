@@ -10,6 +10,7 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <Description>Tau reusable agent runtime and application platform built on Tau.Ai for .NET agent applications.</Description>
   </PropertyGroup>
 
 </Project>
