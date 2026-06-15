@@ -88,6 +88,13 @@ function Invoke-AgentPackageConsumerSmoke {
     }
 }
 
+function Invoke-AgentProxyServerE2eSmoke {
+    powershell -NoProfile -ExecutionPolicy Bypass -File '.\scripts\verify-agent-proxy-server-e2e.ps1' -SkipRestore -NoBuild
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+}
+
 function Invoke-WebUiSmoke {
     $smokeRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("tau-webui-smoke-" + [Guid]::NewGuid().ToString("N"))
     $sessionsPath = Join-Path $smokeRoot 'webui-sessions.json'
@@ -311,6 +318,8 @@ if ($RunSmoke) {
     Invoke-AgentPlatformExamplesSmoke
     Write-Host '==> smoke agent package consumer'
     Invoke-AgentPackageConsumerSmoke
+    Write-Host '==> smoke agent proxy server e2e'
+    Invoke-AgentProxyServerE2eSmoke
     Write-Host '==> smoke webui'
     Invoke-WebUiSmoke
     Write-Host '==> smoke mom'

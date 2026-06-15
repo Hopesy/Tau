@@ -398,6 +398,7 @@ $requiredScripts = @(
     'scripts/publish-release-packages.ps1',
     'scripts/verify-release-package-publish.ps1',
     'scripts/verify-agent-package-consumer.ps1',
+    'scripts/verify-agent-proxy-server-e2e.ps1',
     'scripts/generate-release-provenance.ps1',
     'scripts/sign-release-packages.ps1',
     'scripts/verify-release-provenance.ps1',
@@ -451,6 +452,11 @@ $plannedCommands = @(
         name = 'agent-package-consumer-smoke'
         command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-agent-package-consumer.ps1 -SkipRestore'
         purpose = 'Pack Tau.Ai and Tau.Agent into a local package source, then restore/build/run temp external console apps that reference Tau.Ai directly and Tau.Agent with transitive Tau.Ai consumption.'
+    },
+    [ordered]@{
+        name = 'agent-proxy-server-e2e-smoke'
+        command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-agent-proxy-server-e2e.ps1 -SkipRestore'
+        purpose = 'Validate Tau.Agent ProxyStreamProvider against a real local loopback HTTP/SSE /api/stream server instead of only a fake HttpMessageHandler.'
     },
     [ordered]@{
         name = 'release-provenance-smoke'

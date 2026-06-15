@@ -234,7 +234,7 @@ public sealed class CodingAgentResumeSelectorTests
 
         try
         {
-            var store = new CodingAgentTreeSessionStore(currentPath);
+            var store = new CodingAgentTreeSessionStore(currentPath, cwd: directory);
             store.AppendSessionInfo("Current session", "openai", "gpt-5.4");
             store.AppendMessages([new UserMessage("keep this context")], 0);
 
@@ -254,7 +254,7 @@ public sealed class CodingAgentResumeSelectorTests
             var result = await CodingAgentResumeSelector.SelectAsync(
                 new CodingAgentResumeSelectorState(
                     currentPath,
-                    Environment.CurrentDirectory,
+                    directory,
                     CodingAgentTreeSessionStore.ListAvailableSessions(currentPath)),
                 keyReader,
                 surface);

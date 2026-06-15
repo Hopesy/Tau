@@ -152,6 +152,7 @@ try {
     $finalize = Invoke-JsonScript -Name 'release-finalize-smoke' -ScriptPath 'scripts/verify-release-finalize.ps1' -Arguments @('-Json')
     $packagePublish = Invoke-JsonScript -Name 'release-package-publish-smoke' -ScriptPath 'scripts/verify-release-package-publish.ps1' -Arguments @('-Json')
     $agentPackageConsumer = Invoke-JsonScript -Name 'agent-package-consumer-smoke' -ScriptPath 'scripts/verify-agent-package-consumer.ps1' -Arguments @('-SkipRestore', '-Json')
+    $agentProxyServerE2e = Invoke-JsonScript -Name 'agent-proxy-server-e2e-smoke' -ScriptPath 'scripts/verify-agent-proxy-server-e2e.ps1' -Arguments @('-SkipRestore', '-Json')
     $provenance = Invoke-JsonScript -Name 'release-provenance-smoke' -ScriptPath 'scripts/verify-release-provenance.ps1' -Arguments @('-Json')
     $aiTestImage = Invoke-JsonScript -Name 'ai-test-image-smoke' -ScriptPath 'scripts/verify-ai-test-image.ps1' -Arguments @('-Json')
 
@@ -209,6 +210,12 @@ try {
         agentBuildExitCode = $agentPackageConsumer.results.agentConsumer.buildExitCode
         agentRunExitCode = $agentPackageConsumer.results.agentConsumer.runExitCode
     }
+    $script:results.agentProxyServerE2e = [ordered]@{
+        succeeded = $agentProxyServerE2e.succeeded
+        assertionCount = @($agentProxyServerE2e.assertions).Count
+        exitCode = $agentProxyServerE2e.exitCode
+        filter = $agentProxyServerE2e.filter
+    }
     $script:results.provenance = [ordered]@{
         succeeded = $provenance.succeeded
         assertionCount = @($provenance.assertions).Count
@@ -234,6 +241,7 @@ try {
         'release-finalize-smoke',
         'release-package-publish-smoke',
         'agent-package-consumer-smoke',
+        'agent-proxy-server-e2e-smoke',
         'release-provenance-smoke',
         'ai-test-image-smoke',
         'session-audit-script-smoke',
@@ -354,6 +362,10 @@ try {
     Assert-Equal -Name 'agent package consumer build exit code' -Actual $agentPackageConsumer.results.agentConsumer.buildExitCode -Expected 0
     Assert-Equal -Name 'agent package consumer run exit code' -Actual $agentPackageConsumer.results.agentConsumer.runExitCode -Expected 0
     Assert-Matches -Name 'agent package consumer output' -Actual $agentPackageConsumer.results.agentConsumer.output -Pattern 'assistant=package consumer complete'
+
+    Assert-Equal -Name 'agent proxy server e2e smoke succeeded' -Actual $agentProxyServerE2e.succeeded -Expected $true
+    Assert-Equal -Name 'agent proxy server e2e exit code' -Actual $agentProxyServerE2e.exitCode -Expected 0
+    Assert-Matches -Name 'agent proxy server e2e filter' -Actual $agentProxyServerE2e.filter -Pattern 'ProxyStreamProviderTests'
 
     Assert-Equal -Name 'release provenance smoke succeeded' -Actual $provenance.succeeded -Expected $true
     Assert-Equal -Name 'release provenance dry-run exit code' -Actual $provenance.results.provenanceDryRun.exitCode -Expected 0

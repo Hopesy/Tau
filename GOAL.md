@@ -27,14 +27,15 @@
 - public API compile samples、Agent platform examples、`verify-agent-package-consumer.ps1`、`verify-release-contracts.ps1` 和 `verify-dotnet.ps1 -SkipRestore -RunSmoke` 全部通过。
 - `GOAL.md`、active plan、parity matrix、`next.md`、`docs/QUALITY_SCORE.md`、README 和 history 同步记录该 foundation 边界。
 
-真实 provider/OAuth e2e、真实 proxy-server e2e、真实 NuGet registry 发布、真实 signing/provenance、global install alias 和 TypeScript export/subpath exact parity 仍是后续全量 parity / external-e2e / release gates；没有真实凭证或 registry 环境时不得伪造成完成，但也不得阻塞本地 Agent 基座包引用能力的完成判定。
+真实 provider/OAuth e2e、真实 NuGet registry 发布、真实 signing/provenance、global install alias 和 TypeScript export/subpath exact parity 仍是后续全量 parity / external-e2e / release gates；没有真实凭证或 registry 环境时不得伪造成完成，但也不得阻塞本地 Agent 基座包引用能力的完成判定。
 
 ## Current checkpoint
 
 - [x] Agent platform baseline completed：`src/Tau.Agent/Platform/**`、Console/HTTP examples、provider run + tool execution runtime log、platform smoke 和全仓 gate 已经作为 shared Agent foundation 归档到 `docs/exec-plans/completed/2026-06-07-tau-agent-platform-baseline.md`。
 - [x] Phase 1 inventory freeze completed：`docs/exec-plans/active/2026-05-28-pi-mono-parity-matrix.md` 已冻结 capability、file-level、surface 和 root scripts/manifests 三层 inventory；后续不重开 broad package scan。
 - [x] Foundation-first local package consumer boundary：`scripts/verify-agent-package-consumer.ps1` 覆盖 `Tau.Ai` direct package consumer 和 `Tau.Agent` transitive `Tau.Ai` package consumer；2026-06-15 已复跑 dedicated smoke 22 assertions、`verify-release-contracts.ps1 -Json` 和 `verify-dotnet.ps1 -SkipRestore -RunSmoke`，本地 Agent 基座 package consumer gate 已验证完成。
-- [ ] Phase 2 critical contract closure：foundation-first gate 当前优先于其它工具/产品切片；通过后继续从 matrix 的 `Phase 2 Candidate Queue` 领取真实 provider/OAuth、package/global install alias、proxy/e2e、runtime contract 或 release/package 缺口。
+- [x] Agent stream proxy local server path：`tests/Tau.Agent.Tests/ProxyStreamProviderTests.cs` 已覆盖真实 loopback HTTP/SSE `/api/stream` server path、Authorization/body contract、缺 terminal event 和 malformed SSE JSON；`scripts/verify-agent-proxy-server-e2e.ps1` 已接入 `verify-dotnet.ps1 -RunSmoke`、`plan-release.ps1` 和 `verify-release-contracts.ps1`。
+- [ ] Phase 2 critical contract closure：foundation-first gate 当前优先于其它工具/产品切片；通过后继续从 matrix 的 `Phase 2 Candidate Queue` 领取真实 provider/OAuth、package/global install alias、runtime contract 或 release/package 缺口。
 - [ ] Phase 3 product runtime parity：CodingAgent + Tui、WebUi、Mom、Pods 的用户可见 runtime 行为继续补齐；fake-only runner、stub provider、fixture smoke 只能作为合同证据，不能标成产品完成。
 - [ ] Phase 4 external e2e closure：真实 provider/OAuth/AWS/Slack/Docker/Pods/WebUi/browser/release 等 e2e 要通过；没有环境时保持 `external-e2e-needed`，不能降级成完成。
 - [ ] Phase 5 release/package/CI final parity：Tau release/CI 必须产出真实 executable/package artifacts，并完成 registry/signing/provenance/non-host smoke 或取得用户明确非目标确认。
