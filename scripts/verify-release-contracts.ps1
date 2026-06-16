@@ -372,6 +372,7 @@ try {
     Assert-Equal -Name 'agent package consumer build exit code' -Actual $agentPackageConsumer.results.agentConsumer.buildExitCode -Expected 0
     Assert-Equal -Name 'agent package consumer run exit code' -Actual $agentPackageConsumer.results.agentConsumer.runExitCode -Expected 0
     Assert-Matches -Name 'agent package consumer output' -Actual $agentPackageConsumer.results.agentConsumer.output -Pattern 'assistant=package consumer complete'
+    Assert-Matches -Name 'agent package consumer prepared tool output' -Actual $agentPackageConsumer.results.agentConsumer.output -Pattern 'prepared package consumer'
 
     Assert-Equal -Name 'agent proxy server e2e smoke succeeded' -Actual $agentProxyServerE2e.succeeded -Expected $true
     Assert-Equal -Name 'agent proxy server e2e exit code' -Actual $agentProxyServerE2e.exitCode -Expected 0

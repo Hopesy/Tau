@@ -8,7 +8,7 @@
 
 ## 当前直接执行入口
 
-1. Foundation-first gate 已在本地完成验证：`scripts/verify-agent-package-consumer.ps1` 22 assertions、`scripts/verify-release-contracts.ps1 -Json`、`scripts/verify-dotnet.ps1 -SkipRestore -RunSmoke` 均已通过。
+1. Foundation-first gate 已在本地完成验证：`scripts/verify-agent-package-consumer.ps1` 23 assertions、`scripts/verify-release-contracts.ps1 -Json`、`scripts/verify-dotnet.ps1 -SkipRestore -RunSmoke` 均已通过。
 2. Agent stream proxy local server path 已补验证：`scripts/verify-agent-proxy-server-e2e.ps1` 覆盖真实 loopback HTTP/SSE `/api/stream` server path、缺 terminal event 和 malformed SSE JSON，并已接入 `verify-dotnet.ps1 -RunSmoke` / release contract。
 3. `Tau.Ai.Cli` 本地 dotnet tool install alias 已补验证：`scripts/verify-ai-cli-tool-install.ps1` 会 pack 临时 `pi-ai` / `tau-ai` tool 包、从临时 package source 安装到 tool-path，并验证 `--help` / `list` 命令名和 provider 输出。
 4. `Tau.Agent.Platform.AgentApplicationBuilder.AddTool(..., prepareArguments:)` 已补透传到 `DelegateAgentTool`，平台层可在 tool schema validation 前改写 raw args；对应测试和 public API compile sample 也已补。
@@ -19,7 +19,7 @@
 
 - Agent platform baseline 已完成并归档：`docs/exec-plans/completed/2026-06-07-tau-agent-platform-baseline.md`。
 - `Tau.Agent.Platform` 首版 public surface 已存在：`AgentApplication`、builder、delegate tool、session store、runtime log context、Console/HTTP examples。
-- 本轮 foundation-first WIP 增加本地 NuGet-style package consumer smoke：临时外部 app 可只引用 `Tau.Ai` 并通过 `Tau.Ai.Providers.Faux` / `ProviderRegistry` / `StreamFunctions` 完成一次 LLM 调用；另一个临时外部 app 可只引用 `Tau.Agent`，通过传递依赖使用 `Tau.Ai` 并运行 `AgentApplication`、delegate tool、session store 和 runtime log 回合。
+- 本轮 foundation-first WIP 增加本地 NuGet-style package consumer smoke：临时外部 app 可只引用 `Tau.Ai` 并通过 `Tau.Ai.Providers.Faux` / `ProviderRegistry` / `StreamFunctions` 完成一次 LLM 调用；另一个临时外部 app 可只引用 `Tau.Agent`，通过传递依赖使用 `Tau.Ai` 并运行 `AgentApplication`、delegate tool、session store 和 runtime log 回合；当前 smoke 还会打印 `toolResult=prepared package consumer`，证明 `AgentApplicationBuilder.AddTool(..., prepareArguments:)` 在外部 package consumer 中真实生效。
 - 上述 package consumer boundary 只证明本地 package source 下的外部 .NET consumer 形态；真实 NuGet registry 发布、签名/溯源、global install alias、真实 provider/OAuth 和 TypeScript export/subpath exact parity 仍保持 open。
 - `Tau.Agent` proxy provider 已有本地 loopback server e2e：临时 TCP server 接收真实 HTTP POST `/api/stream`、校验 bearer/body，并返回 SSE，客户端重建 assistant message；异常路径覆盖 HTTP error、缺 terminal event 和 malformed SSE JSON。
 - `Tau.Ai.Cli` 已有本地 dotnet tool install rehearsal：临时 package source 中安装 `pi-ai` / `tau-ai` 两个 tool alias 并验证 command-name help/list 行为；这不是真实 NuGet registry 发布、签名或 provenance。

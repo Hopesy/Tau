@@ -11,7 +11,7 @@
 
 ## 最新增量（2026-06-17）
 
-- 本轮继续 Phase 2 `Agent runtime loop, facade and tool events` 收口：`src/Tau.Agent/Platform/AgentApplicationBuilder.cs` 现在把 `AddTool(..., prepareArguments:)` 透传给 `DelegateAgentTool`，因此外部消费者可以在不碰 runtime 内核的情况下，于 tool schema validation 前改写原始参数。新增 `PromptAsync_UsesDelegateToolPrepareArgumentsBeforeExecution` 和 `AgentPublicApiCompileSampleTests` 中的 builder sample 证明该参数在执行前生效且可被外部项目编译使用。该切片只关闭平台 builder 层的 facade option pass-through，不代表更广的 export-shape 决策、真实 registry/signing/provenance 或 provider/OAuth e2e 已完成。
+- 本轮继续 Phase 2 `Agent runtime loop, facade and tool events` 收口：`src/Tau.Agent/Platform/AgentApplicationBuilder.cs` 现在把 `AddTool(..., prepareArguments:)` 透传给 `DelegateAgentTool`，因此外部消费者可以在不碰 runtime 内核的情况下，于 tool schema validation 前改写原始参数。新增 `PromptAsync_UsesDelegateToolPrepareArgumentsBeforeExecution` 和 `AgentPublicApiCompileSampleTests` 中的 builder sample 证明该参数在执行前生效且可被外部项目编译使用；同轮把 `scripts/verify-agent-package-consumer.ps1` 扩到 23 assertions，临时外部 `Tau.Agent` package consumer 会输出并断言 `toolResult=prepared package consumer`，避免 package smoke 只证明回合完成而没有证明参数预处理结果。该切片只关闭平台 builder 层的 facade option pass-through，不代表更广的 export-shape 决策、真实 registry/signing/provenance 或 provider/OAuth e2e 已完成。
 
 ## 最新增量（2026-06-15）
 

@@ -342,22 +342,43 @@ var app = AgentApplication.CreateBuilder()
         (context, _) => new ToolResult(new ContentBlock[]
         {
             new TextContent(context.Arguments.GetProperty("text").GetString() ?? string.Empty)
-        }))
+        }),
+        prepareArguments: (rawArgs, _) => new ValueTask<JsonElement>(PreparePackageConsumerArgs(rawArgs)))
     .Build();
 
 var result = await app.PromptAsync("run from package consumer").WaitAsync(TimeSpan.FromSeconds(10));
 var snapshot = sessions.Load("consumer-session");
 var providerRunStarts = sink.Events.Count(static evt => evt.Category == "provider" && evt.Event == "run.start");
+var toolResult = result.Messages.OfType<ToolResultMessage>().Single();
 
 Console.WriteLine($"assistant={result.AssistantText}");
 Console.WriteLine($"saved={result.SavedSession}");
 Console.WriteLine($"messages={result.Messages.Count}");
+Console.WriteLine($"toolResult={ReadText(toolResult.Content)}");
 Console.WriteLine($"toolStarts={result.ToolStarts.Count}");
 Console.WriteLine($"toolEnds={result.ToolEnds.Count}");
 Console.WriteLine($"providerRuns={providerRunStarts}");
 Console.WriteLine($"logSession={result.LogContext.SessionId}");
 Console.WriteLine($"snapshot={snapshot?.SessionId}");
 Console.WriteLine($"fauxCalls={faux.State.CallCount}");
+
+static JsonElement PreparePackageConsumerArgs(JsonElement rawArgs)
+{
+    if (!rawArgs.TryGetProperty("text", out var text) || text.ValueKind != JsonValueKind.String)
+    {
+        return rawArgs;
+    }
+
+    var prepared = JsonSerializer.SerializeToElement(new Dictionary<string, string>
+    {
+        ["text"] = $"prepared {text.GetString()}"
+    });
+
+    return prepared;
+}
+
+static string ReadText(IReadOnlyList<ContentBlock> content) =>
+    string.Join("\n", content.OfType<TextContent>().Select(static block => block.Text));
 
 public sealed class CapturingTauLogSink : ITauLogSink
 {
@@ -452,6 +473,7 @@ try {
     Assert-Matches -Name 'consumer assistant output' -Text $runOutput -Pattern 'assistant=package consumer complete'
     Assert-Matches -Name 'consumer saved session' -Text $runOutput -Pattern 'saved=True'
     Assert-Matches -Name 'consumer message count' -Text $runOutput -Pattern 'messages=4'
+    Assert-Matches -Name 'consumer prepared tool result' -Text $runOutput -Pattern 'prepared package consumer'
     Assert-Matches -Name 'consumer tool start count' -Text $runOutput -Pattern 'toolStarts=1'
     Assert-Matches -Name 'consumer tool end count' -Text $runOutput -Pattern 'toolEnds=1'
     Assert-Matches -Name 'consumer provider run count' -Text $runOutput -Pattern 'providerRuns=2'
