@@ -9,6 +9,10 @@
 - `C`：能用，但需要针对性补强。
 - `D`：脆弱、缺少规范，或很多行为尚未定义。
 
+## 最新增量（2026-06-17）
+
+- 本轮继续 Phase 2 `Agent runtime loop, facade and tool events` 收口：`src/Tau.Agent/Platform/AgentApplicationBuilder.cs` 现在把 `AddTool(..., prepareArguments:)` 透传给 `DelegateAgentTool`，因此外部消费者可以在不碰 runtime 内核的情况下，于 tool schema validation 前改写原始参数。新增 `PromptAsync_UsesDelegateToolPrepareArgumentsBeforeExecution` 和 `AgentPublicApiCompileSampleTests` 中的 builder sample 证明该参数在执行前生效且可被外部项目编译使用。该切片只关闭平台 builder 层的 facade option pass-through，不代表更广的 export-shape 决策、真实 registry/signing/provenance 或 provider/OAuth e2e 已完成。
+
 ## 最新增量（2026-06-15）
 
 - 本轮继续 Phase 2 `Agent stream proxy` 收口：对照上游 `packages/agent/src/proxy.ts` 的 `/api/stream` proxy client 行为，`tests/Tau.Agent.Tests/ProxyStreamProviderTests.cs` 现在不再只靠 fake `HttpMessageHandler` 固定请求/响应，而是新增真实 loopback TCP HTTP/SSE server path：`ProxyStreamProvider` 会向本地 `/api/stream` 发起真实 HTTP POST，携带 `Authorization: Bearer ...` 与 JSON request envelope，并从 SSE `start/text_delta/done` 重建 Tau `AssistantMessage`。同轮补齐 proxy 行此前记录的本地异常边界：HTTP error 不泄漏 token、proxy stream 缺 terminal event 会产出 terminal `ErrorEvent` 而不是挂起、malformed SSE JSON 会收束为 terminal error。新增 `scripts/verify-agent-proxy-server-e2e.ps1`，该脚本已接入 `verify-dotnet.ps1 -RunSmoke`、`plan-release.ps1` 和 `verify-release-contracts.ps1`；当前 dedicated smoke 通过 `ProxyStreamProviderTests` 5/5。提交前 `verify-dotnet.ps1 -SkipRestore -RunSmoke` 已通过，覆盖 Ai 344、Agent 126、Tui 251、CodingAgent 631、WebUi 72、Pods 216，以及 `tau-ai`、Agent examples、Agent package consumer、Agent proxy loopback server-path、WebUi 和 Mom smoke；过程中修正了 `CodingAgentResumeSelectorTests.SelectAsync_CtrlRRenamesCurrentSessionAndReturnsUpdatedNameWhenCancelled` 的测试夹具 cwd 不一致，避免临时目录 session 被默认 current-scope 过滤后误判取消。parity matrix 中 `Agent stream proxy` capability 行与 `packages/agent/src/proxy.ts` file-level 行从 `ported` 提升为 `verified`，当前 matrix machine count 为 `verified=9`、`ported=24`、`partial=197`、`missing=1`、`external-e2e-needed=31`、`non-goal-proposed=1`，合计 262。该切片关闭的是 Tau.Agent proxy provider 的本地 server-path 合同；真实 provider/OAuth、真实 registry/signing/provenance、package/global install alias 和 TypeScript export/subpath exact parity 仍保持 open。

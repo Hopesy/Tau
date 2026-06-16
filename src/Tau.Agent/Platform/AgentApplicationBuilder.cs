@@ -140,12 +140,14 @@ public sealed class AgentApplicationBuilder
         string description,
         JsonElement parameterSchema,
         Func<AgentToolContext, CancellationToken, ToolResult> execute,
-        ToolExecutionMode executionMode = ToolExecutionMode.Parallel)
+        ToolExecutionMode executionMode = ToolExecutionMode.Parallel,
+        Func<JsonElement, CancellationToken, ValueTask<JsonElement>>? prepareArguments = null)
     {
         ArgumentNullException.ThrowIfNull(execute);
         return AddTool(name, label, description, parameterSchema,
             (context, ct) => Task.FromResult(execute(context, ct)),
-            executionMode);
+            executionMode,
+            prepareArguments);
     }
 
     public AgentApplicationBuilder AddTool(
@@ -154,9 +156,10 @@ public sealed class AgentApplicationBuilder
         string description,
         JsonElement parameterSchema,
         AgentToolDelegate execute,
-        ToolExecutionMode executionMode = ToolExecutionMode.Parallel)
+        ToolExecutionMode executionMode = ToolExecutionMode.Parallel,
+        Func<JsonElement, CancellationToken, ValueTask<JsonElement>>? prepareArguments = null)
     {
-        _tools.Add(new DelegateAgentTool(name, label, description, parameterSchema, execute, executionMode));
+        _tools.Add(new DelegateAgentTool(name, label, description, parameterSchema, execute, executionMode, prepareArguments));
         return this;
     }
 

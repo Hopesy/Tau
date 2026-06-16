@@ -85,6 +85,50 @@ public sealed class AgentPlatformTests
     }
 
     [Fact]
+    public async Task PromptAsync_UsesDelegateToolPrepareArgumentsBeforeExecution()
+    {
+        var registry = new ProviderRegistry();
+        var registration = Faux.Register(registry);
+        registration.SetResponses([
+            Faux.AssistantMessage(
+                [Faux.ToolCall("echo", new Dictionary<string, object?> { ["text"] = "hello" }, "call-prepare")],
+                stopReason: StopReason.ToolUse),
+            Faux.AssistantMessage("done")
+        ]);
+        var prepared = false;
+
+        var app = AgentApplication.CreateBuilder()
+            .UseProviderRegistry(registry)
+            .UseModel(registration.GetModel())
+            .AddTool(
+                "echo",
+                "Echo",
+                "Echoes text.",
+                Schema("""{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}"""),
+                (context, _ct) => new ToolResult([
+                    new TextContent(context.Arguments.GetProperty("text").GetString() ?? string.Empty)
+                ]),
+                prepareArguments: (rawArgs, _ct) =>
+                {
+                    prepared = true;
+                    Assert.Equal("hello", rawArgs.GetProperty("text").GetString());
+                    return new ValueTask<JsonElement>(Json("""{"text":"prepared hello"}"""));
+                })
+            .Build();
+
+        var result = await app.PromptAsync("hello").WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.True(result.IsSuccess);
+        Assert.True(prepared);
+        Assert.Collection(
+            result.Messages,
+            message => Assert.Equal("hello", ReadText(Assert.IsType<UserMessage>(message).Content)),
+            message => Assert.IsType<AssistantMessage>(message),
+            message => Assert.Equal("prepared hello", ReadText(Assert.IsType<ToolResultMessage>(message).Content)),
+            message => Assert.Equal("done", ReadText(Assert.IsType<AssistantMessage>(message).Content)));
+    }
+
+    [Fact]
     public async Task PromptAsync_PopulatesToolTraceContextWithoutArgumentsOrResultFields()
     {
         var registry = new ProviderRegistry();
@@ -289,6 +333,12 @@ public sealed class AgentPlatformTests
     }
 
     private static JsonElement Schema(string json)
+    {
+        using var document = JsonDocument.Parse(json);
+        return document.RootElement.Clone();
+    }
+
+    private static JsonElement Json(string json)
     {
         using var document = JsonDocument.Parse(json);
         return document.RootElement.Clone();

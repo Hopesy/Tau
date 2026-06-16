@@ -145,6 +145,26 @@ public sealed class AgentPublicApiCompileSampleTests
         Assert.Equal("platform done", platformResult.AssistantText);
         Assert.Equal("platform-session", platformResult.LogContext.SessionId);
         Assert.Equal("platform-session", sessions.Load("platform-session")?.SessionId);
+
+        var preparedPlatformApp = AgentApplication.CreateBuilder()
+            .UseProviderRegistry(platformRegistry)
+            .UseModel(faux.GetModel())
+            .UseSystemPrompt("platform system")
+            .UseSessionId("prepared-platform-session")
+            .UseSessionStore(new InMemoryAgentSessionStore())
+            .UseLogSink(NullTauLogSink.Instance)
+            .AddTool(
+                "echo",
+                "Echo",
+                "Echoes text.",
+                CreateEchoSchema(),
+                (context, _) => new ToolResult([
+                    new TextContent(context.Arguments.GetProperty("text").GetString() ?? string.Empty)
+                ]),
+                prepareArguments: (rawArgs, _) => new ValueTask<JsonElement>(rawArgs))
+            .Build();
+
+        Assert.NotNull(preparedPlatformApp);
     }
 
     private static string ReadText(IReadOnlyList<ContentBlock> content) =>
