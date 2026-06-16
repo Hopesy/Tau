@@ -34,6 +34,15 @@ public sealed class AiCliRunnerTests
     }
 
     [Fact]
+    public void GetDefaultCommandName_IgnoresBlankEnvironmentOverride()
+    {
+        using var scope = EnvironmentVariableScope.Acquire();
+        scope.Set("TAU_AI_CLI_COMMAND_NAME", " ");
+
+        Assert.Equal("tau-ai", AiCliRunner.GetDefaultCommandName());
+    }
+
+    [Fact]
     public async Task RunAsync_HelpUsesProvidedCommandName()
     {
         var provider = new FakeOAuthProvider("anthropic", "Anthropic (Claude Pro/Max)");
@@ -47,6 +56,21 @@ public sealed class AiCliRunnerTests
         Assert.Contains("pi-ai login", console.Output);
         Assert.Contains("pi-ai list", console.Output);
         Assert.Empty(console.Error);
+    }
+
+    [Fact]
+    public async Task RunAsync_ListUsesProvidedCommandNameInUsageContext()
+    {
+        var provider = new FakeOAuthProvider("anthropic", "Anthropic (Claude Pro/Max)");
+        var console = new FakeConsole();
+        var runner = CreateRunner(console, "pi-ai", provider);
+
+        var exitCode = await runner.RunAsync(["--help"]);
+
+        Assert.Equal(0, exitCode);
+        Assert.Contains("Usage: pi-ai <command> [provider] [options]", console.Output);
+        Assert.Contains("pi-ai list", console.Output);
+        Assert.Contains("pi-ai login", console.Output);
     }
 
     [Fact]

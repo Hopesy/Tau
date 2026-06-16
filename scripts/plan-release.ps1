@@ -397,6 +397,7 @@ $requiredScripts = @(
     'scripts/verify-release-finalize.ps1',
     'scripts/publish-release-packages.ps1',
     'scripts/verify-release-package-publish.ps1',
+    'scripts/verify-ai-cli-tool-install.ps1',
     'scripts/verify-agent-package-consumer.ps1',
     'scripts/verify-agent-proxy-server-e2e.ps1',
     'scripts/generate-release-provenance.ps1',
@@ -447,6 +448,11 @@ $plannedCommands = @(
         name = 'release-package-publish-smoke'
         command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-release-package-publish.ps1'
         purpose = 'Validate guarded NuGet/package publish synchronization against a temp fixture and fake dotnet command without touching real package registries.'
+    },
+    [ordered]@{
+        name = 'ai-cli-tool-install-smoke'
+        command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-ai-cli-tool-install.ps1 -SkipRestore'
+        purpose = 'Pack Tau.Ai.Cli as local dotnet tools with pi-ai and tau-ai command aliases, install them from a temp package source, and verify help/list command-name behavior.'
     },
     [ordered]@{
         name = 'agent-package-consumer-smoke'

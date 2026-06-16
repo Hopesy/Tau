@@ -36,7 +36,36 @@ internal sealed class AiCliRunner
     internal static string GetDefaultCommandName()
     {
         var commandName = Environment.GetEnvironmentVariable(CommandNameEnvironmentVariable);
-        return string.IsNullOrWhiteSpace(commandName) ? "tau-ai" : commandName.Trim();
+        if (!string.IsNullOrWhiteSpace(commandName))
+        {
+            return commandName.Trim();
+        }
+
+        var toolCommandName = GetToolCommandName();
+        return string.IsNullOrWhiteSpace(toolCommandName) ? "tau-ai" : toolCommandName;
+    }
+
+    private static string? GetToolCommandName()
+    {
+        var commandPath = Environment.ProcessPath;
+        if (string.IsNullOrWhiteSpace(commandPath))
+        {
+            return null;
+        }
+
+        var fileName = Path.GetFileNameWithoutExtension(commandPath.Trim().Trim('"'));
+        if (string.IsNullOrWhiteSpace(fileName))
+        {
+            return null;
+        }
+
+        if (fileName.Equals("tau-ai", StringComparison.OrdinalIgnoreCase) ||
+            fileName.Equals("pi-ai", StringComparison.OrdinalIgnoreCase))
+        {
+            return fileName;
+        }
+
+        return null;
     }
 
     public async Task<int> RunAsync(string[] args, CancellationToken cancellationToken = default)

@@ -74,6 +74,13 @@ function Invoke-AiCliSmoke {
     }
 }
 
+function Invoke-AiCliToolInstallSmoke {
+    powershell -NoProfile -ExecutionPolicy Bypass -File '.\scripts\verify-ai-cli-tool-install.ps1' -SkipRestore
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+}
+
 function Invoke-AgentPlatformExamplesSmoke {
     powershell -NoProfile -ExecutionPolicy Bypass -File '.\scripts\verify-agent-platform-examples.ps1' -SkipRestore
     if ($LASTEXITCODE -ne 0) {
@@ -314,6 +321,8 @@ foreach ($project in $testProjects) {
 if ($RunSmoke) {
     Write-Host '==> smoke tau-ai'
     Invoke-AiCliSmoke
+    Write-Host '==> smoke ai cli tool install'
+    Invoke-AiCliToolInstallSmoke
     Write-Host '==> smoke agent platform examples'
     Invoke-AgentPlatformExamplesSmoke
     Write-Host '==> smoke agent package consumer'

@@ -151,6 +151,7 @@ try {
     $execute = Invoke-JsonScript -Name 'execute-release' -ScriptPath 'scripts/execute-release.ps1' -Arguments $prepareArgs
     $finalize = Invoke-JsonScript -Name 'release-finalize-smoke' -ScriptPath 'scripts/verify-release-finalize.ps1' -Arguments @('-Json')
     $packagePublish = Invoke-JsonScript -Name 'release-package-publish-smoke' -ScriptPath 'scripts/verify-release-package-publish.ps1' -Arguments @('-Json')
+    $aiCliToolInstall = Invoke-JsonScript -Name 'ai-cli-tool-install-smoke' -ScriptPath 'scripts/verify-ai-cli-tool-install.ps1' -Arguments @('-SkipRestore', '-Json')
     $agentPackageConsumer = Invoke-JsonScript -Name 'agent-package-consumer-smoke' -ScriptPath 'scripts/verify-agent-package-consumer.ps1' -Arguments @('-SkipRestore', '-Json')
     $agentProxyServerE2e = Invoke-JsonScript -Name 'agent-proxy-server-e2e-smoke' -ScriptPath 'scripts/verify-agent-proxy-server-e2e.ps1' -Arguments @('-SkipRestore', '-Json')
     $provenance = Invoke-JsonScript -Name 'release-provenance-smoke' -ScriptPath 'scripts/verify-release-provenance.ps1' -Arguments @('-Json')
@@ -200,6 +201,11 @@ try {
         packageCount = $packagePublish.results.apply.packageCount
         dirtyApplyExitCode = $packagePublish.results.dirtyApply.exitCode
     }
+    $script:results.aiCliToolInstall = [ordered]@{
+        succeeded = $aiCliToolInstall.succeeded
+        assertionCount = @($aiCliToolInstall.assertions).Count
+        version = $aiCliToolInstall.version
+    }
     $script:results.agentPackageConsumer = [ordered]@{
         succeeded = $agentPackageConsumer.succeeded
         assertionCount = @($agentPackageConsumer.assertions).Count
@@ -240,6 +246,7 @@ try {
         'release-contract-smoke',
         'release-finalize-smoke',
         'release-package-publish-smoke',
+        'ai-cli-tool-install-smoke',
         'agent-package-consumer-smoke',
         'agent-proxy-server-e2e-smoke',
         'release-provenance-smoke',
@@ -352,6 +359,9 @@ try {
     Assert-Equal -Name 'release package publish apply exit code' -Actual $packagePublish.results.apply.exitCode -Expected 0
     Assert-Equal -Name 'release package publish default package count' -Actual $packagePublish.results.apply.packageCount -Expected 3
     Assert-Equal -Name 'release package publish dirty apply blocked' -Actual ($packagePublish.results.dirtyApply.exitCode -ne 0) -Expected $true
+
+    Assert-Equal -Name 'ai cli tool install smoke succeeded' -Actual $aiCliToolInstall.succeeded -Expected $true
+    Assert-Matches -Name 'ai cli tool install version' -Actual $aiCliToolInstall.version -Pattern '^\d+\.\d+\.\d+$'
 
     Assert-Equal -Name 'agent package consumer smoke succeeded' -Actual $agentPackageConsumer.succeeded -Expected $true
     Assert-Equal -Name 'ai package consumer restore exit code' -Actual $agentPackageConsumer.results.aiConsumer.restoreExitCode -Expected 0
