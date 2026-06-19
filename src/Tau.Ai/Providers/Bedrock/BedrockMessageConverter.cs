@@ -4,6 +4,8 @@ namespace Tau.Ai.Providers.Bedrock;
 
 internal static class BedrockMessageConverter
 {
+    private const string InterleavedThinkingBeta = "interleaved-thinking-2025-05-14";
+
     public static Dictionary<string, object> BuildRequestBody(Model model, LlmContext context, BedrockOptions options)
     {
         var body = new Dictionary<string, object>
@@ -348,7 +350,13 @@ internal static class BedrockMessageConverter
             thinking["display"] = options.ThinkingDisplay!;
         }
 
-        return new Dictionary<string, object> { ["thinking"] = thinking };
+        var result = new Dictionary<string, object> { ["thinking"] = thinking };
+        if (options.InterleavedThinking == true && !SupportsAdaptiveThinking(model))
+        {
+            result["anthropic_beta"] = new List<object> { InterleavedThinkingBeta };
+        }
+
+        return result;
     }
 
     private static int MapThinkingBudget(ThinkingLevel level, ThinkingBudgets? budgets) =>
@@ -420,6 +428,17 @@ internal static class BedrockMessageConverter
     }
 
     private static bool SupportsThinkingSignature(Model model) => IsClaudeModel(model);
+
+    private static bool SupportsAdaptiveThinking(Model model)
+    {
+        var id = model.Id.ToLowerInvariant();
+        return id.Contains("opus-4-6", StringComparison.Ordinal) ||
+               id.Contains("opus-4.6", StringComparison.Ordinal) ||
+               id.Contains("opus-4-7", StringComparison.Ordinal) ||
+               id.Contains("opus-4.7", StringComparison.Ordinal) ||
+               id.Contains("sonnet-4-6", StringComparison.Ordinal) ||
+               id.Contains("sonnet-4.6", StringComparison.Ordinal);
+    }
 
     private static bool IsClaudeModel(Model model)
     {

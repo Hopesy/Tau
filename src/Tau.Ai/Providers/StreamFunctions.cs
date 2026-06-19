@@ -1,6 +1,7 @@
 using Tau.Ai.Streaming;
 using Tau.Ai.Auth;
 using Tau.Ai.Providers.Anthropic;
+using Tau.Ai.Providers.Bedrock;
 using Tau.Ai.Providers.Google;
 using Tau.Ai.Providers.Mistral;
 using Tau.Ai.Providers.OpenAiResponses;
@@ -163,6 +164,7 @@ public static class StreamFunctions
             "google-generative-language" => CreateGoogleOptions(model, resolvedOptions, explicitOptions, configured),
             "google-vertex" => CreateGoogleVertexOptions(model, resolvedOptions, explicitOptions, configured),
             "google-gemini-cli" => CreateGoogleGeminiCliOptions(model, resolvedOptions, explicitOptions, configured),
+            "bedrock-converse-stream" => CreateBedrockOptions(model, resolvedOptions, explicitOptions, configured),
             _ => resolvedOptions
         };
 
@@ -344,6 +346,7 @@ public static class StreamFunctions
             "google-generative-language" => ApplyGoogleOptions(model, options, configured),
             "google-vertex" => ApplyGoogleVertexOptions(model, options, configured),
             "google-gemini-cli" => ApplyGoogleGeminiCliOptions(model, options, configured),
+            "bedrock-converse-stream" => ApplyBedrockOptions(model, options, configured),
             _ => options
         };
     }
@@ -738,6 +741,100 @@ public static class StreamFunctions
         };
     }
 
+    private static BedrockOptions CreateBedrockOptions(
+        Model model,
+        SimpleStreamOptions resolvedOptions,
+        SimpleStreamOptions explicitOptions,
+        ModelProviderSpecificOptionsConfiguration configured)
+    {
+        var (toolChoice, toolName) = ToBedrockToolChoice(configured.ToolChoice);
+        return new BedrockOptions
+        {
+            Temperature = resolvedOptions.Temperature,
+            MaxTokens = resolvedOptions.MaxTokens ?? model.MaxOutputTokens,
+            TopP = resolvedOptions.TopP,
+            ApiKey = resolvedOptions.ApiKey,
+            Signal = resolvedOptions.Signal,
+            OnResponse = resolvedOptions.OnResponse,
+            OnPayload = resolvedOptions.OnPayload,
+            Transport = resolvedOptions.Transport,
+            CacheRetention = resolvedOptions.CacheRetention,
+            SessionId = resolvedOptions.SessionId,
+            Headers = resolvedOptions.Headers,
+            MaxRetryDelay = resolvedOptions.MaxRetryDelay,
+            Metadata = resolvedOptions.Metadata,
+            Region = configured.Region,
+            Profile = configured.Profile,
+            BearerToken = configured.BearerToken,
+            ToolChoice = toolChoice,
+            ToolName = toolName,
+            Reasoning = model.Reasoning ? resolvedOptions.Reasoning : null,
+            ThinkingBudgetTokens = explicitOptions.Reasoning is null ? configured.ThinkingBudgetTokens : null,
+            ThinkingBudgets = resolvedOptions.ThinkingBudgets,
+            ThinkingDisplay = configured.ThinkingDisplay,
+            InterleavedThinking = configured.InterleavedThinking,
+            RequestMetadata = configured.RequestMetadata
+        };
+    }
+
+    private static BedrockOptions ApplyBedrockOptions(
+        Model model,
+        StreamOptions options,
+        ModelProviderSpecificOptionsConfiguration configured)
+    {
+        var typed = options as BedrockOptions;
+        var (toolChoice, toolName) = ToBedrockToolChoice(configured.ToolChoice);
+        return new BedrockOptions
+        {
+            Temperature = options.Temperature,
+            MaxTokens = options.MaxTokens,
+            TopP = options.TopP,
+            ApiKey = options.ApiKey,
+            Signal = options.Signal,
+            OnResponse = options.OnResponse,
+            OnPayload = options.OnPayload,
+            Transport = options.Transport,
+            CacheRetention = options.CacheRetention,
+            SessionId = options.SessionId,
+            Headers = options.Headers,
+            MaxRetryDelay = options.MaxRetryDelay,
+            Metadata = options.Metadata,
+            Region = typed?.Region ?? configured.Region,
+            BearerToken = typed?.BearerToken ?? configured.BearerToken,
+            AccessKeyId = typed?.AccessKeyId,
+            SecretAccessKey = typed?.SecretAccessKey,
+            SessionToken = typed?.SessionToken,
+            Profile = typed?.Profile ?? configured.Profile,
+            CredentialsFile = typed?.CredentialsFile,
+            ConfigFile = typed?.ConfigFile,
+            CredentialProcess = typed?.CredentialProcess,
+            WebIdentityTokenFile = typed?.WebIdentityTokenFile,
+            WebIdentityRoleArn = typed?.WebIdentityRoleArn,
+            WebIdentityRoleSessionName = typed?.WebIdentityRoleSessionName,
+            StsEndpoint = typed?.StsEndpoint,
+            SsoTokenCacheFile = typed?.SsoTokenCacheFile,
+            SsoTokenCacheDirectory = typed?.SsoTokenCacheDirectory,
+            SsoPortalEndpoint = typed?.SsoPortalEndpoint,
+            SsoOidcEndpoint = typed?.SsoOidcEndpoint,
+            ContainerCredentialsRelativeUri = typed?.ContainerCredentialsRelativeUri,
+            ContainerCredentialsFullUri = typed?.ContainerCredentialsFullUri,
+            ContainerAuthorizationToken = typed?.ContainerAuthorizationToken,
+            ContainerAuthorizationTokenFile = typed?.ContainerAuthorizationTokenFile,
+            Ec2MetadataDisabled = typed?.Ec2MetadataDisabled,
+            Ec2MetadataV1Disabled = typed?.Ec2MetadataV1Disabled,
+            Ec2MetadataServiceEndpoint = typed?.Ec2MetadataServiceEndpoint,
+            Ec2MetadataServiceTimeout = typed?.Ec2MetadataServiceTimeout,
+            ToolChoice = typed?.ToolChoice ?? toolChoice,
+            ToolName = typed?.ToolName ?? toolName,
+            Reasoning = typed?.Reasoning ?? (model.Reasoning ? options is SimpleStreamOptions simple ? simple.Reasoning : null : null),
+            ThinkingBudgetTokens = typed?.ThinkingBudgetTokens ?? configured.ThinkingBudgetTokens,
+            ThinkingBudgets = typed?.ThinkingBudgets ?? (options as SimpleStreamOptions)?.ThinkingBudgets,
+            ThinkingDisplay = typed?.ThinkingDisplay ?? configured.ThinkingDisplay,
+            InterleavedThinking = typed?.InterleavedThinking ?? configured.InterleavedThinking,
+            RequestMetadata = typed?.RequestMetadata ?? configured.RequestMetadata
+        };
+    }
+
     private static GoogleThinkingOptions? CreateGoogleThinking(
         Model model,
         SimpleStreamOptions? resolvedOptions,
@@ -884,6 +981,21 @@ public static class StreamFunctions
         return configured.IsTool
             ? AnthropicToolChoice.Tool(configured.ToolName!)
             : AnthropicToolChoice.FromString(configured.Kind);
+    }
+
+    private static (string? ToolChoice, string? ToolName) ToBedrockToolChoice(ModelToolChoiceConfiguration? configured)
+    {
+        if (configured is null)
+        {
+            return (null, null);
+        }
+
+        if (configured.IsTool)
+        {
+            return ("tool", configured.ToolName);
+        }
+
+        return configured.IsFunction ? (null, null) : (configured.Kind, null);
     }
 
     private static bool UsesAnthropicAdaptiveThinking(Model model) =>

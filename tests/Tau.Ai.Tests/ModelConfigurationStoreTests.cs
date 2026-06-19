@@ -3,6 +3,7 @@ using Tau.Ai.Auth;
 using Tau.Ai.Auth.OAuth;
 using Tau.Ai.Providers;
 using Tau.Ai.Providers.Anthropic;
+using Tau.Ai.Providers.Bedrock;
 using Tau.Ai.Providers.Google;
 using Tau.Ai.Providers.Mistral;
 using Tau.Ai.Providers.OpenAiResponses;
@@ -1390,6 +1391,190 @@ public sealed class ModelConfigurationStoreTests
         }
     }
 
+    [Fact]
+    public async Task StreamFunctions_AppliesBedrockProviderSpecificOptionsFromModelsJson()
+    {
+        using var scope = EnvironmentVariableScope.Acquire();
+        var tempDir = Path.Combine(Path.GetTempPath(), $"tau-models-bedrock-options-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+
+        try
+        {
+            var modelsPath = Path.Combine(tempDir, "models.json");
+            var authPath = Path.Combine(tempDir, "auth.json");
+            File.WriteAllText(authPath, "{}");
+            File.WriteAllText(modelsPath, """
+                {
+                  "providers": {
+                    "amazon-bedrock": {
+                      "apiKey": "bedrock-api-key",
+                      "options": {
+                        "maxTokens": 888,
+                        "region": "us-west-2",
+                        "profile": "foundation-profile",
+                        "bearerToken": "configured-bedrock-token",
+                        "toolChoice": {
+                          "type": "tool",
+                          "name": "read_file"
+                        },
+                        "reasoning": "high",
+                        "thinkingBudgetTokens": 3456,
+                        "thinkingDisplay": "omitted",
+                        "interleavedThinking": true,
+                        "requestMetadata": {
+                          "app": "tau",
+                          "costCenter": "foundation"
+                        }
+                      },
+                      "models": [
+                        { "id": "anthropic.claude-3-7-sonnet-20250219-v1:0" }
+                      ]
+                    }
+                  }
+                }
+                """);
+            scope.Set("TAU_MODELS_FILE", modelsPath);
+            scope.Set("TAU_AUTH_FILE", authPath);
+
+            var provider = new BedrockOptionsCapturingProvider();
+            var registry = new ProviderRegistry();
+            registry.Register("bedrock-converse-stream", () => provider, sourceId: "test");
+            var configurationStore = new ModelConfigurationStore([modelsPath]);
+            var authResolver = new ProviderAuthResolver(
+                credentialStore: new OAuthCredentialStore([authPath]),
+                configurationStore: configurationStore);
+
+            await OpenAiResponsesProviderTests.CollectAsync(StreamFunctions.StreamSimple(
+                registry,
+                new Model
+                {
+                    Id = "anthropic.claude-3-7-sonnet-20250219-v1:0",
+                    Name = "Bedrock Claude",
+                    Api = "bedrock-converse-stream",
+                    Provider = "amazon-bedrock",
+                    Reasoning = true,
+                    MaxOutputTokens = 4096
+                },
+                new LlmContext { Messages = [new UserMessage("hi")] },
+                new SimpleStreamOptions(),
+                configurationStore,
+                authResolver));
+
+            var options = provider.CapturedOptions!;
+            Assert.Equal("bedrock-api-key", options.ApiKey);
+            Assert.Equal(888, options.MaxTokens);
+            Assert.Equal("us-west-2", options.Region);
+            Assert.Equal("foundation-profile", options.Profile);
+            Assert.Equal("configured-bedrock-token", options.BearerToken);
+            Assert.Equal("tool", options.ToolChoice);
+            Assert.Equal("read_file", options.ToolName);
+            Assert.Equal(ThinkingLevel.High, options.Reasoning);
+            Assert.Equal(3456, options.ThinkingBudgetTokens);
+            Assert.Equal("omitted", options.ThinkingDisplay);
+            Assert.True(options.InterleavedThinking);
+            Assert.Equal("tau", options.RequestMetadata?["app"]);
+            Assert.Equal("foundation", options.RequestMetadata?["costCenter"]);
+        }
+        finally
+        {
+            DeleteDirectoryWithRetry(tempDir);
+        }
+    }
+
+    [Fact]
+    public async Task StreamFunctions_PreservesExplicitBedrockOptionsOverModelsJsonProviderSpecificOptions()
+    {
+        using var scope = EnvironmentVariableScope.Acquire();
+        var tempDir = Path.Combine(Path.GetTempPath(), $"tau-models-bedrock-options-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+
+        try
+        {
+            var modelsPath = Path.Combine(tempDir, "models.json");
+            var authPath = Path.Combine(tempDir, "auth.json");
+            File.WriteAllText(authPath, "{}");
+            File.WriteAllText(modelsPath, """
+                {
+                  "providers": {
+                    "amazon-bedrock": {
+                      "apiKey": "bedrock-api-key",
+                      "options": {
+                        "region": "us-west-2",
+                        "profile": "configured-profile",
+                        "bearerToken": "configured-token",
+                        "toolChoice": "auto",
+                        "reasoning": "high",
+                        "thinkingBudgetTokens": 3456,
+                        "thinkingDisplay": "omitted",
+                        "interleavedThinking": true,
+                        "requestMetadata": {
+                          "app": "configured"
+                        }
+                      },
+                      "models": [
+                        { "id": "anthropic.claude-3-7-sonnet-20250219-v1:0" }
+                      ]
+                    }
+                  }
+                }
+                """);
+            scope.Set("TAU_MODELS_FILE", modelsPath);
+            scope.Set("TAU_AUTH_FILE", authPath);
+
+            var provider = new BedrockOptionsCapturingProvider();
+            var registry = new ProviderRegistry();
+            registry.Register("bedrock-converse-stream", () => provider, sourceId: "test");
+            var configurationStore = new ModelConfigurationStore([modelsPath]);
+            var authResolver = new ProviderAuthResolver(
+                credentialStore: new OAuthCredentialStore([authPath]),
+                configurationStore: configurationStore);
+
+            await OpenAiResponsesProviderTests.CollectAsync(StreamFunctions.Stream(
+                registry,
+                new Model
+                {
+                    Id = "anthropic.claude-3-7-sonnet-20250219-v1:0",
+                    Name = "Bedrock Claude",
+                    Api = "bedrock-converse-stream",
+                    Provider = "amazon-bedrock",
+                    Reasoning = true
+                },
+                new LlmContext { Messages = [new UserMessage("hi")] },
+                new BedrockOptions
+                {
+                    Region = "eu-central-1",
+                    Profile = "explicit-profile",
+                    BearerToken = "explicit-token",
+                    ToolChoice = "tool",
+                    ToolName = "explicit_tool",
+                    Reasoning = ThinkingLevel.Low,
+                    ThinkingBudgetTokens = 9999,
+                    ThinkingDisplay = "summarized",
+                    InterleavedThinking = false,
+                    RequestMetadata = new Dictionary<string, string> { ["app"] = "explicit" }
+                },
+                configurationStore,
+                authResolver));
+
+            var options = provider.CapturedOptions!;
+            Assert.Equal("bedrock-api-key", options.ApiKey);
+            Assert.Equal("eu-central-1", options.Region);
+            Assert.Equal("explicit-profile", options.Profile);
+            Assert.Equal("explicit-token", options.BearerToken);
+            Assert.Equal("tool", options.ToolChoice);
+            Assert.Equal("explicit_tool", options.ToolName);
+            Assert.Equal(ThinkingLevel.Low, options.Reasoning);
+            Assert.Equal(9999, options.ThinkingBudgetTokens);
+            Assert.Equal("summarized", options.ThinkingDisplay);
+            Assert.False(options.InterleavedThinking);
+            Assert.Equal("explicit", options.RequestMetadata?["app"]);
+        }
+        finally
+        {
+            DeleteDirectoryWithRetry(tempDir);
+        }
+    }
+
     [Theory]
     [InlineData("openai-chat-completions", "openai-completions")]
     [InlineData("google-generative-language", "google-generative-ai")]
@@ -1574,6 +1759,21 @@ public sealed class ModelConfigurationStoreTests
 
         public AssistantMessageStream StreamSimple(Model model, LlmContext context, SimpleStreamOptions options) =>
             throw new InvalidOperationException("Provider-specific models.json options must dispatch through Stream with typed Google Gemini CLI options.");
+    }
+
+    private sealed class BedrockOptionsCapturingProvider : IStreamProvider
+    {
+        public string Api => "bedrock-converse-stream";
+        public BedrockOptions? CapturedOptions { get; private set; }
+
+        public AssistantMessageStream Stream(Model model, LlmContext context, StreamOptions options)
+        {
+            CapturedOptions = Assert.IsType<BedrockOptions>(options);
+            return Complete(model);
+        }
+
+        public AssistantMessageStream StreamSimple(Model model, LlmContext context, SimpleStreamOptions options) =>
+            throw new InvalidOperationException("Provider-specific models.json options must dispatch through Stream with typed Bedrock options.");
     }
 
     private static AssistantMessageStream Complete(Model model)

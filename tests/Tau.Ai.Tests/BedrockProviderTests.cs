@@ -906,6 +906,57 @@ public sealed class BedrockProviderTests
         Assert.Equal(22_222, thinking.GetProperty("budget_tokens").GetInt32());
     }
 
+    [Fact]
+    public async Task Stream_WritesToolChoiceThinkingDisplayInterleavedThinkingAndRequestMetadata()
+    {
+        using var handler = new OpenAiResponsesProviderTests.StubHandler(_ => new HttpResponseMessage(HttpStatusCode.BadRequest)
+        {
+            Content = new StringContent("stop after payload", Encoding.UTF8, "text/plain")
+        });
+        using var client = new HttpClient(handler);
+        var provider = new BedrockProvider(client);
+        using var schema = JsonDocument.Parse("""{"type":"object","properties":{"path":{"type":"string"}}}""");
+
+        await OpenAiResponsesProviderTests.CollectAsync(provider.Stream(
+            BuildModel(reasoning: true),
+            new LlmContext
+            {
+                Messages = [new UserMessage("think with tool")],
+                Tools = [new Tool("read_file", "Read file", schema.RootElement.Clone())]
+            },
+            new BedrockOptions
+            {
+                BearerToken = "bedrock-token",
+                ToolChoice = "tool",
+                ToolName = "read_file",
+                Reasoning = ThinkingLevel.High,
+                ThinkingBudgetTokens = 3333,
+                ThinkingDisplay = "omitted",
+                InterleavedThinking = true,
+                RequestMetadata = new Dictionary<string, string>
+                {
+                    ["app"] = "tau",
+                    ["costCenter"] = "foundation"
+                }
+            }));
+
+        using var doc = JsonDocument.Parse(handler.CapturedBody);
+        var root = doc.RootElement;
+        Assert.Equal(
+            "read_file",
+            root.GetProperty("toolConfig").GetProperty("toolChoice").GetProperty("tool").GetProperty("name").GetString());
+        Assert.Equal("tau", root.GetProperty("requestMetadata").GetProperty("app").GetString());
+        Assert.Equal("foundation", root.GetProperty("requestMetadata").GetProperty("costCenter").GetString());
+        var additional = root.GetProperty("additionalModelRequestFields");
+        var thinking = additional.GetProperty("thinking");
+        Assert.Equal("enabled", thinking.GetProperty("type").GetString());
+        Assert.Equal(3333, thinking.GetProperty("budget_tokens").GetInt32());
+        Assert.Equal("omitted", thinking.GetProperty("display").GetString());
+        Assert.Equal(
+            "interleaved-thinking-2025-05-14",
+            additional.GetProperty("anthropic_beta")[0].GetString());
+    }
+
     private static Model BuildModel(bool reasoning = false, string? baseUrl = "https://bedrock-runtime.us-east-1.amazonaws.com") => new()
     {
         Id = "anthropic.claude-3-7-sonnet-20250219-v1:0",

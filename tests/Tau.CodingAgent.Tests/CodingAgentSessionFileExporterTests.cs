@@ -3,6 +3,7 @@ using Tau.CodingAgent.Runtime;
 
 namespace Tau.CodingAgent.Tests;
 
+[Collection(nameof(CodingAgentSessionTargetEnvironmentCollection))]
 public sealed class CodingAgentSessionFileExporterTests
 {
     [Fact]

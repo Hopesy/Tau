@@ -560,6 +560,10 @@ public sealed class ModelConfigurationStore
             ThinkingDisplay: GetString(options, "thinkingDisplay"),
             ThinkingLevel: GetString(options, "thinkingLevel"),
             InterleavedThinking: GetBool(options, "interleavedThinking"),
+            Region: GetString(options, "region"),
+            Profile: GetString(options, "profile"),
+            BearerToken: GetString(options, "bearerToken"),
+            RequestMetadata: ParseStringDictionary(options, "requestMetadata"),
             AzureApiVersion: GetString(options, "azureApiVersion"),
             AzureResourceName: GetString(options, "azureResourceName"),
             AzureBaseUrl: GetString(options, "azureBaseUrl"),
@@ -598,6 +602,10 @@ public sealed class ModelConfigurationStore
             ThinkingDisplay: overrideOptions.ThinkingDisplay ?? baseOptions.ThinkingDisplay,
             ThinkingLevel: overrideOptions.ThinkingLevel ?? baseOptions.ThinkingLevel,
             InterleavedThinking: overrideOptions.InterleavedThinking ?? baseOptions.InterleavedThinking,
+            Region: overrideOptions.Region ?? baseOptions.Region,
+            Profile: overrideOptions.Profile ?? baseOptions.Profile,
+            BearerToken: overrideOptions.BearerToken ?? baseOptions.BearerToken,
+            RequestMetadata: MergeHeaders(baseOptions.RequestMetadata, overrideOptions.RequestMetadata),
             AzureApiVersion: overrideOptions.AzureApiVersion ?? baseOptions.AzureApiVersion,
             AzureResourceName: overrideOptions.AzureResourceName ?? baseOptions.AzureResourceName,
             AzureBaseUrl: overrideOptions.AzureBaseUrl ?? baseOptions.AzureBaseUrl,
@@ -1189,6 +1197,10 @@ internal sealed record ModelProviderSpecificOptionsConfiguration(
     string? ThinkingDisplay,
     string? ThinkingLevel,
     bool? InterleavedThinking,
+    string? Region,
+    string? Profile,
+    string? BearerToken,
+    IDictionary<string, string>? RequestMetadata,
     string? AzureApiVersion,
     string? AzureResourceName,
     string? AzureBaseUrl,
@@ -1210,6 +1222,10 @@ internal sealed record ModelProviderSpecificOptionsConfiguration(
         string.IsNullOrWhiteSpace(ThinkingDisplay) &&
         string.IsNullOrWhiteSpace(ThinkingLevel) &&
         InterleavedThinking is null &&
+        string.IsNullOrWhiteSpace(Region) &&
+        string.IsNullOrWhiteSpace(Profile) &&
+        string.IsNullOrWhiteSpace(BearerToken) &&
+        (RequestMetadata is null || RequestMetadata.Count == 0) &&
         string.IsNullOrWhiteSpace(AzureApiVersion) &&
         string.IsNullOrWhiteSpace(AzureResourceName) &&
         string.IsNullOrWhiteSpace(AzureBaseUrl) &&

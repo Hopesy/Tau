@@ -413,6 +413,7 @@ public record BedrockOptions : StreamOptions
     public int? ThinkingBudgetTokens { get; init; }
     public ThinkingBudgets? ThinkingBudgets { get; init; }
     public string? ThinkingDisplay { get; init; }
+    public bool? InterleavedThinking { get; init; }
     public IDictionary<string, string>? RequestMetadata { get; init; }
 }
 

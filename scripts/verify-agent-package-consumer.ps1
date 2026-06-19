@@ -239,6 +239,7 @@ using Tau.Ai.Auth;
 using Tau.Ai.Auth.OAuth;
 using Tau.Ai.Providers;
 using Tau.Ai.Providers.Anthropic;
+using Tau.Ai.Providers.Bedrock;
 using Tau.Ai.Providers.Faux;
 using Tau.Ai.Providers.Google;
 using Tau.Ai.Providers.Mistral;
@@ -410,6 +411,33 @@ await File.WriteAllTextAsync(modelsPath, """
           "name": "Consumer Google Model"
         }
       ]
+    },
+    "consumer-bedrock-provider": {
+      "apiKey": "bedrock-config-key",
+      "options": {
+        "maxTokens": 876,
+        "region": "us-west-2",
+        "profile": "consumer-profile",
+        "bearerToken": "consumer-bedrock-token",
+        "toolChoice": {
+          "type": "tool",
+          "name": "read_file"
+        },
+        "reasoning": "high",
+        "thinkingBudgetTokens": 3456,
+        "thinkingDisplay": "omitted",
+        "interleavedThinking": true,
+        "requestMetadata": {
+          "app": "consumer",
+          "costCenter": "foundation"
+        }
+      },
+      "models": [
+        {
+          "id": "anthropic.claude-3-7-sonnet-20250219-v1:0",
+          "name": "Consumer Bedrock Model"
+        }
+      ]
     }
   }
 }
@@ -536,6 +564,25 @@ await StreamFunctions.CompleteSimpleAsync(
         configurationStore,
         authResolver)
     .WaitAsync(TimeSpan.FromSeconds(10));
+var bedrockProvider = new BedrockOptionsCapturingProvider();
+registry.Register("bedrock-converse-stream", () => bedrockProvider, sourceId: "consumer-bedrock-options");
+var bedrockModel = new Model
+{
+    Id = "anthropic.claude-3-7-sonnet-20250219-v1:0",
+    Name = "Consumer Bedrock Model",
+    Provider = "consumer-bedrock-provider",
+    Api = "bedrock-converse-stream",
+    Reasoning = true,
+    MaxOutputTokens = 876
+};
+await StreamFunctions.CompleteSimpleAsync(
+        registry,
+        bedrockModel,
+        new LlmContext(null, new ChatMessage[] { new UserMessage("run configured bedrock options package consumer") }, null),
+        new SimpleStreamOptions(),
+        configurationStore,
+        authResolver)
+    .WaitAsync(TimeSpan.FromSeconds(10));
 
 Console.WriteLine($"configuredStatus={configuredStatus.Source}:{configuredStatus.IsConfigured}");
 Console.WriteLine($"configuredProviderStatus={configuredProviderStatus.Source}:{configuredProviderStatus.IsConfigured}");
@@ -590,6 +637,18 @@ Console.WriteLine($"configuredGoogleOptionsToolChoice={capturedGoogleOptions.Too
 Console.WriteLine($"configuredGoogleOptionsThinkingEnabled={capturedGoogleOptions.Thinking?.Enabled}");
 Console.WriteLine($"configuredGoogleOptionsThinkingBudgetTokens={capturedGoogleOptions.Thinking?.BudgetTokens}");
 Console.WriteLine($"configuredGoogleOptionsMaxTokens={capturedGoogleOptions.MaxTokens}");
+var capturedBedrockOptions = bedrockProvider.CapturedOptions!;
+Console.WriteLine($"configuredBedrockOptionsType={capturedBedrockOptions.GetType().Name}");
+Console.WriteLine($"configuredBedrockOptionsRegion={capturedBedrockOptions.Region}");
+Console.WriteLine($"configuredBedrockOptionsProfile={capturedBedrockOptions.Profile}");
+Console.WriteLine($"configuredBedrockOptionsBearerToken={capturedBedrockOptions.BearerToken}");
+Console.WriteLine($"configuredBedrockOptionsToolChoice={capturedBedrockOptions.ToolChoice}:{capturedBedrockOptions.ToolName}");
+Console.WriteLine($"configuredBedrockOptionsReasoning={capturedBedrockOptions.Reasoning}");
+Console.WriteLine($"configuredBedrockOptionsThinkingBudgetTokens={capturedBedrockOptions.ThinkingBudgetTokens}");
+Console.WriteLine($"configuredBedrockOptionsThinkingDisplay={capturedBedrockOptions.ThinkingDisplay}");
+Console.WriteLine($"configuredBedrockOptionsInterleavedThinking={capturedBedrockOptions.InterleavedThinking}");
+Console.WriteLine($"configuredBedrockOptionsRequestMetadataApp={capturedBedrockOptions.RequestMetadata?["app"]}");
+Console.WriteLine($"configuredBedrockOptionsMaxTokens={capturedBedrockOptions.MaxTokens}");
 
 static string ReadText(IReadOnlyList<ContentBlock> content) =>
     string.Join("\n", content.OfType<TextContent>().Select(static block => block.Text));
@@ -783,6 +842,30 @@ file sealed class GoogleOptionsCapturingProvider : IStreamProvider
         CapturedOptions = (GoogleOptions)options;
         var stream = new AssistantMessageStream();
         stream.Push(new DoneEvent(new AssistantMessage([new TextContent("configured google options package consumer complete")])
+        {
+            Api = model.Api,
+            Provider = model.Provider,
+            Model = model.Id,
+            StopReason = StopReason.EndTurn
+        }));
+        return stream;
+    }
+
+    public AssistantMessageStream StreamSimple(Model model, LlmContext context, SimpleStreamOptions options) =>
+        throw new InvalidOperationException("Provider-specific models.json options must dispatch through Stream with typed options.");
+}
+
+file sealed class BedrockOptionsCapturingProvider : IStreamProvider
+{
+    public string Api => "bedrock-converse-stream";
+
+    public BedrockOptions? CapturedOptions { get; private set; }
+
+    public AssistantMessageStream Stream(Model model, LlmContext context, StreamOptions options)
+    {
+        CapturedOptions = (BedrockOptions)options;
+        var stream = new AssistantMessageStream();
+        stream.Push(new DoneEvent(new AssistantMessage([new TextContent("configured bedrock options package consumer complete")])
         {
             Api = model.Api,
             Provider = model.Provider,
@@ -1042,6 +1125,17 @@ try {
     Assert-Matches -Name 'ai consumer configured google options thinking enabled output' -Text $aiRunOutput -Pattern 'configuredGoogleOptionsThinkingEnabled=True'
     Assert-Matches -Name 'ai consumer configured google options thinking budget output' -Text $aiRunOutput -Pattern 'configuredGoogleOptionsThinkingBudgetTokens=8765'
     Assert-Matches -Name 'ai consumer configured google options max tokens output' -Text $aiRunOutput -Pattern 'configuredGoogleOptionsMaxTokens=765'
+    Assert-Matches -Name 'ai consumer configured bedrock options type output' -Text $aiRunOutput -Pattern 'configuredBedrockOptionsType=BedrockOptions'
+    Assert-Matches -Name 'ai consumer configured bedrock options region output' -Text $aiRunOutput -Pattern 'configuredBedrockOptionsRegion=us-west-2'
+    Assert-Matches -Name 'ai consumer configured bedrock options profile output' -Text $aiRunOutput -Pattern 'configuredBedrockOptionsProfile=consumer-profile'
+    Assert-Matches -Name 'ai consumer configured bedrock options bearer token output' -Text $aiRunOutput -Pattern 'configuredBedrockOptionsBearerToken=consumer-bedrock-token'
+    Assert-Matches -Name 'ai consumer configured bedrock options tool choice output' -Text $aiRunOutput -Pattern 'configuredBedrockOptionsToolChoice=tool:read_file'
+    Assert-Matches -Name 'ai consumer configured bedrock options reasoning output' -Text $aiRunOutput -Pattern 'configuredBedrockOptionsReasoning=High'
+    Assert-Matches -Name 'ai consumer configured bedrock options thinking budget output' -Text $aiRunOutput -Pattern 'configuredBedrockOptionsThinkingBudgetTokens=3456'
+    Assert-Matches -Name 'ai consumer configured bedrock options thinking display output' -Text $aiRunOutput -Pattern 'configuredBedrockOptionsThinkingDisplay=omitted'
+    Assert-Matches -Name 'ai consumer configured bedrock options interleaved thinking output' -Text $aiRunOutput -Pattern 'configuredBedrockOptionsInterleavedThinking=True'
+    Assert-Matches -Name 'ai consumer configured bedrock options request metadata output' -Text $aiRunOutput -Pattern 'configuredBedrockOptionsRequestMetadataApp=consumer'
+    Assert-Matches -Name 'ai consumer configured bedrock options max tokens output' -Text $aiRunOutput -Pattern 'configuredBedrockOptionsMaxTokens=876'
 
     Write-AgentConsumerProject -ConsumerDir $agentConsumerDir -PackagesDir $packagesDir -Version $version
     $consumerProject = Join-Path $agentConsumerDir 'Consumer.csproj'

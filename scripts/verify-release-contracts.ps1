@@ -438,6 +438,17 @@ try {
     Assert-Matches -Name 'ai package consumer configured anthropic options tool choice kind output' -Actual $agentPackageConsumer.results.aiConsumer.output -Pattern 'configuredAnthropicOptionsToolChoiceKind=tool'
     Assert-Matches -Name 'ai package consumer configured anthropic options tool choice name output' -Actual $agentPackageConsumer.results.aiConsumer.output -Pattern 'configuredAnthropicOptionsToolChoiceName=read_file'
     Assert-Matches -Name 'ai package consumer configured anthropic options max tokens output' -Actual $agentPackageConsumer.results.aiConsumer.output -Pattern 'configuredAnthropicOptionsMaxTokens=654'
+    Assert-Matches -Name 'ai package consumer configured bedrock options type output' -Actual $agentPackageConsumer.results.aiConsumer.output -Pattern 'configuredBedrockOptionsType=BedrockOptions'
+    Assert-Matches -Name 'ai package consumer configured bedrock options region output' -Actual $agentPackageConsumer.results.aiConsumer.output -Pattern 'configuredBedrockOptionsRegion=us-west-2'
+    Assert-Matches -Name 'ai package consumer configured bedrock options profile output' -Actual $agentPackageConsumer.results.aiConsumer.output -Pattern 'configuredBedrockOptionsProfile=consumer-profile'
+    Assert-Matches -Name 'ai package consumer configured bedrock options bearer token output' -Actual $agentPackageConsumer.results.aiConsumer.output -Pattern 'configuredBedrockOptionsBearerToken=consumer-bedrock-token'
+    Assert-Matches -Name 'ai package consumer configured bedrock options tool choice output' -Actual $agentPackageConsumer.results.aiConsumer.output -Pattern 'configuredBedrockOptionsToolChoice=tool:read_file'
+    Assert-Matches -Name 'ai package consumer configured bedrock options reasoning output' -Actual $agentPackageConsumer.results.aiConsumer.output -Pattern 'configuredBedrockOptionsReasoning=High'
+    Assert-Matches -Name 'ai package consumer configured bedrock options thinking budget output' -Actual $agentPackageConsumer.results.aiConsumer.output -Pattern 'configuredBedrockOptionsThinkingBudgetTokens=3456'
+    Assert-Matches -Name 'ai package consumer configured bedrock options thinking display output' -Actual $agentPackageConsumer.results.aiConsumer.output -Pattern 'configuredBedrockOptionsThinkingDisplay=omitted'
+    Assert-Matches -Name 'ai package consumer configured bedrock options interleaved thinking output' -Actual $agentPackageConsumer.results.aiConsumer.output -Pattern 'configuredBedrockOptionsInterleavedThinking=True'
+    Assert-Matches -Name 'ai package consumer configured bedrock options request metadata output' -Actual $agentPackageConsumer.results.aiConsumer.output -Pattern 'configuredBedrockOptionsRequestMetadataApp=consumer'
+    Assert-Matches -Name 'ai package consumer configured bedrock options max tokens output' -Actual $agentPackageConsumer.results.aiConsumer.output -Pattern 'configuredBedrockOptionsMaxTokens=876'
 
     Assert-Equal -Name 'agent proxy server e2e smoke succeeded' -Actual $agentProxyServerE2e.succeeded -Expected $true
     Assert-Equal -Name 'agent proxy server e2e exit code' -Actual $agentProxyServerE2e.exitCode -Expected 0
