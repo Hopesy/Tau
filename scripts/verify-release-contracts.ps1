@@ -124,6 +124,35 @@ function Invoke-JsonScript {
     }
 }
 
+function Invoke-JsonScriptAllowFailure {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name,
+        [Parameter(Mandatory = $true)]
+        [string]$ScriptPath,
+        [Parameter(Mandatory = $true)]
+        [string[]]$Arguments
+    )
+
+    $fullScriptPath = Join-Path $repoRoot $ScriptPath
+    $output = & powershell -NoProfile -ExecutionPolicy Bypass -File $fullScriptPath @Arguments 2>&1
+    $exitCode = $LASTEXITCODE
+    $outputText = ($output -join [Environment]::NewLine)
+
+    try {
+        $json = $outputText | ConvertFrom-Json
+    }
+    catch {
+        throw "$Name did not return valid JSON. Output: $outputText"
+    }
+
+    return [ordered]@{
+        exitCode = $exitCode
+        json = $json
+        raw = $outputText
+    }
+}
+
 function Get-Names {
     param(
         [AllowNull()]
@@ -155,6 +184,7 @@ try {
     $agentPackageConsumer = Invoke-JsonScript -Name 'agent-package-consumer-smoke' -ScriptPath 'scripts/verify-agent-package-consumer.ps1' -Arguments @('-SkipRestore', '-Json')
     $agentProxyServerE2e = Invoke-JsonScript -Name 'agent-proxy-server-e2e-smoke' -ScriptPath 'scripts/verify-agent-proxy-server-e2e.ps1' -Arguments @('-SkipRestore', '-Json')
     $aiProviderOauthMatrix = Invoke-JsonScript -Name 'ai-provider-oauth-matrix-smoke' -ScriptPath 'scripts/verify-ai-provider-e2e-matrix.ps1' -Arguments @('-Isolated', '-Json')
+    $aiProviderOauthMatrixRequired = Invoke-JsonScriptAllowFailure -Name 'ai-provider-oauth-matrix-required-guard' -ScriptPath 'scripts/verify-ai-provider-e2e-matrix.ps1' -Arguments @('-RunConfigured', '-RequireConfigured', '-Isolated', '-Json')
     $aiAgentExportShape = Invoke-JsonScript -Name 'ai-agent-export-shape-smoke' -ScriptPath 'scripts/verify-ai-agent-export-shape.ps1' -Arguments @('-Json')
     $provenance = Invoke-JsonScript -Name 'release-provenance-smoke' -ScriptPath 'scripts/verify-release-provenance.ps1' -Arguments @('-Json')
     $aiTestImage = Invoke-JsonScript -Name 'ai-test-image-smoke' -ScriptPath 'scripts/verify-ai-test-image.ps1' -Arguments @('-Json')
@@ -230,9 +260,25 @@ try {
         assertionCount = @($aiProviderOauthMatrix.assertions).Count
         mode = $aiProviderOauthMatrix.mode
         isolated = $aiProviderOauthMatrix.isolated
+        requireConfigured = $aiProviderOauthMatrix.requireConfigured
+        realE2eSatisfied = $aiProviderOauthMatrix.realE2eSatisfied
+        completionStatus = $aiProviderOauthMatrix.completionStatus
         providerCount = $aiProviderOauthMatrix.providerCount
         configuredProviderCount = $aiProviderOauthMatrix.results.summary.configuredProviderCount
         openProviderCount = $aiProviderOauthMatrix.results.summary.openProviderCount
+    }
+    $script:results.aiProviderOauthMatrixRequired = [ordered]@{
+        succeeded = $aiProviderOauthMatrixRequired.json.succeeded
+        assertionCount = @($aiProviderOauthMatrixRequired.json.assertions).Count
+        exitCode = $aiProviderOauthMatrixRequired.exitCode
+        mode = $aiProviderOauthMatrixRequired.json.mode
+        isolated = $aiProviderOauthMatrixRequired.json.isolated
+        runConfigured = $aiProviderOauthMatrixRequired.json.runConfigured
+        requireConfigured = $aiProviderOauthMatrixRequired.json.requireConfigured
+        configuredProviderCount = $aiProviderOauthMatrixRequired.json.results.summary.configuredProviderCount
+        attemptedProviderCount = $aiProviderOauthMatrixRequired.json.results.summary.attemptedProviderCount
+        completionStatus = $aiProviderOauthMatrixRequired.json.results.summary.completionStatus
+        gateFailure = $aiProviderOauthMatrixRequired.json.results.summary.gateFailure
     }
     $script:results.aiAgentExportShape = [ordered]@{
         succeeded = $aiAgentExportShape.succeeded
@@ -457,12 +503,24 @@ try {
     Assert-Equal -Name 'ai provider oauth matrix smoke succeeded' -Actual $aiProviderOauthMatrix.succeeded -Expected $true
     Assert-Equal -Name 'ai provider oauth matrix mode' -Actual $aiProviderOauthMatrix.mode -Expected 'inspect'
     Assert-Equal -Name 'ai provider oauth matrix isolated' -Actual $aiProviderOauthMatrix.isolated -Expected $true
+    Assert-Equal -Name 'ai provider oauth matrix require configured default' -Actual $aiProviderOauthMatrix.requireConfigured -Expected $false
+    Assert-Equal -Name 'ai provider oauth matrix real e2e default' -Actual $aiProviderOauthMatrix.realE2eSatisfied -Expected $false
+    Assert-Equal -Name 'ai provider oauth matrix completion default' -Actual $aiProviderOauthMatrix.completionStatus -Expected 'inspect-only'
     Assert-Equal -Name 'ai provider oauth matrix provider count' -Actual $aiProviderOauthMatrix.providerCount -Expected 11
     Assert-Equal -Name 'ai provider oauth matrix configured count' -Actual $aiProviderOauthMatrix.results.summary.configuredProviderCount -Expected 0
     Assert-Equal -Name 'ai provider oauth matrix attempted count' -Actual $aiProviderOauthMatrix.results.summary.attemptedProviderCount -Expected 0
     Assert-Equal -Name 'ai provider oauth matrix succeeded count' -Actual $aiProviderOauthMatrix.results.summary.succeededProviderCount -Expected 0
     Assert-Equal -Name 'ai provider oauth matrix raw succeeded flag' -Actual $aiProviderOauthMatrix.results.summary.succeeded -Expected $true
     Assert-Equal -Name 'ai provider oauth matrix open providers minimum' -Actual ($aiProviderOauthMatrix.results.summary.openProviderCount -ge 1) -Expected $true
+    Assert-Equal -Name 'ai provider oauth matrix required guard blocks empty credentials' -Actual ($aiProviderOauthMatrixRequired.exitCode -ne 0) -Expected $true
+    Assert-Equal -Name 'ai provider oauth matrix required guard succeeded flag' -Actual $aiProviderOauthMatrixRequired.json.succeeded -Expected $false
+    Assert-Equal -Name 'ai provider oauth matrix required guard mode' -Actual $aiProviderOauthMatrixRequired.json.mode -Expected 'run-configured'
+    Assert-Equal -Name 'ai provider oauth matrix required guard isolated' -Actual $aiProviderOauthMatrixRequired.json.isolated -Expected $true
+    Assert-Equal -Name 'ai provider oauth matrix required guard switch' -Actual $aiProviderOauthMatrixRequired.json.requireConfigured -Expected $true
+    Assert-Equal -Name 'ai provider oauth matrix required guard configured count' -Actual $aiProviderOauthMatrixRequired.json.results.summary.configuredProviderCount -Expected 0
+    Assert-Equal -Name 'ai provider oauth matrix required guard attempted count' -Actual $aiProviderOauthMatrixRequired.json.results.summary.attemptedProviderCount -Expected 0
+    Assert-Equal -Name 'ai provider oauth matrix required guard completion status' -Actual $aiProviderOauthMatrixRequired.json.results.summary.completionStatus -Expected 'no-configured-providers'
+    Assert-Matches -Name 'ai provider oauth matrix required guard failure text' -Actual $aiProviderOauthMatrixRequired.json.results.summary.gateFailure -Pattern 'No configured providers'
 
     Assert-Equal -Name 'ai agent export shape smoke succeeded' -Actual $aiAgentExportShape.succeeded -Expected $true
     Assert-Equal -Name 'ai agent export shape AI package export count' -Actual $aiAgentExportShape.results.aiPackageExportCount -Expected 12

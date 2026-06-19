@@ -1,5 +1,6 @@
 param(
     [switch]$RunConfigured,
+    [switch]$RequireConfigured,
     [switch]$Isolated,
     [string[]]$Provider,
     [int]$TimeoutSeconds = 45,
@@ -271,6 +272,7 @@ var providerCsv = args.Length > 1 ? args[1] : string.Empty;
 var timeoutSeconds = args.Length > 2 && int.TryParse(args[2], out var parsedTimeout) ? parsedTimeout : 45;
 var maxTokens = args.Length > 3 && int.TryParse(args[3], out var parsedTokens) ? parsedTokens : 16;
 var isolated = args.Length > 4 && (args[4] is "1" or "true" or "True");
+var requireConfigured = args.Length > 5 && (args[5] is "1" or "true" or "True");
 
 var requestedProviders = ParseProviders(providerCsv);
 if (requestedProviders.Count == 0)
@@ -298,10 +300,37 @@ var attemptedProviderCount = rows.Count(row => row.RunAttempted);
 var succeededProviderCount = rows.Count(row => row.RunSucceeded);
 var openProviderCount = rows.Count(row => row.CanLogin && !row.Configured);
 var hasFailure = rows.Any(row => row.RunStatus is "model-unavailable" or "failed");
+var realE2eSatisfied = runConfigured &&
+                       !isolated &&
+                       attemptedProviderCount > 0 &&
+                       attemptedProviderCount == succeededProviderCount &&
+                       !hasFailure;
+var completionStatus = runConfigured
+    ? attemptedProviderCount == 0
+        ? "no-configured-providers"
+        : hasFailure
+            ? "configured-provider-failed"
+            : realE2eSatisfied
+                ? "real-e2e-verified"
+                : "configured-provider-smoke"
+    : "inspect-only";
+string? gateFailure = null;
+if (runConfigured && requireConfigured && configuredProviderCount == 0)
+{
+    gateFailure = "No configured providers were found. Configure at least one real provider credential before using -RunConfigured -RequireConfigured as final e2e evidence.";
+}
+else if (runConfigured && requireConfigured && attemptedProviderCount == 0)
+{
+    gateFailure = "No configured provider run was attempted. Resolve model selection or provider registration before using this as final e2e evidence.";
+}
+else if (runConfigured && requireConfigured && !realE2eSatisfied)
+{
+    gateFailure = "Configured provider runs did not produce a non-isolated all-success real e2e result.";
+}
 
 if (runConfigured)
 {
-    succeeded = !hasFailure;
+    succeeded = !hasFailure && gateFailure is null;
 }
 
 var result = new
@@ -310,6 +339,7 @@ var result = new
     mode,
     isolated,
     runConfigured,
+    requireConfigured,
     timeoutSeconds,
     maxTokens,
     providerCount = rows.Count,
@@ -317,12 +347,16 @@ var result = new
     attemptedProviderCount,
     succeededProviderCount,
     openProviderCount,
+    realE2eSatisfied,
+    completionStatus,
+    gateFailure,
     succeeded,
     providers = rows,
     remainingGaps = new[]
     {
         "This harness proves the inspect contract and can run configured providers, but isolated mode intentionally avoids real provider calls.",
         "Providers without configured credentials remain external-e2e-needed until a real RunConfigured invocation succeeds against live services.",
+        "Use -RunConfigured -RequireConfigured for final provider/OAuth e2e gating; it fails when no live provider credentials are configured or no real run succeeds.",
         "A successful isolated run does not close real provider/OAuth e2e, registry/global install, signing or provenance gaps."
     }
 };
@@ -520,6 +554,10 @@ $environment = @{}
 $environmentBackup = @{}
 
 try {
+    if ($RequireConfigured -and -not $RunConfigured) {
+        throw '-RequireConfigured requires -RunConfigured.'
+    }
+
     New-Item -ItemType Directory -Force -Path $harnessRoot | Out-Null
     $projectPath = New-MatrixHarness -Root $harnessRoot -RepoRoot $repoRoot
 
@@ -554,7 +592,8 @@ try {
         ($requestedProviders -join ','),
         $TimeoutSeconds.ToString(),
         $MaxTokens.ToString(),
-        ($(if ($Isolated) { '1' } else { '0' }))
+        ($(if ($Isolated) { '1' } else { '0' })),
+        ($(if ($RequireConfigured) { '1' } else { '0' }))
     ) -Environment $environment
 
     $raw = $runResult.json
@@ -565,6 +604,7 @@ try {
     Assert-Equal -Name 'matrix mode' -Actual $raw.mode -Expected $mode
     Assert-Equal -Name 'matrix isolated flag' -Actual $raw.isolated -Expected $Isolated.IsPresent
     Assert-Equal -Name 'matrix runConfigured flag' -Actual $raw.runConfigured -Expected $RunConfigured.IsPresent
+    Assert-Equal -Name 'matrix requireConfigured flag' -Actual $raw.requireConfigured -Expected $RequireConfigured.IsPresent
     Assert-Equal -Name 'matrix provider count' -Actual $raw.providerCount -Expected $requestedProviders.Count
     Assert-ContainsAll -Name 'matrix provider names' -Actual @($raw.providers | ForEach-Object { $_.provider }) -Expected @($requestedProviders)
 
@@ -591,9 +631,19 @@ try {
         succeeded = $raw.succeeded
         mode = $raw.mode
         isolated = $raw.isolated
+        requireConfigured = $raw.requireConfigured
+        realE2eSatisfied = $raw.realE2eSatisfied
+        completionStatus = $raw.completionStatus
+        gateFailure = $raw.gateFailure
     }
 
     $script:results.remainingGaps = @($raw.remainingGaps)
+
+    if ($RequireConfigured) {
+        Assert-True -Name 'matrix required configured providers present' -Condition ($raw.configuredProviderCount -gt 0) -Detail 'Expected at least one configured provider when -RequireConfigured is set.'
+        Assert-True -Name 'matrix required configured run attempted' -Condition ($raw.attemptedProviderCount -gt 0) -Detail 'Expected at least one attempted provider run when -RequireConfigured is set.'
+        Assert-Equal -Name 'matrix required configured real e2e satisfied' -Actual $raw.realE2eSatisfied -Expected $true
+    }
 
     $finalSucceeded = [bool]$raw.succeeded
     if ($RunConfigured -and -not $Isolated -and $raw.attemptedProviderCount -gt 0 -and -not $raw.succeeded) {
@@ -606,6 +656,9 @@ try {
         mode = $raw.mode
         isolated = $raw.isolated
         runConfigured = $raw.runConfigured
+        requireConfigured = $raw.requireConfigured
+        realE2eSatisfied = $raw.realE2eSatisfied
+        completionStatus = $raw.completionStatus
         timeoutSeconds = $TimeoutSeconds
         maxTokens = $MaxTokens
         providerCount = $raw.providerCount
@@ -622,10 +675,12 @@ try {
         Write-Host "  mode: $($raw.mode)"
         Write-Host "  isolated: $($raw.isolated)"
         Write-Host "  runConfigured: $($raw.runConfigured)"
+        Write-Host "  requireConfigured: $($raw.requireConfigured)"
         Write-Host "  providers: $($raw.providerCount)"
         Write-Host "  configured: $($raw.configuredProviderCount)"
         Write-Host "  attempted: $($raw.attemptedProviderCount)"
         Write-Host "  succeeded: $($raw.succeededProviderCount)"
+        Write-Host "  completion: $($raw.completionStatus)"
         Write-Host "  assertions: $($script:assertions.Count)"
     }
 }
@@ -636,6 +691,7 @@ catch {
         mode = if ($RunConfigured) { 'run-configured' } else { 'inspect' }
         isolated = $Isolated.IsPresent
         runConfigured = $RunConfigured.IsPresent
+        requireConfigured = $RequireConfigured.IsPresent
         timeoutSeconds = $TimeoutSeconds
         maxTokens = $MaxTokens
         results = $script:results
