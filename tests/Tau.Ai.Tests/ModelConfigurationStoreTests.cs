@@ -6,6 +6,7 @@ using Tau.Ai.Providers.Anthropic;
 using Tau.Ai.Providers.Bedrock;
 using Tau.Ai.Providers.Google;
 using Tau.Ai.Providers.Mistral;
+using Tau.Ai.Providers.OpenAi;
 using Tau.Ai.Providers.OpenAiResponses;
 using Tau.Ai.Registry;
 using Tau.Ai.Streaming;
@@ -518,6 +519,155 @@ public sealed class ModelConfigurationStoreTests
             Assert.Equal(cts.Token, options.Signal);
             Assert.Same(onPayload, options.OnPayload);
             Assert.Same(onResponse, options.OnResponse);
+        }
+        finally
+        {
+            DeleteDirectoryWithRetry(tempDir);
+        }
+    }
+
+    [Fact]
+    public async Task StreamFunctions_AppliesOpenAiProviderSpecificOptionsFromModelsJson()
+    {
+        using var scope = EnvironmentVariableScope.Acquire();
+        var tempDir = Path.Combine(Path.GetTempPath(), $"tau-models-openai-options-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+
+        try
+        {
+            var modelsPath = Path.Combine(tempDir, "models.json");
+            var authPath = Path.Combine(tempDir, "auth.json");
+            File.WriteAllText(authPath, "{}");
+            File.WriteAllText(modelsPath, """
+                {
+                  "providers": {
+                    "openai": {
+                      "apiKey": "openai-key",
+                      "models": [
+                        {
+                          "id": "gpt-5.4",
+                          "options": {
+                            "maxTokens": 512,
+                            "toolChoice": {
+                              "type": "function",
+                              "function": {
+                                "name": "read_file"
+                              }
+                            },
+                            "reasoningEffort": "low"
+                          }
+                        }
+                      ]
+                    }
+                  }
+                }
+                """);
+            scope.Set("TAU_MODELS_FILE", modelsPath);
+            scope.Set("TAU_AUTH_FILE", authPath);
+
+            var provider = new OpenAiOptionsCapturingProvider();
+            var registry = new ProviderRegistry();
+            registry.Register("openai-chat-completions", () => provider, sourceId: "test");
+            var configurationStore = new ModelConfigurationStore([modelsPath]);
+            var authResolver = new ProviderAuthResolver(
+                credentialStore: new OAuthCredentialStore([authPath]),
+                configurationStore: configurationStore);
+
+            await OpenAiResponsesProviderTests.CollectAsync(StreamFunctions.StreamSimple(
+                registry,
+                new Model
+                {
+                    Id = "gpt-5.4",
+                    Name = "GPT-5.4",
+                    Api = "openai-chat-completions",
+                    Provider = "openai",
+                    Reasoning = true,
+                    MaxOutputTokens = 1024
+                },
+                new LlmContext { Messages = [new UserMessage("hi")] },
+                new SimpleStreamOptions(),
+                configurationStore,
+                authResolver));
+
+            var options = provider.CapturedOptions!;
+            Assert.Equal("openai-key", options.ApiKey);
+            Assert.Equal(512, options.MaxTokens);
+            Assert.True(options.ToolChoice?.IsFunction);
+            Assert.Equal("function", options.ToolChoice?.Kind);
+            Assert.Equal("read_file", options.ToolChoice?.FunctionName);
+            Assert.Equal("low", options.ReasoningEffort);
+        }
+        finally
+        {
+            DeleteDirectoryWithRetry(tempDir);
+        }
+    }
+
+    [Fact]
+    public async Task StreamFunctions_PreservesExplicitOpenAiOptionsOverModelsJsonProviderSpecificOptions()
+    {
+        using var scope = EnvironmentVariableScope.Acquire();
+        var tempDir = Path.Combine(Path.GetTempPath(), $"tau-models-openai-options-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+
+        try
+        {
+            var modelsPath = Path.Combine(tempDir, "models.json");
+            var authPath = Path.Combine(tempDir, "auth.json");
+            File.WriteAllText(authPath, "{}");
+            File.WriteAllText(modelsPath, """
+                {
+                  "providers": {
+                    "openai": {
+                      "apiKey": "openai-key",
+                      "models": [
+                        {
+                          "id": "gpt-5.4",
+                          "options": {
+                            "toolChoice": "required",
+                            "reasoningEffort": "low"
+                          }
+                        }
+                      ]
+                    }
+                  }
+                }
+                """);
+            scope.Set("TAU_MODELS_FILE", modelsPath);
+            scope.Set("TAU_AUTH_FILE", authPath);
+
+            var provider = new OpenAiOptionsCapturingProvider();
+            var registry = new ProviderRegistry();
+            registry.Register("openai-chat-completions", () => provider, sourceId: "test");
+            var configurationStore = new ModelConfigurationStore([modelsPath]);
+            var authResolver = new ProviderAuthResolver(
+                credentialStore: new OAuthCredentialStore([authPath]),
+                configurationStore: configurationStore);
+
+            await OpenAiResponsesProviderTests.CollectAsync(StreamFunctions.Stream(
+                registry,
+                new Model
+                {
+                    Id = "gpt-5.4",
+                    Name = "GPT-5.4",
+                    Api = "openai-chat-completions",
+                    Provider = "openai",
+                    Reasoning = true
+                },
+                new LlmContext { Messages = [new UserMessage("hi")] },
+                new OpenAiOptions
+                {
+                    ToolChoice = OpenAiToolChoice.Function("explicit_tool"),
+                    ReasoningEffort = "high"
+                },
+                configurationStore,
+                authResolver));
+
+            var options = provider.CapturedOptions!;
+            Assert.Equal("openai-key", options.ApiKey);
+            Assert.True(options.ToolChoice?.IsFunction);
+            Assert.Equal("explicit_tool", options.ToolChoice?.FunctionName);
+            Assert.Equal("high", options.ReasoningEffort);
         }
         finally
         {
@@ -1669,6 +1819,21 @@ public sealed class ModelConfigurationStoreTests
 
         public AssistantMessageStream StreamSimple(Model model, LlmContext context, SimpleStreamOptions options) =>
             throw new InvalidOperationException("Provider-specific models.json options must dispatch through Stream with typed Codex options.");
+    }
+
+    private sealed class OpenAiOptionsCapturingProvider : IStreamProvider
+    {
+        public string Api => "openai-chat-completions";
+        public OpenAiOptions? CapturedOptions { get; private set; }
+
+        public AssistantMessageStream Stream(Model model, LlmContext context, StreamOptions options)
+        {
+            CapturedOptions = Assert.IsType<OpenAiOptions>(options);
+            return Complete(model);
+        }
+
+        public AssistantMessageStream StreamSimple(Model model, LlmContext context, SimpleStreamOptions options) =>
+            throw new InvalidOperationException("Provider-specific models.json options must dispatch through Stream with typed OpenAI options.");
     }
 
     private sealed class AzureOptionsCapturingProvider : IStreamProvider

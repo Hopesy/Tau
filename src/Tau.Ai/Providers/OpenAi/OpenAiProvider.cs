@@ -175,10 +175,30 @@ public sealed class OpenAiProvider : IStreamProvider
         if (options.TopP.HasValue)
             body["top_p"] = options.TopP.Value;
 
+        AddToolChoice(options, body);
         AddReasoning(model, options, compatibility, body);
         AddRouting(model, compatibility, body);
 
         return body;
+    }
+
+    private static void AddToolChoice(StreamOptions options, Dictionary<string, object> body)
+    {
+        if (options is not OpenAiOptions { ToolChoice: { } toolChoice })
+        {
+            return;
+        }
+
+        body["tool_choice"] = toolChoice.IsFunction
+            ? new Dictionary<string, object>
+            {
+                ["type"] = "function",
+                ["function"] = new Dictionary<string, object>
+                {
+                    ["name"] = toolChoice.FunctionName!
+                }
+            }
+            : toolChoice.Kind;
     }
 
     private static void AddReasoning(
@@ -187,12 +207,17 @@ public sealed class OpenAiProvider : IStreamProvider
         ResolvedOpenAiCompatibility compatibility,
         Dictionary<string, object> body)
     {
-        if (options is not SimpleStreamOptions { Reasoning: { } reasoning } || !model.Reasoning)
+        if (!model.Reasoning)
         {
             return;
         }
 
-        var effort = MapReasoningEffort(reasoning, model, compatibility.ReasoningEffortMap);
+        var effort = ResolveReasoningEffort(model, options, compatibility);
+        if (string.IsNullOrWhiteSpace(effort))
+        {
+            return;
+        }
+
         switch (compatibility.ThinkingFormat)
         {
             case "zai":
@@ -216,6 +241,22 @@ public sealed class OpenAiProvider : IStreamProvider
                 }
                 break;
         }
+    }
+
+    private static string? ResolveReasoningEffort(
+        Model model,
+        StreamOptions options,
+        ResolvedOpenAiCompatibility compatibility)
+    {
+        if (options is OpenAiOptions { ReasoningEffort: { } effort } &&
+            !string.IsNullOrWhiteSpace(effort))
+        {
+            return MapReasoningEffort(effort, model, compatibility.ReasoningEffortMap);
+        }
+
+        return options is SimpleStreamOptions { Reasoning: { } reasoning }
+            ? MapReasoningEffort(reasoning, model, compatibility.ReasoningEffortMap)
+            : null;
     }
 
     private static void AddRouting(
@@ -273,6 +314,20 @@ public sealed class OpenAiProvider : IStreamProvider
                 _ => "medium"
             };
 
+        return MapReasoningEffort(normalized, model, reasoningEffortMap);
+    }
+
+    private static string MapReasoningEffort(
+        string effort,
+        Model model,
+        IReadOnlyDictionary<string, string> reasoningEffortMap)
+    {
+        var normalized = effort.Trim().ToLowerInvariant();
+        if (normalized == "xhigh" && !ModelCatalog.SupportsXhigh(model))
+        {
+            normalized = "high";
+        }
+
         return reasoningEffortMap.TryGetValue(normalized, out var mapped) ? mapped : normalized;
     }
 
@@ -326,6 +381,48 @@ public sealed class OpenAiProvider : IStreamProvider
         public bool ZaiToolStream { get; init; }
         public bool SupportsStrictMode { get; init; }
     }
+}
+
+public record OpenAiOptions : StreamOptions
+{
+    public OpenAiToolChoice? ToolChoice { get; init; }
+    public string? ReasoningEffort { get; init; }
+}
+
+public sealed record OpenAiToolChoice
+{
+    private OpenAiToolChoice(string kind, string? functionName)
+    {
+        Kind = string.IsNullOrWhiteSpace(kind)
+            ? throw new ArgumentException("Tool choice kind cannot be empty.", nameof(kind))
+            : kind;
+        FunctionName = functionName;
+    }
+
+    public string Kind { get; }
+    public string? FunctionName { get; }
+    public bool IsFunction => FunctionName is not null;
+
+    public static OpenAiToolChoice FromString(string choice)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(choice);
+        return new OpenAiToolChoice(choice, functionName: null);
+    }
+
+    public static OpenAiToolChoice Function(string name)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+        return new OpenAiToolChoice("function", name);
+    }
+
+    public static implicit operator OpenAiToolChoice(string choice) =>
+        FromString(choice);
+
+    public static implicit operator string?(OpenAiToolChoice? choice) =>
+        choice?.ToString();
+
+    public override string ToString() =>
+        IsFunction ? $"function:{FunctionName}" : Kind;
 }
 
 [System.Text.Json.Serialization.JsonSourceGenerationOptions(

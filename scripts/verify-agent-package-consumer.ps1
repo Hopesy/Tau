@@ -243,6 +243,7 @@ using Tau.Ai.Providers.Bedrock;
 using Tau.Ai.Providers.Faux;
 using Tau.Ai.Providers.Google;
 using Tau.Ai.Providers.Mistral;
+using Tau.Ai.Providers.OpenAi;
 using Tau.Ai.Providers.OpenAiResponses;
 using Tau.Ai.Registry;
 using Tau.Ai.Streaming;
@@ -355,6 +356,23 @@ await File.WriteAllTextAsync(modelsPath, """
               "modelOnly": 7
             }
           }
+        }
+      ]
+    },
+    "consumer-openai-provider": {
+      "apiKey": "openai-config-key",
+      "options": {
+        "maxTokens": 222,
+        "toolChoice": {
+          "type": "function",
+          "function": { "name": "consumer_openai_tool" }
+        },
+        "reasoningEffort": "high"
+      },
+      "models": [
+        {
+          "id": "gpt-5.4",
+          "name": "Consumer OpenAI Model"
         }
       ]
     },
@@ -507,6 +525,25 @@ await StreamFunctions.CompleteSimpleAsync(
         configurationStore,
         authResolver)
     .WaitAsync(TimeSpan.FromSeconds(10));
+var openAiProvider = new OpenAiOptionsCapturingProvider();
+registry.Register("openai-chat-completions", () => openAiProvider, sourceId: "consumer-openai-options");
+var openAiModel = new Model
+{
+    Id = "gpt-5.4",
+    Name = "Consumer OpenAI Model",
+    Provider = "consumer-openai-provider",
+    Api = "openai-chat-completions",
+    Reasoning = true,
+    MaxOutputTokens = 222
+};
+await StreamFunctions.CompleteSimpleAsync(
+        registry,
+        openAiModel,
+        new LlmContext(null, new ChatMessage[] { new UserMessage("run configured openai options package consumer") }, null),
+        new SimpleStreamOptions(),
+        configurationStore,
+        authResolver)
+    .WaitAsync(TimeSpan.FromSeconds(10));
 var mistralProvider = new MistralOptionsCapturingProvider();
 registry.Register("mistral-conversations", () => mistralProvider, sourceId: "consumer-mistral-options");
 var mistralModel = new Model
@@ -612,6 +649,13 @@ Console.WriteLine($"configuredResponsesOptionsServiceTier={capturedResponsesOpti
 Console.WriteLine($"configuredResponsesOptionsReasoningEffort={capturedResponsesOptions.ReasoningEffort}");
 Console.WriteLine($"configuredResponsesOptionsReasoningSummary={capturedResponsesOptions.ReasoningSummary}");
 Console.WriteLine($"configuredResponsesOptionsMaxTokens={capturedResponsesOptions.MaxTokens}");
+var capturedOpenAiOptions = openAiProvider.CapturedOptions!;
+Console.WriteLine($"configuredOpenAiOptionsType={capturedOpenAiOptions.GetType().Name}");
+Console.WriteLine($"configuredOpenAiOptionsToolChoice={capturedOpenAiOptions.ToolChoice}");
+Console.WriteLine($"configuredOpenAiOptionsToolChoiceKind={capturedOpenAiOptions.ToolChoice?.Kind}");
+Console.WriteLine($"configuredOpenAiOptionsToolChoiceFunction={capturedOpenAiOptions.ToolChoice?.FunctionName}");
+Console.WriteLine($"configuredOpenAiOptionsReasoningEffort={capturedOpenAiOptions.ReasoningEffort}");
+Console.WriteLine($"configuredOpenAiOptionsMaxTokens={capturedOpenAiOptions.MaxTokens}");
 var capturedMistralOptions = mistralProvider.CapturedOptions!;
 Console.WriteLine($"configuredMistralOptionsType={capturedMistralOptions.GetType().Name}");
 Console.WriteLine($"configuredMistralOptionsToolChoice={capturedMistralOptions.ToolChoice}");
@@ -775,6 +819,29 @@ file sealed class ResponsesOptionsCapturingProvider : IStreamProvider
             Provider = model.Provider,
             Model = model.Id,
             StopReason = StopReason.EndTurn
+        }));
+        return stream;
+    }
+
+    public AssistantMessageStream StreamSimple(Model model, LlmContext context, SimpleStreamOptions options) =>
+        throw new InvalidOperationException("Provider-specific models.json options must dispatch through Stream with typed options.");
+}
+
+file sealed class OpenAiOptionsCapturingProvider : IStreamProvider
+{
+    public string Api => "openai-chat-completions";
+
+    public OpenAiOptions? CapturedOptions { get; private set; }
+
+    public AssistantMessageStream Stream(Model model, LlmContext context, StreamOptions options)
+    {
+        CapturedOptions = (OpenAiOptions)options;
+        var stream = new AssistantMessageStream();
+        stream.Push(new DoneEvent(new AssistantMessage([new TextContent("configured openai options package consumer complete")])
+        {
+            Api = model.Api,
+            Provider = model.Provider,
+            Model = model.Id
         }));
         return stream;
     }
@@ -1103,6 +1170,12 @@ try {
     Assert-Matches -Name 'ai consumer configured responses options reasoning effort output' -Text $aiRunOutput -Pattern 'configuredResponsesOptionsReasoningEffort=low'
     Assert-Matches -Name 'ai consumer configured responses options reasoning summary output' -Text $aiRunOutput -Pattern 'configuredResponsesOptionsReasoningSummary=concise'
     Assert-Matches -Name 'ai consumer configured responses options max tokens output' -Text $aiRunOutput -Pattern 'configuredResponsesOptionsMaxTokens=111'
+    Assert-Matches -Name 'ai consumer configured openai options type output' -Text $aiRunOutput -Pattern 'configuredOpenAiOptionsType=OpenAiOptions'
+    Assert-Matches -Name 'ai consumer configured openai options tool choice output' -Text $aiRunOutput -Pattern 'configuredOpenAiOptionsToolChoice=function:consumer_openai_tool'
+    Assert-Matches -Name 'ai consumer configured openai options tool choice kind output' -Text $aiRunOutput -Pattern 'configuredOpenAiOptionsToolChoiceKind=function'
+    Assert-Matches -Name 'ai consumer configured openai options tool choice function output' -Text $aiRunOutput -Pattern 'configuredOpenAiOptionsToolChoiceFunction=consumer_openai_tool'
+    Assert-Matches -Name 'ai consumer configured openai options reasoning effort output' -Text $aiRunOutput -Pattern 'configuredOpenAiOptionsReasoningEffort=high'
+    Assert-Matches -Name 'ai consumer configured openai options max tokens output' -Text $aiRunOutput -Pattern 'configuredOpenAiOptionsMaxTokens=222'
     Assert-Matches -Name 'ai consumer configured mistral options type output' -Text $aiRunOutput -Pattern 'configuredMistralOptionsType=MistralOptions'
     Assert-Matches -Name 'ai consumer configured mistral options tool choice output' -Text $aiRunOutput -Pattern 'configuredMistralOptionsToolChoice=function:consumer_tool'
     Assert-Matches -Name 'ai consumer configured mistral options tool choice kind output' -Text $aiRunOutput -Pattern 'configuredMistralOptionsToolChoiceKind=function'

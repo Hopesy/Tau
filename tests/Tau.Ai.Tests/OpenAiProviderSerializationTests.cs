@@ -210,6 +210,52 @@ public sealed class OpenAiProviderSerializationTests
     }
 
     [Fact]
+    public async Task Stream_WithOpenAiOptions_WritesToolChoiceAndReasoningEffort()
+    {
+        using var handler = new StubHandler();
+        using var client = new HttpClient(handler);
+        var provider = new OpenAiProvider(client);
+
+        var model = new Model
+        {
+            Id = "gpt-5.4",
+            Name = "GPT-5.4",
+            Api = "openai-chat-completions",
+            Provider = "openai",
+            BaseUrl = "https://example.invalid/v1",
+            Reasoning = true,
+            Compat = new ModelCompatibility
+            {
+                SupportsReasoningEffort = true
+            }
+        };
+
+        await DrainAsync(provider.Stream(
+            model,
+            new LlmContext
+            {
+                Messages = [new UserMessage("use tool")],
+                Tools =
+                [
+                    new Tool("read_file", "Read a file", JsonDocument.Parse("""{"type":"object"}""").RootElement.Clone())
+                ]
+            },
+            new OpenAiOptions
+            {
+                ApiKey = "test-key",
+                ToolChoice = OpenAiToolChoice.Function("read_file"),
+                ReasoningEffort = "low"
+            }));
+
+        using var doc = JsonDocument.Parse(handler.CapturedBody!);
+        var root = doc.RootElement;
+        Assert.Equal("low", root.GetProperty("reasoning_effort").GetString());
+        var toolChoice = root.GetProperty("tool_choice");
+        Assert.Equal("function", toolChoice.GetProperty("type").GetString());
+        Assert.Equal("read_file", toolChoice.GetProperty("function").GetProperty("name").GetString());
+    }
+
+    [Fact]
     public async Task Stream_AppliesPayloadCallbackAndResponseCallback()
     {
         using var handler = new StubHandler

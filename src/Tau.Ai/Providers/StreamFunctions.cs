@@ -4,6 +4,7 @@ using Tau.Ai.Providers.Anthropic;
 using Tau.Ai.Providers.Bedrock;
 using Tau.Ai.Providers.Google;
 using Tau.Ai.Providers.Mistral;
+using Tau.Ai.Providers.OpenAi;
 using Tau.Ai.Providers.OpenAiResponses;
 using Tau.Ai.Registry;
 
@@ -156,6 +157,7 @@ public static class StreamFunctions
     {
         providerOptions = model.Api switch
         {
+            "openai-chat-completions" => CreateOpenAiOptions(model, resolvedOptions, explicitOptions, configured),
             "openai-responses" => CreateOpenAiResponsesOptions(model, resolvedOptions, explicitOptions, configured),
             "openai-codex-responses" => CreateOpenAiCodexResponsesOptions(model, resolvedOptions, explicitOptions, configured),
             "azure-openai-responses" => CreateAzureOpenAiResponsesOptions(model, resolvedOptions, explicitOptions, configured),
@@ -170,6 +172,30 @@ public static class StreamFunctions
 
         return !ReferenceEquals(providerOptions, resolvedOptions);
     }
+
+    private static OpenAiOptions CreateOpenAiOptions(
+        Model model,
+        SimpleStreamOptions resolvedOptions,
+        SimpleStreamOptions explicitOptions,
+        ModelProviderSpecificOptionsConfiguration configured) =>
+        new()
+        {
+            Temperature = resolvedOptions.Temperature,
+            MaxTokens = resolvedOptions.MaxTokens ?? model.MaxOutputTokens,
+            TopP = resolvedOptions.TopP,
+            ApiKey = resolvedOptions.ApiKey,
+            Signal = resolvedOptions.Signal,
+            OnResponse = resolvedOptions.OnResponse,
+            OnPayload = resolvedOptions.OnPayload,
+            Transport = resolvedOptions.Transport,
+            CacheRetention = resolvedOptions.CacheRetention,
+            SessionId = resolvedOptions.SessionId,
+            Headers = resolvedOptions.Headers,
+            MaxRetryDelay = resolvedOptions.MaxRetryDelay,
+            Metadata = resolvedOptions.Metadata,
+            ToolChoice = ToOpenAiToolChoice(configured.ToolChoice),
+            ReasoningEffort = ResolveOpenAiReasoningEffort(model, resolvedOptions, explicitOptions, configured)
+        };
 
     private static OpenAiResponsesOptions CreateOpenAiResponsesOptions(
         Model model,
@@ -326,6 +352,40 @@ public static class StreamFunctions
         model.Id.Equals("mistral-small-2603", StringComparison.OrdinalIgnoreCase) ||
         model.Id.Equals("mistral-small-latest", StringComparison.OrdinalIgnoreCase);
 
+    private static string? ResolveOpenAiReasoningEffort(
+        Model model,
+        SimpleStreamOptions resolvedOptions,
+        SimpleStreamOptions explicitOptions,
+        ModelProviderSpecificOptionsConfiguration configured)
+    {
+        if (explicitOptions.Reasoning is { } explicitReasoning)
+        {
+            return MapOpenAiReasoningEffort(model, explicitReasoning);
+        }
+
+        return configured.ReasoningEffort ??
+               (resolvedOptions.Reasoning is { } resolvedReasoning
+                   ? MapOpenAiReasoningEffort(model, resolvedReasoning)
+                   : null);
+    }
+
+    private static string MapOpenAiReasoningEffort(Model model, ThinkingLevel reasoning)
+    {
+        if (reasoning == ThinkingLevel.ExtraHigh && !ModelCatalog.SupportsXhigh(model))
+        {
+            reasoning = ThinkingLevel.High;
+        }
+
+        return reasoning switch
+        {
+            ThinkingLevel.Minimal => "minimal",
+            ThinkingLevel.Low => "low",
+            ThinkingLevel.Medium => "medium",
+            ThinkingLevel.ExtraHigh => "xhigh",
+            _ => "high"
+        };
+    }
+
     private static StreamOptions ApplyProviderSpecificOptions(
         Model model,
         StreamOptions options,
@@ -338,6 +398,7 @@ public static class StreamFunctions
 
         return model.Api switch
         {
+            "openai-chat-completions" => ApplyOpenAiOptions(options, configured),
             "openai-responses" => ApplyOpenAiResponsesOptions(options, configured),
             "openai-codex-responses" => ApplyOpenAiCodexResponsesOptions(options, configured),
             "azure-openai-responses" => ApplyAzureOpenAiResponsesOptions(options, configured),
@@ -348,6 +409,31 @@ public static class StreamFunctions
             "google-gemini-cli" => ApplyGoogleGeminiCliOptions(model, options, configured),
             "bedrock-converse-stream" => ApplyBedrockOptions(model, options, configured),
             _ => options
+        };
+    }
+
+    private static OpenAiOptions ApplyOpenAiOptions(
+        StreamOptions options,
+        ModelProviderSpecificOptionsConfiguration configured)
+    {
+        var typed = options as OpenAiOptions;
+        return new OpenAiOptions
+        {
+            Temperature = options.Temperature,
+            MaxTokens = options.MaxTokens,
+            TopP = options.TopP,
+            ApiKey = options.ApiKey,
+            Signal = options.Signal,
+            OnResponse = options.OnResponse,
+            OnPayload = options.OnPayload,
+            Transport = options.Transport,
+            CacheRetention = options.CacheRetention,
+            SessionId = options.SessionId,
+            Headers = options.Headers,
+            MaxRetryDelay = options.MaxRetryDelay,
+            Metadata = options.Metadata,
+            ToolChoice = typed?.ToolChoice ?? ToOpenAiToolChoice(configured.ToolChoice),
+            ReasoningEffort = typed?.ReasoningEffort ?? configured.ReasoningEffort
         };
     }
 
@@ -969,6 +1055,18 @@ public static class StreamFunctions
         return configured.IsFunction
             ? MistralToolChoice.Function(configured.FunctionName!)
             : MistralToolChoice.FromString(configured.Kind);
+    }
+
+    private static OpenAiToolChoice? ToOpenAiToolChoice(ModelToolChoiceConfiguration? configured)
+    {
+        if (configured is null || configured.IsTool)
+        {
+            return null;
+        }
+
+        return configured.IsFunction
+            ? OpenAiToolChoice.Function(configured.FunctionName!)
+            : OpenAiToolChoice.FromString(configured.Kind);
     }
 
     private static AnthropicToolChoice? ToAnthropicToolChoice(ModelToolChoiceConfiguration? configured)

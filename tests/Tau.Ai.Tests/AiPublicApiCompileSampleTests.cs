@@ -7,6 +7,7 @@ using Tau.Ai.Providers.Google;
 using Tau.Ai.Providers;
 using Tau.Ai.Providers.Anthropic;
 using Tau.Ai.Providers.Faux;
+using Tau.Ai.Providers.OpenAi;
 using Tau.Ai.Registry;
 using Tau.Ai.Streaming;
 
@@ -93,6 +94,13 @@ public sealed class AiPublicApiCompileSampleTests
             Headers = new Dictionary<string, string> { ["x-sample"] = "1" },
             Metadata = new Dictionary<string, object> { ["source"] = "public-api-sample" }
         };
+
+        var openAiOptions = new OpenAiOptions
+        {
+            ToolChoice = OpenAiToolChoice.Function("count"),
+            ReasoningEffort = "high"
+        };
+        Assert.Equal("function:count", openAiOptions.ToolChoice.ToString());
 
         var anthropicOptions = new AnthropicOptions
         {
