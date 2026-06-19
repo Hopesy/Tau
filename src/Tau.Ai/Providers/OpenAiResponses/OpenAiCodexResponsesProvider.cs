@@ -36,6 +36,10 @@ public sealed class OpenAiCodexResponsesProvider : IStreamProvider
             {
                 await StreamInternalAsync(model, context, options, stream).ConfigureAwait(false);
             }
+            catch (OperationCanceledException) when (options.Signal.IsCancellationRequested)
+            {
+                StreamOptionHelpers.PushAborted(stream, model, Api);
+            }
             catch (Exception ex)
             {
                 stream.Push(new ErrorEvent(ex.Message));
@@ -53,6 +57,9 @@ public sealed class OpenAiCodexResponsesProvider : IStreamProvider
             MaxTokens = options.MaxTokens ?? model.MaxOutputTokens,
             TopP = options.TopP,
             ApiKey = options.ApiKey,
+            Signal = options.Signal,
+            OnResponse = options.OnResponse,
+            OnPayload = options.OnPayload,
             CacheRetention = options.CacheRetention,
             SessionId = options.SessionId,
             Headers = options.Headers,
@@ -70,6 +77,11 @@ public sealed class OpenAiCodexResponsesProvider : IStreamProvider
         StreamOptions options,
         AssistantMessageStream stream)
     {
+        if (StreamOptionHelpers.PushAbortedIfCanceled(options, stream, model, Api))
+        {
+            return;
+        }
+
         if (string.IsNullOrWhiteSpace(options.ApiKey))
         {
             stream.Push(new ErrorEvent($"No API key for provider: {model.Provider}"));
@@ -78,7 +90,10 @@ public sealed class OpenAiCodexResponsesProvider : IStreamProvider
 
         var accountId = OpenAiResponsesShared.ExtractAccountIdFromJwt(options.ApiKey!);
         var url = ResolveCodexUrl(model.BaseUrl);
-        var body = BuildRequestBody(model, context, options);
+        var body = await StreamOptionHelpers.ApplyPayloadCallbackAsync(
+            options,
+            model,
+            BuildRequestBody(model, context, options)).ConfigureAwait(false);
         var bodyJson = JsonSerializer.Serialize(body, OpenAiResponsesJsonContext.Default.DictionaryStringObject);
 
         if (options.Transport is StreamTransport.WebSocket or StreamTransport.Auto)
@@ -115,13 +130,13 @@ public sealed class OpenAiCodexResponsesProvider : IStreamProvider
                 Content = new StringContent(bodyJson, Encoding.UTF8, "application/json")
             };
             ApplyCodexHeaders(request, model, options, accountId);
-            response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead).ConfigureAwait(false);
+            response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, options.Signal).ConfigureAwait(false);
             if (response.IsSuccessStatusCode)
             {
                 break;
             }
 
-            lastError = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+            lastError = await response.Content.ReadAsStringAsync(options.Signal).ConfigureAwait(false);
             if (attempt == MaxRetries || !OpenAiResponsesShared.IsRetryableError((int)response.StatusCode, lastError))
             {
                 stream.Push(new ErrorEvent($"{Api} error {(int)response.StatusCode}: {lastError}"));
@@ -129,7 +144,7 @@ public sealed class OpenAiCodexResponsesProvider : IStreamProvider
             }
 
             response.Dispose();
-            await Task.Delay(GetRetryDelay(options, attempt)).ConfigureAwait(false);
+            await Task.Delay(GetRetryDelay(options, attempt), options.Signal).ConfigureAwait(false);
         }
 
         if (response is null)
@@ -140,6 +155,7 @@ public sealed class OpenAiCodexResponsesProvider : IStreamProvider
 
         using (response)
         {
+            await StreamOptionHelpers.InvokeResponseCallbackAsync(options, model, response).ConfigureAwait(false);
             var partial = new AssistantMessage
             {
                 Api = Api,
@@ -149,14 +165,15 @@ public sealed class OpenAiCodexResponsesProvider : IStreamProvider
             };
             stream.Push(new StartEvent(partial));
 
-            await using var responseStream = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
+            await using var responseStream = await response.Content.ReadAsStreamAsync(options.Signal).ConfigureAwait(false);
             await OpenAiResponsesShared.ProcessResponsesStreamAsync(
                 responseStream,
                 partial,
                 stream,
                 OpenAiResponsesShared.MapCodexEvent,
                 requestedServiceTier: (options as OpenAiCodexResponsesOptions)?.ServiceTier,
-                resolveServiceTier: ResolveCodexServiceTier).ConfigureAwait(false);
+                resolveServiceTier: ResolveCodexServiceTier,
+                cancellationToken: options.Signal).ConfigureAwait(false);
         }
     }
 
@@ -254,7 +271,7 @@ public sealed class OpenAiCodexResponsesProvider : IStreamProvider
             : options.SessionId!;
         var headers = BuildWebSocketHeaders(model, options, accountId, requestId);
         var webSocketUrl = ResolveCodexWebSocketUrl(sseUrl);
-        var lease = await AcquireWebSocketAsync(webSocketUrl, headers, options.SessionId).ConfigureAwait(false);
+        var lease = await AcquireWebSocketAsync(webSocketUrl, headers, options.SessionId, options.Signal).ConfigureAwait(false);
         var keepConnection = true;
         var released = false;
         void Release(bool keep)
@@ -275,7 +292,7 @@ public sealed class OpenAiCodexResponsesProvider : IStreamProvider
                 ["type"] = "response.create"
             };
             var frameJson = JsonSerializer.Serialize(frame, OpenAiResponsesJsonContext.Default.DictionaryStringObject);
-            await lease.Connection.SendTextAsync(frameJson).ConfigureAwait(false);
+            await lease.Connection.SendTextAsync(frameJson, options.Signal).ConfigureAwait(false);
             onStarted();
 
             var partial = new AssistantMessage
@@ -288,13 +305,14 @@ public sealed class OpenAiCodexResponsesProvider : IStreamProvider
             stream.Push(new StartEvent(partial));
 
             var completed = await OpenAiResponsesShared.ProcessResponsesJsonEventsAsync(
-                lease.Connection.ReadTextMessagesAsync(),
+                lease.Connection.ReadTextMessagesAsync(options.Signal),
                 partial,
                 stream,
                 OpenAiResponsesShared.MapCodexEvent,
                 beforeDone: () => Release(keep: true),
                 requestedServiceTier: (options as OpenAiCodexResponsesOptions)?.ServiceTier,
-                resolveServiceTier: ResolveCodexServiceTier).ConfigureAwait(false);
+                resolveServiceTier: ResolveCodexServiceTier,
+                cancellationToken: options.Signal).ConfigureAwait(false);
             if (!completed)
             {
                 keepConnection = false;
@@ -315,11 +333,12 @@ public sealed class OpenAiCodexResponsesProvider : IStreamProvider
     private async Task<CodexWebSocketLease> AcquireWebSocketAsync(
         Uri url,
         IReadOnlyDictionary<string, string> headers,
-        string? sessionId)
+        string? sessionId,
+        CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(sessionId))
         {
-            var connection = await _webSocketTransport.ConnectAsync(url, headers).ConfigureAwait(false);
+            var connection = await _webSocketTransport.ConnectAsync(url, headers, cancellationToken).ConfigureAwait(false);
             return new CodexWebSocketLease(connection, _ => CloseWebSocketSilently(connection));
         }
 
@@ -360,12 +379,12 @@ public sealed class OpenAiCodexResponsesProvider : IStreamProvider
 
             if (cached.Busy)
             {
-                var overflowConnection = await _webSocketTransport.ConnectAsync(url, headers).ConfigureAwait(false);
+                var overflowConnection = await _webSocketTransport.ConnectAsync(url, headers, cancellationToken).ConfigureAwait(false);
                 return new CodexWebSocketLease(overflowConnection, _ => CloseWebSocketSilently(overflowConnection));
             }
         }
 
-        var newConnection = await _webSocketTransport.ConnectAsync(url, headers).ConfigureAwait(false);
+        var newConnection = await _webSocketTransport.ConnectAsync(url, headers, cancellationToken).ConfigureAwait(false);
         var entry = new CachedCodexWebSocketConnection(newConnection)
         {
             Busy = true

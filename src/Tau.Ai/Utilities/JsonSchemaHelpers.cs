@@ -25,12 +25,12 @@ public static class JsonSchemaHelpers
 
             writer.WriteEndArray();
 
-            if (!string.IsNullOrWhiteSpace(description))
+            if (!string.IsNullOrEmpty(description))
             {
                 writer.WriteString("description", description);
             }
 
-            if (defaultValue is not null)
+            if (!string.IsNullOrEmpty(defaultValue))
             {
                 writer.WriteString("default", defaultValue);
             }

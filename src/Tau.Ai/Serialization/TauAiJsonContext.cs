@@ -23,6 +23,7 @@ namespace Tau.Ai.Serialization;
 [JsonSerializable(typeof(Usage))]
 [JsonSerializable(typeof(UsageCost))]
 [JsonSerializable(typeof(ModelCost))]
+[JsonSerializable(typeof(ThinkingBudgets))]
 [JsonSerializable(typeof(StreamOptions))]
 [JsonSerializable(typeof(SimpleStreamOptions))]
 [JsonSerializable(typeof(IReadOnlyList<ChatMessage>))]

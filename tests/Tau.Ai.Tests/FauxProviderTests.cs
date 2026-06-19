@@ -211,6 +211,99 @@ public sealed class FauxProviderTests
     }
 
     [Fact]
+    public async Task Stream_InvokesResponseCallbackBeforeStreaming()
+    {
+        var registry = new ProviderRegistry();
+        var registration = Faux.Register(registry);
+        registration.SetResponses([Faux.AssistantMessage("hello")]);
+        var responses = new List<(ProviderResponse Response, string ModelId)>();
+
+        var response = await StreamFunctions.CompleteAsync(
+            registry,
+            registration.GetModel(),
+            new LlmContext(null, [new UserMessage("hi")], null),
+            new StreamOptions
+            {
+                OnResponse = (providerResponse, model) =>
+                {
+                    responses.Add((providerResponse, model.Id));
+                    return ValueTask.CompletedTask;
+                }
+            });
+
+        Assert.Equal("hello", ReadText(response.Content));
+        var callback = Assert.Single(responses);
+        Assert.Equal(200, callback.Response.Status);
+        Assert.Empty(callback.Response.Headers);
+        Assert.Equal("faux-1", callback.ModelId);
+    }
+
+    [Fact]
+    public async Task Stream_WhenSignalAlreadyCancelledTerminatesWithAbortedAssistant()
+    {
+        var registry = new ProviderRegistry();
+        var registration = Faux.Register(registry);
+        registration.SetResponses([Faux.AssistantMessage("should not stream")]);
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        var stream = StreamFunctions.Stream(
+            registry,
+            registration.GetModel(),
+            new LlmContext(null, [new UserMessage("hi")], null),
+            new StreamOptions { Signal = cts.Token });
+        var events = await CollectEventsAsync(stream);
+        var response = await stream.ResultAsync;
+
+        var error = Assert.Single(events.OfType<ErrorEvent>());
+        Assert.Equal("Request was aborted", error.Error);
+        Assert.Empty(response.Content);
+        Assert.Equal(StopReason.Aborted, response.StopReason);
+        Assert.Equal("Request was aborted", response.ErrorMessage);
+        Assert.DoesNotContain(events, static evt => evt is TextDeltaEvent or DoneEvent);
+    }
+
+    [Fact]
+    public async Task Stream_WhenSignalCancelsMidStreamTerminatesWithAbortedAssistant()
+    {
+        var registry = new ProviderRegistry();
+        var registration = Faux.Register(
+            registry,
+            new FauxProviderOptions
+            {
+                TokenSize = new FauxTokenSize(Min: 1, Max: 1),
+                TokensPerSecond = 20
+            });
+        registration.SetResponses([Faux.AssistantMessage("cancel me please")]);
+        using var cts = new CancellationTokenSource();
+        var stream = StreamFunctions.Stream(
+            registry,
+            registration.GetModel(),
+            new LlmContext(null, [new UserMessage("hi")], null),
+            new StreamOptions { Signal = cts.Token });
+
+        var events = new List<StreamEvent>();
+        await foreach (var evt in stream)
+        {
+            events.Add(evt);
+            if (evt is TextDeltaEvent)
+            {
+                cts.Cancel();
+            }
+        }
+
+        var response = await stream.ResultAsync;
+        Assert.Contains(events, evt => evt is StartEvent);
+        Assert.Contains(events, evt => evt is TextStartEvent);
+        Assert.Contains(events, evt => evt is TextDeltaEvent);
+        Assert.Single(events.OfType<ErrorEvent>());
+        Assert.DoesNotContain(events, static evt => evt is DoneEvent);
+        Assert.Equal(StopReason.Aborted, response.StopReason);
+        Assert.Equal("Request was aborted", response.ErrorMessage);
+        Assert.True(events.OfType<TextDeltaEvent>().Count() >= 1);
+    }
+
+    [Fact]
     public async Task FactoryThrow_EmitsErrorEventAndResult()
     {
         var registry = new ProviderRegistry();

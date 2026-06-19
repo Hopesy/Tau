@@ -27,6 +27,10 @@ public sealed class AzureOpenAiResponsesProvider : IStreamProvider
             {
                 await StreamInternalAsync(model, context, options, stream).ConfigureAwait(false);
             }
+            catch (OperationCanceledException) when (options.Signal.IsCancellationRequested)
+            {
+                StreamOptionHelpers.PushAborted(stream, model, Api);
+            }
             catch (Exception ex)
             {
                 stream.Push(new ErrorEvent(ex.Message));
@@ -44,6 +48,9 @@ public sealed class AzureOpenAiResponsesProvider : IStreamProvider
             MaxTokens = options.MaxTokens ?? model.MaxOutputTokens,
             TopP = options.TopP,
             ApiKey = options.ApiKey,
+            Signal = options.Signal,
+            OnResponse = options.OnResponse,
+            OnPayload = options.OnPayload,
             CacheRetention = options.CacheRetention,
             SessionId = options.SessionId,
             Headers = options.Headers,
@@ -60,11 +67,19 @@ public sealed class AzureOpenAiResponsesProvider : IStreamProvider
         StreamOptions options,
         AssistantMessageStream stream)
     {
+        if (StreamOptionHelpers.PushAbortedIfCanceled(options, stream, model, Api))
+        {
+            return;
+        }
+
         var azureOptions = options as AzureOpenAiResponsesOptions;
         var deploymentName = ResolveDeploymentName(model, azureOptions);
         var config = ResolveAzureConfig(model, azureOptions);
         var url = $"{config.BaseUrl}/responses?api-version={Uri.EscapeDataString(config.ApiVersion)}";
-        var body = BuildRequestBody(model, context, options, deploymentName);
+        var body = await StreamOptionHelpers.ApplyPayloadCallbackAsync(
+            options,
+            model,
+            BuildRequestBody(model, context, options, deploymentName)).ConfigureAwait(false);
         var json = JsonSerializer.Serialize(body, OpenAiResponsesJsonContext.Default.DictionaryStringObject);
 
         using var request = new HttpRequestMessage(HttpMethod.Post, url)
@@ -76,10 +91,11 @@ public sealed class AzureOpenAiResponsesProvider : IStreamProvider
         ApplyHeaders(request, options.Headers);
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
 
-        using var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead).ConfigureAwait(false);
+        using var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, options.Signal).ConfigureAwait(false);
+        await StreamOptionHelpers.InvokeResponseCallbackAsync(options, model, response).ConfigureAwait(false);
         if (!response.IsSuccessStatusCode)
         {
-            var errorBody = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+            var errorBody = await response.Content.ReadAsStringAsync(options.Signal).ConfigureAwait(false);
             stream.Push(new ErrorEvent($"{Api} error {(int)response.StatusCode}: {errorBody}"));
             return;
         }
@@ -93,8 +109,12 @@ public sealed class AzureOpenAiResponsesProvider : IStreamProvider
         };
         stream.Push(new StartEvent(partial));
 
-        await using var responseStream = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
-        await OpenAiResponsesShared.ProcessResponsesStreamAsync(responseStream, partial, stream).ConfigureAwait(false);
+        await using var responseStream = await response.Content.ReadAsStreamAsync(options.Signal).ConfigureAwait(false);
+        await OpenAiResponsesShared.ProcessResponsesStreamAsync(
+            responseStream,
+            partial,
+            stream,
+            cancellationToken: options.Signal).ConfigureAwait(false);
     }
 
     private static Dictionary<string, object> BuildRequestBody(

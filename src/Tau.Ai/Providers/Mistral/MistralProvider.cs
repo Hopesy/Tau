@@ -29,6 +29,10 @@ public sealed class MistralProvider : IStreamProvider
             {
                 await StreamInternalAsync(model, context, options, stream).ConfigureAwait(false);
             }
+            catch (OperationCanceledException) when (options.Signal.IsCancellationRequested)
+            {
+                StreamOptionHelpers.PushAborted(stream, model, Api);
+            }
             catch (Exception ex)
             {
                 stream.Push(new ErrorEvent(ex.Message));
@@ -45,6 +49,9 @@ public sealed class MistralProvider : IStreamProvider
             MaxTokens = options.MaxTokens ?? model.MaxOutputTokens,
             TopP = options.TopP,
             ApiKey = options.ApiKey,
+            Signal = options.Signal,
+            OnResponse = options.OnResponse,
+            OnPayload = options.OnPayload,
             CacheRetention = options.CacheRetention,
             SessionId = options.SessionId,
             Headers = options.Headers,
@@ -66,9 +73,17 @@ public sealed class MistralProvider : IStreamProvider
         StreamOptions options,
         AssistantMessageStream stream)
     {
+        if (StreamOptionHelpers.PushAbortedIfCanceled(options, stream, model, Api))
+        {
+            return;
+        }
+
         var baseUrl = model.BaseUrl?.TrimEnd('/') ?? "https://api.mistral.ai/v1";
         var url = $"{baseUrl}/chat/completions";
-        var body = BuildRequestBody(model, context, options);
+        var body = await StreamOptionHelpers.ApplyPayloadCallbackAsync(
+            options,
+            model,
+            BuildRequestBody(model, context, options)).ConfigureAwait(false);
         var json = JsonSerializer.Serialize(body, MistralJsonContext.Default.DictionaryStringObject);
 
         using var request = new HttpRequestMessage(HttpMethod.Post, url)
@@ -85,15 +100,16 @@ public sealed class MistralProvider : IStreamProvider
 
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
 
-        using var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead).ConfigureAwait(false);
+        using var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, options.Signal).ConfigureAwait(false);
+        await StreamOptionHelpers.InvokeResponseCallbackAsync(options, model, response).ConfigureAwait(false);
         if (!response.IsSuccessStatusCode)
         {
-            var errorBody = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+            var errorBody = await response.Content.ReadAsStringAsync(options.Signal).ConfigureAwait(false);
             stream.Push(new ErrorEvent($"{Api} error {(int)response.StatusCode}: {errorBody}"));
             return;
         }
 
-        await using var responseStream = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
+        await using var responseStream = await response.Content.ReadAsStreamAsync(options.Signal).ConfigureAwait(false);
         var partial = new AssistantMessage
         {
             Api = Api,
@@ -105,7 +121,7 @@ public sealed class MistralProvider : IStreamProvider
 
         var toolCallAccumulators = new Dictionary<int, OpenAiStreamParser.ToolCallAccumulator>();
         var contentIndex = 0;
-        await foreach (var sse in SseParser.ParseAsync(responseStream))
+        await foreach (var sse in SseParser.ParseAsync(responseStream, options.Signal))
         {
             if (sse.Data == "[DONE]")
             {
@@ -172,9 +188,9 @@ public sealed class MistralProvider : IStreamProvider
 
         if (options is MistralOptions mistralOptions)
         {
-            if (!string.IsNullOrWhiteSpace(mistralOptions.ToolChoice))
+            if (mistralOptions.ToolChoice is { } toolChoice)
             {
-                body["tool_choice"] = mistralOptions.ToolChoice!;
+                body["tool_choice"] = MapToolChoice(toolChoice);
             }
 
             if (!string.IsNullOrWhiteSpace(mistralOptions.PromptMode))
@@ -189,6 +205,23 @@ public sealed class MistralProvider : IStreamProvider
         }
 
         return body;
+    }
+
+    private static object MapToolChoice(MistralToolChoice choice)
+    {
+        if (choice.IsFunction)
+        {
+            return new Dictionary<string, object>
+            {
+                ["type"] = "function",
+                ["function"] = new Dictionary<string, object>
+                {
+                    ["name"] = choice.FunctionName!
+                }
+            };
+        }
+
+        return choice.Kind;
     }
 
     private static List<object> ConvertMessages(Model model, LlmContext context, MistralToolCallIdNormalizer normalizer)
@@ -424,9 +457,43 @@ public sealed class MistralProvider : IStreamProvider
 
 public record MistralOptions : StreamOptions
 {
-    public string? ToolChoice { get; init; }
+    public MistralToolChoice? ToolChoice { get; init; }
     public string? PromptMode { get; init; }
     public string? ReasoningEffort { get; init; }
+}
+
+public sealed record MistralToolChoice
+{
+    private MistralToolChoice(string kind, string? functionName)
+    {
+        Kind = kind;
+        FunctionName = functionName;
+    }
+
+    public string Kind { get; }
+    public string? FunctionName { get; }
+    public bool IsFunction => FunctionName is not null;
+
+    public static MistralToolChoice FromString(string choice)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(choice);
+        return new MistralToolChoice(choice, functionName: null);
+    }
+
+    public static MistralToolChoice Function(string name)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+        return new MistralToolChoice("function", name);
+    }
+
+    public static implicit operator MistralToolChoice(string choice) =>
+        FromString(choice);
+
+    public static implicit operator string?(MistralToolChoice? choice) =>
+        choice?.ToString();
+
+    public override string ToString() =>
+        IsFunction ? $"function:{FunctionName}" : Kind;
 }
 
 [JsonSourceGenerationOptions(

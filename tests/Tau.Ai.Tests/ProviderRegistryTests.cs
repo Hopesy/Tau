@@ -50,6 +50,40 @@ public sealed class ProviderRegistryTests
         Assert.Same(provider, registry.TryGet("anthropic-messages"));
     }
 
+    [Theory]
+    [InlineData("openai-chat-completions", "openai-completions")]
+    [InlineData("openai-chat-completions", "openai-compatible")]
+    [InlineData("google-generative-language", "google-generative-ai")]
+    public void GetAndTryGet_ResolveUpstreamApiAliases(string registeredApi, string aliasApi)
+    {
+        var registry = new ProviderRegistry();
+        var provider = new FakeStreamProvider(registeredApi);
+
+        registry.Register(registeredApi, provider);
+
+        Assert.Same(provider, registry.Get(aliasApi));
+        Assert.Same(provider, registry.TryGet(aliasApi));
+        Assert.Contains(registeredApi, registry.RegisteredApis);
+        Assert.DoesNotContain(aliasApi, registry.RegisteredApis);
+    }
+
+    [Theory]
+    [InlineData("openai-completions", "openai-chat-completions")]
+    [InlineData("openai-compatible", "openai-chat-completions")]
+    [InlineData("google-generative-ai", "google-generative-language")]
+    public void Register_NormalizesUpstreamApiAliases(string aliasApi, string canonicalApi)
+    {
+        var registry = new ProviderRegistry();
+        var provider = new FakeStreamProvider(aliasApi);
+
+        registry.Register(aliasApi, provider);
+
+        Assert.Same(provider, registry.Get(canonicalApi));
+        Assert.Same(provider, registry.Get(aliasApi));
+        Assert.Contains(canonicalApi, registry.RegisteredApis);
+        Assert.DoesNotContain(aliasApi, registry.RegisteredApis);
+    }
+
     [Fact]
     public void Register_Factory_DefersConstructionUntilFirstResolution()
     {
@@ -110,6 +144,17 @@ public sealed class ProviderRegistryTests
 
         Assert.Null(registry.TryGet("drop"));
         Assert.NotNull(registry.TryGet("keep"));
+    }
+
+    [Fact]
+    public void Unregister_NormalizesUpstreamApiAlias()
+    {
+        var registry = new ProviderRegistry();
+        registry.Register("google-generative-language", new FakeStreamProvider("google-generative-language"));
+
+        registry.Unregister("google-generative-ai");
+
+        Assert.Null(registry.TryGet("google-generative-language"));
     }
 
     [Fact]

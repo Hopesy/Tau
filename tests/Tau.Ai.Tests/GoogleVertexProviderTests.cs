@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using Tau.Ai.Auth;
 using Tau.Ai.Providers;
 using Tau.Ai.Providers.Google;
@@ -237,6 +238,70 @@ public sealed class GoogleVertexProviderTests
         {
             File.Delete(credentialsPath);
         }
+    }
+
+    [Fact]
+    public async Task StreamSimple_UsesCustomThinkingBudget()
+    {
+        using var handler = new RecordingHandler((_, _) => VertexSseResponse("budget"));
+        using var client = new HttpClient(handler);
+        var provider = new GoogleVertexProvider(client);
+
+        await OpenAiResponsesProviderTests.CollectAsync(provider.StreamSimple(
+            BuildVertexModel(),
+            new LlmContext { Messages = [new UserMessage("think")] },
+            new SimpleStreamOptions
+            {
+                ApiKey = "vertex-api-key",
+                Reasoning = ThinkingLevel.High,
+                ThinkingBudgets = new ThinkingBudgets { High = 33_333 }
+            }));
+
+        using var doc = JsonDocument.Parse(handler.Requests[0].Body);
+        var thinking = doc.RootElement
+            .GetProperty("generationConfig")
+            .GetProperty("thinkingConfig");
+        Assert.Equal(33_333, thinking.GetProperty("thinkingBudget").GetInt32());
+    }
+
+    [Fact]
+    public async Task Stream_AddsToolChoiceAndExplicitThinkingOptions()
+    {
+        using var schema = JsonDocument.Parse("""{"type":"object","properties":{"path":{"type":"string"}}}""");
+        using var handler = new RecordingHandler((_, _) => VertexSseResponse("tool choice"));
+        using var client = new HttpClient(handler);
+        var provider = new GoogleVertexProvider(client);
+
+        await OpenAiResponsesProviderTests.CollectAsync(provider.Stream(
+            BuildVertexModel(),
+            new LlmContext
+            {
+                Messages = [new UserMessage("think")],
+                Tools = [new Tool("read_file", "Read file", schema.RootElement.Clone())]
+            },
+            new GoogleVertexOptions
+            {
+                ApiKey = "vertex-api-key",
+                ToolChoice = "any",
+                Thinking = new GoogleThinkingOptions
+                {
+                    Enabled = true,
+                    BudgetTokens = 7_654
+                }
+            }));
+
+        using var doc = JsonDocument.Parse(handler.Requests[0].Body);
+        var root = doc.RootElement;
+        Assert.Equal("ANY", root
+            .GetProperty("toolConfig")
+            .GetProperty("functionCallingConfig")
+            .GetProperty("mode")
+            .GetString());
+        Assert.Equal(7_654, root
+            .GetProperty("generationConfig")
+            .GetProperty("thinkingConfig")
+            .GetProperty("thinkingBudget")
+            .GetInt32());
     }
 
     private static Model BuildVertexModel(string? baseUrl = "https://vertex.example/v1/projects/tau/locations/us-central1/publishers/google") => new()

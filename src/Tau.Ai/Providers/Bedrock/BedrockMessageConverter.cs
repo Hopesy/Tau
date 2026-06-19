@@ -341,7 +341,7 @@ internal static class BedrockMessageConverter
         var thinking = new Dictionary<string, object>
         {
             ["type"] = "enabled",
-            ["budget_tokens"] = options.ThinkingBudgetTokens ?? MapThinkingBudget(options.Reasoning.Value)
+            ["budget_tokens"] = options.ThinkingBudgetTokens ?? MapThinkingBudget(options.Reasoning.Value, options.ThinkingBudgets)
         };
         if (!string.IsNullOrWhiteSpace(options.ThinkingDisplay))
         {
@@ -351,15 +351,14 @@ internal static class BedrockMessageConverter
         return new Dictionary<string, object> { ["thinking"] = thinking };
     }
 
-    private static int MapThinkingBudget(ThinkingLevel level) => level switch
-    {
-        ThinkingLevel.Minimal => 1_024,
-        ThinkingLevel.Low => 2_048,
-        ThinkingLevel.Medium => 8_192,
-        ThinkingLevel.High => 16_384,
-        ThinkingLevel.ExtraHigh => 16_384,
-        _ => 8_192
-    };
+    private static int MapThinkingBudget(ThinkingLevel level, ThinkingBudgets? budgets) =>
+        StreamOptionHelpers.GetThinkingBudget(
+            budgets,
+            level,
+            defaultMinimal: 1_024,
+            defaultLow: 2_048,
+            defaultMedium: 8_192,
+            defaultHigh: 16_384);
 
     private static void AddCachePointIfNeeded(List<object> blocks, Model model, CacheRetention cacheRetention)
     {

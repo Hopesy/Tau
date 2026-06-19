@@ -125,6 +125,38 @@ public sealed class OpenAiCodexResponsesProviderTests
     }
 
     [Fact]
+    public async Task Stream_AddsReasoningServiceTierAndTextVerbosityOptions()
+    {
+        using var handler = new OpenAiResponsesProviderTests.StubHandler(_ => OpenAiResponsesProviderTests.SseResponse(
+            """
+            data: {"type":"response.done","response":{"id":"resp_1","status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}
+
+            """));
+        using var client = new HttpClient(handler);
+        var provider = new OpenAiCodexResponsesProvider(client);
+
+        _ = await OpenAiResponsesProviderTests.CollectAsync(provider.Stream(
+            BuildCodexModel(),
+            new LlmContext { Messages = [new UserMessage("hi")] },
+            new OpenAiCodexResponsesOptions
+            {
+                ApiKey = OpenAiResponsesSharedTests.BuildFakeJwt("acc_options"),
+                ReasoningEffort = "minimal",
+                ReasoningSummary = "detailed",
+                ServiceTier = "priority",
+                TextVerbosity = "high"
+            }));
+
+        using var body = JsonDocument.Parse(handler.CapturedBody);
+        var root = body.RootElement;
+        var reasoning = root.GetProperty("reasoning");
+        Assert.Equal("low", reasoning.GetProperty("effort").GetString());
+        Assert.Equal("detailed", reasoning.GetProperty("summary").GetString());
+        Assert.Equal("priority", root.GetProperty("service_tier").GetString());
+        Assert.Equal("high", root.GetProperty("text").GetProperty("verbosity").GetString());
+    }
+
+    [Fact]
     public async Task Stream_WebSocketTransport_SendsResponseCreateFrameAndParsesEvents()
     {
         var connection = new FakeCodexWebSocketConnection(_ =>

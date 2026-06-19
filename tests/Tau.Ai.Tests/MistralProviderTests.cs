@@ -103,6 +103,59 @@ public sealed class MistralProviderTests
         Assert.Equal("""{"path":"README.md"}""", toolCall.Arguments);
     }
 
+    [Fact]
+    public async Task Stream_AddsToolChoicePromptModeAndReasoningEffortOptions()
+    {
+        using var handler = new OpenAiResponsesProviderTests.StubHandler(_ => new HttpResponseMessage(HttpStatusCode.BadRequest)
+        {
+            Content = new StringContent("stop after payload", Encoding.UTF8, "text/plain")
+        });
+        using var client = new HttpClient(handler);
+        var provider = new MistralProvider(client);
+
+        await OpenAiResponsesProviderTests.CollectAsync(provider.Stream(
+            BuildModel(reasoning: true),
+            new LlmContext { Messages = [new UserMessage("think")] },
+            new MistralOptions
+            {
+                ApiKey = "mistral-key",
+                ToolChoice = "required",
+                PromptMode = "reasoning",
+                ReasoningEffort = "high"
+            }));
+
+        using var doc = JsonDocument.Parse(handler.CapturedBody);
+        var root = doc.RootElement;
+        Assert.Equal("required", root.GetProperty("tool_choice").GetString());
+        Assert.Equal("reasoning", root.GetProperty("prompt_mode").GetString());
+        Assert.Equal("high", root.GetProperty("reasoning_effort").GetString());
+    }
+
+    [Fact]
+    public async Task Stream_AddsFunctionToolChoiceOption()
+    {
+        using var handler = new OpenAiResponsesProviderTests.StubHandler(_ => new HttpResponseMessage(HttpStatusCode.BadRequest)
+        {
+            Content = new StringContent("stop after payload", Encoding.UTF8, "text/plain")
+        });
+        using var client = new HttpClient(handler);
+        var provider = new MistralProvider(client);
+
+        await OpenAiResponsesProviderTests.CollectAsync(provider.Stream(
+            BuildModel(reasoning: true),
+            new LlmContext { Messages = [new UserMessage("use tool")] },
+            new MistralOptions
+            {
+                ApiKey = "mistral-key",
+                ToolChoice = MistralToolChoice.Function("read_file")
+            }));
+
+        using var doc = JsonDocument.Parse(handler.CapturedBody);
+        var toolChoice = doc.RootElement.GetProperty("tool_choice");
+        Assert.Equal("function", toolChoice.GetProperty("type").GetString());
+        Assert.Equal("read_file", toolChoice.GetProperty("function").GetProperty("name").GetString());
+    }
+
 
     [Fact]
     public async Task Stream_NormalizesAssistantToolCallIdsToNineAlphanumericCharacters()

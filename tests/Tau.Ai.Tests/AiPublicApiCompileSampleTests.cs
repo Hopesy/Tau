@@ -3,7 +3,9 @@ using System.Net;
 using Tau.Ai.Auth;
 using Tau.Ai.Auth.OAuth;
 using Tau.Ai.Observability;
+using Tau.Ai.Providers.Google;
 using Tau.Ai.Providers;
+using Tau.Ai.Providers.Anthropic;
 using Tau.Ai.Providers.Faux;
 using Tau.Ai.Registry;
 using Tau.Ai.Streaming;
@@ -86,9 +88,57 @@ public sealed class AiPublicApiCompileSampleTests
             Transport = StreamTransport.Sse,
             CacheRetention = CacheRetention.Short,
             SessionId = "sample-session",
+            Signal = CancellationToken.None,
+            OnResponse = (_, _) => ValueTask.CompletedTask,
             Headers = new Dictionary<string, string> { ["x-sample"] = "1" },
             Metadata = new Dictionary<string, object> { ["source"] = "public-api-sample" }
         };
+
+        var anthropicOptions = new AnthropicOptions
+        {
+            ThinkingEnabled = true,
+            ThinkingBudgetTokens = 1024,
+            Effort = "high",
+            ThinkingDisplay = "summarized",
+            InterleavedThinking = true,
+            ToolChoice = AnthropicToolChoice.Tool("count")
+        };
+        Assert.Equal("tool:count", anthropicOptions.ToolChoice.ToString());
+
+        var googleOptions = new GoogleOptions
+        {
+            ToolChoice = "any",
+            Thinking = new GoogleThinkingOptions
+            {
+                Enabled = true,
+                BudgetTokens = 1024
+            }
+        };
+        Assert.Equal("any", googleOptions.ToolChoice);
+
+        var vertexOptions = new GoogleVertexOptions
+        {
+            Project = "sample-project",
+            Location = "us-central1",
+            ToolChoice = "auto",
+            Thinking = new GoogleThinkingOptions
+            {
+                Enabled = false
+            }
+        };
+        Assert.Equal("us-central1", vertexOptions.Location);
+
+        var geminiCliOptions = new GoogleGeminiCliOptions
+        {
+            ProjectId = "sample-cli-project",
+            ToolChoice = "none",
+            Thinking = new GoogleThinkingOptions
+            {
+                Enabled = true,
+                Level = "HIGH"
+            }
+        };
+        Assert.Equal("sample-cli-project", geminiCliOptions.ProjectId);
 
         var stream = StreamFunctions.StreamSimple(registry, model, context, options);
         var events = await CollectEventsAsync(stream).WaitAsync(TimeSpan.FromSeconds(5));
@@ -130,12 +180,134 @@ public sealed class AiPublicApiCompileSampleTests
         Assert.True(authStatus.IsConfigured);
         Assert.Equal("explicit", authStatus.Source);
 
-        Assert.NotEmpty(BuiltInOAuthProviders.GetAll());
+        var builtIns = BuiltInOAuthProviders.GetAll();
+        Assert.NotEmpty(builtIns);
+        var oauthRegistry = new OAuthProviderRegistry(builtIns);
+        Assert.NotEmpty(oauthRegistry.GetProviderInfoList());
         var emptyOAuthRegistry = new OAuthProviderRegistry([]);
         Assert.Empty(emptyOAuthRegistry.Providers);
 
+        var stubOAuthProvider = new SampleOAuthProvider();
+        emptyOAuthRegistry.Register(stubOAuthProvider);
+        var refreshed = await OAuthHelpers.RefreshOAuthTokenAsync(
+            emptyOAuthRegistry,
+            stubOAuthProvider.Id,
+            new OAuthCredentials
+            {
+                Refresh = "refresh-token",
+                Access = "expired-access-token",
+                ExpiresAt = DateTimeOffset.UtcNow.AddHours(-1)
+            });
+        Assert.Equal("refreshed-access-token", refreshed.Access);
+
+        var apiKeyResult = await OAuthHelpers.GetOAuthApiKeyAsync(
+            emptyOAuthRegistry,
+            stubOAuthProvider.Id,
+            new Dictionary<string, OAuthCredentials>(StringComparer.OrdinalIgnoreCase)
+            {
+                [stubOAuthProvider.Id] = new OAuthCredentials
+                {
+                    Refresh = "refresh-token",
+                    Access = "expired-access-token",
+                    ExpiresAt = DateTimeOffset.UtcNow.AddHours(-1)
+                }
+            });
+        Assert.NotNull(apiKeyResult);
+        Assert.Equal("refreshed-access-token", apiKeyResult.NewCredentials.Access);
+        Assert.Equal("oauth:refreshed-access-token", apiKeyResult.ApiKey);
+        emptyOAuthRegistry.Unregister(stubOAuthProvider.Id);
+        Assert.Null(emptyOAuthRegistry.TryGet(stubOAuthProvider.Id));
+
         registry.UnregisterBySource("sample-source");
         Assert.Null(registry.TryGet(provider.Api));
+    }
+
+    [Fact]
+    public async Task PublicApiSample_SupportsExplicitConfigurationStoreAndAuthResolver()
+    {
+        using var scope = EnvironmentVariableScope.Acquire();
+        var tempDir = Path.Combine(Path.GetTempPath(), $"tau-ai-public-config-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+
+        try
+        {
+            var modelsPath = Path.Combine(tempDir, "models.json");
+            var authPath = Path.Combine(tempDir, "auth.json");
+            File.WriteAllText(authPath, "{}");
+            File.WriteAllText(modelsPath, """
+                {
+                  "providers": {
+                    "sample-config-provider": {
+                      "apiKey": "TAU_SAMPLE_PUBLIC_CONFIG_API_KEY",
+                      "authHeader": true,
+                      "headers": {
+                        "X-From-Provider": "TAU_SAMPLE_PUBLIC_CONFIG_HEADER"
+                      },
+                      "models": [
+                        {
+                          "id": "sample-config-model",
+                          "headers": {
+                            "X-From-Model": "TAU_SAMPLE_PUBLIC_MODEL_HEADER"
+                          }
+                        }
+                      ]
+                    }
+                  }
+                }
+                """);
+
+            scope.Set("TAU_SAMPLE_PUBLIC_CONFIG_API_KEY", "public-config-key");
+            scope.Set("TAU_SAMPLE_PUBLIC_CONFIG_HEADER", "provider-header-value");
+            scope.Set("TAU_SAMPLE_PUBLIC_MODEL_HEADER", "model-header-value");
+
+            var configurationStore = new ModelConfigurationStore([modelsPath]);
+            var authResolver = new ProviderAuthResolver(
+                credentialStore: new OAuthCredentialStore([authPath]),
+                configurationStore: configurationStore,
+                logSink: NullTauLogSink.Instance);
+
+            var provider = new CapturingProvider();
+            var registry = new ProviderRegistry();
+            registry.Register(provider.Api, () => provider, sourceId: "sample-config-source");
+
+            var model = new Model
+            {
+                Provider = "sample-config-provider",
+                Id = "sample-config-model",
+                Name = "Configured Model",
+                Api = provider.Api
+            };
+
+            var status = authResolver.GetStatus(model);
+            Assert.True(status.IsConfigured);
+            Assert.Equal("models.json", status.Source);
+
+            var completed = await StreamFunctions.CompleteSimpleAsync(
+                registry,
+                model,
+                new LlmContext(null, [new UserMessage("configured request")], null),
+                new SimpleStreamOptions
+                {
+                    Headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                    {
+                        ["X-Explicit"] = "explicit-header",
+                        ["X-From-Provider"] = "explicit-provider-header"
+                    }
+                },
+                configurationStore,
+                authResolver).WaitAsync(TimeSpan.FromSeconds(5));
+
+            Assert.Equal("hello from sample-config-model", ReadText(completed.Content));
+            Assert.Equal("public-config-key", provider.LastOptions?.ApiKey);
+            Assert.Equal("Bearer public-config-key", provider.LastOptions?.Headers?["Authorization"]);
+            Assert.Equal("explicit-provider-header", provider.LastOptions?.Headers?["X-From-Provider"]);
+            Assert.Equal("model-header-value", provider.LastOptions?.Headers?["X-From-Model"]);
+            Assert.Equal("explicit-header", provider.LastOptions?.Headers?["X-Explicit"]);
+        }
+        finally
+        {
+            Directory.Delete(tempDir, recursive: true);
+        }
     }
 
     private static string ReadText(IEnumerable<ContentBlock> content) =>
@@ -201,5 +373,58 @@ public sealed class AiPublicApiCompileSampleTests
             stream.Push(new DoneEvent(message));
             return stream;
         }
+    }
+
+    private sealed class CapturingProvider : IStreamProvider
+    {
+        public string Api => "sample-config-api";
+
+        public StreamOptions? LastOptions { get; private set; }
+
+        public LlmContext? LastContext { get; private set; }
+
+        public AssistantMessageStream Stream(Model model, LlmContext context, StreamOptions options) =>
+            Complete(model, context, options);
+
+        public AssistantMessageStream StreamSimple(Model model, LlmContext context, SimpleStreamOptions options) =>
+            Complete(model, context, options);
+
+        private AssistantMessageStream Complete(Model model, LlmContext context, StreamOptions options)
+        {
+            LastOptions = options;
+            LastContext = context;
+
+            var message = new AssistantMessage([new TextContent($"hello from {model.Id}")])
+            {
+                Api = model.Api,
+                Provider = model.Provider,
+                Model = model.Id,
+                StopReason = StopReason.EndTurn,
+                Usage = new Usage(InputTokens: 10, OutputTokens: 20)
+            };
+
+            var stream = new AssistantMessageStream();
+            stream.Push(new StartEvent(new AssistantMessage()));
+            stream.Push(new DoneEvent(message));
+            return stream;
+        }
+    }
+
+    private sealed class SampleOAuthProvider : IOAuthProvider
+    {
+        public string Id => "sample-oauth";
+        public string Name => "Sample OAuth";
+
+        public Task<OAuthCredentials> LoginAsync(IOAuthLoginCallbacks callbacks, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+
+        public Task<OAuthCredentials> RefreshTokenAsync(OAuthCredentials credentials, CancellationToken cancellationToken = default) =>
+            Task.FromResult(credentials with
+            {
+                Access = "refreshed-access-token",
+                ExpiresAt = DateTimeOffset.UtcNow.AddHours(1)
+            });
+
+        public string GetApiKey(OAuthCredentials credentials) => $"oauth:{credentials.Access}";
     }
 }

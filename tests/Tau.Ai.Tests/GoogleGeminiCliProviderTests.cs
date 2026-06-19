@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
+using Tau.Ai.Providers;
 using Tau.Ai.Providers.Google;
 
 namespace Tau.Ai.Tests;
@@ -96,6 +97,76 @@ public sealed class GoogleGeminiCliProviderTests
     }
 
     [Fact]
+    public async Task StreamSimple_UsesCustomThinkingBudgetsAndClampsExtraHigh()
+    {
+        using var handler = new RecordingHandler(_ => SseResponse("budget"));
+        using var client = new HttpClient(handler);
+        var provider = new GoogleGeminiCliProvider(client);
+        var model = BuildModel(providerId: "google-gemini-cli", baseUrl: "https://cloudcode-pa.googleapis.com");
+
+        await OpenAiResponsesProviderTests.CollectAsync(provider.StreamSimple(
+            model,
+            new LlmContext { Messages = [new UserMessage("think")] },
+            new SimpleStreamOptions
+            {
+                ApiKey = ApiKey(),
+                Reasoning = ThinkingLevel.ExtraHigh,
+                ThinkingBudgets = new ThinkingBudgets { High = 12_345 }
+            }));
+
+        using var doc = JsonDocument.Parse(handler.Requests[0].Body);
+        var thinking = doc.RootElement
+            .GetProperty("request")
+            .GetProperty("generationConfig")
+            .GetProperty("thinkingConfig");
+        Assert.Equal(12_345, thinking.GetProperty("thinkingBudget").GetInt32());
+    }
+
+    [Fact]
+    public async Task Stream_AddsToolChoiceAndExplicitThinkingOptions()
+    {
+        using var schema = JsonDocument.Parse("""{"type":"object","properties":{"path":{"type":"string"}}}""");
+        using var handler = new RecordingHandler(_ => SseResponse("tool choice"));
+        using var client = new HttpClient(handler);
+        var provider = new GoogleGeminiCliProvider(client);
+        var model = BuildModel(providerId: "google-gemini-cli", baseUrl: "https://cloudcode-pa.googleapis.com");
+
+        await OpenAiResponsesProviderTests.CollectAsync(provider.Stream(
+            model,
+            new LlmContext
+            {
+                Messages = [new UserMessage("think")],
+                Tools = [new Tool("read_file", "Read file", schema.RootElement.Clone())]
+            },
+            new GoogleGeminiCliOptions
+            {
+                ApiKey = ApiKey(),
+                ToolChoice = "any",
+                Thinking = new GoogleThinkingOptions
+                {
+                    Enabled = true,
+                    BudgetTokens = 4_321
+                },
+                ProjectId = "configured-project"
+            }));
+
+        using var doc = JsonDocument.Parse(handler.Requests[0].Body);
+        var root = doc.RootElement;
+        Assert.Equal("configured-project", root.GetProperty("project").GetString());
+        var request = root.GetProperty("request");
+        Assert.Equal("ANY", request
+            .GetProperty("toolConfig")
+            .GetProperty("functionCallingConfig")
+            .GetProperty("mode")
+            .GetString());
+        Assert.Equal(4_321, request
+            .GetProperty("generationConfig")
+            .GetProperty("thinkingConfig")
+            .GetProperty("thinkingBudget")
+            .GetInt32());
+    }
+
+    [Fact]
     public async Task Stream_RetriesEmptySseWithoutDuplicateStart()
     {
         var callCount = 0;
@@ -137,6 +208,35 @@ public sealed class GoogleGeminiCliProviderTests
 
         var error = Assert.Single(events.OfType<ErrorEvent>());
         Assert.Contains("Server requested 40s retry delay", error.Error, StringComparison.Ordinal);
+        Assert.Single(handler.Requests);
+    }
+
+    [Fact]
+    public async Task Stream_WhenSignalCancelsRetryDelayTerminatesWithAbortedAssistant()
+    {
+        using var cts = new CancellationTokenSource();
+        using var handler = new RecordingHandler(_ =>
+        {
+            cts.Cancel();
+            return new HttpResponseMessage(HttpStatusCode.TooManyRequests)
+            {
+                Content = new StringContent("Please retry in 1s", Encoding.UTF8, "text/plain")
+            };
+        });
+        using var client = new HttpClient(handler);
+        var provider = new GoogleGeminiCliProvider(client);
+        var model = BuildModel("gemini-3.1-pro-high", "google-antigravity", baseUrl: string.Empty);
+
+        var stream = provider.Stream(
+            model,
+            new LlmContext { Messages = [new UserMessage("hi")] },
+            new StreamOptions { ApiKey = ApiKey(), Signal = cts.Token });
+        var events = await OpenAiResponsesProviderTests.CollectAsync(stream);
+
+        var error = Assert.Single(events.OfType<ErrorEvent>());
+        Assert.Equal(StreamOptionHelpers.AbortedErrorMessage, error.Error);
+        var response = await stream.ResultAsync;
+        Assert.Equal(StopReason.Aborted, response.StopReason);
         Assert.Single(handler.Requests);
     }
 

@@ -46,10 +46,12 @@
 
 ### Validation
 
-* `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-agent-package-consumer.ps1`：通过，22 assertions，覆盖 `aiConsumer` 和 `agentConsumer` 两条外部 package 消费路径。
+* `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-agent-package-consumer.ps1`：最初通过，22 assertions，覆盖 `aiConsumer` 和 `agentConsumer` 两条外部 package 消费路径。
 * `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-release-contracts.ps1 -Json`：通过，`agentPackageConsumer.succeeded=true`，`aiConsumer` / `agentConsumer` restore/build/run exit code 均为 0。
 * `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-dotnet.ps1 -SkipRestore -RunSmoke`：通过，测试计数 `Tau.Ai.Tests` 344、`Tau.Agent.Tests` 123、`Tau.Tui.Tests` 251、`Tau.CodingAgent.Tests` 631、`Tau.WebUi.Tests` 72、`Tau.Pods.Tests` 216，并完成 `tau-ai`、Agent examples、Agent package consumer、WebUi、Mom smoke。
 * 2026-06-15 复验：首次全仓 `-RunSmoke` 在 `WebUiEndpointTests.StreamEndpoint_EmitsNdjsonAndPersistsSession` 暴露 cwd 隔离问题；修复后 `dotnet test tests\Tau.CodingAgent.Tests\Tau.CodingAgent.Tests.csproj --filter "FullyQualifiedName~WebUiEndpointTests" --no-restore --verbosity minimal` 通过 11/11，随后 `verify-dotnet.ps1 -SkipRestore -RunSmoke` 全链路通过。
+* 2026-06-18 增量复验：同一 smoke 扩展到 32 assertions，`aiConsumer` 额外固定 `configuredStatus=models.json:True`、`configuredApi=consumer-config-api`、`configuredAuth=Bearer consumer-dynamic-key`、header precedence 和 `/v1/chat/completions` request-path，证明外部 consumer 可显式注入 `ModelConfigurationStore` / `ProviderAuthResolver` 并消费 `models.json` 动态 OpenAI-compatible provider。
+* 2026-06-18 再增量：`EnvironmentApiKeyResolver` 现在在 Windows 上优先读取 `%APPDATA%\gcloud\application_default_credentials.json` 判断 Vertex ADC，回退用户目录 `~/.config/gcloud/application_default_credentials.json`；`ProviderAuthResolver` 对过期 OAuth credential 的状态文案也改为“refresh/login flow is available”，与现有 `tau-ai login` / CodingAgent `/login` 能力保持一致。同轮后续 auth/OAuth focused gate 已在 `20260618-0226-ai-auth-env-status-contract.md` 收口到 68/68，并把完整 `Tau.Ai.Tests` 推进到 393/393。
 
 ### Remaining Boundaries
 

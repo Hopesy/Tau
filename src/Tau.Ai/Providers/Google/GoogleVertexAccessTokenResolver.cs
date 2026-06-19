@@ -16,7 +16,7 @@ internal sealed class GoogleVertexAccessTokenResolver
         _httpClient = httpClient;
     }
 
-    public async Task<string?> ResolveAsync(StreamOptions options)
+    public async Task<string?> ResolveAsync(StreamOptions options, CancellationToken cancellationToken = default)
     {
         var explicitAccessToken = GetAccessToken(options);
         if (!string.IsNullOrWhiteSpace(explicitAccessToken))
@@ -33,8 +33,8 @@ internal sealed class GoogleVertexAccessTokenResolver
         var credentials = LoadCredentials(credentialsPath);
         return credentials switch
         {
-            GoogleServiceAccountCredentials serviceAccount => await ExchangeServiceAccountAsync(serviceAccount).ConfigureAwait(false),
-            GoogleAuthorizedUserCredentials authorizedUser => await ExchangeAuthorizedUserAsync(authorizedUser).ConfigureAwait(false),
+            GoogleServiceAccountCredentials serviceAccount => await ExchangeServiceAccountAsync(serviceAccount, cancellationToken).ConfigureAwait(false),
+            GoogleAuthorizedUserCredentials authorizedUser => await ExchangeAuthorizedUserAsync(authorizedUser, cancellationToken).ConfigureAwait(false),
             _ => throw new InvalidOperationException("Unsupported Vertex ADC credentials.")
         };
     }
@@ -80,7 +80,9 @@ internal sealed class GoogleVertexAccessTokenResolver
 
     public static bool HasCredentialsFile(StreamOptions options) => !string.IsNullOrWhiteSpace(ResolveCredentialsFile(options));
 
-    private async Task<string> ExchangeServiceAccountAsync(GoogleServiceAccountCredentials credentials)
+    private async Task<string> ExchangeServiceAccountAsync(
+        GoogleServiceAccountCredentials credentials,
+        CancellationToken cancellationToken)
     {
         var assertion = CreateServiceAccountAssertion(credentials);
         using var content = new FormUrlEncodedContent(new Dictionary<string, string>
@@ -89,10 +91,12 @@ internal sealed class GoogleVertexAccessTokenResolver
             ["assertion"] = assertion
         });
 
-        return await ExchangeTokenAsync(credentials.TokenUri, content).ConfigureAwait(false);
+        return await ExchangeTokenAsync(credentials.TokenUri, content, cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task<string> ExchangeAuthorizedUserAsync(GoogleAuthorizedUserCredentials credentials)
+    private async Task<string> ExchangeAuthorizedUserAsync(
+        GoogleAuthorizedUserCredentials credentials,
+        CancellationToken cancellationToken)
     {
         using var content = new FormUrlEncodedContent(new Dictionary<string, string>
         {
@@ -102,18 +106,21 @@ internal sealed class GoogleVertexAccessTokenResolver
             ["refresh_token"] = credentials.RefreshToken
         });
 
-        return await ExchangeTokenAsync(credentials.TokenUri, content).ConfigureAwait(false);
+        return await ExchangeTokenAsync(credentials.TokenUri, content, cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task<string> ExchangeTokenAsync(string tokenUri, HttpContent content)
+    private async Task<string> ExchangeTokenAsync(
+        string tokenUri,
+        HttpContent content,
+        CancellationToken cancellationToken)
     {
         using var request = new HttpRequestMessage(HttpMethod.Post, tokenUri)
         {
             Content = content
         };
 
-        using var response = await _httpClient.SendAsync(request).ConfigureAwait(false);
-        var responseBody = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+        using var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
+        var responseBody = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
         if (!response.IsSuccessStatusCode)
         {
             throw new InvalidOperationException($"Vertex ADC token exchange failed {(int)response.StatusCode}: {responseBody}");

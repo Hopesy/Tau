@@ -76,6 +76,29 @@ public sealed class BedrockProviderTests
     }
 
     [Fact]
+    public async Task Stream_WhenSignalAlreadyCancelledTerminatesWithAbortedAssistant()
+    {
+        using var handler = new OpenAiResponsesProviderTests.StubHandler(_ =>
+            throw new InvalidOperationException("HTTP should not be called when cancelled"));
+        using var client = new HttpClient(handler);
+        var provider = new BedrockProvider(client);
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        var stream = provider.Stream(
+            BuildModel(),
+            new LlmContext { Messages = [new UserMessage("hi")] },
+            new BedrockOptions { BearerToken = "bedrock-token", Signal = cts.Token });
+        var events = await OpenAiResponsesProviderTests.CollectAsync(stream);
+
+        var error = Assert.Single(events.OfType<ErrorEvent>());
+        Assert.Equal(StreamOptionHelpers.AbortedErrorMessage, error.Error);
+        var response = await stream.ResultAsync;
+        Assert.Equal(StopReason.Aborted, response.StopReason);
+        Assert.Equal(StreamOptionHelpers.AbortedErrorMessage, response.ErrorMessage);
+    }
+
+    [Fact]
     public async Task Stream_SignsRequestWithSigV4WhenAwsCredentialsAreProvided()
     {
         HttpRequestMessage? capturedRequest = null;
@@ -846,6 +869,41 @@ public sealed class BedrockProviderTests
         var thinking = doc.RootElement.GetProperty("additionalModelRequestFields").GetProperty("thinking");
         Assert.Equal("enabled", thinking.GetProperty("type").GetString());
         Assert.Equal(16_384, thinking.GetProperty("budget_tokens").GetInt32());
+    }
+
+    [Fact]
+    public async Task StreamSimple_UsesCustomThinkingBudgetsAndPayloadCallback()
+    {
+        using var handler = new OpenAiResponsesProviderTests.StubHandler(_ => new HttpResponseMessage(HttpStatusCode.BadRequest)
+        {
+            Content = new StringContent("stop after payload", Encoding.UTF8, "text/plain")
+        });
+        using var client = new HttpClient(handler);
+        var provider = new BedrockProvider(client);
+
+        await OpenAiResponsesProviderTests.CollectAsync(provider.StreamSimple(
+            BuildModel(reasoning: true),
+            new LlmContext { Messages = [new UserMessage("think")] },
+            new SimpleStreamOptions
+            {
+                ApiKey = "bedrock-token",
+                Reasoning = ThinkingLevel.ExtraHigh,
+                ThinkingBudgets = new ThinkingBudgets { High = 22_222 },
+                OnPayload = (payload, _) =>
+                {
+                    var body = Assert.IsType<Dictionary<string, object>>(payload);
+                    body["requestMetadata"] = new Dictionary<string, object> { ["source"] = "payload-callback" };
+                    return ValueTask.FromResult<object?>(null);
+                }
+            }));
+
+        using var doc = JsonDocument.Parse(handler.CapturedBody);
+        var root = doc.RootElement;
+        Assert.Equal(
+            "payload-callback",
+            root.GetProperty("requestMetadata").GetProperty("source").GetString());
+        var thinking = root.GetProperty("additionalModelRequestFields").GetProperty("thinking");
+        Assert.Equal(22_222, thinking.GetProperty("budget_tokens").GetInt32());
     }
 
     private static Model BuildModel(bool reasoning = false, string? baseUrl = "https://bedrock-runtime.us-east-1.amazonaws.com") => new()

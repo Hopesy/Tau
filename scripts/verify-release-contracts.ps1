@@ -154,6 +154,8 @@ try {
     $aiCliToolInstall = Invoke-JsonScript -Name 'ai-cli-tool-install-smoke' -ScriptPath 'scripts/verify-ai-cli-tool-install.ps1' -Arguments @('-SkipRestore', '-Json')
     $agentPackageConsumer = Invoke-JsonScript -Name 'agent-package-consumer-smoke' -ScriptPath 'scripts/verify-agent-package-consumer.ps1' -Arguments @('-SkipRestore', '-Json')
     $agentProxyServerE2e = Invoke-JsonScript -Name 'agent-proxy-server-e2e-smoke' -ScriptPath 'scripts/verify-agent-proxy-server-e2e.ps1' -Arguments @('-SkipRestore', '-Json')
+    $aiProviderOauthMatrix = Invoke-JsonScript -Name 'ai-provider-oauth-matrix-smoke' -ScriptPath 'scripts/verify-ai-provider-e2e-matrix.ps1' -Arguments @('-Isolated', '-Json')
+    $aiAgentExportShape = Invoke-JsonScript -Name 'ai-agent-export-shape-smoke' -ScriptPath 'scripts/verify-ai-agent-export-shape.ps1' -Arguments @('-Json')
     $provenance = Invoke-JsonScript -Name 'release-provenance-smoke' -ScriptPath 'scripts/verify-release-provenance.ps1' -Arguments @('-Json')
     $aiTestImage = Invoke-JsonScript -Name 'ai-test-image-smoke' -ScriptPath 'scripts/verify-ai-test-image.ps1' -Arguments @('-Json')
 
@@ -199,6 +201,7 @@ try {
         dryRunExitCode = $packagePublish.results.dryRun.exitCode
         applyExitCode = $packagePublish.results.apply.exitCode
         packageCount = $packagePublish.results.apply.packageCount
+        toolPackageCount = $packagePublish.results.apply.toolPackageCount
         dirtyApplyExitCode = $packagePublish.results.dirtyApply.exitCode
     }
     $script:results.aiCliToolInstall = [ordered]@{
@@ -221,6 +224,23 @@ try {
         assertionCount = @($agentProxyServerE2e.assertions).Count
         exitCode = $agentProxyServerE2e.exitCode
         filter = $agentProxyServerE2e.filter
+    }
+    $script:results.aiProviderOauthMatrix = [ordered]@{
+        succeeded = $aiProviderOauthMatrix.succeeded
+        assertionCount = @($aiProviderOauthMatrix.assertions).Count
+        mode = $aiProviderOauthMatrix.mode
+        isolated = $aiProviderOauthMatrix.isolated
+        providerCount = $aiProviderOauthMatrix.providerCount
+        configuredProviderCount = $aiProviderOauthMatrix.results.summary.configuredProviderCount
+        openProviderCount = $aiProviderOauthMatrix.results.summary.openProviderCount
+    }
+    $script:results.aiAgentExportShape = [ordered]@{
+        succeeded = $aiAgentExportShape.succeeded
+        assertionCount = @($aiAgentExportShape.assertions).Count
+        aiPackageExportCount = $aiAgentExportShape.results.aiPackageExportCount
+        aiIndexExportCount = $aiAgentExportShape.results.aiIndexExportCount
+        agentIndexExportCount = $aiAgentExportShape.results.agentIndexExportCount
+        evidenceFileCount = $aiAgentExportShape.results.evidenceFileCount
     }
     $script:results.provenance = [ordered]@{
         succeeded = $provenance.succeeded
@@ -249,6 +269,8 @@ try {
         'ai-cli-tool-install-smoke',
         'agent-package-consumer-smoke',
         'agent-proxy-server-e2e-smoke',
+        'ai-provider-oauth-matrix-smoke',
+        'ai-agent-export-shape-smoke',
         'release-provenance-smoke',
         'ai-test-image-smoke',
         'session-audit-script-smoke',
@@ -357,7 +379,8 @@ try {
     Assert-Equal -Name 'release package publish smoke succeeded' -Actual $packagePublish.succeeded -Expected $true
     Assert-Equal -Name 'release package publish dry-run exit code' -Actual $packagePublish.results.dryRun.exitCode -Expected 0
     Assert-Equal -Name 'release package publish apply exit code' -Actual $packagePublish.results.apply.exitCode -Expected 0
-    Assert-Equal -Name 'release package publish default package count' -Actual $packagePublish.results.apply.packageCount -Expected 3
+    Assert-Equal -Name 'release package publish default package count' -Actual $packagePublish.results.apply.packageCount -Expected 5
+    Assert-Equal -Name 'release package publish default tool package count' -Actual $packagePublish.results.apply.toolPackageCount -Expected 2
     Assert-Equal -Name 'release package publish dirty apply blocked' -Actual ($packagePublish.results.dirtyApply.exitCode -ne 0) -Expected $true
 
     Assert-Equal -Name 'ai cli tool install smoke succeeded' -Actual $aiCliToolInstall.succeeded -Expected $true
@@ -373,10 +396,67 @@ try {
     Assert-Equal -Name 'agent package consumer run exit code' -Actual $agentPackageConsumer.results.agentConsumer.runExitCode -Expected 0
     Assert-Matches -Name 'agent package consumer output' -Actual $agentPackageConsumer.results.agentConsumer.output -Pattern 'assistant=package consumer complete'
     Assert-Matches -Name 'agent package consumer prepared tool output' -Actual $agentPackageConsumer.results.agentConsumer.output -Pattern 'prepared package consumer'
+    Assert-Matches -Name 'ai package consumer configured status output' -Actual $agentPackageConsumer.results.aiConsumer.output -Pattern 'configuredStatus=models\.json:True'
+    Assert-Matches -Name 'ai package consumer configured assistant output' -Actual $agentPackageConsumer.results.aiConsumer.output -Pattern 'configuredAssistant=configured package consumer complete'
+    Assert-Matches -Name 'ai package consumer configured api output' -Actual $agentPackageConsumer.results.aiConsumer.output -Pattern 'configuredApi=consumer-config-api'
+    Assert-Matches -Name 'ai package consumer configured host output' -Actual $agentPackageConsumer.results.aiConsumer.output -Pattern 'configuredHost=consumer\.example\.test'
+    Assert-Matches -Name 'ai package consumer configured auth output' -Actual $agentPackageConsumer.results.aiConsumer.output -Pattern 'configuredAuth=Bearer consumer-dynamic-key'
+    Assert-Matches -Name 'ai package consumer configured provider header output' -Actual $agentPackageConsumer.results.aiConsumer.output -Pattern 'configuredProviderHeader=explicit-provider-header'
+    Assert-Matches -Name 'ai package consumer configured model header output' -Actual $agentPackageConsumer.results.aiConsumer.output -Pattern 'configuredModelHeader=model-header-value'
+    Assert-Matches -Name 'ai package consumer configured explicit header output' -Actual $agentPackageConsumer.results.aiConsumer.output -Pattern 'configuredExplicitHeader=explicit-header'
+    Assert-Matches -Name 'ai package consumer configured path output' -Actual $agentPackageConsumer.results.aiConsumer.output -Pattern 'configuredPath=/v1/chat/completions'
+    Assert-Matches -Name 'ai package consumer configured options temperature output' -Actual $agentPackageConsumer.results.aiConsumer.output -Pattern 'configuredOptionsTemperature=0\.3'
+    Assert-Matches -Name 'ai package consumer configured options max tokens output' -Actual $agentPackageConsumer.results.aiConsumer.output -Pattern 'configuredOptionsMaxTokens=111'
+    Assert-Matches -Name 'ai package consumer configured options top-p output' -Actual $agentPackageConsumer.results.aiConsumer.output -Pattern 'configuredOptionsTopP=0\.6'
+    Assert-Matches -Name 'ai package consumer configured options transport output' -Actual $agentPackageConsumer.results.aiConsumer.output -Pattern 'configuredOptionsTransport=WebSocket'
+    Assert-Matches -Name 'ai package consumer configured options cache output' -Actual $agentPackageConsumer.results.aiConsumer.output -Pattern 'configuredOptionsCacheRetention=Long'
+    Assert-Matches -Name 'ai package consumer configured options session output' -Actual $agentPackageConsumer.results.aiConsumer.output -Pattern 'configuredOptionsSessionId=model-session'
+    Assert-Matches -Name 'ai package consumer configured options retry output' -Actual $agentPackageConsumer.results.aiConsumer.output -Pattern 'configuredOptionsMaxRetryDelayMs=2500'
+    Assert-Matches -Name 'ai package consumer configured options reasoning output' -Actual $agentPackageConsumer.results.aiConsumer.output -Pattern 'configuredOptionsReasoning=High'
+    Assert-Matches -Name 'ai package consumer configured options thinking output' -Actual $agentPackageConsumer.results.aiConsumer.output -Pattern 'configuredOptionsThinkingHigh=400'
+    Assert-Matches -Name 'ai package consumer configured options metadata shared output' -Actual $agentPackageConsumer.results.aiConsumer.output -Pattern 'configuredOptionsMetadataShared=model'
+    Assert-Matches -Name 'ai package consumer configured options metadata model output' -Actual $agentPackageConsumer.results.aiConsumer.output -Pattern 'configuredOptionsMetadataModelOnly=7'
+    Assert-Matches -Name 'ai package consumer configured responses options type output' -Actual $agentPackageConsumer.results.aiConsumer.output -Pattern 'configuredResponsesOptionsType=OpenAiResponsesOptions'
+    Assert-Matches -Name 'ai package consumer configured responses options service tier output' -Actual $agentPackageConsumer.results.aiConsumer.output -Pattern 'configuredResponsesOptionsServiceTier=flex'
+    Assert-Matches -Name 'ai package consumer configured responses options reasoning effort output' -Actual $agentPackageConsumer.results.aiConsumer.output -Pattern 'configuredResponsesOptionsReasoningEffort=low'
+    Assert-Matches -Name 'ai package consumer configured responses options reasoning summary output' -Actual $agentPackageConsumer.results.aiConsumer.output -Pattern 'configuredResponsesOptionsReasoningSummary=concise'
+    Assert-Matches -Name 'ai package consumer configured responses options max tokens output' -Actual $agentPackageConsumer.results.aiConsumer.output -Pattern 'configuredResponsesOptionsMaxTokens=111'
+    Assert-Matches -Name 'ai package consumer configured mistral options type output' -Actual $agentPackageConsumer.results.aiConsumer.output -Pattern 'configuredMistralOptionsType=MistralOptions'
+    Assert-Matches -Name 'ai package consumer configured mistral options tool choice output' -Actual $agentPackageConsumer.results.aiConsumer.output -Pattern 'configuredMistralOptionsToolChoice=function:consumer_tool'
+    Assert-Matches -Name 'ai package consumer configured mistral options tool choice kind output' -Actual $agentPackageConsumer.results.aiConsumer.output -Pattern 'configuredMistralOptionsToolChoiceKind=function'
+    Assert-Matches -Name 'ai package consumer configured mistral options tool choice function output' -Actual $agentPackageConsumer.results.aiConsumer.output -Pattern 'configuredMistralOptionsToolChoiceFunction=consumer_tool'
+    Assert-Matches -Name 'ai package consumer configured mistral options prompt mode output' -Actual $agentPackageConsumer.results.aiConsumer.output -Pattern 'configuredMistralOptionsPromptMode=reasoning'
+    Assert-Matches -Name 'ai package consumer configured mistral options reasoning effort output' -Actual $agentPackageConsumer.results.aiConsumer.output -Pattern 'configuredMistralOptionsReasoningEffort=high'
+    Assert-Matches -Name 'ai package consumer configured mistral options max tokens output' -Actual $agentPackageConsumer.results.aiConsumer.output -Pattern 'configuredMistralOptionsMaxTokens=321'
+    Assert-Matches -Name 'ai package consumer configured anthropic options type output' -Actual $agentPackageConsumer.results.aiConsumer.output -Pattern 'configuredAnthropicOptionsType=AnthropicOptions'
+    Assert-Matches -Name 'ai package consumer configured anthropic options thinking enabled output' -Actual $agentPackageConsumer.results.aiConsumer.output -Pattern 'configuredAnthropicOptionsThinkingEnabled=True'
+    Assert-Matches -Name 'ai package consumer configured anthropic options thinking budget output' -Actual $agentPackageConsumer.results.aiConsumer.output -Pattern 'configuredAnthropicOptionsThinkingBudgetTokens=2345'
+    Assert-Matches -Name 'ai package consumer configured anthropic options effort output' -Actual $agentPackageConsumer.results.aiConsumer.output -Pattern 'configuredAnthropicOptionsEffort=high'
+    Assert-Matches -Name 'ai package consumer configured anthropic options thinking display output' -Actual $agentPackageConsumer.results.aiConsumer.output -Pattern 'configuredAnthropicOptionsThinkingDisplay=omitted'
+    Assert-Matches -Name 'ai package consumer configured anthropic options interleaved thinking output' -Actual $agentPackageConsumer.results.aiConsumer.output -Pattern 'configuredAnthropicOptionsInterleavedThinking=True'
+    Assert-Matches -Name 'ai package consumer configured anthropic options tool choice output' -Actual $agentPackageConsumer.results.aiConsumer.output -Pattern 'configuredAnthropicOptionsToolChoice=tool:read_file'
+    Assert-Matches -Name 'ai package consumer configured anthropic options tool choice kind output' -Actual $agentPackageConsumer.results.aiConsumer.output -Pattern 'configuredAnthropicOptionsToolChoiceKind=tool'
+    Assert-Matches -Name 'ai package consumer configured anthropic options tool choice name output' -Actual $agentPackageConsumer.results.aiConsumer.output -Pattern 'configuredAnthropicOptionsToolChoiceName=read_file'
+    Assert-Matches -Name 'ai package consumer configured anthropic options max tokens output' -Actual $agentPackageConsumer.results.aiConsumer.output -Pattern 'configuredAnthropicOptionsMaxTokens=654'
 
     Assert-Equal -Name 'agent proxy server e2e smoke succeeded' -Actual $agentProxyServerE2e.succeeded -Expected $true
     Assert-Equal -Name 'agent proxy server e2e exit code' -Actual $agentProxyServerE2e.exitCode -Expected 0
     Assert-Matches -Name 'agent proxy server e2e filter' -Actual $agentProxyServerE2e.filter -Pattern 'ProxyStreamProviderTests'
+
+    Assert-Equal -Name 'ai provider oauth matrix smoke succeeded' -Actual $aiProviderOauthMatrix.succeeded -Expected $true
+    Assert-Equal -Name 'ai provider oauth matrix mode' -Actual $aiProviderOauthMatrix.mode -Expected 'inspect'
+    Assert-Equal -Name 'ai provider oauth matrix isolated' -Actual $aiProviderOauthMatrix.isolated -Expected $true
+    Assert-Equal -Name 'ai provider oauth matrix provider count' -Actual $aiProviderOauthMatrix.providerCount -Expected 11
+    Assert-Equal -Name 'ai provider oauth matrix configured count' -Actual $aiProviderOauthMatrix.results.summary.configuredProviderCount -Expected 0
+    Assert-Equal -Name 'ai provider oauth matrix attempted count' -Actual $aiProviderOauthMatrix.results.summary.attemptedProviderCount -Expected 0
+    Assert-Equal -Name 'ai provider oauth matrix succeeded count' -Actual $aiProviderOauthMatrix.results.summary.succeededProviderCount -Expected 0
+    Assert-Equal -Name 'ai provider oauth matrix raw succeeded flag' -Actual $aiProviderOauthMatrix.results.summary.succeeded -Expected $true
+    Assert-Equal -Name 'ai provider oauth matrix open providers minimum' -Actual ($aiProviderOauthMatrix.results.summary.openProviderCount -ge 1) -Expected $true
+
+    Assert-Equal -Name 'ai agent export shape smoke succeeded' -Actual $aiAgentExportShape.succeeded -Expected $true
+    Assert-Equal -Name 'ai agent export shape AI package export count' -Actual $aiAgentExportShape.results.aiPackageExportCount -Expected 12
+    Assert-Equal -Name 'ai agent export shape AI index export count' -Actual $aiAgentExportShape.results.aiIndexExportCount -Expected 13
+    Assert-Equal -Name 'ai agent export shape Agent index export count' -Actual $aiAgentExportShape.results.agentIndexExportCount -Expected 4
 
     Assert-Equal -Name 'release provenance smoke succeeded' -Actual $provenance.succeeded -Expected $true
     Assert-Equal -Name 'release provenance dry-run exit code' -Actual $provenance.results.provenanceDryRun.exitCode -Expected 0

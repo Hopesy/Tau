@@ -400,6 +400,8 @@ $requiredScripts = @(
     'scripts/verify-ai-cli-tool-install.ps1',
     'scripts/verify-agent-package-consumer.ps1',
     'scripts/verify-agent-proxy-server-e2e.ps1',
+    'scripts/verify-ai-provider-e2e-matrix.ps1',
+    'scripts/verify-ai-agent-export-shape.ps1',
     'scripts/generate-release-provenance.ps1',
     'scripts/sign-release-packages.ps1',
     'scripts/verify-release-provenance.ps1',
@@ -457,12 +459,22 @@ $plannedCommands = @(
     [ordered]@{
         name = 'agent-package-consumer-smoke'
         command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-agent-package-consumer.ps1 -SkipRestore'
-        purpose = 'Pack Tau.Ai and Tau.Agent into a local package source, then restore/build/run temp external console apps that reference Tau.Ai directly and Tau.Agent with transitive Tau.Ai consumption.'
+        purpose = 'Pack Tau.Ai and Tau.Agent into a local package source, then restore/build/run temp external console apps that reference Tau.Ai directly and Tau.Agent with transitive Tau.Ai consumption; the Tau.Ai consumer also proves explicit models.json/auth resolver injection, auth status reporting and OpenAI-compatible header override behavior.'
     },
     [ordered]@{
         name = 'agent-proxy-server-e2e-smoke'
         command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-agent-proxy-server-e2e.ps1 -SkipRestore'
         purpose = 'Validate Tau.Agent ProxyStreamProvider against a real local loopback HTTP/SSE /api/stream server instead of only a fake HttpMessageHandler.'
+    },
+    [ordered]@{
+        name = 'ai-provider-oauth-matrix-smoke'
+        command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-ai-provider-e2e-matrix.ps1 -Isolated -Json'
+        purpose = 'Inspect the Tau AI provider/OAuth matrix in isolated mode, proving the local contract without touching real provider credentials or services.'
+    },
+    [ordered]@{
+        name = 'ai-agent-export-shape-smoke'
+        command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-ai-agent-export-shape.ps1'
+        purpose = 'Validate the repo-owned Tau-native mapping from upstream AI/Agent TypeScript exports and bins to .NET assemblies, namespaces, package consumer smoke and tool/package publish smoke.'
     },
     [ordered]@{
         name = 'release-provenance-smoke'
@@ -614,7 +626,7 @@ $upstreamReleaseMapping = @(
     },
     [ordered]@{
         upstreamStep = 'publish'
-        tauPlan = 'GitHub release archive upload is available through finalize-release.ps1 -CreateGitHubRelease after verified archives exist; NuGet/package registry synchronization is guarded by publish-release-packages.ps1 and defaults to Tau.Ai/Tau.Agent/Tau.Tui library packages, with provenance manifest and NuGet signing previews available through generate-release-provenance.ps1 and sign-release-packages.ps1. Real registry execution and package signing still require explicit -Apply, credentials and signing material.'
+        tauPlan = 'GitHub release archive upload is available through finalize-release.ps1 -CreateGitHubRelease after verified archives exist; NuGet/package registry synchronization is guarded by publish-release-packages.ps1 and defaults to Tau.Ai/Tau.Agent/Tau.Tui library packages plus Tau.Ai.Cli pi-ai/tau-ai tool packages, with provenance manifest and NuGet signing previews available through generate-release-provenance.ps1 and sign-release-packages.ps1. Real registry execution and package signing still require explicit -Apply, credentials and signing material.'
         state = 'guarded-package-publish-available'
     },
     [ordered]@{

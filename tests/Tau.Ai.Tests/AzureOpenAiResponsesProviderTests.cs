@@ -134,6 +134,52 @@ public sealed class AzureOpenAiResponsesProviderTests
     }
 
     [Fact]
+    public async Task Stream_AddsConfiguredReasoningAndAzureOptions()
+    {
+        using var handler = new OpenAiResponsesProviderTests.StubHandler(request =>
+        {
+            Assert.True(request.Headers.TryGetValues("api-key", out var apiKeys));
+            Assert.Equal("azure-key", Assert.Single(apiKeys));
+            return OpenAiResponsesProviderTests.SseResponse(
+                """
+                data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}
+
+                """);
+        });
+        using var client = new HttpClient(handler);
+        var provider = new AzureOpenAiResponsesProvider(client);
+
+        _ = await OpenAiResponsesProviderTests.CollectAsync(provider.Stream(
+            BuildAzureModel() with
+            {
+                BaseUrl = string.Empty,
+                Reasoning = true
+            },
+            new LlmContext { Messages = [new UserMessage("think")] },
+            new AzureOpenAiResponsesOptions
+            {
+                ApiKey = "azure-key",
+                AzureBaseUrl = "https://configured.openai.azure.com/openai/v1",
+                AzureApiVersion = "2026-01-01-preview",
+                AzureDeploymentName = "configured-deployment",
+                ReasoningEffort = "low",
+                ReasoningSummary = "concise"
+            }));
+
+        Assert.Equal("configured.openai.azure.com", handler.RequestUri!.Host);
+        Assert.Equal("?api-version=2026-01-01-preview", handler.RequestUri.Query);
+        using var body = JsonDocument.Parse(handler.CapturedBody);
+        var root = body.RootElement;
+        Assert.Equal("configured-deployment", root.GetProperty("model").GetString());
+        var reasoning = root.GetProperty("reasoning");
+        Assert.Equal("low", reasoning.GetProperty("effort").GetString());
+        Assert.Equal("concise", reasoning.GetProperty("summary").GetString());
+        Assert.Contains(
+            root.GetProperty("include").EnumerateArray(),
+            item => item.GetString() == "reasoning.encrypted_content");
+    }
+
+    [Fact]
     public async Task Stream_ReportsMissingBaseUrl()
     {
         using var env = new EnvironmentOverride(new Dictionary<string, string?>

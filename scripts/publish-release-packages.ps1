@@ -4,6 +4,10 @@ param(
         'src/Tau.Agent/Tau.Agent.csproj',
         'src/Tau.Tui/Tau.Tui.csproj'
     ),
+    [string[]]$ToolPackageSpec = @(
+        'src/Tau.Ai.Cli/Tau.Ai.Cli.csproj|Tau.Ai.Cli.PiAiTool|pi-ai',
+        'src/Tau.Ai.Cli/Tau.Ai.Cli.csproj|Tau.Ai.Cli.TauAiTool|tau-ai'
+    ),
     [string[]]$PackagePath = @(),
     [string]$Configuration = 'Release',
     [string]$OutputDirectory = 'artifacts/nuget',
@@ -14,6 +18,7 @@ param(
     [switch]$AllowDirty,
     [switch]$AllowNoApiKey,
     [switch]$SkipPack,
+    [switch]$SkipToolPackages,
     [switch]$SkipPush,
     [switch]$NoRestore,
     [switch]$NoBuild,
@@ -330,15 +335,63 @@ function Get-ProjectMetadata {
     }
 }
 
+function Get-ToolPackageMetadata {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Spec,
+        [Parameter(Mandatory = $true)]
+        [string]$Version
+    )
+
+    $parts = @($Spec -split '\|')
+    if ($parts.Count -ne 3) {
+        throw "Tool package spec must use '<project>|<packageId>|<commandName>' format. Actual: $Spec"
+    }
+
+    $projectPath = $parts[0].Trim()
+    $packageId = $parts[1].Trim()
+    $commandName = $parts[2].Trim()
+    if ([string]::IsNullOrWhiteSpace($projectPath) -or
+        [string]::IsNullOrWhiteSpace($packageId) -or
+        [string]::IsNullOrWhiteSpace($commandName)) {
+        throw "Tool package spec must include project, package id and command name. Actual: $Spec"
+    }
+
+    $fullPath = Convert-ToFullPath -Path $projectPath
+    if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) {
+        throw "Tool package project file not found: $projectPath"
+    }
+
+    return [ordered]@{
+        path = Convert-ToRepoRelativePath -Path $fullPath
+        fullPath = $fullPath
+        packageId = $packageId
+        toolCommandName = $commandName
+        expectedPackage = Convert-ToRepoRelativePath -Path (Join-Path (Convert-ToFullPath -Path $OutputDirectory) "$packageId.$Version.nupkg")
+    }
+}
+
 function New-PackArguments {
     param(
         [Parameter(Mandatory = $true)]
         [object]$Project,
         [Parameter(Mandatory = $true)]
-        [string]$Version
+        [string]$Version,
+        [switch]$PackAsTool,
+        [string]$PackageId = '',
+        [string]$ToolCommandName = ''
     )
 
     $args = @('pack', $Project.fullPath, '--configuration', $Configuration, '--output', (Convert-ToFullPath -Path $OutputDirectory), "-p:PackageVersion=$Version")
+    if (-not [string]::IsNullOrWhiteSpace($PackageId)) {
+        $args += "-p:PackageId=$PackageId"
+    }
+    if ($PackAsTool) {
+        $args += '-p:PackAsTool=true'
+        if (-not [string]::IsNullOrWhiteSpace($ToolCommandName)) {
+            $args += "-p:ToolCommandName=$ToolCommandName"
+        }
+    }
     if ($NoRestore) {
         $args += '--no-restore'
     }
@@ -387,6 +440,7 @@ function New-PackageEntry {
 function New-Result {
     param(
         [object[]]$Projects,
+        [object[]]$ToolPackages,
         [object[]]$Packages,
         [object[]]$PlannedCommands,
         [bool]$Succeeded = $false
@@ -414,6 +468,7 @@ function New-Result {
             allowDirty = $AllowDirty.IsPresent
             allowNoApiKey = $AllowNoApiKey.IsPresent
             skipPack = $SkipPack.IsPresent -or $PackagePath.Count -gt 0
+            skipToolPackages = $SkipToolPackages.IsPresent
             skipPush = $SkipPush.IsPresent
             noRestore = $NoRestore.IsPresent
             noBuild = $NoBuild.IsPresent
@@ -430,6 +485,14 @@ function New-Result {
                 expectedPackage = $_.expectedPackage
             }
         })
+        toolPackages = @($ToolPackages | ForEach-Object {
+            [ordered]@{
+                path = $_.path
+                packageId = $_.packageId
+                toolCommandName = $_.toolCommandName
+                expectedPackage = $_.expectedPackage
+            }
+        })
         packages = @($Packages | ForEach-Object {
             [ordered]@{
                 path = $_.path
@@ -443,6 +506,7 @@ function New-Result {
         remainingGaps = @(
             'Real NuGet/package registry publish remains unverified until publish-release-packages.ps1 is run with -Apply against the intended source.',
             'Tau applications are still delivered by release archives by default; NuGet publish defaults only cover public library packages.',
+            'Tau.Ai.Cli tool packages are rehearsed locally; real feed promotion still depends on a real registry source and credentials.',
             'Symbol package publishing and package signing/provenance remain open release hardening work.'
         )
     }
@@ -453,11 +517,19 @@ try {
     $apiKeyValue = if ([string]::IsNullOrWhiteSpace($ApiKeyEnv)) { '' } else { [Environment]::GetEnvironmentVariable($ApiKeyEnv) }
     $packEnabled = -not $SkipPack.IsPresent -and $PackagePath.Count -eq 0
     $pushEnabled = -not $SkipPush.IsPresent
+    $toolPackEnabled = $packEnabled -and -not $SkipToolPackages.IsPresent
 
     $projectMetadata = @()
     if ($packEnabled) {
         foreach ($project in $ProjectPath) {
             $projectMetadata += Get-ProjectMetadata -Path $project -Version $versionSource.value
+        }
+    }
+
+    $toolPackageMetadata = @()
+    if ($toolPackEnabled) {
+        foreach ($spec in $ToolPackageSpec) {
+            $toolPackageMetadata += Get-ToolPackageMetadata -Spec $spec -Version $versionSource.value
         }
     }
 
@@ -480,6 +552,16 @@ try {
     }
     else {
         Add-Check -Name 'package-projects' -Status 'warning' -Detail 'Project packing is skipped because -SkipPack or -PackagePath was supplied.'
+    }
+
+    if ($toolPackEnabled -and $toolPackageMetadata.Count -gt 0) {
+        Add-Check -Name 'tool-packages' -Status 'passed' -Detail "Tool package count: $($toolPackageMetadata.Count)."
+    }
+    elseif ($toolPackEnabled) {
+        Add-Check -Name 'tool-packages' -Status 'warning' -Detail 'No tool package specs were supplied.'
+    }
+    else {
+        Add-Check -Name 'tool-packages' -Status 'warning' -Detail 'Tool package packing is skipped by explicit option or package-file mode.'
     }
 
     $gitStatus = Get-GitStatus
@@ -531,6 +613,9 @@ try {
         foreach ($project in $projectMetadata) {
             $packageEntries += New-PackageEntry -Path $project.expectedPackage -SourceKind 'project'
         }
+        foreach ($toolPackage in $toolPackageMetadata) {
+            $packageEntries += New-PackageEntry -Path $toolPackage.expectedPackage -SourceKind 'tool-project'
+        }
     }
     else {
         $outputFull = Convert-ToFullPath -Path $OutputDirectory
@@ -554,7 +639,7 @@ try {
         }
     }
     elseif ($pushEnabled) {
-        Add-Check -Name 'packages' -Status 'passed' -Detail "Package file(s) will be produced from $($projectMetadata.Count) project(s)."
+        Add-Check -Name 'packages' -Status 'passed' -Detail "Package file(s) will be produced from $($projectMetadata.Count) library project(s) and $($toolPackageMetadata.Count) tool package spec(s)."
     }
     else {
         Add-Check -Name 'packages' -Status 'warning' -Detail 'Package push is skipped, so package file discovery is informational.'
@@ -566,6 +651,14 @@ try {
             $packArgs = New-PackArguments -Project $project -Version $versionSource.value
             $plannedCommands += [ordered]@{
                 name = "pack-$($project.packageId)"
+                command = Join-CommandDisplay -FilePath $DotnetCli -Arguments $packArgs
+                executedWhenApply = $true
+            }
+        }
+        foreach ($toolPackage in $toolPackageMetadata) {
+            $packArgs = New-PackArguments -Project $toolPackage -Version $versionSource.value -PackAsTool -PackageId $toolPackage.packageId -ToolCommandName $toolPackage.toolCommandName
+            $plannedCommands += [ordered]@{
+                name = "pack-$($toolPackage.packageId)"
                 command = Join-CommandDisplay -FilePath $DotnetCli -Arguments $packArgs
                 executedWhenApply = $true
             }
@@ -588,7 +681,7 @@ try {
     }
 
     if ($script:hardPreflightFailure) {
-        $result = New-Result -Projects $projectMetadata -Packages $packageEntries -PlannedCommands $plannedCommands -Succeeded $false
+        $result = New-Result -Projects $projectMetadata -ToolPackages $toolPackageMetadata -Packages $packageEntries -PlannedCommands $plannedCommands -Succeeded $false
         if ($Json) {
             $result | ConvertTo-Json -Depth 12
         }
@@ -607,10 +700,16 @@ try {
             foreach ($project in $projectMetadata) {
                 Invoke-ReleaseStep -Name "pack-$($project.packageId)" -FilePath $DotnetCli -Arguments (New-PackArguments -Project $project -Version $versionSource.value)
             }
+            foreach ($toolPackage in $toolPackageMetadata) {
+                Invoke-ReleaseStep -Name "pack-$($toolPackage.packageId)" -FilePath $DotnetCli -Arguments (New-PackArguments -Project $toolPackage -Version $versionSource.value -PackAsTool -PackageId $toolPackage.packageId -ToolCommandName $toolPackage.toolCommandName)
+            }
 
             $packageEntries = @()
             foreach ($project in $projectMetadata) {
                 $packageEntries += New-PackageEntry -Path $project.expectedPackage -SourceKind 'project'
+            }
+            foreach ($toolPackage in $toolPackageMetadata) {
+                $packageEntries += New-PackageEntry -Path $toolPackage.expectedPackage -SourceKind 'tool-project'
             }
         }
 
@@ -626,7 +725,7 @@ try {
         }
     }
 
-    $result = New-Result -Projects $projectMetadata -Packages $packageEntries -PlannedCommands $plannedCommands -Succeeded $true
+    $result = New-Result -Projects $projectMetadata -ToolPackages $toolPackageMetadata -Packages $packageEntries -PlannedCommands $plannedCommands -Succeeded $true
     if ($Json) {
         $result | ConvertTo-Json -Depth 12
     }

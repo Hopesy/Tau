@@ -176,6 +176,17 @@ try {
         ) -Encoding ASCII
     }
 
+    $toolProjectDir = Join-Path $srcDir 'Tau.Ai.Cli'
+    New-Item -ItemType Directory -Force -Path $toolProjectDir | Out-Null
+    Set-Content -LiteralPath (Join-Path $toolProjectDir 'Tau.Ai.Cli.csproj') -Value @(
+        '<Project Sdk="Microsoft.NET.Sdk">',
+        '  <PropertyGroup>',
+        '    <OutputType>Exe</OutputType>',
+        '    <TargetFramework>net10.0</TargetFramework>',
+        '  </PropertyGroup>',
+        '</Project>'
+    ) -Encoding ASCII
+
     $appDir = Join-Path $srcDir 'Tau.CodingAgent'
     New-Item -ItemType Directory -Force -Path $appDir | Out-Null
     Set-Content -LiteralPath (Join-Path $appDir 'Tau.CodingAgent.csproj') -Value @(
@@ -195,18 +206,22 @@ try {
         'Write-Output ($args -join " ")',
         'if ($args.Count -gt 0 -and $args[0] -eq "pack") {',
         '    $project = [System.IO.Path]::GetFileNameWithoutExtension($args[1])',
+        '    $packageId = $project',
         '    $output = "."',
         '    $version = "0.0.0"',
         '    for ($i = 0; $i -lt $args.Count; $i++) {',
         '        if ($args[$i] -eq "--output" -and ($i + 1) -lt $args.Count) {',
         '            $output = $args[$i + 1]',
         '        }',
+        '        elseif ($args[$i].StartsWith("-p:PackageId=", [System.StringComparison]::OrdinalIgnoreCase)) {',
+        '            $packageId = $args[$i].Substring(13)',
+        '        }',
         '        elseif ($args[$i].StartsWith("-p:PackageVersion=", [System.StringComparison]::OrdinalIgnoreCase)) {',
         '            $version = $args[$i].Substring(18)',
         '        }',
         '    }',
         '    New-Item -ItemType Directory -Force -Path $output | Out-Null',
-        '    Set-Content -LiteralPath (Join-Path $output "$project.$version.nupkg") -Value "fake package" -Encoding ASCII',
+        '    Set-Content -LiteralPath (Join-Path $output "$packageId.$version.nupkg") -Value "fake package" -Encoding ASCII',
         '}',
         'exit 0'
     ) -Encoding ASCII
@@ -229,13 +244,18 @@ try {
     $script:results.dryRun = [ordered]@{
         exitCode = $dryRun.exitCode
         projectCount = @($dryRunJson.projects).Count
+        toolPackageCount = @($dryRunJson.toolPackages).Count
         commandNames = Get-CommandNames -Items @($dryRunJson.plannedCommands)
     }
     Assert-Equal -Name 'dry-run exit code' -Actual $dryRun.exitCode -Expected 0
     Assert-Equal -Name 'dry-run schema version' -Actual $dryRunJson.schemaVersion -Expected 1
     Assert-Equal -Name 'dry-run true' -Actual $dryRunJson.dryRun -Expected $true
     Assert-Equal -Name 'default library project count' -Actual @($dryRunJson.projects).Count -Expected 3
+    Assert-Equal -Name 'default tool package count' -Actual @($dryRunJson.toolPackages).Count -Expected 2
     Assert-Equal -Name 'skip push command count' -Actual @($dryRunJson.plannedCommands | Where-Object { $_.name -like 'push-*' }).Count -Expected 0
+    Assert-Matches -Name 'tool pack command uses pack as tool' -Text (@($dryRunJson.plannedCommands | Where-Object { $_.name -like 'pack-Tau.Ai.Cli*' } | ForEach-Object { $_.command }) -join [Environment]::NewLine) -Pattern '-p:PackAsTool=true'
+    Assert-Matches -Name 'tool pack command names include pi-ai' -Text (@($dryRunJson.plannedCommands | Where-Object { $_.name -eq 'pack-Tau.Ai.Cli.PiAiTool' } | ForEach-Object { $_.command }) -join [Environment]::NewLine) -Pattern '-p:ToolCommandName=pi-ai'
+    Assert-Matches -Name 'tool pack command names include tau-ai' -Text (@($dryRunJson.plannedCommands | Where-Object { $_.name -eq 'pack-Tau.Ai.Cli.TauAiTool' } | ForEach-Object { $_.command }) -join [Environment]::NewLine) -Pattern '-p:ToolCommandName=tau-ai'
 
     $env:TAU_TEST_NUGET_API_KEY = 'super-secret-package-key'
     try {
@@ -278,11 +298,17 @@ try {
         exitCode = $apply.exitCode
         commandResultCount = @($applyJson.commandResults).Count
         packageCount = @($applyJson.packages).Count
+        toolPackageCount = @($applyJson.toolPackages).Count
     }
     Assert-Equal -Name 'apply exit code' -Actual $apply.exitCode -Expected 0
     Assert-Equal -Name 'apply succeeded' -Actual $applyJson.succeeded -Expected $true
-    Assert-Matches -Name 'fake dotnet ran pack' -Text $fakeDotnetOutput -Pattern '^pack .*Tau\.Ai\.csproj'
-    Assert-Matches -Name 'fake dotnet ran push' -Text $fakeDotnetOutput -Pattern 'nuget push .*Tau\.Ai\.1\.2\.3\.nupkg'
+    Assert-Matches -Name 'fake dotnet ran pack' -Text $fakeDotnetOutput -Pattern '(?m)^pack .*Tau\.Ai\.csproj'
+    Assert-Matches -Name 'fake dotnet ran tool pack' -Text $fakeDotnetOutput -Pattern '(?m)^pack .*Tau\.Ai\.Cli\.csproj'
+    Assert-Matches -Name 'fake dotnet ran push' -Text $fakeDotnetOutput -Pattern '(?m)^nuget push .*Tau\.Ai\.1\.2\.3\.nupkg'
+    Assert-Matches -Name 'fake dotnet ran tool pack with tool flag' -Text $fakeDotnetOutput -Pattern 'PackAsTool=true'
+    Assert-Matches -Name 'fake dotnet tool pack uses pi-ai command' -Text $fakeDotnetOutput -Pattern 'ToolCommandName=pi-ai'
+    Assert-Matches -Name 'fake dotnet tool pack uses tau-ai command' -Text $fakeDotnetOutput -Pattern 'ToolCommandName=tau-ai'
+    Assert-Equal -Name 'apply tool package count' -Actual @($applyJson.toolPackages).Count -Expected 2
     Assert-Matches -Name 'apply command redacted api key' -Text (@($applyJson.commandResults | ForEach-Object { $_.command }) -join [Environment]::NewLine) -Pattern '<redacted:TAU_TEST_NUGET_API_KEY>'
     Assert-Matches -Name 'apply output preview redacted api key' -Text (@($applyJson.commandResults | ForEach-Object { $_.outputPreview }) -join [Environment]::NewLine) -Pattern '<redacted:TAU_TEST_NUGET_API_KEY>'
     Assert-NotMatches -Name 'apply json does not leak api key' -Text $apply.output -Pattern 'super-secret-package-key'

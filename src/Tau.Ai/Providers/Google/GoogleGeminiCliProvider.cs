@@ -44,6 +44,10 @@ public sealed class GoogleGeminiCliProvider : IStreamProvider
             {
                 await StreamInternalAsync(model, context, options, stream, reasoning: null).ConfigureAwait(false);
             }
+            catch (OperationCanceledException) when (options.Signal.IsCancellationRequested)
+            {
+                StreamOptionHelpers.PushAborted(stream, model, Api);
+            }
             catch (Exception ex)
             {
                 stream.Push(new ErrorEvent(ex.Message));
@@ -61,6 +65,10 @@ public sealed class GoogleGeminiCliProvider : IStreamProvider
             try
             {
                 await StreamInternalAsync(model, context, options, stream, options.Reasoning).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (options.Signal.IsCancellationRequested)
+            {
+                StreamOptionHelpers.PushAborted(stream, model, Api);
             }
             catch (Exception ex)
             {
@@ -172,6 +180,11 @@ public sealed class GoogleGeminiCliProvider : IStreamProvider
         AssistantMessageStream stream,
         ThinkingLevel? reasoning)
     {
+        if (StreamOptionHelpers.PushAbortedIfCanceled(options, stream, model, Api))
+        {
+            return;
+        }
+
         if (string.IsNullOrWhiteSpace(options.ApiKey))
         {
             stream.Push(new ErrorEvent("Google Cloud Code Assist requires OAuth credentials. Import them into auth.json or provide an explicit apiKey payload."));
@@ -179,12 +192,25 @@ public sealed class GoogleGeminiCliProvider : IStreamProvider
         }
 
         var credentials = ParseCredentials(options.ApiKey);
+        var projectId = options is GoogleGeminiCliOptions { ProjectId: { Length: > 0 } configuredProjectId }
+            ? configuredProjectId
+            : credentials.ProjectId;
         var isAntigravity = model.Provider.Equals("google-antigravity", StringComparison.OrdinalIgnoreCase);
         var endpoints = ResolveEndpoints(model, isAntigravity);
-        var body = BuildRequestBody(model, context, credentials.ProjectId, options, reasoning, isAntigravity);
+        var body = await StreamOptionHelpers.ApplyPayloadCallbackAsync(
+            options,
+            model,
+            BuildRequestBody(model, context, projectId, options, reasoning, isAntigravity)).ConfigureAwait(false);
         var json = JsonSerializer.Serialize(body, GoogleGeminiCliRequestJsonContext.Default.DictionaryStringObject);
 
-        using var responseWithEndpoint = await SendWithRetryAsync(model, options, credentials.Token, endpoints, json, isAntigravity).ConfigureAwait(false);
+        using var responseWithEndpoint = await SendWithRetryAsync(
+            model,
+            options,
+            credentials.Token,
+            endpoints,
+            json,
+            isAntigravity,
+            options.Signal).ConfigureAwait(false);
         var initial = new AssistantMessage
         {
             Api = Api,
@@ -197,9 +223,17 @@ public sealed class GoogleGeminiCliProvider : IStreamProvider
         {
             var activeResponse = emptyAttempt == 0
                 ? responseWithEndpoint.Response
-                : await SendSingleAsync(model, options, credentials.Token, responseWithEndpoint.Endpoint, json, isAntigravity).ConfigureAwait(false);
+                : await SendSingleAsync(
+                    model,
+                    options,
+                    credentials.Token,
+                    responseWithEndpoint.Endpoint,
+                    json,
+                    isAntigravity,
+                    options.Signal).ConfigureAwait(false);
 
-            var emitted = await ParseResponseAsync(activeResponse, stream, initial).ConfigureAwait(false);
+            await StreamOptionHelpers.InvokeResponseCallbackAsync(options, model, activeResponse).ConfigureAwait(false);
+            var emitted = await ParseResponseAsync(activeResponse, stream, initial, options.Signal).ConfigureAwait(false);
             if (activeResponse != responseWithEndpoint.Response)
             {
                 activeResponse.Dispose();
@@ -220,20 +254,29 @@ public sealed class GoogleGeminiCliProvider : IStreamProvider
         string token,
         IReadOnlyList<string> endpoints,
         string json,
-        bool isAntigravity)
+        bool isAntigravity,
+        CancellationToken cancellationToken)
     {
         HttpResponseMessage? response = null;
         string? lastError = null;
         var endpointIndex = 0;
         for (var attempt = 0; attempt <= MaxRetries; attempt++)
         {
-            response = await SendSingleAsync(model, options, token, endpoints[endpointIndex], json, isAntigravity).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            response = await SendSingleAsync(
+                model,
+                options,
+                token,
+                endpoints[endpointIndex],
+                json,
+                isAntigravity,
+                cancellationToken).ConfigureAwait(false);
             if (response.IsSuccessStatusCode)
             {
                 return new GeminiCliResponse(response, endpoints[endpointIndex]);
             }
 
-            lastError = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+            lastError = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
             if ((response.StatusCode == HttpStatusCode.Forbidden || response.StatusCode == HttpStatusCode.NotFound) && endpointIndex < endpoints.Count - 1)
             {
                 response.Dispose();
@@ -264,7 +307,7 @@ public sealed class GoogleGeminiCliProvider : IStreamProvider
 
             if (delay > TimeSpan.Zero)
             {
-                await Task.Delay(delay).ConfigureAwait(false);
+                await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
             }
         }
 
@@ -277,7 +320,8 @@ public sealed class GoogleGeminiCliProvider : IStreamProvider
         string token,
         string endpoint,
         string json,
-        bool isAntigravity)
+        bool isAntigravity,
+        CancellationToken cancellationToken)
     {
         var url = $"{endpoint.TrimEnd('/')}/v1internal:streamGenerateContent?alt=sse";
         using var request = new HttpRequestMessage(HttpMethod.Post, url)
@@ -296,26 +340,30 @@ public sealed class GoogleGeminiCliProvider : IStreamProvider
         ApplyHeaders(request, model.Headers);
         ApplyHeaders(request, options.Headers);
 
-        return await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead).ConfigureAwait(false);
+        return await _httpClient.SendAsync(
+            request,
+            HttpCompletionOption.ResponseHeadersRead,
+            cancellationToken).ConfigureAwait(false);
     }
 
     private static async Task<bool> ParseResponseAsync(
         HttpResponseMessage response,
         AssistantMessageStream stream,
-        AssistantMessage initial)
+        AssistantMessage initial,
+        CancellationToken cancellationToken)
     {
         if (!response.IsSuccessStatusCode)
         {
-            var errorBody = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+            var errorBody = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
             stream.Push(new ErrorEvent($"Google Gemini CLI API error {(int)response.StatusCode}: {errorBody}"));
             return true;
         }
 
-        await using var responseStream = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
+        await using var responseStream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
         var parser = new GoogleStreamParser(initial, stream);
         var hasContent = false;
 
-        await foreach (var sse in SseParser.ParseAsync(responseStream))
+        await foreach (var sse in SseParser.ParseAsync(responseStream, cancellationToken))
         {
             if (string.IsNullOrEmpty(sse.Data))
             {
@@ -401,6 +449,10 @@ public sealed class GoogleGeminiCliProvider : IStreamProvider
         if (context.Tools is { Count: > 0 })
         {
             request["tools"] = GoogleMessageConverter.ConvertTools(context.Tools);
+            if (options is GoogleGeminiCliOptions { ToolChoice: { Length: > 0 } toolChoice })
+            {
+                request["toolConfig"] = BuildToolConfig(toolChoice);
+            }
         }
 
         var generationConfig = new Dictionary<string, object>();
@@ -412,9 +464,16 @@ public sealed class GoogleGeminiCliProvider : IStreamProvider
         {
             generationConfig["temperature"] = options.Temperature.Value;
         }
-        if (reasoning.HasValue && model.Reasoning)
+        if (options is GoogleGeminiCliOptions { Thinking: { } thinking } && model.Reasoning)
         {
-            generationConfig["thinkingConfig"] = BuildThinkingConfig(model.Id, reasoning.Value);
+            generationConfig["thinkingConfig"] = BuildThinkingConfig(model.Id, thinking);
+        }
+        else if (reasoning.HasValue && model.Reasoning)
+        {
+            generationConfig["thinkingConfig"] = BuildThinkingConfig(
+                model.Id,
+                reasoning.Value,
+                (options as SimpleStreamOptions)?.ThinkingBudgets);
         }
         if (generationConfig.Count > 0)
         {
@@ -438,29 +497,82 @@ public sealed class GoogleGeminiCliProvider : IStreamProvider
         return body;
     }
 
-    private static Dictionary<string, object> BuildThinkingConfig(string modelId, ThinkingLevel reasoning)
+    private static Dictionary<string, object> BuildToolConfig(string toolChoice) => new()
+    {
+        ["functionCallingConfig"] = new Dictionary<string, object>
+        {
+            ["mode"] = MapToolChoice(toolChoice)
+        }
+    };
+
+    private static string MapToolChoice(string toolChoice) =>
+        toolChoice.Trim().ToLowerInvariant() switch
+        {
+            "none" => "NONE",
+            "any" => "ANY",
+            _ => "AUTO"
+        };
+
+    private static Dictionary<string, object> BuildThinkingConfig(string modelId, GoogleThinkingOptions thinking)
+    {
+        if (!thinking.Enabled)
+        {
+            return GetDisabledThinkingConfig(modelId);
+        }
+
+        var config = new Dictionary<string, object>
+        {
+            ["includeThoughts"] = true
+        };
+
+        if (!string.IsNullOrWhiteSpace(thinking.Level))
+        {
+            config["thinkingLevel"] = thinking.Level!;
+        }
+        else if (thinking.BudgetTokens.HasValue)
+        {
+            config["thinkingBudget"] = thinking.BudgetTokens.Value;
+        }
+
+        return config;
+    }
+
+    private static Dictionary<string, object> GetDisabledThinkingConfig(string modelId)
+    {
+        if (IsGemini3ProModel(modelId))
+        {
+            return new Dictionary<string, object> { ["thinkingLevel"] = "LOW" };
+        }
+
+        if (IsGemini3FlashModel(modelId))
+        {
+            return new Dictionary<string, object> { ["thinkingLevel"] = "MINIMAL" };
+        }
+
+        return new Dictionary<string, object> { ["thinkingBudget"] = 0 };
+    }
+
+    private static Dictionary<string, object> BuildThinkingConfig(string modelId, ThinkingLevel reasoning, ThinkingBudgets? budgets = null)
     {
         if (IsGemini3Model(modelId))
         {
             return new Dictionary<string, object>
             {
-                ["includeThoughts"] = true,
-                ["thinkingLevel"] = GetGemini3ThinkingLevel(modelId, reasoning)
+            ["includeThoughts"] = true,
+            ["thinkingLevel"] = GetGemini3ThinkingLevel(modelId, reasoning)
             };
         }
 
         return new Dictionary<string, object>
         {
             ["includeThoughts"] = true,
-            ["thinkingBudget"] = reasoning switch
-            {
-                ThinkingLevel.Minimal => 1_024,
-                ThinkingLevel.Low => 2_048,
-                ThinkingLevel.Medium => 8_192,
-                ThinkingLevel.High => 16_384,
-                ThinkingLevel.ExtraHigh => 24_576,
-                _ => 2_048
-            }
+            ["thinkingBudget"] = StreamOptionHelpers.GetThinkingBudget(
+                budgets,
+                reasoning,
+                defaultMinimal: 1_024,
+                defaultLow: 2_048,
+                defaultMedium: 8_192,
+                defaultHigh: 16_384)
         };
     }
 
@@ -585,6 +697,13 @@ internal sealed class GeminiCliResponse : IDisposable
     public string Endpoint { get; }
 
     public void Dispose() => Response.Dispose();
+}
+
+public record GoogleGeminiCliOptions : StreamOptions
+{
+    public string? ToolChoice { get; init; }
+    public GoogleThinkingOptions? Thinking { get; init; }
+    public string? ProjectId { get; init; }
 }
 
 [System.Text.Json.Serialization.JsonSourceGenerationOptions(

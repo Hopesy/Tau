@@ -5,7 +5,6 @@ namespace Tau.Ai.Registry;
 
 public sealed class ModelConfigurationStore
 {
-    private const string DefaultApi = "openai-chat-completions";
     private readonly string[] _searchPaths;
 
     public ModelConfigurationStore(IEnumerable<string>? searchPaths = null)
@@ -59,12 +58,14 @@ public sealed class ModelConfigurationStore
             var apiKey = ResolveConfigValue(GetString(providerConfig, "apiKey"));
             var authHeader = GetBool(providerConfig, "authHeader") ?? false;
             var headers = ResolveHeaders(ParseStringDictionary(providerConfig, "headers"));
+            var options = ParseRequestOptions(providerConfig);
 
             if (providerConfig.TryGetProperty("modelOverrides", out var overrides) &&
                 overrides.ValueKind == JsonValueKind.Object &&
                 TryGetObjectProperty(overrides, model.Id, out var overrideConfig))
             {
                 headers = MergeHeaders(headers, ResolveHeaders(ParseStringDictionary(overrideConfig, "headers")));
+                options = MergeRequestOptions(options, ParseRequestOptions(overrideConfig));
             }
 
             if (providerConfig.TryGetProperty("models", out var configuredModels) &&
@@ -77,12 +78,13 @@ public sealed class ModelConfigurationStore
                         model.Id.Equals(modelId, StringComparison.OrdinalIgnoreCase))
                     {
                         headers = MergeHeaders(headers, ResolveHeaders(ParseStringDictionary(configuredModel, "headers")));
+                        options = MergeRequestOptions(options, ParseRequestOptions(configuredModel));
                         break;
                     }
                 }
             }
 
-            return new ModelRequestConfiguration(apiKey, headers, authHeader);
+            return new ModelRequestConfiguration(apiKey, headers, authHeader, options);
         }
     }
 
@@ -141,6 +143,31 @@ public sealed class ModelConfigurationStore
         }
     }
 
+    internal ModelRequestConfigurationStatus InspectProviderConfigurationStatus(string provider)
+    {
+        var doc = LoadDocument();
+        if (doc is null)
+        {
+            return ModelRequestConfigurationStatus.Empty;
+        }
+
+        using (doc)
+        {
+            if (!TryGetProviders(doc.RootElement, out var providers) ||
+                !TryGetObjectProperty(providers, provider, out var providerConfig))
+            {
+                return ModelRequestConfigurationStatus.Empty;
+            }
+
+            var providerHeaders = ParseStringDictionary(providerConfig, "headers");
+            return new ModelRequestConfigurationStatus(
+                HasConfiguredValue(GetString(providerConfig, "apiKey")),
+                HasCredentialHeader(providerHeaders),
+                IsCommandBackedValue(GetString(providerConfig, "apiKey")) ||
+                HasCommandBackedCredentialHeader(providerHeaders));
+        }
+    }
+
     internal IReadOnlyList<DynamicProviderRegistration> GetDynamicProviderRegistrations()
     {
         var doc = LoadDocument();
@@ -175,7 +202,7 @@ public sealed class ModelConfigurationStore
         JsonElement providerConfig,
         Dictionary<string, DynamicProviderRegistration> registrations)
     {
-        var providerApi = NormalizeApi(GetString(providerConfig, "api"));
+        var providerApi = ModelApiNames.Normalize(GetString(providerConfig, "api"));
         var providerBaseUrl = GetString(providerConfig, "baseUrl");
         var providerRequestPath = GetRequestPath(providerConfig);
         var providerIsOpenAiCompatible = IsOpenAiCompatibleRegistration(providerConfig);
@@ -203,7 +230,7 @@ public sealed class ModelConfigurationStore
                 continue;
             }
 
-            var modelApi = NormalizeApi(GetString(configuredModel, "api"));
+            var modelApi = ModelApiNames.Normalize(GetString(configuredModel, "api"));
             var api = modelApi ?? providerApi;
             var baseUrl = GetString(configuredModel, "baseUrl") ?? providerBaseUrl;
             var requestPath = GetString(configuredModel, "requestPath") is { } modelRequestPath
@@ -225,7 +252,7 @@ public sealed class ModelConfigurationStore
         JsonElement providerConfig,
         Dictionary<string, Dictionary<string, Model>> models)
     {
-        var providerApi = NormalizeApi(GetString(providerConfig, "api"));
+        var providerApi = ModelApiNames.Normalize(GetString(providerConfig, "api"));
         var providerBaseUrl = GetString(providerConfig, "baseUrl");
         var providerHeaders = ParseStringDictionary(providerConfig, "headers");
         var providerCompat = ParseCompat(providerConfig, "compat");
@@ -288,7 +315,7 @@ public sealed class ModelConfigurationStore
             return;
         }
 
-        var defaultApi = providerApi ?? bucket.Values.FirstOrDefault()?.Api ?? DefaultApi;
+        var defaultApi = providerApi ?? bucket.Values.FirstOrDefault()?.Api ?? ModelApiNames.OpenAiChatCompletions;
         foreach (var configuredModel in configuredModels.EnumerateArray())
         {
             if (configuredModel.ValueKind != JsonValueKind.Object ||
@@ -301,7 +328,7 @@ public sealed class ModelConfigurationStore
             {
                 Id = modelId!,
                 Name = GetString(configuredModel, "name") ?? modelId!,
-                Api = NormalizeApi(GetString(configuredModel, "api")) ?? defaultApi,
+                Api = ModelApiNames.Normalize(GetString(configuredModel, "api")) ?? defaultApi,
                 Provider = providerName,
                 BaseUrl = GetString(configuredModel, "baseUrl") ?? providerBaseUrl ?? string.Empty,
                 Reasoning = GetBool(configuredModel, "reasoning") ?? false,
@@ -467,6 +494,210 @@ public sealed class ModelConfigurationStore
         }
 
         return result.Count == 0 ? null : result;
+    }
+
+    private static ModelRequestOptionsConfiguration ParseRequestOptions(JsonElement element)
+    {
+        if (!element.TryGetProperty("options", out var options) || options.ValueKind != JsonValueKind.Object)
+        {
+            return ModelRequestOptionsConfiguration.Empty;
+        }
+
+        return new ModelRequestOptionsConfiguration(
+            Temperature: GetFloat(options, "temperature"),
+            MaxTokens: GetInt(options, "maxTokens"),
+            TopP: GetFloat(options, "topP"),
+            Transport: ParseEnum<StreamTransport>(GetString(options, "transport")),
+            CacheRetention: ParseEnum<CacheRetention>(GetString(options, "cacheRetention")),
+            SessionId: GetString(options, "sessionId"),
+            MaxRetryDelay: ParseMaxRetryDelay(options),
+            Metadata: ParseObjectDictionary(options, "metadata"),
+            Reasoning: ParseEnum<ThinkingLevel>(GetString(options, "reasoning")),
+            ThinkingBudgets: ParseThinkingBudgets(options),
+            ProviderSpecific: ParseProviderSpecificOptions(options));
+    }
+
+    private static ModelRequestOptionsConfiguration MergeRequestOptions(
+        ModelRequestOptionsConfiguration baseOptions,
+        ModelRequestOptionsConfiguration overrideOptions)
+    {
+        if (ReferenceEquals(baseOptions, ModelRequestOptionsConfiguration.Empty))
+        {
+            return overrideOptions;
+        }
+
+        if (ReferenceEquals(overrideOptions, ModelRequestOptionsConfiguration.Empty))
+        {
+            return baseOptions;
+        }
+
+        return new ModelRequestOptionsConfiguration(
+            Temperature: overrideOptions.Temperature ?? baseOptions.Temperature,
+            MaxTokens: overrideOptions.MaxTokens ?? baseOptions.MaxTokens,
+            TopP: overrideOptions.TopP ?? baseOptions.TopP,
+            Transport: overrideOptions.Transport ?? baseOptions.Transport,
+            CacheRetention: overrideOptions.CacheRetention ?? baseOptions.CacheRetention,
+            SessionId: overrideOptions.SessionId ?? baseOptions.SessionId,
+            MaxRetryDelay: overrideOptions.MaxRetryDelay ?? baseOptions.MaxRetryDelay,
+            Metadata: MergeObjectDictionaries(baseOptions.Metadata, overrideOptions.Metadata),
+            Reasoning: overrideOptions.Reasoning ?? baseOptions.Reasoning,
+            ThinkingBudgets: MergeThinkingBudgets(baseOptions.ThinkingBudgets, overrideOptions.ThinkingBudgets),
+            ProviderSpecific: MergeProviderSpecificOptions(baseOptions.ProviderSpecific, overrideOptions.ProviderSpecific));
+    }
+
+    private static ModelProviderSpecificOptionsConfiguration? ParseProviderSpecificOptions(JsonElement options)
+    {
+        var parsed = new ModelProviderSpecificOptionsConfiguration(
+            ReasoningEffort: GetString(options, "reasoningEffort"),
+            ReasoningSummary: GetString(options, "reasoningSummary"),
+            ServiceTier: GetString(options, "serviceTier"),
+            TextVerbosity: GetString(options, "textVerbosity"),
+            PromptMode: GetString(options, "promptMode"),
+            ToolChoice: ParseToolChoice(options),
+            ThinkingEnabled: GetBool(options, "thinkingEnabled"),
+            ThinkingBudgetTokens: GetInt(options, "thinkingBudgetTokens"),
+            Effort: GetString(options, "effort"),
+            ThinkingDisplay: GetString(options, "thinkingDisplay"),
+            ThinkingLevel: GetString(options, "thinkingLevel"),
+            InterleavedThinking: GetBool(options, "interleavedThinking"),
+            AzureApiVersion: GetString(options, "azureApiVersion"),
+            AzureResourceName: GetString(options, "azureResourceName"),
+            AzureBaseUrl: GetString(options, "azureBaseUrl"),
+            AzureDeploymentName: GetString(options, "azureDeploymentName"),
+            Project: GetString(options, "project"),
+            Location: GetString(options, "location"),
+            ProjectId: GetString(options, "projectId"));
+
+        return parsed.IsEmpty ? null : parsed;
+    }
+
+    private static ModelProviderSpecificOptionsConfiguration? MergeProviderSpecificOptions(
+        ModelProviderSpecificOptionsConfiguration? baseOptions,
+        ModelProviderSpecificOptionsConfiguration? overrideOptions)
+    {
+        if (baseOptions is null)
+        {
+            return overrideOptions;
+        }
+
+        if (overrideOptions is null)
+        {
+            return baseOptions;
+        }
+
+        return new ModelProviderSpecificOptionsConfiguration(
+            ReasoningEffort: overrideOptions.ReasoningEffort ?? baseOptions.ReasoningEffort,
+            ReasoningSummary: overrideOptions.ReasoningSummary ?? baseOptions.ReasoningSummary,
+            ServiceTier: overrideOptions.ServiceTier ?? baseOptions.ServiceTier,
+            TextVerbosity: overrideOptions.TextVerbosity ?? baseOptions.TextVerbosity,
+            PromptMode: overrideOptions.PromptMode ?? baseOptions.PromptMode,
+            ToolChoice: overrideOptions.ToolChoice ?? baseOptions.ToolChoice,
+            ThinkingEnabled: overrideOptions.ThinkingEnabled ?? baseOptions.ThinkingEnabled,
+            ThinkingBudgetTokens: overrideOptions.ThinkingBudgetTokens ?? baseOptions.ThinkingBudgetTokens,
+            Effort: overrideOptions.Effort ?? baseOptions.Effort,
+            ThinkingDisplay: overrideOptions.ThinkingDisplay ?? baseOptions.ThinkingDisplay,
+            ThinkingLevel: overrideOptions.ThinkingLevel ?? baseOptions.ThinkingLevel,
+            InterleavedThinking: overrideOptions.InterleavedThinking ?? baseOptions.InterleavedThinking,
+            AzureApiVersion: overrideOptions.AzureApiVersion ?? baseOptions.AzureApiVersion,
+            AzureResourceName: overrideOptions.AzureResourceName ?? baseOptions.AzureResourceName,
+            AzureBaseUrl: overrideOptions.AzureBaseUrl ?? baseOptions.AzureBaseUrl,
+            AzureDeploymentName: overrideOptions.AzureDeploymentName ?? baseOptions.AzureDeploymentName,
+            Project: overrideOptions.Project ?? baseOptions.Project,
+            Location: overrideOptions.Location ?? baseOptions.Location,
+            ProjectId: overrideOptions.ProjectId ?? baseOptions.ProjectId);
+    }
+
+    private static ModelToolChoiceConfiguration? ParseToolChoice(JsonElement options)
+    {
+        if (!options.TryGetProperty("toolChoice", out var toolChoice))
+        {
+            return null;
+        }
+
+        if (toolChoice.ValueKind == JsonValueKind.String)
+        {
+            var value = toolChoice.GetString();
+            return string.IsNullOrWhiteSpace(value)
+                ? null
+                : new ModelToolChoiceConfiguration(value);
+        }
+
+        if (toolChoice.ValueKind == JsonValueKind.Object &&
+            string.Equals(GetString(toolChoice, "type"), "function", StringComparison.Ordinal) &&
+            toolChoice.TryGetProperty("function", out var function) &&
+            function.ValueKind == JsonValueKind.Object)
+        {
+            var name = GetString(function, "name");
+            return string.IsNullOrWhiteSpace(name)
+                ? null
+                : new ModelToolChoiceConfiguration("function", FunctionName: name);
+        }
+
+        if (toolChoice.ValueKind == JsonValueKind.Object &&
+            string.Equals(GetString(toolChoice, "type"), "tool", StringComparison.Ordinal))
+        {
+            var name = GetString(toolChoice, "name");
+            return string.IsNullOrWhiteSpace(name)
+                ? null
+                : new ModelToolChoiceConfiguration("tool", ToolName: name);
+        }
+
+        return null;
+    }
+
+    private static TimeSpan? ParseMaxRetryDelay(JsonElement options)
+    {
+        var delayMs = GetInt(options, "maxRetryDelayMs");
+        if (delayMs is null)
+        {
+            return null;
+        }
+
+        return TimeSpan.FromMilliseconds(Math.Max(0, delayMs.Value));
+    }
+
+    private static ThinkingBudgets? ParseThinkingBudgets(JsonElement options)
+    {
+        if (!options.TryGetProperty("thinkingBudgets", out var budgets) || budgets.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        var parsed = new ThinkingBudgets
+        {
+            Minimal = GetInt(budgets, "minimal"),
+            Low = GetInt(budgets, "low"),
+            Medium = GetInt(budgets, "medium"),
+            High = GetInt(budgets, "high")
+        };
+
+        return parsed.Minimal is null &&
+               parsed.Low is null &&
+               parsed.Medium is null &&
+               parsed.High is null
+            ? null
+            : parsed;
+    }
+
+    private static ThinkingBudgets? MergeThinkingBudgets(ThinkingBudgets? baseBudgets, ThinkingBudgets? overrideBudgets)
+    {
+        if (baseBudgets is null)
+        {
+            return overrideBudgets;
+        }
+
+        if (overrideBudgets is null)
+        {
+            return baseBudgets;
+        }
+
+        return new ThinkingBudgets
+        {
+            Minimal = overrideBudgets.Minimal ?? baseBudgets.Minimal,
+            Low = overrideBudgets.Low ?? baseBudgets.Low,
+            Medium = overrideBudgets.Medium ?? baseBudgets.Medium,
+            High = overrideBudgets.High ?? baseBudgets.High
+        };
     }
 
     private static IReadOnlyList<string> ParseInputModalities(JsonElement element)
@@ -772,21 +1003,6 @@ public sealed class ModelConfigurationStore
         }
     }
 
-    private static string? NormalizeApi(string? api)
-    {
-        if (string.IsNullOrWhiteSpace(api))
-        {
-            return null;
-        }
-
-        return api.Trim() switch
-        {
-            "openai-completions" => DefaultApi,
-            "openai-compatible" => DefaultApi,
-            var value => value
-        };
-    }
-
     private static bool IsOpenAiCompatibleRegistration(JsonElement element)
     {
         var kind = GetString(element, "apiKind") ?? GetString(element, "apiType");
@@ -799,7 +1015,7 @@ public sealed class ModelConfigurationStore
         {
             "openai-compatible" => true,
             "openai-completions" => true,
-            DefaultApi => true,
+            ModelApiNames.OpenAiChatCompletions => true,
             _ => false
         };
     }
@@ -867,6 +1083,41 @@ public sealed class ModelConfigurationStore
             : null;
     }
 
+    private static float? GetFloat(JsonElement element, string propertyName)
+    {
+        return element.TryGetProperty(propertyName, out var property) &&
+               property.ValueKind == JsonValueKind.Number &&
+               property.TryGetSingle(out var value)
+            ? value
+            : null;
+    }
+
+    private static TEnum? ParseEnum<TEnum>(string? value)
+        where TEnum : struct, Enum
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        var normalized = value.Trim().Replace("-", string.Empty, StringComparison.Ordinal);
+        if (typeof(TEnum) == typeof(ThinkingLevel) &&
+            string.Equals(normalized, "xhigh", StringComparison.OrdinalIgnoreCase))
+        {
+            return (TEnum)(object)ThinkingLevel.ExtraHigh;
+        }
+
+        foreach (var candidate in Enum.GetValues<TEnum>())
+        {
+            if (string.Equals(candidate.ToString(), normalized, StringComparison.OrdinalIgnoreCase))
+            {
+                return candidate;
+            }
+        }
+
+        return null;
+    }
+
     private static IEnumerable<string> GetDefaultSearchPaths()
     {
         var configured = Environment.GetEnvironmentVariable("TAU_MODELS_FILE");
@@ -888,9 +1139,90 @@ public sealed class ModelConfigurationStore
 internal sealed record ModelRequestConfiguration(
     string? ApiKey,
     IDictionary<string, string>? Headers,
-    bool AuthHeader)
+    bool AuthHeader,
+    ModelRequestOptionsConfiguration Options)
 {
-    public static ModelRequestConfiguration Empty { get; } = new(null, null, false);
+    public static ModelRequestConfiguration Empty { get; } = new(
+        null,
+        null,
+        false,
+        ModelRequestOptionsConfiguration.Empty);
+}
+
+internal sealed record ModelRequestOptionsConfiguration(
+    float? Temperature,
+    int? MaxTokens,
+    float? TopP,
+    StreamTransport? Transport,
+    CacheRetention? CacheRetention,
+    string? SessionId,
+    TimeSpan? MaxRetryDelay,
+    IDictionary<string, object>? Metadata,
+    ThinkingLevel? Reasoning,
+    ThinkingBudgets? ThinkingBudgets,
+    ModelProviderSpecificOptionsConfiguration? ProviderSpecific)
+{
+    public static ModelRequestOptionsConfiguration Empty { get; } = new(
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null);
+}
+
+internal sealed record ModelProviderSpecificOptionsConfiguration(
+    string? ReasoningEffort,
+    string? ReasoningSummary,
+    string? ServiceTier,
+    string? TextVerbosity,
+    string? PromptMode,
+    ModelToolChoiceConfiguration? ToolChoice,
+    bool? ThinkingEnabled,
+    int? ThinkingBudgetTokens,
+    string? Effort,
+    string? ThinkingDisplay,
+    string? ThinkingLevel,
+    bool? InterleavedThinking,
+    string? AzureApiVersion,
+    string? AzureResourceName,
+    string? AzureBaseUrl,
+    string? AzureDeploymentName,
+    string? Project,
+    string? Location,
+    string? ProjectId)
+{
+    public bool IsEmpty =>
+        string.IsNullOrWhiteSpace(ReasoningEffort) &&
+        string.IsNullOrWhiteSpace(ReasoningSummary) &&
+        string.IsNullOrWhiteSpace(ServiceTier) &&
+        string.IsNullOrWhiteSpace(TextVerbosity) &&
+        string.IsNullOrWhiteSpace(PromptMode) &&
+        ToolChoice is null &&
+        ThinkingEnabled is null &&
+        ThinkingBudgetTokens is null &&
+        string.IsNullOrWhiteSpace(Effort) &&
+        string.IsNullOrWhiteSpace(ThinkingDisplay) &&
+        string.IsNullOrWhiteSpace(ThinkingLevel) &&
+        InterleavedThinking is null &&
+        string.IsNullOrWhiteSpace(AzureApiVersion) &&
+        string.IsNullOrWhiteSpace(AzureResourceName) &&
+        string.IsNullOrWhiteSpace(AzureBaseUrl) &&
+        string.IsNullOrWhiteSpace(AzureDeploymentName) &&
+        string.IsNullOrWhiteSpace(Project) &&
+        string.IsNullOrWhiteSpace(Location) &&
+        string.IsNullOrWhiteSpace(ProjectId);
+}
+
+internal sealed record ModelToolChoiceConfiguration(string Kind, string? FunctionName = null, string? ToolName = null)
+{
+    public bool IsFunction => FunctionName is not null;
+    public bool IsTool => ToolName is not null;
 }
 
 internal sealed record ModelRequestConfigurationStatus(

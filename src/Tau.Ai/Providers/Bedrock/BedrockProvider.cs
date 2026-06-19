@@ -39,6 +39,10 @@ public sealed class BedrockProvider : IStreamProvider
             {
                 await StreamInternalAsync(model, context, ToBedrockOptions(options), stream).ConfigureAwait(false);
             }
+            catch (OperationCanceledException) when (options.Signal.IsCancellationRequested)
+            {
+                StreamOptionHelpers.PushAborted(stream, model, Api);
+            }
             catch (Exception ex)
             {
                 stream.Push(new ErrorEvent(ex.Message));
@@ -55,12 +59,16 @@ public sealed class BedrockProvider : IStreamProvider
             MaxTokens = options.MaxTokens ?? model.MaxOutputTokens,
             TopP = options.TopP,
             ApiKey = options.ApiKey,
+            Signal = options.Signal,
+            OnResponse = options.OnResponse,
+            OnPayload = options.OnPayload,
             CacheRetention = options.CacheRetention,
             SessionId = options.SessionId,
             Headers = options.Headers,
             MaxRetryDelay = options.MaxRetryDelay,
             Metadata = options.Metadata,
-            Reasoning = model.Reasoning ? options.Reasoning : null
+            Reasoning = model.Reasoning ? options.Reasoning : null,
+            ThinkingBudgets = options.ThinkingBudgets
         };
         return Stream(model, context, bedrockOptions);
     }
@@ -71,10 +79,18 @@ public sealed class BedrockProvider : IStreamProvider
         BedrockOptions options,
         AssistantMessageStream stream)
     {
+        if (StreamOptionHelpers.PushAbortedIfCanceled(options, stream, model, Api))
+        {
+            return;
+        }
+
         var profile = BedrockProfileCredentialsResolver.Load(options);
         var region = ResolveRegion(options, profile);
         var requestUri = BuildRequestUri(model, region);
-        var body = BedrockMessageConverter.BuildRequestBody(model, context, options);
+        var body = await StreamOptionHelpers.ApplyPayloadCallbackAsync(
+            options,
+            model,
+            BedrockMessageConverter.BuildRequestBody(model, context, options)).ConfigureAwait(false);
         var json = JsonSerializer.Serialize(body, BedrockJsonContext.Default.DictionaryStringObject);
         var payload = Encoding.UTF8.GetBytes(json);
 
@@ -108,15 +124,16 @@ public sealed class BedrockProvider : IStreamProvider
             }
         }
 
-        using var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead).ConfigureAwait(false);
+        using var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, options.Signal).ConfigureAwait(false);
+        await StreamOptionHelpers.InvokeResponseCallbackAsync(options, model, response).ConfigureAwait(false);
         if (!response.IsSuccessStatusCode)
         {
-            var errorBody = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+            var errorBody = await response.Content.ReadAsStringAsync(options.Signal).ConfigureAwait(false);
             stream.Push(new ErrorEvent($"Amazon Bedrock error {(int)response.StatusCode}: {errorBody}"));
             return;
         }
 
-        await using var responseStream = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
+        await using var responseStream = await response.Content.ReadAsStreamAsync(options.Signal).ConfigureAwait(false);
         var initial = new AssistantMessage
         {
             Api = Api,
@@ -126,7 +143,7 @@ public sealed class BedrockProvider : IStreamProvider
         };
         var parser = new BedrockStreamParser(initial, stream);
 
-        await foreach (var message in BedrockEventStreamParser.ParseAsync(responseStream))
+        await foreach (var message in BedrockEventStreamParser.ParseAsync(responseStream, options.Signal))
         {
             parser.ParseMessage(message);
             if (parser.Completed)
@@ -151,6 +168,9 @@ public sealed class BedrockProvider : IStreamProvider
             MaxTokens = options.MaxTokens,
             TopP = options.TopP,
             ApiKey = options.ApiKey,
+            Signal = options.Signal,
+            OnResponse = options.OnResponse,
+            OnPayload = options.OnPayload,
             CacheRetention = options.CacheRetention,
             SessionId = options.SessionId,
             Headers = options.Headers,
@@ -391,6 +411,7 @@ public record BedrockOptions : StreamOptions
     public string? ToolName { get; init; }
     public ThinkingLevel? Reasoning { get; init; }
     public int? ThinkingBudgetTokens { get; init; }
+    public ThinkingBudgets? ThinkingBudgets { get; init; }
     public string? ThinkingDisplay { get; init; }
     public IDictionary<string, string>? RequestMetadata { get; init; }
 }

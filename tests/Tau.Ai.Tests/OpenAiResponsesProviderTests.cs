@@ -193,6 +193,30 @@ public sealed class OpenAiResponsesProviderTests
         Assert.Equal("data:image/png;base64,dGVzdA==", image.GetProperty("image_url").GetString());
     }
 
+    [Fact]
+    public async Task Stream_WhenSignalAlreadyCancelledTerminatesWithAbortedAssistant()
+    {
+        using var handler = new StubHandler(_ =>
+            throw new InvalidOperationException("HTTP should not be called when cancelled"));
+        using var client = new HttpClient(handler);
+        var provider = new OpenAiResponsesProvider(client);
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        var stream = provider.Stream(
+            BuildResponsesModel(),
+            new LlmContext { Messages = [new UserMessage("hi")] },
+            new StreamOptions { ApiKey = "test-key", Signal = cts.Token });
+        var events = await CollectAsync(stream);
+
+        var error = Assert.Single(events.OfType<ErrorEvent>());
+        Assert.Equal(StreamOptionHelpers.AbortedErrorMessage, error.Error);
+        var response = await stream.ResultAsync;
+        Assert.Equal(StopReason.Aborted, response.StopReason);
+        Assert.Equal(StreamOptionHelpers.AbortedErrorMessage, response.ErrorMessage);
+        Assert.Empty(handler.Requests);
+    }
+
     internal static Model BuildResponsesModel() => new()
     {
         Id = "gpt-5.4",

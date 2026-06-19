@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
+using Tau.Ai.Providers;
 using Tau.Ai.Providers.OpenAi;
 
 namespace Tau.Ai.Tests;
@@ -60,6 +61,36 @@ public sealed class OpenAiProviderSerializationTests
         Assert.NotNull(handler.CapturedBody);
         Assert.Contains("\"tools\"", handler.CapturedBody, StringComparison.Ordinal);
         Assert.Contains("\"function\"", handler.CapturedBody, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Stream_WhenSignalAlreadyCancelledTerminatesWithAbortedAssistant()
+    {
+        using var handler = new StubHandler();
+        using var client = new HttpClient(handler);
+        var provider = new OpenAiProvider(client);
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        var stream = provider.Stream(
+            new Model
+            {
+                Id = "gpt-5.4",
+                Name = "GPT-5.4",
+                Api = "openai-chat-completions",
+                Provider = "openai",
+                BaseUrl = "https://example.invalid/v1"
+            },
+            new LlmContext { Messages = [new UserMessage("hi")] },
+            new StreamOptions { ApiKey = "test-key", Signal = cts.Token });
+        var events = await DrainEventsAsync(stream);
+
+        var error = Assert.Single(events.OfType<ErrorEvent>());
+        Assert.Equal(StreamOptionHelpers.AbortedErrorMessage, error.Error);
+        var response = await stream.ResultAsync;
+        Assert.Equal(StopReason.Aborted, response.StopReason);
+        Assert.Equal(StreamOptionHelpers.AbortedErrorMessage, response.ErrorMessage);
+        Assert.Empty(handler.SawRequests);
     }
 
     [Fact]
@@ -179,6 +210,72 @@ public sealed class OpenAiProviderSerializationTests
     }
 
     [Fact]
+    public async Task Stream_AppliesPayloadCallbackAndResponseCallback()
+    {
+        using var handler = new StubHandler
+        {
+            Response = new HttpResponseMessage(HttpStatusCode.BadRequest)
+            {
+                Content = new StringContent("stubbed-openai-error", Encoding.UTF8, "text/plain"),
+                Headers =
+                {
+                    { "x-request-id", "req_123" }
+                }
+            }
+        };
+        using var client = new HttpClient(handler);
+        var provider = new OpenAiProvider(client);
+
+        var callbacks = new List<(ProviderResponse Response, string ModelId)>();
+        await DrainAsync(provider.Stream(
+            new Model
+            {
+                Id = "gpt-5.4",
+                Name = "GPT-5.4",
+                Api = "openai-chat-completions",
+                Provider = "openai",
+                BaseUrl = "https://example.invalid/v1"
+            },
+            new LlmContext { Messages = [new UserMessage("original")] },
+            new StreamOptions
+            {
+                ApiKey = "test-key",
+                OnPayload = (payload, model) =>
+                {
+                    var body = Assert.IsType<Dictionary<string, object>>(payload);
+                    Assert.Equal("gpt-5.4", body["model"]);
+                    return ValueTask.FromResult<object?>(new Dictionary<string, object>
+                    {
+                        ["model"] = $"{model.Id}-payload",
+                        ["stream"] = true,
+                        ["messages"] = new List<object>
+                        {
+                            new Dictionary<string, object>
+                            {
+                                ["role"] = "user",
+                                ["content"] = "replaced"
+                            }
+                        }
+                    });
+                },
+                OnResponse = (response, model) =>
+                {
+                    callbacks.Add((response, model.Id));
+                    return ValueTask.CompletedTask;
+                }
+            }));
+
+        using var doc = JsonDocument.Parse(handler.CapturedBody!);
+        var root = doc.RootElement;
+        Assert.Equal("gpt-5.4-payload", root.GetProperty("model").GetString());
+        Assert.Equal("replaced", root.GetProperty("messages")[0].GetProperty("content").GetString());
+        var callback = Assert.Single(callbacks);
+        Assert.Equal(400, callback.Response.Status);
+        Assert.Equal("req_123", callback.Response.Headers["x-request-id"]);
+        Assert.Equal("gpt-5.4", callback.ModelId);
+    }
+
+    [Fact]
     public async Task Stream_WithVercelGatewayRouting_AddsProviderOptions()
     {
         using var handler = new StubHandler();
@@ -265,14 +362,17 @@ public sealed class OpenAiProviderSerializationTests
     private sealed class StubHandler : HttpMessageHandler
     {
         public string? CapturedBody { get; private set; }
+        public HttpResponseMessage? Response { get; set; }
+        public List<HttpRequestMessage> SawRequests { get; } = [];
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
+            SawRequests.Add(request);
             CapturedBody = request.Content is null
                 ? null
                 : await request.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
 
-            return new HttpResponseMessage(HttpStatusCode.BadRequest)
+            return Response ?? new HttpResponseMessage(HttpStatusCode.BadRequest)
             {
                 Content = new StringContent("stubbed-openai-error", Encoding.UTF8, "text/plain")
             };
@@ -284,6 +384,17 @@ public sealed class OpenAiProviderSerializationTests
         await foreach (var _ in stream)
         {
         }
+    }
+
+    private static async Task<List<StreamEvent>> DrainEventsAsync(IAsyncEnumerable<StreamEvent> stream)
+    {
+        var events = new List<StreamEvent>();
+        await foreach (var evt in stream)
+        {
+            events.Add(evt);
+        }
+
+        return events;
     }
 
     private static string CollectJsonStrings(JsonElement element)

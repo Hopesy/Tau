@@ -102,13 +102,28 @@ public static class EnvironmentApiKeyResolver
             return true;
         }
 
-        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        if (string.IsNullOrWhiteSpace(home))
+        var applicationData = FirstNonEmpty(
+            Environment.GetEnvironmentVariable("APPDATA"),
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData));
+        if (!string.IsNullOrWhiteSpace(applicationData))
         {
-            return false;
+            var adcPath = Path.Combine(applicationData, "gcloud", "application_default_credentials.json");
+            if (File.Exists(adcPath))
+            {
+                return true;
+            }
         }
 
-        var adcPath = Path.Combine(home, ".config", "gcloud", "application_default_credentials.json");
-        return File.Exists(adcPath);
+        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        if (!string.IsNullOrWhiteSpace(home))
+        {
+            var adcPath = Path.Combine(home, ".config", "gcloud", "application_default_credentials.json");
+            if (File.Exists(adcPath))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 }

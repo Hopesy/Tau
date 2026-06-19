@@ -78,28 +78,27 @@ public sealed class ProviderAuthResolver
 
                 if (entry.OAuth.IsExpired())
                 {
-                    return new ProviderAuthStatus(provider, false, "auth.json oauth", true, true, "OAuth credentials exist but are expired; refresh/login flow is not yet fully ported for this provider.");
+                    return new ProviderAuthStatus(provider, false, "auth.json oauth", true, true, "OAuth credentials exist but are expired; refresh/login flow is available for this provider.");
                 }
 
                 return new ProviderAuthStatus(provider, true, "auth.json oauth", true, true, "OAuth credentials found in auth.json.");
             }
         }
 
-        if (model is not null)
+        var requestConfig = model is null
+            ? _configurationStore.InspectProviderConfigurationStatus(provider)
+            : _configurationStore.InspectRequestConfigurationStatus(model);
+        if (requestConfig.IsConfigured)
         {
-            var requestConfig = _configurationStore.InspectRequestConfigurationStatus(model);
-            if (requestConfig.IsConfigured)
-            {
-                var detail = requestConfig.HasCommandBackedSecret
-                    ? "models.json contains command-backed credential configuration; status checks do not execute it or reveal its value."
-                    : "models.json contains request credential configuration; status checks do not reveal its value.";
-                return new ProviderAuthStatus(provider, true, "models.json", false, false, detail);
-            }
+            var detail = requestConfig.HasCommandBackedSecret
+                ? "models.json contains command-backed credential configuration; status checks do not execute it or reveal its value."
+                : "models.json contains request credential configuration; status checks do not reveal its value.";
+            return new ProviderAuthStatus(provider, true, "models.json", false, false, detail);
         }
 
         var canLogin = _oauthProviders.TryGet(provider) is not null;
         var message = canLogin
-            ? "No credentials found. OAuth provider metadata exists, but login flow is not yet ported; use environment variables or auth.json."
+            ? "No credentials found. OAuth login is available for this provider; use the login flow, environment variables, auth.json, or models.json."
             : "No credentials found. Use environment variables, auth.json, or models.json provider configuration.";
         return new ProviderAuthStatus(provider, false, "none", false, canLogin, message);
     }

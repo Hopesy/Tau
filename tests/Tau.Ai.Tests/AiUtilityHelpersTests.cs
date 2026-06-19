@@ -31,6 +31,31 @@ public sealed class AiUtilityHelpersTests
         Assert.Equal("content-1", headers["x-content-trace"]);
     }
 
+    [Fact]
+    public void AiHeaderUtilities_ToDictionary_CopiesHttpHeadersOnlyWhenRequested()
+    {
+        using var response = new HttpResponseMessage(HttpStatusCode.OK);
+        response.Headers.TryAddWithoutValidation("X-Request-Id", "request-1");
+        response.Content = new StringContent("body");
+        response.Content.Headers.TryAddWithoutValidation("X-Content-Trace", "content-1");
+
+        var headers = AiHeaderUtilities.ToDictionary(response, includeContentHeaders: false);
+
+        Assert.Equal("request-1", headers["x-request-id"]);
+        Assert.False(headers.ContainsKey("x-content-trace"));
+    }
+
+    [Fact]
+    public void AiHeaderUtilities_ToDictionary_CopiesDirectHeadersWithCaseInsensitiveLookup()
+    {
+        using var content = new StringContent("body");
+        content.Headers.TryAddWithoutValidation("X-Trace-Id", "trace-1");
+
+        var headers = AiHeaderUtilities.ToDictionary(content.Headers);
+
+        Assert.Equal("trace-1", headers["x-trace-id"]);
+    }
+
     [Theory]
     [InlineData("prompt is too long: 213462 tokens > 200000 maximum")]
     [InlineData("Your input exceeds the context window of this model")]
@@ -67,6 +92,27 @@ public sealed class AiUtilityHelpersTests
     }
 
     [Fact]
+    public void ContextOverflowDetector_IsContextOverflow_RequiresErrorStopReasonForErrorText()
+    {
+        var message = new AssistantMessage([new TextContent("not an error")])
+        {
+            StopReason = StopReason.EndTurn,
+            ErrorMessage = "Your input exceeds the context window of this model"
+        };
+
+        Assert.False(ContextOverflowDetector.IsContextOverflow(message));
+    }
+
+    [Fact]
+    public void ContextOverflowDetector_GetOverflowPatternSources_ReturnsCopy()
+    {
+        var patterns = ContextOverflowDetector.GetOverflowPatternSources();
+
+        Assert.Contains(patterns, static pattern => pattern.Contains("prompt is too long", StringComparison.Ordinal));
+        Assert.Contains(patterns, static pattern => pattern.Contains("context", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
     public void JsonSchemaHelpers_StringEnum_BuildsProviderCompatibleSchema()
     {
         var schema = JsonSchemaHelpers.StringEnum(
@@ -80,6 +126,25 @@ public sealed class AiUtilityHelpersTests
             schema.GetProperty("enum").EnumerateArray().Select(static item => item.GetString()!).ToArray());
         Assert.Equal("The operation to perform.", schema.GetProperty("description").GetString());
         Assert.Equal("add", schema.GetProperty("default").GetString());
+    }
+
+    [Fact]
+    public void JsonSchemaHelpers_StringEnum_OmitsEmptyOptionalFields()
+    {
+        var schema = JsonSchemaHelpers.StringEnum(["add"], description: "", defaultValue: "");
+
+        Assert.Equal("string", schema.GetProperty("type").GetString());
+        Assert.Equal("add", schema.GetProperty("enum").EnumerateArray().First().GetString());
+        Assert.False(schema.TryGetProperty("description", out _));
+        Assert.False(schema.TryGetProperty("default", out _));
+    }
+
+    [Fact]
+    public void JsonSchemaHelpers_StringEnum_PreservesWhitespaceDescription()
+    {
+        var schema = JsonSchemaHelpers.StringEnum(["add"], description: "   ");
+
+        Assert.Equal("   ", schema.GetProperty("description").GetString());
     }
 
     [Theory]

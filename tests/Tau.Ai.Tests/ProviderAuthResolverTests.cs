@@ -34,6 +34,23 @@ public sealed class ProviderAuthResolverTests
     }
 
     [Fact]
+    public void GetStatus_ReportsAvailableOAuthLogin_WhenProviderSupportsOAuthButNoCredentialExists()
+    {
+        using var scope = EnvironmentVariableScope.Acquire();
+        scope.Set("TAU_AUTH_FILE", Path.Combine(Path.GetTempPath(), $"missing-auth-{Guid.NewGuid():N}.json"));
+
+        var resolver = new ProviderAuthResolver();
+
+        var status = resolver.GetStatus("anthropic");
+
+        Assert.False(status.IsConfigured);
+        Assert.Equal("none", status.Source);
+        Assert.False(status.UsesOAuth);
+        Assert.True(status.CanLogin);
+        Assert.Contains("OAuth login is available", status.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void GetStatus_LogsRuntimeEventWithoutLeakingSecret()
     {
         using var scope = EnvironmentVariableScope.Acquire();
@@ -101,6 +118,134 @@ public sealed class ProviderAuthResolverTests
         finally
         {
             Directory.Delete(tempDir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void GetStatus_ReportsProviderLevelModelsJsonCredentialsWithoutModel()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), $"tau-auth-status-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+
+        try
+        {
+            var modelsPath = Path.Combine(tempDir, "models.json");
+            var authPath = Path.Combine(tempDir, "auth.json");
+            File.WriteAllText(authPath, "{}");
+            File.WriteAllText(modelsPath, """
+                {
+                  "providers": {
+                    "custom-provider": {
+                      "apiKey": "provider-secret",
+                      "headers": {
+                        "X-Provider": "provider-header"
+                      },
+                      "models": [
+                        { "id": "custom-model" }
+                      ]
+                    }
+                  }
+                }
+                """);
+            var resolver = CreateResolver(authPath, modelsPath);
+
+            var status = resolver.GetStatus("custom-provider");
+
+            Assert.True(status.IsConfigured);
+            Assert.Equal("models.json", status.Source);
+            Assert.False(status.UsesOAuth);
+            Assert.False(status.CanLogin);
+            Assert.DoesNotContain("provider-secret", status.Message, StringComparison.Ordinal);
+            Assert.DoesNotContain("provider-header", status.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(tempDir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void GetStatus_DoesNotTreatModelOnlyModelsJsonCredentialAsProviderLevelCredential()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), $"tau-auth-status-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+
+        try
+        {
+            var modelsPath = Path.Combine(tempDir, "models.json");
+            var authPath = Path.Combine(tempDir, "auth.json");
+            File.WriteAllText(authPath, "{}");
+            File.WriteAllText(modelsPath, """
+                {
+                  "providers": {
+                    "custom-provider": {
+                      "models": [
+                        {
+                          "id": "custom-model",
+                          "headers": {
+                            "Authorization": "Bearer model-secret"
+                          }
+                        }
+                      ]
+                    }
+                  }
+                }
+                """);
+            var resolver = CreateResolver(authPath, modelsPath);
+
+            var providerStatus = resolver.GetStatus("custom-provider");
+            var modelStatus = resolver.GetStatus(new Model
+            {
+                Provider = "custom-provider",
+                Id = "custom-model",
+                Name = "Custom Model",
+                Api = "openai-chat-completions"
+            });
+
+            Assert.False(providerStatus.IsConfigured);
+            Assert.Equal("none", providerStatus.Source);
+            Assert.True(modelStatus.IsConfigured);
+            Assert.Equal("models.json", modelStatus.Source);
+            Assert.DoesNotContain("model-secret", modelStatus.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(tempDir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void GetStatus_ReportsVertexAmbientCredentialsFromWindowsAppData()
+    {
+        using var scope = EnvironmentVariableScope.Acquire();
+        var tempRoot = Path.Combine(Path.GetTempPath(), $"tau-vertex-auth-status-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempRoot);
+
+        try
+        {
+            var gcloudDir = Path.Combine(tempRoot, "gcloud");
+            Directory.CreateDirectory(gcloudDir);
+            File.WriteAllText(Path.Combine(gcloudDir, "application_default_credentials.json"), "{}");
+
+            scope.Set("APPDATA", tempRoot);
+            scope.Set("GOOGLE_APPLICATION_CREDENTIALS", null);
+            scope.Set("GOOGLE_CLOUD_API_KEY", null);
+            scope.Set("GOOGLE_CLOUD_PROJECT", "tau-project");
+            scope.Set("GOOGLE_CLOUD_LOCATION", "us-central1");
+
+            var resolver = new ProviderAuthResolver();
+
+            var status = resolver.GetStatus("google-vertex");
+
+            Assert.True(status.IsConfigured);
+            Assert.Equal("environment/ambient", status.Source);
+            Assert.False(status.UsesOAuth);
+            Assert.False(status.CanLogin);
+            Assert.DoesNotContain("application_default_credentials", status.Message, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            Directory.Delete(tempRoot, recursive: true);
         }
     }
 
@@ -258,6 +403,44 @@ public sealed class ProviderAuthResolverTests
             var result = resolver.ResolveApiKey("custom-oauth");
 
             Assert.Equal("refreshed-access", result);
+        }
+        finally
+        {
+            Directory.Delete(tempDir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void GetStatus_ReportsExpiredOAuthCredentialsAsRefreshable()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), $"tau-auth-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+
+        try
+        {
+            var authPath = Path.Combine(tempDir, "auth.json");
+            File.WriteAllText(authPath, """
+                {
+                  "custom-oauth": {
+                    "type": "oauth",
+                    "refresh": "refresh-token",
+                    "access": "expired-access",
+                    "expiresAt": "2000-01-01T00:00:00Z"
+                  }
+                }
+                """);
+
+            var resolver = new ProviderAuthResolver(
+                new OAuthProviderRegistry([new StubOAuthProvider()]),
+                new OAuthCredentialStore([authPath]));
+
+            var status = resolver.GetStatus("custom-oauth");
+
+            Assert.False(status.IsConfigured);
+            Assert.True(status.UsesOAuth);
+            Assert.True(status.CanLogin);
+            Assert.Equal("auth.json oauth", status.Source);
+            Assert.Contains("refresh/login flow is available", status.Message, StringComparison.Ordinal);
         }
         finally
         {

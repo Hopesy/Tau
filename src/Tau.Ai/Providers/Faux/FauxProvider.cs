@@ -338,6 +338,13 @@ internal sealed class FauxStreamProvider : IStreamProvider
     {
         try
         {
+            if (options.OnResponse is not null)
+            {
+                await options.OnResponse(
+                    new ProviderResponse(200, new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)),
+                    requestModel).ConfigureAwait(false);
+            }
+
             if (step is null)
             {
                 var exhausted = WithUsageEstimate(
@@ -350,7 +357,7 @@ internal sealed class FauxStreamProvider : IStreamProvider
 
             var resolved = await step.Value.ResolveAsync(context, options, State, requestModel).ConfigureAwait(false);
             var message = WithUsageEstimate(CloneMessage(resolved, requestModel), context, options);
-            await StreamWithDeltasAsync(stream, message).ConfigureAwait(false);
+            await StreamWithDeltasAsync(stream, message, options.Signal).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -431,13 +438,28 @@ internal sealed class FauxStreamProvider : IStreamProvider
 
     private async Task StreamWithDeltasAsync(
         AssistantMessageStream stream,
-        AssistantMessage message)
+        AssistantMessage message,
+        CancellationToken cancellationToken)
     {
         var partialContent = new List<ContentBlock>();
+        if (cancellationToken.IsCancellationRequested)
+        {
+            var aborted = CreateAbortedMessage(BuildPartial(message, partialContent));
+            stream.Push(new ErrorEvent(aborted.ErrorMessage!, Message: aborted));
+            return;
+        }
+
         stream.Push(new StartEvent(BuildPartial(message, partialContent)));
 
         for (var index = 0; index < message.Content.Count; index++)
         {
+            if (cancellationToken.IsCancellationRequested)
+            {
+                var aborted = CreateAbortedMessage(BuildPartial(message, partialContent));
+                stream.Push(new ErrorEvent(aborted.ErrorMessage!, BuildPartial(message, partialContent), aborted));
+                return;
+            }
+
             var block = message.Content[index];
             switch (block)
             {
@@ -447,6 +469,13 @@ internal sealed class FauxStreamProvider : IStreamProvider
                     foreach (var chunk in SplitStringByTokenSize(thinking.Thinking))
                     {
                         await ScheduleChunkAsync(chunk).ConfigureAwait(false);
+                        if (cancellationToken.IsCancellationRequested)
+                        {
+                            var aborted = CreateAbortedMessage(BuildPartial(message, partialContent));
+                            stream.Push(new ErrorEvent(aborted.ErrorMessage!, BuildPartial(message, partialContent), aborted));
+                            return;
+                        }
+
                         var current = (ThinkingContent)partialContent[index];
                         partialContent[index] = current with { Thinking = current.Thinking + chunk };
                         stream.Push(new ThinkingDeltaEvent(index, chunk, BuildPartial(message, partialContent)));
@@ -461,6 +490,13 @@ internal sealed class FauxStreamProvider : IStreamProvider
                     foreach (var chunk in SplitStringByTokenSize(text.Text))
                     {
                         await ScheduleChunkAsync(chunk).ConfigureAwait(false);
+                        if (cancellationToken.IsCancellationRequested)
+                        {
+                            var aborted = CreateAbortedMessage(BuildPartial(message, partialContent));
+                            stream.Push(new ErrorEvent(aborted.ErrorMessage!, BuildPartial(message, partialContent), aborted));
+                            return;
+                        }
+
                         var current = (TextContent)partialContent[index];
                         partialContent[index] = current with { Text = current.Text + chunk };
                         stream.Push(new TextDeltaEvent(index, chunk, BuildPartial(message, partialContent)));
@@ -475,6 +511,13 @@ internal sealed class FauxStreamProvider : IStreamProvider
                     foreach (var chunk in SplitStringByTokenSize(toolCall.Arguments))
                     {
                         await ScheduleChunkAsync(chunk).ConfigureAwait(false);
+                        if (cancellationToken.IsCancellationRequested)
+                        {
+                            var aborted = CreateAbortedMessage(BuildPartial(message, partialContent));
+                            stream.Push(new ErrorEvent(aborted.ErrorMessage!, BuildPartial(message, partialContent), aborted));
+                            return;
+                        }
+
                         stream.Push(new ToolCallDeltaEvent(index, chunk, BuildPartial(message, partialContent)));
                     }
 
@@ -495,6 +538,14 @@ internal sealed class FauxStreamProvider : IStreamProvider
 
         stream.Push(new DoneEvent(message));
     }
+
+    private static AssistantMessage CreateAbortedMessage(AssistantMessage partial) =>
+        partial with
+        {
+            StopReason = StopReason.Aborted,
+            ErrorMessage = "Request was aborted",
+            Timestamp = DateTimeOffset.UtcNow
+        };
 
     private static AssistantMessage BuildPartial(
         AssistantMessage message,
