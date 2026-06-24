@@ -134,6 +134,28 @@ public sealed class ProviderRequestTextSanitizerTests
     }
 
     [Fact]
+    public async Task GoogleProvider_DoesNotTreatGoogleApiKeyAsGeminiApiKey()
+    {
+        using var handler = new OpenAiResponsesProviderTests.StubHandler(_ => ErrorResponse("stop after payload"));
+        using var client = new HttpClient(handler);
+        var provider = new GoogleProvider(client);
+
+        await OpenAiResponsesProviderTests.CollectAsync(provider.Stream(
+            GoogleModel("google-generative-language", "google", "https://generativelanguage.googleapis.com"),
+            new LlmContext { Messages = [new UserMessage("hi")] },
+            new StreamOptions
+            {
+                Env = new Dictionary<string, string>
+                {
+                    ["GOOGLE_API_KEY"] = "google-key"
+                }
+            }));
+
+        var request = Assert.Single(handler.Requests);
+        Assert.False(request.Headers.Contains("x-goog-api-key"));
+    }
+
+    [Fact]
     public async Task GoogleVertexProvider_RemovesUnpairedSurrogatesFromRequestText()
     {
         using var handler = new OpenAiResponsesProviderTests.StubHandler(_ => ErrorResponse("stop after payload"));

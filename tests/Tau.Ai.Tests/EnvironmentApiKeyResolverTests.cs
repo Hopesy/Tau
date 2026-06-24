@@ -37,9 +37,8 @@ public sealed class EnvironmentApiKeyResolverTests
 
     [Theory]
     [InlineData("gemini-key", null, "gemini-key")]
-    [InlineData(null, "google-key", "google-key")]
     [InlineData("gemini-key", "google-key", "gemini-key")]
-    public void GetApiKey_ResolvesGoogleCredentialWithExpectedPrecedence(string? geminiKey, string? googleApiKey, string expected)
+    public void GetApiKey_ResolvesGoogleCredentialFromGeminiApiKey(string? geminiKey, string? googleApiKey, string expected)
     {
         using var scope = EnvironmentVariableScope.Acquire();
         scope.Set("GEMINI_API_KEY", geminiKey);
@@ -48,6 +47,18 @@ public sealed class EnvironmentApiKeyResolverTests
         var apiKey = EnvironmentApiKeyResolver.GetApiKey("google");
 
         Assert.Equal(expected, apiKey);
+    }
+
+    [Fact]
+    public void GetApiKey_DoesNotTreatGoogleApiKeyAsGoogleProviderEnvApiKey()
+    {
+        using var scope = EnvironmentVariableScope.Acquire();
+        scope.Set("GEMINI_API_KEY", null);
+        scope.Set("GOOGLE_API_KEY", "google-key");
+
+        var apiKey = EnvironmentApiKeyResolver.GetApiKey("google");
+
+        Assert.Null(apiKey);
     }
 
     [Fact]
@@ -198,24 +209,32 @@ public sealed class EnvironmentApiKeyResolverTests
         }
     }
 
-    [Theory]
-    [InlineData("copilot-token", "gh-token", "github-token", "copilot-token")]
-    [InlineData(null, "gh-token", "github-token", "gh-token")]
-    [InlineData(null, null, "github-token", "github-token")]
-    public void GetApiKey_ResolvesCopilotCredentialWithExpectedFallbackOrder(
-        string? copilotToken,
-        string? ghToken,
-        string? githubToken,
-        string expected)
+    [Fact]
+    public void GetApiKey_DoesNotTreatGenericGitHubTokensAsCopilotCredentials()
     {
         using var scope = EnvironmentVariableScope.Acquire();
-        scope.Set("COPILOT_GITHUB_TOKEN", copilotToken);
-        scope.Set("GH_TOKEN", ghToken);
-        scope.Set("GITHUB_TOKEN", githubToken);
+        scope.Set("COPILOT_GITHUB_TOKEN", null);
+        scope.Set("GH_TOKEN", "gh-token");
+        scope.Set("GITHUB_TOKEN", "github-token");
 
         var apiKey = EnvironmentApiKeyResolver.GetApiKey("github-copilot");
 
-        Assert.Equal(expected, apiKey);
+        Assert.Null(apiKey);
+        Assert.Empty(EnvironmentApiKeyResolver.FindEnvKeys("github-copilot"));
+    }
+
+    [Fact]
+    public void GetApiKey_ResolvesCopilotCredentialFromCopilotGitHubToken()
+    {
+        using var scope = EnvironmentVariableScope.Acquire();
+        scope.Set("COPILOT_GITHUB_TOKEN", "copilot-token");
+        scope.Set("GH_TOKEN", "gh-token");
+        scope.Set("GITHUB_TOKEN", "github-token");
+
+        var apiKey = EnvironmentApiKeyResolver.GetApiKey("github-copilot");
+
+        Assert.Equal("copilot-token", apiKey);
+        Assert.Equal(["COPILOT_GITHUB_TOKEN"], EnvironmentApiKeyResolver.FindEnvKeys("github-copilot"));
     }
 
     [Theory]
@@ -265,6 +284,67 @@ public sealed class EnvironmentApiKeyResolverTests
         var apiKey = EnvironmentApiKeyResolver.GetApiKey(provider);
 
         Assert.Equal($"value-for-{provider}", apiKey);
+    }
+
+    [Theory]
+    [InlineData("ant-ling", "ANT_LING_API_KEY")]
+    [InlineData("nvidia", "NVIDIA_API_KEY")]
+    [InlineData("deepseek", "DEEPSEEK_API_KEY")]
+    [InlineData("zai-coding-cn", "ZAI_CODING_CN_API_KEY")]
+    [InlineData("moonshotai", "MOONSHOT_API_KEY")]
+    [InlineData("moonshotai-cn", "MOONSHOT_API_KEY")]
+    [InlineData("fireworks", "FIREWORKS_API_KEY")]
+    [InlineData("together", "TOGETHER_API_KEY")]
+    [InlineData("cloudflare-workers-ai", "CLOUDFLARE_API_KEY")]
+    [InlineData("cloudflare-ai-gateway", "CLOUDFLARE_API_KEY")]
+    [InlineData("xiaomi", "XIAOMI_API_KEY")]
+    [InlineData("xiaomi-token-plan-cn", "XIAOMI_TOKEN_PLAN_CN_API_KEY")]
+    [InlineData("xiaomi-token-plan-ams", "XIAOMI_TOKEN_PLAN_AMS_API_KEY")]
+    [InlineData("xiaomi-token-plan-sgp", "XIAOMI_TOKEN_PLAN_SGP_API_KEY")]
+    public void GetApiKey_MapsAdditionalUpstreamProvidersToExpectedEnvironmentVariable(
+        string provider,
+        string variableName)
+    {
+        using var scope = EnvironmentVariableScope.Acquire();
+        scope.Set(variableName, $"value-for-{provider}");
+
+        var apiKey = EnvironmentApiKeyResolver.GetApiKey(provider);
+
+        Assert.Equal($"value-for-{provider}", apiKey);
+        Assert.Equal([variableName], EnvironmentApiKeyResolver.FindEnvKeys(provider));
+    }
+
+    [Fact]
+    public void FindEnvKeys_ReturnsAllConfiguredApiKeyVariablesInProviderOrder()
+    {
+        using var scope = EnvironmentVariableScope.Acquire();
+        scope.Set("ANTHROPIC_OAUTH_TOKEN", "oauth-token");
+        scope.Set("ANTHROPIC_API_KEY", "api-key");
+
+        var keys = EnvironmentApiKeyResolver.FindEnvKeys("anthropic");
+
+        Assert.Equal(["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"], keys);
+        Assert.Equal("oauth-token", EnvironmentApiKeyResolver.GetApiKey("anthropic"));
+    }
+
+    [Fact]
+    public void FindEnvKeys_UsesScopedEnvironmentAndDoesNotReportAmbientCredentials()
+    {
+        using var scope = EnvironmentVariableScope.Acquire();
+        scope.Set("OPENAI_API_KEY", "ambient-openai-key");
+        scope.Set("AWS_PROFILE", "ambient-aws-profile");
+
+        var openAiKeys = EnvironmentApiKeyResolver.FindEnvKeys(
+            "openai",
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["OPENAI_API_KEY"] = "scoped-openai-key"
+            });
+        var bedrockKeys = EnvironmentApiKeyResolver.FindEnvKeys("amazon-bedrock");
+
+        Assert.Equal(["OPENAI_API_KEY"], openAiKeys);
+        Assert.Empty(bedrockKeys);
+        Assert.Equal(EnvironmentApiKeyResolver.AuthenticatedMarker, EnvironmentApiKeyResolver.GetApiKey("amazon-bedrock"));
     }
 
     [Fact]

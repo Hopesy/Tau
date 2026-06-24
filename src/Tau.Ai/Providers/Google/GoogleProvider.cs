@@ -90,8 +90,7 @@ public sealed class GoogleProvider : IStreamProvider
         request.Content = new StringContent(json, Encoding.UTF8, "application/json");
 
         var apiKey = options.ApiKey ??
-            ProviderEnvironment.GetValue("GEMINI_API_KEY", options.Env) ??
-            ProviderEnvironment.GetValue("GOOGLE_API_KEY", options.Env);
+            ProviderEnvironment.GetValue("GEMINI_API_KEY", options.Env);
         if (!string.IsNullOrEmpty(apiKey))
             request.Headers.TryAddWithoutValidation("x-goog-api-key", apiKey);
 

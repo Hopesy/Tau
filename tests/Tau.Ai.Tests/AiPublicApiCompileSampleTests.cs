@@ -273,6 +273,11 @@ public sealed class AiPublicApiCompileSampleTests
             .GetStatus(model, explicitApiKey: "explicit-sample-key");
         Assert.True(authStatus.IsConfigured);
         Assert.Equal("explicit", authStatus.Source);
+        Assert.Equal(
+            ["OPENAI_API_KEY"],
+            EnvironmentApiKeyResolver.FindEnvKeys(
+                "openai",
+                new Dictionary<string, string> { ["OPENAI_API_KEY"] = "sample-env-key" }));
 
         var builtIns = BuiltInOAuthProviders.GetAll();
         Assert.NotEmpty(builtIns);
