@@ -1,3 +1,4 @@
+using Tau.Ai.Auth;
 using Tau.Ai.Providers.Anthropic;
 using Tau.Ai.Providers.Bedrock;
 using Tau.Ai.Providers.Google;
@@ -71,6 +72,35 @@ public static class BuiltInProviders
     {
         registry.Register("openrouter-images", () => new OpenRouterImagesProvider(httpClient), sourceId: "builtin");
     }
+
+    public static IReadOnlyList<ImagesProviderDefinition> GetBuiltInImagesProviders(
+        ImageModelCatalog? catalog = null,
+        HttpClient? openRouterHttpClient = null) =>
+        [CreateOpenRouterImagesProvider(catalog, openRouterHttpClient)];
+
+    public static ImagesModels CreateBuiltInImagesModels(
+        ImageModelCatalog? catalog = null,
+        HttpClient? openRouterHttpClient = null,
+        ProviderAuthResolver? authResolver = null,
+        ModelConfigurationStore? configurationStore = null)
+    {
+        var models = new ImagesModels(authResolver: authResolver, configurationStore: configurationStore);
+        foreach (var provider in GetBuiltInImagesProviders(catalog, openRouterHttpClient))
+        {
+            models.SetProvider(provider);
+        }
+
+        return models;
+    }
+
+    public static ImagesProviderDefinition CreateOpenRouterImagesProvider(
+        ImageModelCatalog? catalog = null,
+        HttpClient? httpClient = null) =>
+        new(
+            "openrouter",
+            new OpenRouterImagesProvider(httpClient),
+            (catalog ?? new ImageModelCatalog()).GetModels("openrouter"),
+            "OpenRouter");
 
     public static void RegisterConfiguredProviders(
         ProviderRegistry registry,

@@ -246,6 +246,22 @@ public sealed class AiPublicApiCompileSampleTests
         Assert.Equal("image/png", Assert.IsType<ImageContent>(images.Output[0]).MimeType);
         Assert.Equal("explicit-image-key", imagesProvider.LastOptions?.ApiKey);
         Assert.Equal("draw sample", Assert.IsType<TextContent>(imagesProvider.LastContext.Input[0]).Text);
+        var imagesModels = new ImagesModels(authResolver: new ProviderAuthResolver(logSink: NullTauLogSink.Instance));
+        imagesModels.SetProvider(new ImagesProviderDefinition(
+            "openrouter",
+            imagesProvider,
+            [imagesModel],
+            "OpenRouter"));
+        Assert.True(imagesModels.GetAuth(imagesModel, imagesOptions)!.IsConfigured);
+        var collectionImages = await imagesModels.GenerateImagesAsync(
+            imagesModel,
+            new ImagesContext([new TextContent("draw through collection")]),
+            imagesOptions).WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(ImagesStopReason.Stop, collectionImages.StopReason);
+        Assert.Equal("draw through collection", Assert.IsType<TextContent>(imagesProvider.LastContext.Input[0]).Text);
+        var builtInImagesModels = BuiltInProviders.CreateBuiltInImagesModels();
+        Assert.Equal("openrouter", Assert.Single(BuiltInProviders.GetBuiltInImagesProviders()).Id);
+        Assert.NotNull(builtInImagesModels.GetModel("openrouter", "openrouter/auto"));
         BuiltInProviders.RegisterOpenRouterImages(imagesRegistry);
         Assert.NotNull(imagesRegistry.TryGet(new OpenRouterImagesProvider().Api));
         imagesRegistry.UnregisterBySource("sample-images-source");
