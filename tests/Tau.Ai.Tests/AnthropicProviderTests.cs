@@ -139,6 +139,188 @@ public sealed class AnthropicProviderTests
         Assert.Equal("summarized", thinking.GetProperty("display").GetString());
     }
 
+    [Fact]
+    public async Task Stream_TranslatesAnthropicStreamEventsWithContentIndexUsageAndToolArguments()
+    {
+        using var handler = new OpenAiResponsesProviderTests.StubHandler(_ => OpenAiResponsesProviderTests.SseResponse(
+            """
+            event: message_start
+            data: {"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":10,"output_tokens":0,"cache_read_input_tokens":2}}}
+
+            event: content_block_start
+            data: {"type":"content_block_start","index":2,"content_block":{"type":"text","text":""}}
+
+            event: content_block_delta
+            data: {"type":"content_block_delta","index":2,"delta":{"type":"text_delta","text":"hello"}}
+
+            event: content_block_stop
+            data: {"type":"content_block_stop","index":2}
+
+            event: content_block_start
+            data: {"type":"content_block_start","index":5,"content_block":{"type":"thinking","thinking":""}}
+
+            event: content_block_delta
+            data: {"type":"content_block_delta","index":5,"delta":{"type":"thinking_delta","thinking":"plan"}}
+
+            event: content_block_delta
+            data: {"type":"content_block_delta","index":5,"delta":{"type":"signature_delta","signature":"sig-"}}
+
+            event: content_block_delta
+            data: {"type":"content_block_delta","index":5,"delta":{"type":"signature_delta","signature":"tail"}}
+
+            event: content_block_stop
+            data: {"type":"content_block_stop","index":5}
+
+            event: content_block_start
+            data: {"type":"content_block_start","index":9,"content_block":{"type":"tool_use","id":"toolu_1","name":"read_file","input":{}}}
+
+            event: content_block_delta
+            data: {"type":"content_block_delta","index":9,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"README"}}
+
+            event: content_block_delta
+            data: {"type":"content_block_delta","index":9,"delta":{"type":"input_json_delta","partial_json":".md\"}"}}
+
+            event: content_block_stop
+            data: {"type":"content_block_stop","index":9}
+
+            event: message_delta
+            data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":4,"cache_creation_input_tokens":3}}
+
+            event: message_stop
+            data: {"type":"message_stop"}
+
+            """));
+        using var client = new HttpClient(handler);
+        var provider = new AnthropicProvider(client);
+
+        var events = await OpenAiResponsesProviderTests.CollectAsync(provider.Stream(
+            BuildModel(reasoning: true),
+            new LlmContext { Messages = [new UserMessage("hi")] },
+            new StreamOptions { ApiKey = "anthropic-key" }));
+
+        Assert.Contains(events, evt => evt is StartEvent { Partial.ResponseId: "msg_1" });
+        Assert.Contains(events, evt => evt is TextStartEvent { ContentIndex: 0 });
+        Assert.Contains(events, evt => evt is ThinkingStartEvent { ContentIndex: 1 });
+        Assert.Contains(events, evt => evt is ToolCallStartEvent { ContentIndex: 2 });
+        Assert.Contains(events, evt => evt is ToolCallDeltaEvent { ContentIndex: 2, Delta: ".md\"}" });
+        var done = Assert.Single(events.OfType<DoneEvent>());
+        Assert.Equal("msg_1", done.Message.ResponseId);
+        Assert.Equal(StopReason.ToolUse, done.Message.StopReason);
+        Assert.Equal(new Usage(10, 4, 2, 3), done.Message.Usage);
+        Assert.Collection(
+            done.Message.Content,
+            block => Assert.Equal("hello", Assert.IsType<TextContent>(block).Text),
+            block =>
+            {
+                var thinking = Assert.IsType<ThinkingContent>(block);
+                Assert.Equal("plan", thinking.Thinking);
+                Assert.Equal("sig-tail", thinking.ThinkingSignature);
+            },
+            block =>
+            {
+                var tool = Assert.IsType<ToolCallContent>(block);
+                Assert.Equal("toolu_1", tool.Id);
+                Assert.Equal("read_file", tool.Name);
+                Assert.Equal("""{"path":"README.md"}""", tool.Arguments);
+            });
+    }
+
+    [Fact]
+    public async Task Stream_PreservesRedactedThinkingData()
+    {
+        using var handler = new OpenAiResponsesProviderTests.StubHandler(_ => OpenAiResponsesProviderTests.SseResponse(
+            """
+            data: {"type":"message_start","message":{"id":"msg_redacted","usage":{"input_tokens":1,"output_tokens":0}}}
+
+            data: {"type":"content_block_start","index":0,"content_block":{"type":"redacted_thinking","data":"opaque-signature"}}
+
+            data: {"type":"content_block_stop","index":0}
+
+            data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}
+
+            data: {"type":"message_stop"}
+
+            """));
+        using var client = new HttpClient(handler);
+        var provider = new AnthropicProvider(client);
+
+        var events = await OpenAiResponsesProviderTests.CollectAsync(provider.Stream(
+            BuildModel(reasoning: true),
+            new LlmContext { Messages = [new UserMessage("hi")] },
+            new StreamOptions { ApiKey = "anthropic-key" }));
+
+        var done = Assert.Single(events.OfType<DoneEvent>());
+        var thinking = Assert.IsType<ThinkingContent>(Assert.Single(done.Message.Content));
+        Assert.True(thinking.Redacted);
+        Assert.Equal("[Reasoning redacted]", thinking.Thinking);
+        Assert.Equal("opaque-signature", thinking.ThinkingSignature);
+    }
+
+    [Theory]
+    [InlineData("refusal", "Provider stop_reason: refusal")]
+    [InlineData("sensitive", "Provider stop_reason: sensitive")]
+    [InlineData("future_reason", "Unhandled Anthropic stop_reason: future_reason")]
+    public async Task Stream_WithProviderErrorStopReasonTerminatesWithErrorEvent(string stopReason, string expectedError)
+    {
+        var sse =
+            """
+            data: {"type":"message_start","message":{"id":"msg_error","usage":{"input_tokens":1,"output_tokens":0}}}
+
+            data: {"type":"message_delta","delta":{"stop_reason":"__STOP_REASON__"},"usage":{"output_tokens":0}}
+
+            data: {"type":"message_stop"}
+
+            """.Replace("__STOP_REASON__", stopReason, StringComparison.Ordinal);
+        using var handler = new OpenAiResponsesProviderTests.StubHandler(_ => OpenAiResponsesProviderTests.SseResponse(sse));
+        using var client = new HttpClient(handler);
+        var provider = new AnthropicProvider(client);
+
+        var stream = provider.Stream(
+            BuildModel(),
+            new LlmContext { Messages = [new UserMessage("hi")] },
+            new StreamOptions { ApiKey = "anthropic-key" });
+        var events = await OpenAiResponsesProviderTests.CollectAsync(stream);
+
+        var error = Assert.Single(events.OfType<ErrorEvent>());
+        Assert.Equal(expectedError, error.Error);
+        Assert.Equal(StopReason.Error, error.Message?.StopReason);
+        Assert.Equal(expectedError, error.Message?.ErrorMessage);
+        Assert.Empty(events.OfType<DoneEvent>());
+        var result = await stream.ResultAsync;
+        Assert.Equal(StopReason.Error, result.StopReason);
+        Assert.Equal(expectedError, result.ErrorMessage);
+    }
+
+    [Fact]
+    public async Task Stream_WithMalformedSseJsonTerminatesWithErrorEvent()
+    {
+        using var handler = new OpenAiResponsesProviderTests.StubHandler(_ => OpenAiResponsesProviderTests.SseResponse(
+            """
+            data: {"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":1,"output_tokens":0}}}
+
+            data: {"type":"content_block_delta","index":0,"delta":
+
+            data: {"type":"message_stop"}
+
+            """));
+        using var client = new HttpClient(handler);
+        var provider = new AnthropicProvider(client);
+
+        var stream = provider.Stream(
+            BuildModel(),
+            new LlmContext { Messages = [new UserMessage("hi")] },
+            new StreamOptions { ApiKey = "anthropic-key" });
+        var events = await OpenAiResponsesProviderTests.CollectAsync(stream);
+
+        var error = Assert.Single(events.OfType<ErrorEvent>());
+        Assert.StartsWith("Malformed Anthropic SSE JSON:", error.Error, StringComparison.Ordinal);
+        Assert.Equal("msg_1", error.Message?.ResponseId);
+        Assert.Equal(StopReason.Error, error.Message?.StopReason);
+        var result = await stream.ResultAsync;
+        Assert.Equal("msg_1", result.ResponseId);
+        Assert.Equal(StopReason.Error, result.StopReason);
+    }
+
     private static Model BuildModel(string id = "claude-sonnet-4-5-20250929", bool reasoning = false) => new()
     {
         Id = id,

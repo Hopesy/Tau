@@ -22,6 +22,7 @@ public sealed class GeminiCliOAuthProvider : IOAuthProvider
 
     public string Id => "google-gemini-cli";
     public string Name => "Google Cloud Code Assist (Gemini CLI)";
+    public bool UsesCallbackServer => true;
 
     public async Task<OAuthCredentials> LoginAsync(IOAuthLoginCallbacks callbacks, CancellationToken cancellationToken = default)
     {

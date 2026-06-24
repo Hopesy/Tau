@@ -405,6 +405,223 @@ public sealed class OpenAiProviderSerializationTests
         Assert.Contains("tool  🙈", allText, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task Stream_WithToolResultNameCompatibility_AddsToolResultName()
+    {
+        using var handler = new StubHandler();
+        using var client = new HttpClient(handler);
+        var provider = new OpenAiProvider(client);
+        var model = new Model
+        {
+            Id = "compat-model",
+            Name = "Compat Model",
+            Api = "openai-chat-completions",
+            Provider = "custom-openai",
+            BaseUrl = "https://example.invalid/v1",
+            Compat = new ModelCompatibility
+            {
+                RequiresToolResultName = true
+            }
+        };
+        var context = new LlmContext(
+            null,
+            [
+                new AssistantMessage([new ToolCallContent("call_1", "read_file", "{}")]),
+                new ToolResultMessage("call_1", [new TextContent("done")]) { ToolName = "read_file" }
+            ],
+            null);
+
+        await DrainAsync(provider.Stream(model, context, new StreamOptions { ApiKey = "test-key" }));
+
+        using var doc = JsonDocument.Parse(handler.CapturedBody!);
+        var toolMessage = doc.RootElement.GetProperty("messages")[1];
+        Assert.Equal("tool", toolMessage.GetProperty("role").GetString());
+        Assert.Equal("read_file", toolMessage.GetProperty("name").GetString());
+        Assert.Equal("call_1", toolMessage.GetProperty("tool_call_id").GetString());
+    }
+
+    [Fact]
+    public async Task Stream_WithAssistantAfterToolResultCompatibility_InsertsBridgeAssistantBeforeUser()
+    {
+        using var handler = new StubHandler();
+        using var client = new HttpClient(handler);
+        var provider = new OpenAiProvider(client);
+        var model = new Model
+        {
+            Id = "compat-model",
+            Name = "Compat Model",
+            Api = "openai-chat-completions",
+            Provider = "custom-openai",
+            BaseUrl = "https://example.invalid/v1",
+            Compat = new ModelCompatibility
+            {
+                RequiresAssistantAfterToolResult = true
+            }
+        };
+        var context = new LlmContext(
+            null,
+            [
+                new AssistantMessage([new ToolCallContent("call_1", "read_file", "{}")]),
+                new ToolResultMessage("call_1", [new TextContent("done")]) { ToolName = "read_file" },
+                new UserMessage("next question")
+            ],
+            null);
+
+        await DrainAsync(provider.Stream(model, context, new StreamOptions { ApiKey = "test-key" }));
+
+        using var doc = JsonDocument.Parse(handler.CapturedBody!);
+        var messages = doc.RootElement.GetProperty("messages");
+        Assert.Equal(4, messages.GetArrayLength());
+        Assert.Equal("assistant", messages[2].GetProperty("role").GetString());
+        Assert.Equal("I have processed the tool results.", messages[2].GetProperty("content").GetString());
+        Assert.Equal("user", messages[3].GetProperty("role").GetString());
+        Assert.Equal("next question", messages[3].GetProperty("content").GetString());
+    }
+
+    [Fact]
+    public async Task Stream_ParsesToolArgumentDeltasUsageAndContentIndexes()
+    {
+        using var handler = new StubHandler
+        {
+            Response = OpenAiResponsesProviderTests.SseResponse(
+                """
+                data: {"id":"cmpl_1","choices":[{"delta":{"content":"checking"},"finish_reason":null}]}
+
+                data: {"id":"cmpl_1","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"README"}}]},"finish_reason":null}]}
+
+                data: {"id":"cmpl_1","choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":".md\"}"}}]},"finish_reason":null}]}
+
+                data: {"id":"cmpl_1","choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":1,"completion_tokens":2}}
+
+                data: [DONE]
+
+                """)
+        };
+        using var client = new HttpClient(handler);
+        var provider = new OpenAiProvider(client);
+
+        var events = await DrainEventsAsync(provider.Stream(
+            BuildOpenAiModel(),
+            new LlmContext { Messages = [new UserMessage("read")] },
+            new StreamOptions { ApiKey = "test-key" }));
+
+        Assert.Equal(0, Assert.Single(events.OfType<TextStartEvent>()).ContentIndex);
+        Assert.Equal(0, Assert.Single(events.OfType<TextDeltaEvent>()).ContentIndex);
+        Assert.Equal(0, Assert.Single(events.OfType<TextEndEvent>()).ContentIndex);
+        Assert.Equal(1, Assert.Single(events.OfType<ToolCallStartEvent>()).ContentIndex);
+        Assert.All(events.OfType<ToolCallDeltaEvent>(), evt => Assert.Equal(1, evt.ContentIndex));
+        Assert.Equal(1, Assert.Single(events.OfType<ToolCallEndEvent>()).ContentIndex);
+
+        var firstDelta = Assert.IsType<ToolCallDeltaEvent>(events.First(evt => evt is ToolCallDeltaEvent));
+        var partialToolCall = Assert.IsType<ToolCallContent>(firstDelta.Partial.Content[1]);
+        Assert.Equal("""{"path":"README"}""", partialToolCall.Arguments);
+
+        var done = Assert.Single(events.OfType<DoneEvent>());
+        Assert.Equal("cmpl_1", done.Message.ResponseId);
+        Assert.Equal(new Usage(1, 2), done.Message.Usage);
+        Assert.Equal(StopReason.ToolUse, done.Message.StopReason);
+        Assert.Equal("checking", Assert.IsType<TextContent>(done.Message.Content[0]).Text);
+        var toolCall = Assert.IsType<ToolCallContent>(done.Message.Content[1]);
+        Assert.Equal("call_1", toolCall.Id);
+        Assert.Equal("read_file", toolCall.Name);
+        Assert.Equal("""{"path":"README.md"}""", toolCall.Arguments);
+    }
+
+    [Fact]
+    public async Task Stream_UsesChoiceUsageFallback()
+    {
+        using var handler = new StubHandler
+        {
+            Response = OpenAiResponsesProviderTests.SseResponse(
+                """
+                data: {"id":"cmpl_1","choices":[{"delta":{"content":"ok"},"finish_reason":null}]}
+
+                data: {"id":"cmpl_1","choices":[{"delta":{},"finish_reason":"stop","usage":{"prompt_tokens":5,"completion_tokens":6}}]}
+
+                """)
+        };
+        using var client = new HttpClient(handler);
+        var provider = new OpenAiProvider(client);
+
+        var events = await DrainEventsAsync(provider.Stream(
+            BuildOpenAiModel(),
+            new LlmContext { Messages = [new UserMessage("hello")] },
+            new StreamOptions { ApiKey = "test-key" }));
+
+        var done = Assert.Single(events.OfType<DoneEvent>());
+        Assert.Equal(new Usage(5, 6), done.Message.Usage);
+        Assert.Equal(StopReason.EndTurn, done.Message.StopReason);
+    }
+
+    [Theory]
+    [InlineData("content_filter", "Provider finish_reason: content_filter")]
+    [InlineData("network_error", "Provider finish_reason: network_error")]
+    [InlineData("unexpected_stop", "Provider finish_reason: unexpected_stop")]
+    public async Task Stream_WithProviderErrorFinishReasonTerminatesWithErrorEvent(
+        string finishReason,
+        string expectedError)
+    {
+        using var handler = new StubHandler
+        {
+            Response = OpenAiResponsesProviderTests.SseResponse(
+                """
+                data: {"id":"cmpl_1","choices":[{"delta":{"content":"blocked"},"finish_reason":null}]}
+
+                data: {"id":"cmpl_1","choices":[{"delta":{},"finish_reason":"__FINISH_REASON__"}],"usage":{"prompt_tokens":1,"completion_tokens":0}}
+
+                """.Replace("__FINISH_REASON__", finishReason, StringComparison.Ordinal))
+        };
+        using var client = new HttpClient(handler);
+        var provider = new OpenAiProvider(client);
+        var stream = provider.Stream(
+            BuildOpenAiModel(),
+            new LlmContext { Messages = [new UserMessage("hello")] },
+            new StreamOptions { ApiKey = "test-key" });
+
+        var events = await DrainEventsAsync(stream);
+
+        Assert.Empty(events.OfType<DoneEvent>());
+        var error = Assert.Single(events.OfType<ErrorEvent>());
+        Assert.Equal(expectedError, error.Error);
+        Assert.Equal(StopReason.Error, error.Message?.StopReason);
+        Assert.Equal(expectedError, error.Message?.ErrorMessage);
+        Assert.Equal("blocked", Assert.IsType<TextContent>(Assert.Single(error.Message!.Content)).Text);
+        var result = await stream.ResultAsync;
+        Assert.Equal(StopReason.Error, result.StopReason);
+        Assert.Equal(expectedError, result.ErrorMessage);
+        Assert.Equal(new Usage(1, 0), result.Usage);
+    }
+
+    [Fact]
+    public async Task Stream_WithMalformedSseJsonTerminatesWithErrorEvent()
+    {
+        using var handler = new StubHandler
+        {
+            Response = OpenAiResponsesProviderTests.SseResponse(
+                """
+                data: {"choices":[{"delta":{"content":"ok"},"finish_reason":null}]}
+
+                data: {not-json}
+
+                """)
+        };
+        using var client = new HttpClient(handler);
+        var provider = new OpenAiProvider(client);
+        var stream = provider.Stream(
+            BuildOpenAiModel(),
+            new LlmContext { Messages = [new UserMessage("hello")] },
+            new StreamOptions { ApiKey = "test-key" });
+
+        var events = await DrainEventsAsync(stream);
+
+        Assert.Empty(events.OfType<DoneEvent>());
+        var error = Assert.Single(events.OfType<ErrorEvent>());
+        Assert.False(string.IsNullOrWhiteSpace(error.Error));
+        var result = await stream.ResultAsync;
+        Assert.Equal(StopReason.Error, result.StopReason);
+        Assert.False(string.IsNullOrWhiteSpace(result.ErrorMessage));
+    }
+
     private sealed class StubHandler : HttpMessageHandler
     {
         public string? CapturedBody { get; private set; }
@@ -442,6 +659,15 @@ public sealed class OpenAiProviderSerializationTests
 
         return events;
     }
+
+    private static Model BuildOpenAiModel() => new()
+    {
+        Id = "gpt-5.4",
+        Name = "GPT-5.4",
+        Api = "openai-chat-completions",
+        Provider = "openai",
+        BaseUrl = "https://example.invalid/v1"
+    };
 
     private static string CollectJsonStrings(JsonElement element)
     {

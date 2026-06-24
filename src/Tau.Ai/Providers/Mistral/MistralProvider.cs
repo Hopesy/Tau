@@ -129,12 +129,15 @@ public sealed class MistralProvider : IStreamProvider
             }
 
             ApplyMistralMetadata(sse.Data, ref partial);
-            OpenAiStreamParser.ParseChunk(
+            if (OpenAiStreamParser.ParseChunk(
                 sse.Data,
                 stream,
                 ref partial,
                 ref toolCallAccumulators,
-                ref contentIndex);
+                ref contentIndex))
+            {
+                break;
+            }
         }
     }
 

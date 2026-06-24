@@ -137,7 +137,10 @@ public sealed class GoogleVertexProvider : IStreamProvider
                 continue;
             }
 
-            parser.ParseChunk(sse.Data);
+            if (parser.ParseChunk(sse.Data))
+            {
+                return;
+            }
         }
 
         parser.EmitDone();

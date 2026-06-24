@@ -104,19 +104,28 @@ public sealed class ModelConfigurationStore
                 return ModelRequestConfigurationStatus.Empty;
             }
 
+            var providerHeaders = ParseStringDictionary(providerConfig, "headers");
+            var providerOptionHeaders = ParseRequestOptionHeaders(providerConfig);
             var hasApiKey = HasConfiguredValue(GetString(providerConfig, "apiKey"));
-            var hasCredentialHeader = HasCredentialHeader(ParseStringDictionary(providerConfig, "headers"));
+            var hasCredentialHeader =
+                HasCredentialHeader(providerHeaders) ||
+                HasCredentialHeader(providerOptionHeaders);
             var hasCommandBackedSecret =
                 IsCommandBackedValue(GetString(providerConfig, "apiKey")) ||
-                HasCommandBackedCredentialHeader(ParseStringDictionary(providerConfig, "headers"));
+                HasCommandBackedCredentialHeader(providerHeaders) ||
+                HasCommandBackedCredentialHeader(providerOptionHeaders);
 
             if (providerConfig.TryGetProperty("modelOverrides", out var overrides) &&
                 overrides.ValueKind == JsonValueKind.Object &&
                 TryGetObjectProperty(overrides, model.Id, out var overrideConfig))
             {
                 var overrideHeaders = ParseStringDictionary(overrideConfig, "headers");
+                var overrideOptionHeaders = ParseRequestOptionHeaders(overrideConfig);
                 hasCredentialHeader |= HasCredentialHeader(overrideHeaders);
-                hasCommandBackedSecret |= HasCommandBackedCredentialHeader(overrideHeaders);
+                hasCredentialHeader |= HasCredentialHeader(overrideOptionHeaders);
+                hasCommandBackedSecret |=
+                    HasCommandBackedCredentialHeader(overrideHeaders) ||
+                    HasCommandBackedCredentialHeader(overrideOptionHeaders);
             }
 
             if (providerConfig.TryGetProperty("models", out var configuredModels) &&
@@ -129,8 +138,12 @@ public sealed class ModelConfigurationStore
                         model.Id.Equals(modelId, StringComparison.OrdinalIgnoreCase))
                     {
                         var modelHeaders = ParseStringDictionary(configuredModel, "headers");
+                        var modelOptionHeaders = ParseRequestOptionHeaders(configuredModel);
                         hasCredentialHeader |= HasCredentialHeader(modelHeaders);
-                        hasCommandBackedSecret |= HasCommandBackedCredentialHeader(modelHeaders);
+                        hasCredentialHeader |= HasCredentialHeader(modelOptionHeaders);
+                        hasCommandBackedSecret |=
+                            HasCommandBackedCredentialHeader(modelHeaders) ||
+                            HasCommandBackedCredentialHeader(modelOptionHeaders);
                         break;
                     }
                 }
@@ -160,11 +173,14 @@ public sealed class ModelConfigurationStore
             }
 
             var providerHeaders = ParseStringDictionary(providerConfig, "headers");
+            var providerOptionHeaders = ParseRequestOptionHeaders(providerConfig);
             return new ModelRequestConfigurationStatus(
                 HasConfiguredValue(GetString(providerConfig, "apiKey")),
-                HasCredentialHeader(providerHeaders),
+                HasCredentialHeader(providerHeaders) ||
+                HasCredentialHeader(providerOptionHeaders),
                 IsCommandBackedValue(GetString(providerConfig, "apiKey")) ||
-                HasCommandBackedCredentialHeader(providerHeaders));
+                HasCommandBackedCredentialHeader(providerHeaders) ||
+                HasCommandBackedCredentialHeader(providerOptionHeaders));
         }
     }
 
@@ -388,6 +404,8 @@ public sealed class ModelConfigurationStore
             ReasoningEffortMap = ParseStringDictionary(compat, "reasoningEffortMap"),
             SupportsUsageInStreaming = GetBool(compat, "supportsUsageInStreaming"),
             MaxTokensField = GetString(compat, "maxTokensField"),
+            RequiresToolResultName = GetBool(compat, "requiresToolResultName"),
+            RequiresAssistantAfterToolResult = GetBool(compat, "requiresAssistantAfterToolResult"),
             RequiresThinkingAsText = GetBool(compat, "requiresThinkingAsText"),
             ThinkingFormat = GetString(compat, "thinkingFormat"),
             OpenRouterRouting = ParseObjectDictionary(compat, "openRouterRouting"),
@@ -417,6 +435,8 @@ public sealed class ModelConfigurationStore
             ReasoningEffortMap = MergeStringDictionaries(baseCompat.ReasoningEffortMap, overrideCompat.ReasoningEffortMap),
             SupportsUsageInStreaming = overrideCompat.SupportsUsageInStreaming ?? baseCompat.SupportsUsageInStreaming,
             MaxTokensField = overrideCompat.MaxTokensField ?? baseCompat.MaxTokensField,
+            RequiresToolResultName = overrideCompat.RequiresToolResultName ?? baseCompat.RequiresToolResultName,
+            RequiresAssistantAfterToolResult = overrideCompat.RequiresAssistantAfterToolResult ?? baseCompat.RequiresAssistantAfterToolResult,
             RequiresThinkingAsText = overrideCompat.RequiresThinkingAsText ?? baseCompat.RequiresThinkingAsText,
             ThinkingFormat = overrideCompat.ThinkingFormat ?? baseCompat.ThinkingFormat,
             OpenRouterRouting = MergeObjectDictionaries(baseCompat.OpenRouterRouting, overrideCompat.OpenRouterRouting),
@@ -511,6 +531,7 @@ public sealed class ModelConfigurationStore
             CacheRetention: ParseEnum<CacheRetention>(GetString(options, "cacheRetention")),
             SessionId: GetString(options, "sessionId"),
             MaxRetryDelay: ParseMaxRetryDelay(options),
+            Headers: ResolveHeaders(ParseRequestOptionHeaders(element)),
             Metadata: ParseObjectDictionary(options, "metadata"),
             Reasoning: ParseEnum<ThinkingLevel>(GetString(options, "reasoning")),
             ThinkingBudgets: ParseThinkingBudgets(options),
@@ -539,6 +560,7 @@ public sealed class ModelConfigurationStore
             CacheRetention: overrideOptions.CacheRetention ?? baseOptions.CacheRetention,
             SessionId: overrideOptions.SessionId ?? baseOptions.SessionId,
             MaxRetryDelay: overrideOptions.MaxRetryDelay ?? baseOptions.MaxRetryDelay,
+            Headers: MergeHeaders(baseOptions.Headers, overrideOptions.Headers),
             Metadata: MergeObjectDictionaries(baseOptions.Metadata, overrideOptions.Metadata),
             Reasoning: overrideOptions.Reasoning ?? baseOptions.Reasoning,
             ThinkingBudgets: MergeThinkingBudgets(baseOptions.ThinkingBudgets, overrideOptions.ThinkingBudgets),
@@ -573,6 +595,13 @@ public sealed class ModelConfigurationStore
             ProjectId: GetString(options, "projectId"));
 
         return parsed.IsEmpty ? null : parsed;
+    }
+
+    private static IDictionary<string, string>? ParseRequestOptionHeaders(JsonElement element)
+    {
+        return element.TryGetProperty("options", out var options) && options.ValueKind == JsonValueKind.Object
+            ? ParseStringDictionary(options, "headers")
+            : null;
     }
 
     private static ModelProviderSpecificOptionsConfiguration? MergeProviderSpecificOptions(
@@ -1165,12 +1194,14 @@ internal sealed record ModelRequestOptionsConfiguration(
     CacheRetention? CacheRetention,
     string? SessionId,
     TimeSpan? MaxRetryDelay,
+    IDictionary<string, string>? Headers,
     IDictionary<string, object>? Metadata,
     ThinkingLevel? Reasoning,
     ThinkingBudgets? ThinkingBudgets,
     ModelProviderSpecificOptionsConfiguration? ProviderSpecific)
 {
     public static ModelRequestOptionsConfiguration Empty { get; } = new(
+        null,
         null,
         null,
         null,

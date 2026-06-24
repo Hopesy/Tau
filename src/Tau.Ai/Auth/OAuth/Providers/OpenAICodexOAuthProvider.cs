@@ -17,6 +17,7 @@ public sealed class OpenAICodexOAuthProvider : IOAuthProvider
 
     public string Id => "openai-codex";
     public string Name => "ChatGPT Plus/Pro (Codex Subscription)";
+    public bool UsesCallbackServer => true;
 
     public async Task<OAuthCredentials> LoginAsync(IOAuthLoginCallbacks callbacks, CancellationToken cancellationToken = default)
     {

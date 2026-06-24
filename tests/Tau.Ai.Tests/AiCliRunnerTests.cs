@@ -18,6 +18,7 @@ public sealed class AiCliRunnerTests
         Assert.Equal(0, exitCode);
         Assert.Contains("Usage: tau-ai <command> [provider] [options]", console.Output);
         Assert.Contains("login [provider]", console.Output);
+        Assert.Contains("status [provider]", console.Output);
         Assert.Contains("list", console.Output);
         Assert.Contains("--auth-file PATH", console.Output);
         Assert.Contains("anthropic", console.Output);
@@ -76,7 +77,10 @@ public sealed class AiCliRunnerTests
     [Fact]
     public async Task RunAsync_ListShowsRegisteredOAuthProviders()
     {
-        var provider = new FakeOAuthProvider("google-gemini-cli", "Google Cloud Code Assist (Gemini CLI)");
+        var provider = new FakeOAuthProvider("google-gemini-cli", "Google Cloud Code Assist (Gemini CLI)")
+        {
+            UsesCallbackServer = true
+        };
         var console = new FakeConsole();
         var runner = CreateRunner(console, provider);
 
@@ -86,6 +90,144 @@ public sealed class AiCliRunnerTests
         Assert.Contains("Available OAuth providers:", console.Output);
         Assert.Contains("google-gemini-cli", console.Output);
         Assert.Contains("Google Cloud Code Assist (Gemini CLI)", console.Output);
+        Assert.Contains("callback=yes", console.Output);
+    }
+
+    [Fact]
+    public async Task RunAsync_StatusWithoutCredentialShowsLoginAvailable()
+    {
+        using var scope = EnvironmentVariableScope.Acquire();
+        scope.Set("ANTHROPIC_OAUTH_TOKEN", null);
+        scope.Set("ANTHROPIC_API_KEY", null);
+        using var temp = new TempDir();
+        scope.Set("TAU_MODELS_FILE", Path.Combine(temp.Path, "missing-models.json"));
+        var authPath = Path.Combine(temp.Path, "missing-auth.json");
+        var provider = new FakeOAuthProvider("anthropic", "Anthropic");
+        var console = new FakeConsole();
+        var runner = CreateRunner(console, provider);
+
+        var exitCode = await runner.RunAsync(["--auth-file", authPath, "status", "anthropic"]);
+
+        Assert.Equal(0, exitCode);
+        Assert.Contains("Provider authentication status:", console.Output);
+        Assert.Contains("anthropic", console.Output);
+        Assert.Contains("missing", console.Output);
+        Assert.Contains("source=none", console.Output);
+        Assert.Contains("oauth=no", console.Output);
+        Assert.Contains("login=yes", console.Output);
+        Assert.Contains("callback=no", console.Output);
+        Assert.Contains("OAuth login is available", console.Output);
+        Assert.Empty(console.Error);
+    }
+
+    [Fact]
+    public async Task RunAsync_StatusWithAuthFileReportsOAuthCredentialWithoutLeakingSecrets()
+    {
+        using var scope = EnvironmentVariableScope.Acquire();
+        scope.Set("ANTHROPIC_OAUTH_TOKEN", null);
+        scope.Set("ANTHROPIC_API_KEY", null);
+        using var temp = new TempDir();
+        scope.Set("TAU_MODELS_FILE", Path.Combine(temp.Path, "missing-models.json"));
+        var authPath = Path.Combine(temp.Path, "auth.json");
+        File.WriteAllText(authPath, """
+            {
+              "anthropic": {
+                "type": "oauth",
+                "refresh": "secret-refresh-token",
+                "access": "secret-access-token",
+                "expiresAt": "2030-01-01T00:00:00Z"
+              }
+            }
+            """);
+        var provider = new FakeOAuthProvider("anthropic", "Anthropic");
+        var console = new FakeConsole();
+        var runner = CreateRunner(console, provider);
+
+        var exitCode = await runner.RunAsync(["--auth-file", authPath, "status", "anthropic"]);
+
+        Assert.Equal(0, exitCode);
+        Assert.Contains("anthropic", console.Output);
+        Assert.Contains("configured", console.Output);
+        Assert.Contains("source=auth.json oauth", console.Output);
+        Assert.Contains("oauth=yes", console.Output);
+        Assert.Contains("login=yes", console.Output);
+        Assert.Contains("callback=no", console.Output);
+        Assert.Contains("OAuth credentials found in auth.json.", console.Output);
+        Assert.DoesNotContain("secret-refresh-token", console.Output, StringComparison.Ordinal);
+        Assert.DoesNotContain("secret-access-token", console.Output, StringComparison.Ordinal);
+        Assert.Empty(console.Error);
+    }
+
+    [Fact]
+    public async Task RunAsync_StatusWithExpiredOAuthCredentialShowsRefreshLoginDiagnostic()
+    {
+        using var scope = EnvironmentVariableScope.Acquire();
+        scope.Set("ANTHROPIC_OAUTH_TOKEN", null);
+        scope.Set("ANTHROPIC_API_KEY", null);
+        using var temp = new TempDir();
+        scope.Set("TAU_MODELS_FILE", Path.Combine(temp.Path, "missing-models.json"));
+        var authPath = Path.Combine(temp.Path, "auth.json");
+        File.WriteAllText(authPath, """
+            {
+              "anthropic": {
+                "type": "oauth",
+                "refresh": "secret-refresh-token",
+                "access": "secret-access-token",
+                "expiresAt": "2000-01-01T00:00:00Z"
+              }
+            }
+            """);
+        var provider = new FakeOAuthProvider("anthropic", "Anthropic");
+        var console = new FakeConsole();
+        var runner = CreateRunner(console, provider);
+
+        var exitCode = await runner.RunAsync(["--auth-file", authPath, "status", "anthropic"]);
+
+        Assert.Equal(0, exitCode);
+        Assert.Contains("anthropic", console.Output);
+        Assert.Contains("missing", console.Output);
+        Assert.Contains("source=auth.json oauth", console.Output);
+        Assert.Contains("oauth=yes", console.Output);
+        Assert.Contains("login=yes", console.Output);
+        Assert.Contains("callback=no", console.Output);
+        Assert.Contains("expired", console.Output);
+        Assert.Contains("refresh/login flow is available", console.Output);
+        Assert.DoesNotContain("secret-refresh-token", console.Output, StringComparison.Ordinal);
+        Assert.DoesNotContain("secret-access-token", console.Output, StringComparison.Ordinal);
+        Assert.Empty(console.Error);
+    }
+
+    [Fact]
+    public async Task RunAsync_StatusShowsCallbackCapabilityForCallbackFlowProvider()
+    {
+        using var scope = EnvironmentVariableScope.Acquire();
+        scope.Set("TAU_MODELS_FILE", Path.Combine(Path.GetTempPath(), $"missing-models-{Guid.NewGuid():N}.json"));
+        var provider = new FakeOAuthProvider("openai-codex", "ChatGPT Plus/Pro (Codex Subscription)")
+        {
+            UsesCallbackServer = true
+        };
+        var console = new FakeConsole();
+        var runner = CreateRunner(console, provider);
+
+        var exitCode = await runner.RunAsync(["status", "openai-codex"]);
+
+        Assert.Equal(0, exitCode);
+        Assert.Contains("openai-codex", console.Output);
+        Assert.Contains("login=yes", console.Output);
+        Assert.Contains("callback=yes", console.Output);
+    }
+
+    [Fact]
+    public async Task RunAsync_StatusRejectsExtraArguments()
+    {
+        var provider = new FakeOAuthProvider("anthropic", "Anthropic");
+        var console = new FakeConsole();
+        var runner = CreateRunner(console, provider);
+
+        var exitCode = await runner.RunAsync(["status", "anthropic", "extra"]);
+
+        Assert.Equal(1, exitCode);
+        Assert.Contains("status accepts at most one provider.", console.Error);
     }
 
     [Fact]
@@ -263,6 +405,7 @@ public sealed class AiCliRunnerTests
         public string Id { get; } = id;
 
         public string Name { get; } = name;
+        public bool UsesCallbackServer { get; init; }
 
         public int LoginCalls { get; private set; }
 

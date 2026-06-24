@@ -1,3 +1,4 @@
+using Tau.Ai.Auth;
 using Tau.Ai.Auth.OAuth;
 
 namespace Tau.Ai.Cli;
@@ -95,6 +96,11 @@ internal sealed class AiCliRunner
             return 0;
         }
 
+        if (command.Equals("status", StringComparison.OrdinalIgnoreCase))
+        {
+            return RunStatus(commandArgs.Skip(1).ToArray(), parse.AuthFile);
+        }
+
         if (command.Equals("login", StringComparison.OrdinalIgnoreCase))
         {
             return await RunLoginAsync(commandArgs.Skip(1).ToArray(), parse.AuthFile, cancellationToken)
@@ -104,6 +110,39 @@ internal sealed class AiCliRunner
         _console.WriteErrorLine($"Unknown command: {command}");
         _console.WriteErrorLine($"Use '{_commandName} --help' for usage.");
         return 1;
+    }
+
+    private int RunStatus(IReadOnlyList<string> args, string? authFile)
+    {
+        if (args.Count > 1)
+        {
+            _console.WriteErrorLine("status accepts at most one provider.");
+            _console.WriteErrorLine($"Use '{_commandName} --help' for usage.");
+            return 1;
+        }
+
+        var authPaths = string.IsNullOrWhiteSpace(authFile)
+            ? _defaultAuthSearchPathsFactory()
+            : [authFile!];
+        var resolver = new ProviderAuthResolver(
+            _providers,
+            new OAuthCredentialStore(authPaths));
+
+        if (args.Count == 1)
+        {
+            WriteProviderStatus([resolver.GetStatus(args[0])]);
+            return 0;
+        }
+
+        var providers = GetProviders();
+        if (providers.Count == 0)
+        {
+            _console.WriteErrorLine("No OAuth providers are registered.");
+            return 1;
+        }
+
+        WriteProviderStatus(providers.Select(provider => resolver.GetStatus(provider.Id)).ToArray());
+        return 0;
     }
 
     private async Task<int> RunLoginAsync(
@@ -192,10 +231,11 @@ Usage: {_commandName} <command> [provider] [options]
 
 Commands:
   login [provider]  Login to an OAuth provider
+  status [provider] Show auth status without reading or printing secrets
   list              List available providers
 
 Options:
-  --auth-file PATH  Save credentials to PATH instead of the Tau default auth store
+  --auth-file PATH  Read/write credentials at PATH instead of the Tau default auth store
 
 Providers:
 {providerList}
@@ -204,8 +244,21 @@ Examples:
   {_commandName} login
   {_commandName} login anthropic
   {_commandName} --auth-file auth.json login anthropic
+  {_commandName} --auth-file auth.json status anthropic
   {_commandName} list
 """);
+    }
+
+    private void WriteProviderStatus(IReadOnlyList<ProviderAuthStatus> statuses)
+    {
+        _console.WriteLine("Provider authentication status:");
+        _console.WriteLine();
+        foreach (var status in statuses)
+        {
+            var oauthProvider = _providers.TryGet(status.Provider);
+            _console.WriteLine(
+                $"  {status.Provider.PadRight(20)} {FormatConfigured(status).PadRight(10)} source={status.Source}; oauth={FormatBoolean(status.UsesOAuth)}; login={FormatBoolean(status.CanLogin)}; callback={FormatCallbackMode(oauthProvider)}; {status.Message}");
+        }
     }
 
     private void WriteProviderList()
@@ -214,11 +267,26 @@ Examples:
         _console.WriteLine();
         foreach (var provider in GetProviders())
         {
-            _console.WriteLine($"  {provider.Id.PadRight(20)} {provider.Name}");
+            _console.WriteLine($"  {provider.Id.PadRight(20)} {provider.Name} (callback={FormatBoolean(provider.UsesCallbackServer)})");
         }
     }
 
     private IReadOnlyList<IOAuthProvider> GetProviders() => _providers.Providers.ToArray();
+
+    private static string FormatConfigured(ProviderAuthStatus status) =>
+        status.IsConfigured ? "configured" : "missing";
+
+    private static string FormatBoolean(bool value) => value ? "yes" : "no";
+
+    private static string FormatCallbackMode(IOAuthProvider? provider)
+    {
+        if (provider is null)
+        {
+            return "n/a";
+        }
+
+        return provider.UsesCallbackServer ? "yes" : "no";
+    }
 
     private static string[] GetDefaultAuthSearchPaths()
     {

@@ -23,7 +23,7 @@ public sealed class OAuthProviderRegistry
 
     public IReadOnlyList<OAuthProviderInfo> GetProviderInfoList() =>
         _providers.Values
-            .Select(provider => new OAuthProviderInfo(provider.Id, provider.Name, true))
+            .Select(provider => new OAuthProviderInfo(provider.Id, provider.Name, true, provider.UsesCallbackServer))
             .ToArray();
 
     public void Register(IOAuthProvider provider)

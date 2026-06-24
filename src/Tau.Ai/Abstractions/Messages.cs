@@ -31,7 +31,10 @@ public sealed record AssistantMessage : ChatMessage
 public sealed record ToolResultMessage(
     string ToolCallId,
     IReadOnlyList<ContentBlock> Content,
-    bool IsError = false) : ChatMessage("toolResult");
+    bool IsError = false) : ChatMessage("toolResult")
+{
+    public string? ToolName { get; init; }
+}
 
 public record struct Usage(
     int InputTokens,

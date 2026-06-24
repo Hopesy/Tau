@@ -192,6 +192,7 @@ public sealed class AiPublicApiCompileSampleTests
         Assert.NotEmpty(builtIns);
         var oauthRegistry = new OAuthProviderRegistry(builtIns);
         Assert.NotEmpty(oauthRegistry.GetProviderInfoList());
+        Assert.Contains(oauthRegistry.GetProviderInfoList(), static info => info.UsesCallbackServer);
         var emptyOAuthRegistry = new OAuthProviderRegistry([]);
         Assert.Empty(emptyOAuthRegistry.Providers);
 
@@ -422,6 +423,7 @@ public sealed class AiPublicApiCompileSampleTests
     {
         public string Id => "sample-oauth";
         public string Name => "Sample OAuth";
+        public bool UsesCallbackServer => true;
 
         public Task<OAuthCredentials> LoginAsync(IOAuthLoginCallbacks callbacks, CancellationToken cancellationToken = default) =>
             throw new NotSupportedException();

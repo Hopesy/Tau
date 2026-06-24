@@ -30,7 +30,31 @@ public sealed class OAuthProviderRegistryTests
         Assert.Equal("custom-oauth", info.Id);
         Assert.Equal("Custom OAuth", info.Name);
         Assert.True(info.Available);
+        Assert.False(info.UsesCallbackServer);
         Assert.Same(provider, registry.Get("custom-oauth"));
+    }
+
+    [Fact]
+    public void GetProviderInfoList_IncludesCallbackServerMetadata()
+    {
+        var registry = new OAuthProviderRegistry([]);
+        registry.Register(new StubOAuthProvider("callback-oauth", "Callback OAuth") { UsesCallbackServer = true });
+        registry.Register(new StubOAuthProvider("device-oauth", "Device OAuth"));
+
+        var providers = registry.GetProviderInfoList().OrderBy(static info => info.Id, StringComparer.Ordinal).ToArray();
+
+        Assert.Collection(
+            providers,
+            info =>
+            {
+                Assert.Equal("callback-oauth", info.Id);
+                Assert.True(info.UsesCallbackServer);
+            },
+            info =>
+            {
+                Assert.Equal("device-oauth", info.Id);
+                Assert.False(info.UsesCallbackServer);
+            });
     }
 
     [Fact]
@@ -182,6 +206,7 @@ public sealed class OAuthProviderRegistryTests
     {
         public string Id => id;
         public string Name => name;
+        public bool UsesCallbackServer { get; init; }
         public OAuthCredentials? RefreshedCredentials { get; init; }
         public int RefreshCalls { get; private set; }
 

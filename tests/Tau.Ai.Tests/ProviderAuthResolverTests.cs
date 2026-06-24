@@ -140,6 +140,11 @@ public sealed class ProviderAuthResolverTests
                       "headers": {
                         "X-Provider": "provider-header"
                       },
+                      "options": {
+                        "headers": {
+                          "Authorization": "Bearer option-secret"
+                        }
+                      },
                       "models": [
                         { "id": "custom-model" }
                       ]
@@ -157,6 +162,7 @@ public sealed class ProviderAuthResolverTests
             Assert.False(status.CanLogin);
             Assert.DoesNotContain("provider-secret", status.Message, StringComparison.Ordinal);
             Assert.DoesNotContain("provider-header", status.Message, StringComparison.Ordinal);
+            Assert.DoesNotContain("option-secret", status.Message, StringComparison.Ordinal);
         }
         finally
         {
@@ -184,6 +190,11 @@ public sealed class ProviderAuthResolverTests
                           "id": "custom-model",
                           "headers": {
                             "Authorization": "Bearer model-secret"
+                          },
+                          "options": {
+                            "headers": {
+                              "X-Api-Key": "model-option-secret"
+                            }
                           }
                         }
                       ]
@@ -207,6 +218,7 @@ public sealed class ProviderAuthResolverTests
             Assert.True(modelStatus.IsConfigured);
             Assert.Equal("models.json", modelStatus.Source);
             Assert.DoesNotContain("model-secret", modelStatus.Message, StringComparison.Ordinal);
+            Assert.DoesNotContain("model-option-secret", modelStatus.Message, StringComparison.Ordinal);
         }
         finally
         {

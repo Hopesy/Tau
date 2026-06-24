@@ -17,6 +17,7 @@ internal sealed class AnthropicStreamParser
     private AssistantMessage _partial;
     private readonly AssistantMessageStream _stream;
     private readonly Dictionary<int, ToolInputAccumulator> _toolInputs = new();
+    private readonly Dictionary<int, int> _contentIndexes = new();
 
     public AnthropicStreamParser(AssistantMessage initial, AssistantMessageStream stream)
     {
@@ -26,44 +27,53 @@ internal sealed class AnthropicStreamParser
 
     public AssistantMessage Partial => _partial;
 
-    public void ParseEvent(string? eventType, string data)
+    public bool ParseEvent(string? eventType, string data)
     {
         if (string.IsNullOrEmpty(data))
-            return;
+            return false;
 
-        using var doc = JsonDocument.Parse(data);
+        JsonDocument parsed;
+        try
+        {
+            parsed = JsonDocument.Parse(data);
+        }
+        catch (JsonException ex)
+        {
+            PushError($"Malformed Anthropic SSE JSON: {ex.Message}");
+            return true;
+        }
+
+        using var doc = parsed;
         var root = doc.RootElement;
 
         var type = eventType ?? (root.TryGetProperty("type", out var t) ? t.GetString() : null);
         if (string.IsNullOrEmpty(type))
-            return;
+            return false;
 
         switch (type)
         {
             case "message_start":
                 HandleMessageStart(root);
-                break;
+                return false;
             case "content_block_start":
                 HandleContentBlockStart(root);
-                break;
+                return false;
             case "content_block_delta":
                 HandleContentBlockDelta(root);
-                break;
+                return false;
             case "content_block_stop":
                 HandleContentBlockStop(root);
-                break;
+                return false;
             case "message_delta":
-                HandleMessageDelta(root);
-                break;
+                return HandleMessageDelta(root);
             case "message_stop":
                 HandleMessageStop();
-                break;
+                return true;
             case "error":
-                HandleError(root);
-                break;
+                return HandleError(root);
             case "ping":
             default:
-                break;
+                return false;
         }
     }
 
@@ -82,7 +92,7 @@ internal sealed class AnthropicStreamParser
 
     private void HandleContentBlockStart(JsonElement root)
     {
-        var index = root.GetProperty("index").GetInt32();
+        var providerIndex = root.GetProperty("index").GetInt32();
         var block = root.GetProperty("content_block");
         var blockType = block.GetProperty("type").GetString();
 
@@ -90,7 +100,13 @@ internal sealed class AnthropicStreamParser
         {
             "text" => new TextContent(""),
             "thinking" => new ThinkingContent(""),
-            "redacted_thinking" => new ThinkingContent("") { Redacted = true },
+            "redacted_thinking" => new ThinkingContent("[Reasoning redacted]")
+            {
+                Redacted = true,
+                ThinkingSignature = block.TryGetProperty("data", out var data) && data.ValueKind == JsonValueKind.String
+                    ? data.GetString()
+                    : null
+            },
             "tool_use" => new ToolCallContent(
                 block.GetProperty("id").GetString()!,
                 block.GetProperty("name").GetString()!,
@@ -99,34 +115,38 @@ internal sealed class AnthropicStreamParser
             _ => new TextContent("")
         };
 
-        EnsureContentSlot(index);
         var content = _partial.Content.ToList();
-        content[index] = newBlock;
+        var contentIndex = content.Count;
+        content.Add(newBlock);
         _partial = _partial with { Content = content };
+        _contentIndexes[providerIndex] = contentIndex;
 
         StreamEvent evt = newBlock switch
         {
-            TextContent => new TextStartEvent(index, _partial),
-            ThinkingContent => new ThinkingStartEvent(index, _partial),
-            ToolCallContent => new ToolCallStartEvent(index, _partial),
-            _ => new TextStartEvent(index, _partial)
+            TextContent => new TextStartEvent(contentIndex, _partial),
+            ThinkingContent => new ThinkingStartEvent(contentIndex, _partial),
+            ToolCallContent => new ToolCallStartEvent(contentIndex, _partial),
+            _ => new TextStartEvent(contentIndex, _partial)
         };
         _stream.Push(evt);
 
         if (newBlock is ToolCallContent)
-            _toolInputs[index] = new ToolInputAccumulator(new StringBuilder());
+            _toolInputs[providerIndex] = new ToolInputAccumulator(new StringBuilder());
     }
 
     private void HandleContentBlockDelta(JsonElement root)
     {
-        var index = root.GetProperty("index").GetInt32();
+        var providerIndex = root.GetProperty("index").GetInt32();
+        if (!_contentIndexes.TryGetValue(providerIndex, out var contentIndex))
+            return;
+
         var delta = root.GetProperty("delta");
         var deltaType = delta.GetProperty("type").GetString();
 
-        if (index >= _partial.Content.Count)
+        if (contentIndex >= _partial.Content.Count)
             return;
 
-        var current = _partial.Content[index];
+        var current = _partial.Content[contentIndex];
 
         switch (deltaType)
         {
@@ -136,8 +156,8 @@ internal sealed class AnthropicStreamParser
                     if (current is TextContent tc)
                     {
                         var updated = tc with { Text = tc.Text + text };
-                        ReplaceContent(index, updated);
-                        _stream.Push(new TextDeltaEvent(index, text, _partial));
+                        ReplaceContent(contentIndex, updated);
+                        _stream.Push(new TextDeltaEvent(contentIndex, text, _partial));
                     }
                     break;
                 }
@@ -147,8 +167,8 @@ internal sealed class AnthropicStreamParser
                     if (current is ThinkingContent tc)
                     {
                         var updated = tc with { Thinking = tc.Thinking + text };
-                        ReplaceContent(index, updated);
-                        _stream.Push(new ThinkingDeltaEvent(index, text, _partial));
+                        ReplaceContent(contentIndex, updated);
+                        _stream.Push(new ThinkingDeltaEvent(contentIndex, text, _partial));
                     }
                     break;
                 }
@@ -156,20 +176,20 @@ internal sealed class AnthropicStreamParser
                 {
                     var sig = delta.GetProperty("signature").GetString();
                     if (current is ThinkingContent tc)
-                        ReplaceContent(index, tc with { ThinkingSignature = sig });
+                        ReplaceContent(contentIndex, tc with { ThinkingSignature = string.Concat(tc.ThinkingSignature, sig) });
                     else if (current is TextContent txt)
-                        ReplaceContent(index, txt with { TextSignature = sig });
+                        ReplaceContent(contentIndex, txt with { TextSignature = string.Concat(txt.TextSignature, sig) });
                     break;
                 }
             case "input_json_delta":
                 {
                     var partialJson = delta.GetProperty("partial_json").GetString() ?? "";
-                    if (_toolInputs.TryGetValue(index, out var acc) && current is ToolCallContent tcc)
+                    if (_toolInputs.TryGetValue(providerIndex, out var acc) && current is ToolCallContent tcc)
                     {
                         acc.Builder.Append(partialJson);
                         var updated = tcc with { Arguments = StreamingJsonParser.ParseStreamingJsonObjectRawText(acc.Builder.ToString()) };
-                        ReplaceContent(index, updated);
-                        _stream.Push(new ToolCallDeltaEvent(index, partialJson, _partial));
+                        ReplaceContent(contentIndex, updated);
+                        _stream.Push(new ToolCallDeltaEvent(contentIndex, partialJson, _partial));
                     }
                     break;
                 }
@@ -178,27 +198,38 @@ internal sealed class AnthropicStreamParser
 
     private void HandleContentBlockStop(JsonElement root)
     {
-        var index = root.GetProperty("index").GetInt32();
-        if (index >= _partial.Content.Count)
+        var providerIndex = root.GetProperty("index").GetInt32();
+        if (!_contentIndexes.TryGetValue(providerIndex, out var contentIndex))
             return;
 
-        var block = _partial.Content[index];
+        if (contentIndex >= _partial.Content.Count)
+            return;
+
+        var block = _partial.Content[contentIndex];
         StreamEvent evt = block switch
         {
-            TextContent => new TextEndEvent(index, _partial),
-            ThinkingContent => new ThinkingEndEvent(index, _partial),
-            ToolCallContent toolCall => FinalizeToolCall(index, toolCall),
-            _ => new TextEndEvent(index, _partial)
+            TextContent => new TextEndEvent(contentIndex, _partial),
+            ThinkingContent => new ThinkingEndEvent(contentIndex, _partial),
+            ToolCallContent toolCall => FinalizeToolCall(providerIndex, contentIndex, toolCall),
+            _ => new TextEndEvent(contentIndex, _partial)
         };
         _stream.Push(evt);
     }
 
-    private void HandleMessageDelta(JsonElement root)
+    private bool HandleMessageDelta(JsonElement root)
     {
         if (root.TryGetProperty("delta", out var delta))
         {
             if (delta.TryGetProperty("stop_reason", out var sr) && sr.ValueKind == JsonValueKind.String)
-                _partial = _partial with { StopReason = MapStopReason(sr.GetString()) };
+            {
+                var (stopReason, errorMessage) = MapStopReason(sr.GetString());
+                _partial = _partial with { StopReason = stopReason };
+                if (stopReason == StopReason.Error)
+                {
+                    PushError(errorMessage ?? "Provider stop_reason mapped to error");
+                    return true;
+                }
+            }
         }
 
         if (root.TryGetProperty("usage", out var usage))
@@ -214,6 +245,8 @@ internal sealed class AnthropicStreamParser
                     merged.CacheWriteTokens ?? existing.CacheWriteTokens)
             };
         }
+
+        return false;
     }
 
     private void HandleMessageStop()
@@ -222,12 +255,13 @@ internal sealed class AnthropicStreamParser
         _stream.Push(new DoneEvent(_partial));
     }
 
-    private void HandleError(JsonElement root)
+    private bool HandleError(JsonElement root)
     {
         var message = root.TryGetProperty("error", out var err) && err.TryGetProperty("message", out var m)
             ? m.GetString() ?? "Anthropic stream error"
             : "Anthropic stream error";
-        _stream.Push(new ErrorEvent(message, _partial));
+        PushError(message);
+        return true;
     }
 
     private void ReplaceContent(int index, ContentBlock block)
@@ -237,21 +271,13 @@ internal sealed class AnthropicStreamParser
         _partial = _partial with { Content = list };
     }
 
-    private ToolCallEndEvent FinalizeToolCall(int index, ToolCallContent toolCall)
+    private ToolCallEndEvent FinalizeToolCall(int providerIndex, int contentIndex, ToolCallContent toolCall)
     {
-        var rawArguments = _toolInputs.TryGetValue(index, out var acc)
+        var rawArguments = _toolInputs.TryGetValue(providerIndex, out var acc) && acc.Builder.Length > 0
             ? acc.Builder.ToString()
             : toolCall.Arguments;
-        ReplaceContent(index, toolCall with { Arguments = StreamingJsonParser.ParseStreamingJsonObjectRawText(rawArguments) });
-        return new ToolCallEndEvent(index, _partial);
-    }
-
-    private void EnsureContentSlot(int index)
-    {
-        var list = _partial.Content.ToList();
-        while (list.Count <= index)
-            list.Add(new TextContent(""));
-        _partial = _partial with { Content = list };
+        ReplaceContent(contentIndex, toolCall with { Arguments = StreamingJsonParser.ParseStreamingJsonObjectRawText(rawArguments) });
+        return new ToolCallEndEvent(contentIndex, _partial);
     }
 
     private static Usage ExtractUsage(JsonElement usage)
@@ -267,13 +293,28 @@ internal sealed class AnthropicStreamParser
         return new Usage(input, output, cacheRead, cacheWrite);
     }
 
-    private static StopReason MapStopReason(string? reason) => reason switch
+    private void PushError(string message)
     {
-        "end_turn" => StopReason.EndTurn,
-        "max_tokens" => StopReason.MaxTokens,
-        "tool_use" => StopReason.ToolUse,
-        "stop_sequence" => StopReason.EndTurn,
-        _ => StopReason.EndTurn
+        var error = _partial with
+        {
+            StopReason = StopReason.Error,
+            ErrorMessage = message,
+            Timestamp = DateTimeOffset.UtcNow
+        };
+        _partial = error;
+        _stream.Push(new ErrorEvent(message, error, error));
+    }
+
+    private static (StopReason StopReason, string? ErrorMessage) MapStopReason(string? reason) => reason switch
+    {
+        "end_turn" => (StopReason.EndTurn, null),
+        "max_tokens" => (StopReason.MaxTokens, null),
+        "tool_use" => (StopReason.ToolUse, null),
+        "pause_turn" => (StopReason.EndTurn, null),
+        "stop_sequence" => (StopReason.EndTurn, null),
+        "refusal" => (StopReason.Error, "Provider stop_reason: refusal"),
+        "sensitive" => (StopReason.Error, "Provider stop_reason: sensitive"),
+        _ => (StopReason.Error, $"Unhandled Anthropic stop_reason: {reason}")
     };
 
     private sealed record ToolInputAccumulator(StringBuilder Builder);

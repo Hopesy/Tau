@@ -174,7 +174,10 @@ internal sealed class OpenAiCompatibleProvider : IStreamProvider
             });
         }
 
-        foreach (var msg in OpenAi.OpenAiMessageConverter.ConvertMessages(context.Messages).EnumerateArray())
+        foreach (var msg in OpenAi.OpenAiMessageConverter.ConvertMessages(
+                     context.Messages,
+                     requiresToolResultName: model.Compat?.RequiresToolResultName ?? false,
+                     requiresAssistantAfterToolResult: model.Compat?.RequiresAssistantAfterToolResult ?? false).EnumerateArray())
         {
             messages.Add(msg);
         }

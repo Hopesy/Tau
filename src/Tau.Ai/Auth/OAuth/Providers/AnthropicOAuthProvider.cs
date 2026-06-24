@@ -19,6 +19,7 @@ public sealed class AnthropicOAuthProvider : IOAuthProvider
 
     public string Id => "anthropic";
     public string Name => "Anthropic (Claude Pro/Max)";
+    public bool UsesCallbackServer => true;
 
     public async Task<OAuthCredentials> LoginAsync(IOAuthLoginCallbacks callbacks, CancellationToken cancellationToken = default)
     {

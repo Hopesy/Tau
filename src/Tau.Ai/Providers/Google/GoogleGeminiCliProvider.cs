@@ -379,7 +379,10 @@ public sealed class GoogleGeminiCliProvider : IStreamProvider
                     hasContent = true;
                 }
 
-                parser.ParseChunk(responseElement.GetRawText());
+                if (parser.ParseChunk(responseElement.GetRawText()))
+                {
+                    return true;
+                }
             }
         }
 

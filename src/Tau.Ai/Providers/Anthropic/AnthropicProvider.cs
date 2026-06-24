@@ -134,7 +134,8 @@ public sealed class AnthropicProvider : IStreamProvider
         {
             if (string.IsNullOrEmpty(sse.Data))
                 continue;
-            parser.ParseEvent(sse.EventType, sse.Data);
+            if (parser.ParseEvent(sse.EventType, sse.Data))
+                break;
         }
     }
 

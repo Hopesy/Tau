@@ -102,7 +102,8 @@ public static class StreamFunctions
         var requestConfig = (configurationStore ?? new ModelConfigurationStore()).ResolveRequestConfiguration(model);
         providerSpecific = requestConfig.Options.ProviderSpecific;
         var apiKey = resolver.ResolveApiKey(model.Provider, options.ApiKey) ?? requestConfig.ApiKey;
-        var headers = MergeHeaders(requestConfig.Headers, options.Headers);
+        var configuredHeaders = MergeHeaders(requestConfig.Headers, requestConfig.Options.Headers);
+        var headers = MergeHeaders(configuredHeaders, options.Headers);
         var metadata = MergeMetadata(requestConfig.Options.Metadata, options.Metadata);
         if (requestConfig.AuthHeader &&
             !string.IsNullOrWhiteSpace(apiKey) &&

@@ -125,6 +125,8 @@ public sealed class ModelCatalogTests
                         "supportsDeveloperRole": false,
                         "supportsUsageInStreaming": false,
                         "maxTokensField": "max_completion_tokens",
+                        "requiresToolResultName": true,
+                        "requiresAssistantAfterToolResult": true,
                         "thinkingFormat": "openrouter"
                       },
                       "models": [
@@ -174,6 +176,8 @@ public sealed class ModelCatalogTests
             Assert.False(model.Compat!.SupportsDeveloperRole);
             Assert.False(model.Compat.SupportsUsageInStreaming);
             Assert.Equal("max_completion_tokens", model.Compat.MaxTokensField);
+            Assert.True(model.Compat.RequiresToolResultName);
+            Assert.True(model.Compat.RequiresAssistantAfterToolResult);
             Assert.Equal("openrouter", model.Compat.ThinkingFormat);
             Assert.Equal("anthropic", ((JsonElement)model.Compat.OpenRouterRouting!["only"])[0].GetString());
             Assert.False(((JsonElement)model.Compat.OpenRouterRouting["allow_fallbacks"]).GetBoolean());
@@ -240,7 +244,9 @@ public sealed class ModelCatalogTests
                             "X-Model": "gpt-54"
                           },
                           "compat": {
-                            "maxTokensField": "max_completion_tokens"
+                            "maxTokensField": "max_completion_tokens",
+                            "requiresToolResultName": true,
+                            "requiresAssistantAfterToolResult": true
                           }
                         },
                         "missing-model": {
@@ -265,6 +271,8 @@ public sealed class ModelCatalogTests
             Assert.Equal("gpt-54", model.Headers["X-Model"]);
             Assert.False(model.Compat!.SupportsUsageInStreaming);
             Assert.Equal("max_completion_tokens", model.Compat.MaxTokensField);
+            Assert.True(model.Compat.RequiresToolResultName);
+            Assert.True(model.Compat.RequiresAssistantAfterToolResult);
             Assert.Null(catalog.TryGetModel("openai", "missing-model"));
         }
         finally

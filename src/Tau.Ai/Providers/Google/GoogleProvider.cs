@@ -130,7 +130,10 @@ public sealed class GoogleProvider : IStreamProvider
         {
             if (string.IsNullOrEmpty(sse.Data))
                 continue;
-            parser.ParseChunk(sse.Data);
+            if (parser.ParseChunk(sse.Data))
+            {
+                return;
+            }
         }
 
         parser.EmitDone();

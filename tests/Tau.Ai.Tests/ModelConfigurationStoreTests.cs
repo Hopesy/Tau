@@ -339,6 +339,10 @@ public sealed class ModelConfigurationStoreTests
                         "cacheRetention": "long",
                         "sessionId": "provider-session",
                         "maxRetryDelayMs": 2500,
+                        "headers": {
+                          "X-Provider-Option": "provider-option",
+                          "X-Option-Shared": "provider-option"
+                        },
                         "metadata": {
                           "scope": "provider",
                           "shared": "provider"
@@ -348,6 +352,10 @@ public sealed class ModelConfigurationStoreTests
                         "custom-model": {
                           "options": {
                             "temperature": 0.3,
+                            "headers": {
+                              "X-Override-Option": "override-option",
+                              "X-Option-Shared": "override-option"
+                            },
                             "metadata": {
                               "shared": "override",
                               "overrideOnly": true
@@ -361,6 +369,10 @@ public sealed class ModelConfigurationStoreTests
                           "options": {
                             "topP": 0.6,
                             "sessionId": "model-session",
+                            "headers": {
+                              "X-Model-Option": "model-option",
+                              "X-Option-Shared": "model-option"
+                            },
                             "metadata": {
                               "shared": "model",
                               "modelOnly": 7
@@ -391,7 +403,14 @@ public sealed class ModelConfigurationStoreTests
                 registry,
                 model,
                 new LlmContext { Messages = [new UserMessage("hi")] },
-                new StreamOptions()));
+                new StreamOptions
+                {
+                    Headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                    {
+                        ["X-Explicit-Option"] = "explicit-option",
+                        ["X-Option-Shared"] = "explicit-option"
+                    }
+                }));
 
             var options = provider.CapturedOptions!;
             Assert.Equal(0.3f, options.Temperature);
@@ -401,6 +420,11 @@ public sealed class ModelConfigurationStoreTests
             Assert.Equal(CacheRetention.Long, options.CacheRetention);
             Assert.Equal("model-session", options.SessionId);
             Assert.Equal(TimeSpan.FromMilliseconds(2500), options.MaxRetryDelay);
+            Assert.Equal("provider-option", options.Headers!["X-Provider-Option"]);
+            Assert.Equal("override-option", options.Headers["X-Override-Option"]);
+            Assert.Equal("model-option", options.Headers["X-Model-Option"]);
+            Assert.Equal("explicit-option", options.Headers["X-Explicit-Option"]);
+            Assert.Equal("explicit-option", options.Headers["X-Option-Shared"]);
             Assert.Equal("provider", Assert.IsType<JsonElement>(options.Metadata!["scope"]).GetString());
             Assert.Equal("model", Assert.IsType<JsonElement>(options.Metadata["shared"]).GetString());
             Assert.True(Assert.IsType<JsonElement>(options.Metadata["overrideOnly"]).GetBoolean());
@@ -1752,6 +1776,90 @@ public sealed class ModelConfigurationStoreTests
         Assert.NotNull(provider.CapturedOptions);
         Assert.Contains(registeredApi, registry.RegisteredApis);
         Assert.DoesNotContain(aliasApi, registry.RegisteredApis);
+    }
+
+    [Fact]
+    public async Task RegisterConfiguredProviders_AppliesCompatMessageSemanticsForDynamicOpenAiCompatibleProvider()
+    {
+        using var scope = EnvironmentVariableScope.Acquire();
+        var tempDir = Path.Combine(Path.GetTempPath(), $"tau-dynamic-provider-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+
+        try
+        {
+            var modelsPath = Path.Combine(tempDir, "models.json");
+            var authPath = Path.Combine(tempDir, "auth.json");
+            File.WriteAllText(authPath, "{}");
+            File.WriteAllText(modelsPath, """
+                {
+                  "providers": {
+                    "custom-proxy": {
+                      "baseUrl": "https://proxy.example.test/v1",
+                      "api": "custom-openai-api",
+                      "apiKind": "openai-compatible",
+                      "apiKey": "dynamic-key",
+                      "compat": {
+                        "requiresToolResultName": true,
+                        "requiresAssistantAfterToolResult": true
+                      },
+                      "models": [
+                        {
+                          "id": "proxy-model"
+                        }
+                      ]
+                    }
+                  }
+                }
+                """);
+            scope.Set("TAU_MODELS_FILE", modelsPath);
+            scope.Set("TAU_AUTH_FILE", authPath);
+
+            using var handler = new OpenAiResponsesProviderTests.StubHandler(_ => OpenAiResponsesProviderTests.SseResponse(
+                """
+                data: {"choices":[{"delta":{"content":"ok"},"finish_reason":null}]}
+
+                data: {"choices":[{"delta":{},"finish_reason":"stop"}]}
+
+                data: [DONE]
+
+                """));
+            using var client = new HttpClient(handler);
+            var configurationStore = new ModelConfigurationStore([modelsPath]);
+            var catalog = new ModelCatalog(configurationStore: configurationStore);
+            var model = catalog.GetModel("custom-proxy", "proxy-model");
+            var registry = new ProviderRegistry();
+
+            BuiltInProviders.RegisterAll(registry, configurationStore, client);
+
+            var context = new LlmContext(
+                null,
+                [
+                    new AssistantMessage([new ToolCallContent("call_1", "read_file", "{}")]),
+                    new ToolResultMessage("call_1", [new TextContent("done")]) { ToolName = "read_file" },
+                    new UserMessage("follow up")
+                ],
+                null);
+
+            await OpenAiResponsesProviderTests.CollectAsync(StreamFunctions.Stream(
+                registry,
+                model,
+                context,
+                new StreamOptions()));
+
+            using var body = JsonDocument.Parse(handler.CapturedBody);
+            var messages = body.RootElement.GetProperty("messages");
+            Assert.Equal(4, messages.GetArrayLength());
+            Assert.Equal("tool", messages[1].GetProperty("role").GetString());
+            Assert.Equal("read_file", messages[1].GetProperty("name").GetString());
+            Assert.Equal("assistant", messages[2].GetProperty("role").GetString());
+            Assert.Equal("I have processed the tool results.", messages[2].GetProperty("content").GetString());
+            Assert.Equal("user", messages[3].GetProperty("role").GetString());
+            Assert.Equal("follow up", messages[3].GetProperty("content").GetString());
+        }
+        finally
+        {
+            DeleteDirectoryWithRetry(tempDir);
+        }
     }
 
     private static void DeleteDirectoryWithRetry(string path)

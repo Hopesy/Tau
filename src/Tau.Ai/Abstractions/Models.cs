@@ -24,6 +24,8 @@ public record ModelCompatibility
     public IReadOnlyDictionary<string, string>? ReasoningEffortMap { get; init; }
     public bool? SupportsUsageInStreaming { get; init; }
     public string? MaxTokensField { get; init; }
+    public bool? RequiresToolResultName { get; init; }
+    public bool? RequiresAssistantAfterToolResult { get; init; }
     public bool? RequiresThinkingAsText { get; init; }
     public string? ThinkingFormat { get; init; }
     public IDictionary<string, object>? OpenRouterRouting { get; init; }

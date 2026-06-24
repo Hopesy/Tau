@@ -4,6 +4,7 @@ public interface IOAuthProvider
 {
     string Id { get; }
     string Name { get; }
+    bool UsesCallbackServer => false;
 
     Task<OAuthCredentials> LoginAsync(IOAuthLoginCallbacks callbacks, CancellationToken cancellationToken = default);
     Task<OAuthCredentials> RefreshTokenAsync(OAuthCredentials credentials, CancellationToken cancellationToken = default);

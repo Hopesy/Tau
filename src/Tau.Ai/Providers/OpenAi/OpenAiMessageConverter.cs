@@ -11,11 +11,25 @@ internal static class OpenAiMessageConverter
     public static JsonElement ConvertMessages(
         IReadOnlyList<ChatMessage> messages,
         bool supportsImages = true,
-        bool requiresThinkingAsText = false)
+        bool requiresThinkingAsText = false,
+        bool requiresToolResultName = false,
+        bool requiresAssistantAfterToolResult = false)
     {
         var array = new List<object>();
+        var lastRole = string.Empty;
         foreach (var msg in messages)
         {
+            if (requiresAssistantAfterToolResult &&
+                string.Equals(lastRole, "toolResult", StringComparison.Ordinal) &&
+                msg is UserMessage)
+            {
+                array.Add(new Dictionary<string, object>
+                {
+                    ["role"] = "assistant",
+                    ["content"] = "I have processed the tool results."
+                });
+            }
+
             switch (msg)
             {
                 case UserMessage user:
@@ -25,9 +39,11 @@ internal static class OpenAiMessageConverter
                     array.Add(ConvertAssistantMessage(assistant, requiresThinkingAsText));
                     break;
                 case ToolResultMessage toolResult:
-                    array.Add(ConvertToolResultMessage(toolResult));
+                    array.Add(ConvertToolResultMessage(toolResult, requiresToolResultName));
                     break;
             }
+
+            lastRole = msg.Role;
         }
         return JsonSerializer.SerializeToElement(array, OpenAiJsonContext.Default.ListObject);
     }
@@ -106,15 +122,22 @@ internal static class OpenAiMessageConverter
         return result;
     }
 
-    private static object ConvertToolResultMessage(ToolResultMessage msg)
+    private static object ConvertToolResultMessage(ToolResultMessage msg, bool requiresToolResultName)
     {
         var text = SanitizeText(string.Join("", msg.Content.OfType<TextContent>().Select(t => t.Text)));
-        return new Dictionary<string, object>
+        var result = new Dictionary<string, object>
         {
             ["role"] = "tool",
             ["tool_call_id"] = msg.ToolCallId,
             ["content"] = text
         };
+
+        if (requiresToolResultName && !string.IsNullOrWhiteSpace(msg.ToolName))
+        {
+            result["name"] = msg.ToolName;
+        }
+
+        return result;
     }
 
     private static string SanitizeText(string text) =>

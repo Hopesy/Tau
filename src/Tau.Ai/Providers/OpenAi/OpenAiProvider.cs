@@ -114,8 +114,11 @@ public sealed class OpenAiProvider : IStreamProvider
             if (sse.Data == "[DONE]")
                 break;
 
-            OpenAiStreamParser.ParseChunk(
-                sse.Data, stream, ref partial, ref toolCallAccumulators, ref contentIndex);
+            if (OpenAiStreamParser.ParseChunk(
+                sse.Data, stream, ref partial, ref toolCallAccumulators, ref contentIndex))
+            {
+                break;
+            }
         }
     }
 
@@ -152,7 +155,9 @@ public sealed class OpenAiProvider : IStreamProvider
         var converted = OpenAiMessageConverter.ConvertMessages(
             context.Messages,
             supportsImages: model.InputModalities.Contains("image", StringComparer.OrdinalIgnoreCase),
-            requiresThinkingAsText: compatibility.RequiresThinkingAsText);
+            requiresThinkingAsText: compatibility.RequiresThinkingAsText,
+            requiresToolResultName: compatibility.RequiresToolResultName,
+            requiresAssistantAfterToolResult: compatibility.RequiresAssistantAfterToolResult);
         foreach (var msg in converted.EnumerateArray())
             messages.Add(msg);
 
@@ -344,6 +349,8 @@ public sealed class OpenAiProvider : IStreamProvider
             MaxTokensField = string.Equals(compat?.MaxTokensField, "max_completion_tokens", StringComparison.OrdinalIgnoreCase)
                 ? "max_completion_tokens"
                 : "max_tokens",
+            RequiresToolResultName = compat?.RequiresToolResultName ?? false,
+            RequiresAssistantAfterToolResult = compat?.RequiresAssistantAfterToolResult ?? false,
             RequiresThinkingAsText = compat?.RequiresThinkingAsText ?? false,
             ThinkingFormat = NormalizeThinkingFormat(compat?.ThinkingFormat),
             OpenRouterRouting = compat?.OpenRouterRouting,
@@ -374,6 +381,8 @@ public sealed class OpenAiProvider : IStreamProvider
         public IReadOnlyDictionary<string, string> ReasoningEffortMap { get; init; } = EmptyReasoningEffortMap;
         public bool SupportsUsageInStreaming { get; init; }
         public string MaxTokensField { get; init; } = "max_tokens";
+        public bool RequiresToolResultName { get; init; }
+        public bool RequiresAssistantAfterToolResult { get; init; }
         public bool RequiresThinkingAsText { get; init; }
         public string ThinkingFormat { get; init; } = "openai";
         public IDictionary<string, object>? OpenRouterRouting { get; init; }

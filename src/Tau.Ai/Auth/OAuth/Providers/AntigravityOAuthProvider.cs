@@ -24,6 +24,7 @@ public sealed class AntigravityOAuthProvider : IOAuthProvider
 
     public string Id => "google-antigravity";
     public string Name => "Google Antigravity";
+    public bool UsesCallbackServer => true;
 
     public async Task<OAuthCredentials> LoginAsync(IOAuthLoginCallbacks callbacks, CancellationToken cancellationToken = default)
     {
