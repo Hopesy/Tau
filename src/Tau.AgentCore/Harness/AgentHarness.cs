@@ -196,6 +196,44 @@ public sealed record AgentHarnessSessionCompactEvent(
     public string Type => "session_compact";
 }
 
+public sealed record AgentHarnessSessionBeforeCompactEvent(
+    AgentCompactionPreparation Preparation,
+    IReadOnlyList<SessionTreeEntry> BranchEntries,
+    string? CustomInstructions)
+{
+    public string Type => "session_before_compact";
+}
+
+public sealed record AgentHarnessSessionBeforeCompactResult(
+    bool Cancel = false,
+    AgentCompactionResult? Compaction = null);
+
+public sealed record AgentHarnessTreePreparation(
+    string TargetId,
+    string? OldLeafId,
+    string? CommonAncestorId,
+    IReadOnlyList<SessionTreeEntry> EntriesToSummarize,
+    bool UserWantsSummary,
+    string? CustomInstructions,
+    bool ReplaceInstructions,
+    string? Label = null);
+
+public sealed record AgentHarnessSessionBeforeTreeEvent(AgentHarnessTreePreparation Preparation)
+{
+    public string Type => "session_before_tree";
+}
+
+public sealed record AgentHarnessSessionBeforeTreeSummary(
+    string Summary,
+    object? Details = null);
+
+public sealed record AgentHarnessSessionBeforeTreeResult(
+    bool Cancel = false,
+    AgentHarnessSessionBeforeTreeSummary? Summary = null,
+    string? CustomInstructions = null,
+    bool? ReplaceInstructions = null,
+    string? Label = null);
+
 public sealed record AgentHarnessSessionTreeEvent(
     string? NewLeafId,
     string? OldLeafId,
@@ -229,6 +267,8 @@ public sealed class AgentHarness<TMetadata>
     private readonly List<Func<AgentHarnessAfterProviderResponseEvent, CancellationToken, Task>> _afterProviderResponseHandlers = [];
     private readonly List<Func<AgentHarnessToolCallEvent, CancellationToken, Task<AgentHarnessToolCallResult?>>> _toolCallHandlers = [];
     private readonly List<Func<AgentHarnessToolResultEvent, CancellationToken, Task<AgentHarnessToolResultPatch?>>> _toolResultHandlers = [];
+    private readonly List<Func<AgentHarnessSessionBeforeCompactEvent, CancellationToken, Task<AgentHarnessSessionBeforeCompactResult?>>> _sessionBeforeCompactHandlers = [];
+    private readonly List<Func<AgentHarnessSessionBeforeTreeEvent, CancellationToken, Task<AgentHarnessSessionBeforeTreeResult?>>> _sessionBeforeTreeHandlers = [];
     private readonly List<ChatMessage> _steerQueue = [];
     private readonly List<ChatMessage> _followUpQueue = [];
     private readonly List<ChatMessage> _nextTurnQueue = [];
@@ -336,6 +376,14 @@ public sealed class AgentHarness<TMetadata>
         Func<AgentHarnessToolResultEvent, CancellationToken, Task<AgentHarnessToolResultPatch?>> handler) =>
         AddHandler(_toolResultHandlers, handler);
 
+    public IDisposable OnSessionBeforeCompact(
+        Func<AgentHarnessSessionBeforeCompactEvent, CancellationToken, Task<AgentHarnessSessionBeforeCompactResult?>> handler) =>
+        AddHandler(_sessionBeforeCompactHandlers, handler);
+
+    public IDisposable OnSessionBeforeTree(
+        Func<AgentHarnessSessionBeforeTreeEvent, CancellationToken, Task<AgentHarnessSessionBeforeTreeResult?>> handler) =>
+        AddHandler(_sessionBeforeTreeHandlers, handler);
+
     public Task<AssistantMessage> PromptAsync(
         string text,
         CancellationToken cancellationToken = default) =>
@@ -432,23 +480,32 @@ public sealed class AgentHarness<TMetadata>
             if (preparation is null)
                 throw new AgentHarnessException("compaction", "Nothing to compact");
 
-            var result = await AgentCompactionSummaries.CompactAsync(
+            var hookResult = await EmitSessionBeforeCompactHookAsync(
                 preparation,
-                CreateSummaryOptions(customInstructions, replaceInstructions: false, cancellationToken))
+                branchEntries,
+                customInstructions,
+                cancellationToken).ConfigureAwait(false);
+            if (hookResult?.Cancel == true)
+                throw new AgentHarnessException("compaction", "Compaction cancelled");
+
+            var fromHook = hookResult?.Compaction is not null;
+            var result = hookResult?.Compaction ?? await AgentCompactionSummaries.CompactAsync(
+                    preparation,
+                    CreateSummaryOptions(customInstructions, replaceInstructions: false, cancellationToken))
                 .ConfigureAwait(false);
             var entryId = await Session.AppendCompactionAsync(
                 result.Summary,
                 result.FirstKeptEntryId,
                 result.TokensBefore,
                 result.Details,
-                fromHook: false,
+                fromHook,
                 cancellationToken).ConfigureAwait(false);
 
             var entry = await Session.GetEntryAsync(entryId, cancellationToken).ConfigureAwait(false);
             if (entry is CompactionSessionEntry compactionEntry)
             {
                 await EmitAsync(
-                    new AgentHarnessSessionCompactEvent(compactionEntry, FromHook: false),
+                    new AgentHarnessSessionCompactEvent(compactionEntry, fromHook),
                     cancellationToken).ConfigureAwait(false);
             }
 
@@ -487,28 +544,47 @@ public sealed class AgentHarness<TMetadata>
             var collected = await AgentBranchSummaries
                 .CollectEntriesForBranchSummaryAsync(Session, oldLeafId, targetId, cancellationToken)
                 .ConfigureAwait(false);
+            var preparation = new AgentHarnessTreePreparation(
+                targetId,
+                oldLeafId,
+                collected.CommonAncestorId,
+                collected.Entries,
+                summarize,
+                customInstructions,
+                replaceInstructions);
+            var hookResult = await EmitSessionBeforeTreeHookAsync(preparation, cancellationToken).ConfigureAwait(false);
+            if (hookResult?.Cancel == true)
+                return new AgentHarnessNavigateTreeResult(Cancelled: true);
 
             AgentBranchSummaryResult? branchSummary = null;
-            if (summarize && collected.Entries.Count > 0)
+            string? summaryText = hookResult?.Summary?.Summary;
+            object? summaryDetails = hookResult?.Summary?.Details;
+            var summaryFromHook = hookResult?.Summary is not null;
+            if (summaryText is null && summarize && collected.Entries.Count > 0)
             {
                 branchSummary = await AgentBranchSummaries.GenerateBranchSummaryAsync(
                     collected.Entries,
-                    CreateSummaryOptions(customInstructions, replaceInstructions, cancellationToken))
+                    CreateSummaryOptions(
+                        hookResult?.CustomInstructions ?? customInstructions,
+                        hookResult?.ReplaceInstructions ?? replaceInstructions,
+                        cancellationToken))
                     .ConfigureAwait(false);
+                summaryText = branchSummary.Summary;
+                summaryDetails = new AgentBranchSummaryDetails(
+                    branchSummary.ReadFiles,
+                    branchSummary.ModifiedFiles);
             }
 
             var (newLeafId, editorText) = ResolveNavigationTarget(targetEntry);
             string? summaryId = null;
-            if (branchSummary is not null)
+            if (summaryText is not null)
             {
                 summaryId = await Session.MoveToAsync(
                     newLeafId,
                     new SessionBranchSummary(
-                        branchSummary.Summary,
-                        new AgentBranchSummaryDetails(
-                            branchSummary.ReadFiles,
-                            branchSummary.ModifiedFiles),
-                        FromHook: false),
+                        summaryText,
+                        summaryDetails,
+                        summaryFromHook),
                     cancellationToken).ConfigureAwait(false);
             }
             else
@@ -524,7 +600,7 @@ public sealed class AgentHarness<TMetadata>
                     await Session.GetLeafIdAsync(cancellationToken).ConfigureAwait(false),
                     oldLeafId,
                     summaryEntry,
-                    FromHook: false),
+                    summaryFromHook),
                 cancellationToken).ConfigureAwait(false);
 
             return new AgentHarnessNavigateTreeResult(
@@ -827,6 +903,65 @@ public sealed class AgentHarness<TMetadata>
         }
 
         return current;
+    }
+
+    private async Task<AgentHarnessSessionBeforeCompactResult?> EmitSessionBeforeCompactHookAsync(
+        AgentCompactionPreparation preparation,
+        IReadOnlyList<SessionTreeEntry> branchEntries,
+        string? customInstructions,
+        CancellationToken cancellationToken)
+    {
+        var handlers = SnapshotHandlers(_sessionBeforeCompactHandlers);
+        if (handlers.Length == 0)
+            return null;
+
+        AgentHarnessSessionBeforeCompactResult? lastResult = null;
+        var evt = new AgentHarnessSessionBeforeCompactEvent(
+            preparation,
+            branchEntries.ToArray(),
+            customInstructions);
+        foreach (var handler in handlers)
+        {
+            try
+            {
+                var result = await handler(evt, cancellationToken).ConfigureAwait(false);
+                if (result is not null)
+                    lastResult = result;
+            }
+            catch (Exception ex) when (ex is not AgentHarnessException)
+            {
+                throw NormalizeHookException(ex);
+            }
+        }
+
+        return lastResult;
+    }
+
+    private async Task<AgentHarnessSessionBeforeTreeResult?> EmitSessionBeforeTreeHookAsync(
+        AgentHarnessTreePreparation preparation,
+        CancellationToken cancellationToken)
+    {
+        var handlers = SnapshotHandlers(_sessionBeforeTreeHandlers);
+        if (handlers.Length == 0)
+            return null;
+
+        AgentHarnessSessionBeforeTreeResult? lastResult = null;
+        var evt = new AgentHarnessSessionBeforeTreeEvent(preparation);
+        foreach (var handler in handlers)
+        {
+            try
+            {
+                var result = await handler(evt, cancellationToken).ConfigureAwait(false);
+                if (result is not null)
+                    lastResult = result;
+            }
+            catch (Exception ex) when (ex is not AgentHarnessException)
+            {
+                throw NormalizeHookException(ex);
+            }
+        }
+
+        return lastResult;
     }
 
     private async Task<string> ResolveSystemPromptAsync(
@@ -1349,6 +1484,11 @@ public sealed class AgentHarness<TMetadata>
 
         return new AgentHarnessException(fallbackCode, error.Message, error);
     }
+
+    private static AgentHarnessException NormalizeHookException(Exception error) =>
+        error is AgentHarnessException harnessError
+            ? harnessError
+            : new AgentHarnessException("hook", error.Message, error);
 
     private IDisposable AddHandler<THandler>(List<THandler> handlers, THandler handler)
         where THandler : Delegate

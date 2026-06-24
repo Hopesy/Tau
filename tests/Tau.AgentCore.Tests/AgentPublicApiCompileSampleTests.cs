@@ -62,6 +62,10 @@ public sealed class AgentPublicApiCompileSampleTests
         using var publicHarnessSubscription = publicHarness.Subscribe(publicHarnessEvents.Add);
         using var publicHarnessContextHook = publicHarness.OnContext((evt, _) =>
             Task.FromResult<AgentHarnessContextResult?>(new(evt.Messages)));
+        using var publicHarnessBeforeCompactHook = publicHarness.OnSessionBeforeCompact((_, _) =>
+            Task.FromResult<AgentHarnessSessionBeforeCompactResult?>(null));
+        using var publicHarnessBeforeTreeHook = publicHarness.OnSessionBeforeTree((_, _) =>
+            Task.FromResult<AgentHarnessSessionBeforeTreeResult?>(null));
         var harnessAssistant = await publicHarness
             .PromptFromTemplateAsync("sample", ["public-api"])
             .WaitAsync(TimeSpan.FromSeconds(5));

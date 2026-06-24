@@ -87,6 +87,48 @@ public sealed class AgentHarnessTests
     }
 
     [Fact]
+    public async Task CompactAsync_UsesSessionBeforeCompactHookResult()
+    {
+        var provider = new CapturingProvider("unexpected summary");
+        var harness = CreateHarness(provider);
+        await harness.AppendMessageAsync(new UserMessage("old request"));
+        await harness.AppendMessageAsync(new AssistantMessage([new TextContent("old answer")]));
+        var firstKept = await harness.Session.AppendMessageAsync(new UserMessage("recent request"));
+        var events = new List<object>();
+        using var subscription = harness.Subscribe(events.Add);
+        using var beforeCompact = harness.OnSessionBeforeCompact((evt, _) =>
+        {
+            Assert.Equal("prefer hook", evt.CustomInstructions);
+            Assert.Equal(firstKept, evt.Preparation.FirstKeptEntryId);
+            Assert.Equal(3, evt.BranchEntries.Count);
+            return Task.FromResult<AgentHarnessSessionBeforeCompactResult?>(new(
+                Compaction: new AgentCompactionResult(
+                    "hook compact summary",
+                    evt.Preparation.FirstKeptEntryId,
+                    evt.Preparation.TokensBefore,
+                    new AgentCompactionDetails(["README.md"], ["src/Edit.cs"]))));
+        });
+
+        var result = await harness.CompactAsync(
+            customInstructions: "prefer hook",
+            settings: new AgentCompactionSettings(KeepRecentTokens: 1))
+            .WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal("hook compact summary", result.Summary);
+        Assert.Null(provider.LastContext);
+        var compaction = Assert.IsType<CompactionSessionEntry>(
+            (await harness.Session.GetEntriesAsync()).Last(static entry => entry.Type == "compaction"));
+        Assert.True(compaction.FromHook);
+        Assert.Equal("hook compact summary", compaction.Summary);
+        Assert.Equal(firstKept, compaction.FirstKeptEntryId);
+        Assert.Equal(["README.md"], Assert.IsType<AgentCompactionDetails>(compaction.Details).ReadFiles);
+        var compactEvent = Assert.IsType<AgentHarnessSessionCompactEvent>(
+            Assert.Single(events.OfType<AgentHarnessSessionCompactEvent>()));
+        Assert.True(compactEvent.FromHook);
+        Assert.Equal(compaction.Id, compactEvent.CompactionEntry.Id);
+    }
+
+    [Fact]
     public async Task NavigateTreeAsync_SummarizesOldBranchAndPreservesFromId()
     {
         var provider = new CapturingProvider("branch summary");
@@ -118,6 +160,49 @@ public sealed class AgentHarnessTests
         var context = await harness.Session.BuildContextAsync();
         Assert.Equal("branchSummary", Assert.Single(context.Messages).Role);
         Assert.Contains(events, static evt => evt is AgentHarnessSessionTreeEvent);
+    }
+
+    [Fact]
+    public async Task NavigateTreeAsync_UsesSessionBeforeTreeHookSummary()
+    {
+        var provider = new CapturingProvider("unexpected branch summary");
+        var harness = CreateHarness(provider);
+        var root = await harness.Session.AppendMessageAsync(new UserMessage("root prompt"));
+        await harness.Session.AppendMessageAsync(new AssistantMessage([new TextContent("main answer")]));
+        await harness.Session.AppendMessageAsync(new UserMessage("branch request"));
+        await harness.Session.AppendMessageAsync(new AssistantMessage([new TextContent("branch work")]));
+        var events = new List<object>();
+        using var subscription = harness.Subscribe(events.Add);
+        using var beforeTree = harness.OnSessionBeforeTree((evt, _) =>
+        {
+            Assert.Equal(root, evt.Preparation.TargetId);
+            Assert.True(evt.Preparation.UserWantsSummary);
+            Assert.Equal("tree focus", evt.Preparation.CustomInstructions);
+            Assert.False(evt.Preparation.ReplaceInstructions);
+            Assert.Equal(3, evt.Preparation.EntriesToSummarize.Count);
+            return Task.FromResult<AgentHarnessSessionBeforeTreeResult?>(new(
+                Summary: new AgentHarnessSessionBeforeTreeSummary(
+                    "hook branch summary",
+                    new AgentBranchSummaryDetails(["README.md"], ["src/Branch.cs"]))));
+        });
+
+        var result = await harness.NavigateTreeAsync(
+            root,
+            summarize: true,
+            customInstructions: "tree focus")
+            .WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.False(result.Cancelled);
+        Assert.Equal("root prompt", result.EditorText);
+        Assert.NotNull(result.SummaryEntry);
+        Assert.True(result.SummaryEntry.FromHook);
+        Assert.Equal("hook branch summary", result.SummaryEntry.Summary);
+        Assert.Equal("src/Branch.cs", Assert.IsType<AgentBranchSummaryDetails>(result.SummaryEntry.Details).ModifiedFiles.Single());
+        Assert.Null(provider.LastContext);
+        var treeEvent = Assert.IsType<AgentHarnessSessionTreeEvent>(
+            Assert.Single(events.OfType<AgentHarnessSessionTreeEvent>()));
+        Assert.True(treeEvent.FromHook);
+        Assert.Equal(result.SummaryEntry.Id, treeEvent.SummaryEntry?.Id);
     }
 
     [Fact]
