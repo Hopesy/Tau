@@ -1,10 +1,12 @@
 # Tau
 
-Tau 是 [pi-mono](https://github.com/badlogic/pi-mono) 的 .NET 10 移植仓库，目标是在 C# / .NET 生态中重建其核心 AI Agent 能力，而不是简单包一层兼容壳。
+Tau 是 [pi](https://github.com/earendil-works/pi) 当前主线的 .NET 10 移植仓库，参考项目位于 `C:\Users\zhouh\Desktop\pi-main`。当前仓库只保留与参考项目 `packages` 目录对齐的四个模块：
 
-当前仓库已经从单纯 **CLI-first 收口** 进入 **多应用面最小产品切片阶段**：
+| pi-main package | Tau project | 说明 |
+| --- | --- | --- |
+| `packages/ai` | `src/Tau.Ai` | 多 provider LLM API、模型、认证和流式协议 |
+| `packages/agent` / `pi-agent-core` | `src/Tau.AgentCore` | Agent runtime、tool calling、状态管理和应用底座 |
+| `packages/coding-agent` | `src/Tau.CodingAgent` | Coding agent CLI/runtime |
+| `packages/tui` | `src/Tau.Tui` | Terminal UI 基础组件 |
 
-- `Tau.Ai` / `Tau.Agent` / `Tau.CodingAgent` / `Tau.Tui` 已有可运行核心基线
-- `Tau.WebUi` 已从 Hello World 推进到 **可持久化 session + provider/model 选择 + 流式/附件/会话管理 + JSON/HTML/Markdown/JSONL 导入导出 + CodingAgent JSONL 只读预览/tree metadata/filter/audit/保守导入** 的 Web 宿主
-- `Tau.Mom` 已从纯文本 worker 推进到 **支持结构化委派请求 + 本地 events + Slack-compatible message envelope + transport/responder seam + Slack event mapper + Slack Socket Mode transport seam + Slack Web API responder seam + Slack startup backfill + Slack private file download + per-channel queue dispatcher + true cancellable stop + Mom sandbox/tool delegation seam + runtime delegation response/tool/usage 可观测事件 + 显式 sandbox validation 入口 + Docker sandbox validate/exec 可测试 seam + 附件 staging + workspace layout bootstrap + prompt debug snapshot + 本地多消息 session/model carry-over** 的本地委派宿主
-- `Tau.Pods` 已从静态 config CLI 推进到 **支持 probe / exec / health / deploy / stop / restart / model lifecycle / vLLM serve command planner 与 `vllm plan/preflight/deploy/status/health/stop` CLI baseline、vLLM revision/prefetch、health retry/backoff 且 SSH exec 走 ArgumentList argv 构造并结构化处理本地 ssh 进程失败** 的运维 CLI
+旧上游已经移除的 `web-ui`、`mom`、`pods` 以及本仓库对应的历史迁移项目不再作为当前结构目标维护。

@@ -1,5 +1,5 @@
-using Tau.Agent;
-using Tau.Agent.Runtime;
+using Tau.AgentCore;
+using Tau.AgentCore.Runtime;
 using Tau.Ai;
 using Tau.Ai.Auth;
 using Tau.Ai.Auth.OAuth;

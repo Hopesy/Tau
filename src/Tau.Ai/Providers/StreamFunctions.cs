@@ -12,7 +12,7 @@ namespace Tau.Ai.Providers;
 
 /// <summary>
 /// Top-level convenience functions for streaming LLM responses.
-/// Mirrors pi-mono's stream.ts exports.
+/// Mirrors pi-main's stream.ts exports.
 /// </summary>
 public static class StreamFunctions
 {

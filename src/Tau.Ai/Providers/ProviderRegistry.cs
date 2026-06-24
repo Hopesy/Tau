@@ -5,7 +5,7 @@ namespace Tau.Ai.Providers;
 
 /// <summary>
 /// Global provider registry with lazy initialization and source-based bulk unregistration.
-/// Mirrors pi-mono's api-registry.ts.
+/// Mirrors pi-main's api-registry.ts.
 /// </summary>
 public sealed class ProviderRegistry
 {

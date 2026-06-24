@@ -1,5 +1,5 @@
 using System.Runtime.CompilerServices;
-using Tau.Agent;
+using Tau.AgentCore;
 using Tau.Ai;
 using Tau.CodingAgent.Runtime;
 

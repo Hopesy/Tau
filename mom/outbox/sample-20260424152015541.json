@@ -1,9 +1,0 @@
-{
-  "requestFile": "sample-20260424152015541.txt",
-  "prompt": "hello from tau mom",
-  "response": "",
-  "toolEvents": [],
-  "error": "JsonTypeInfo metadata for type \u0027System.Int32\u0027 was not provided by TypeInfoResolver of type \u0027Tau.Ai.Providers.OpenAi.OpenAiRequestJsonContext\u0027. If using source generation, ensure that all root types passed to the serializer have been annotated with \u0027JsonSerializableAttribute\u0027, along with any types that might be serialized polymorphically. The unsupported member type is located on type \u0027System.Object\u0027. Path: $.",
-  "processedAt": "2026-04-24T07:20:16.6249399+00:00",
-  "duration": "00:00:00.0574709"
-}

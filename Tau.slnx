@@ -1,24 +1,18 @@
 <Solution>
   <Folder Name="/src/">
-    <Project Path="src/Tau.Agent/Tau.Agent.csproj" />
+    <Project Path="src/Tau.AgentCore/Tau.AgentCore.csproj" />
     <Project Path="src/Tau.Ai/Tau.Ai.csproj" />
-    <Project Path="src/Tau.Ai.Cli/Tau.Ai.Cli.csproj" />
     <Project Path="src/Tau.CodingAgent/Tau.CodingAgent.csproj" />
-    <Project Path="src/Tau.Mom/Tau.Mom.csproj" />
-    <Project Path="src/Tau.Pods/Tau.Pods.csproj" />
     <Project Path="src/Tau.Tui/Tau.Tui.csproj" />
-    <Project Path="src/Tau.WebUi/Tau.WebUi.csproj" />
   </Folder>
   <Folder Name="/examples/">
-    <Project Path="examples/Tau.Agent.ConsoleExample/Tau.Agent.ConsoleExample.csproj" />
-    <Project Path="examples/Tau.Agent.HttpExample/Tau.Agent.HttpExample.csproj" />
+    <Project Path="examples/Tau.AgentCore.ConsoleExample/Tau.AgentCore.ConsoleExample.csproj" />
+    <Project Path="examples/Tau.AgentCore.HttpExample/Tau.AgentCore.HttpExample.csproj" />
   </Folder>
   <Folder Name="/tests/">
-    <Project Path="tests/Tau.Agent.Tests/Tau.Agent.Tests.csproj" />
+    <Project Path="tests/Tau.AgentCore.Tests/Tau.AgentCore.Tests.csproj" />
     <Project Path="tests/Tau.Ai.Tests/Tau.Ai.Tests.csproj" />
     <Project Path="tests/Tau.CodingAgent.Tests/Tau.CodingAgent.Tests.csproj" />
-    <Project Path="tests/Tau.Pods.Tests/Tau.Pods.Tests.csproj" />
     <Project Path="tests/Tau.Tui.Tests/Tau.Tui.Tests.csproj" />
-    <Project Path="tests/Tau.WebUi.Tests/Tau.WebUi.Tests.csproj" />
   </Folder>
 </Solution>

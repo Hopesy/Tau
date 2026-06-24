@@ -1,14 +1,11 @@
-using System.Runtime.CompilerServices;
 using System.Text.Json;
-using Tau.Agent;
+using Tau.AgentCore;
 using Tau.Ai;
 using Tau.Ai.Observability;
 using Tau.Ai.Providers;
 using Tau.Ai.Streaming;
-using Tau.Agent.Runtime;
+using Tau.AgentCore.Runtime;
 using Tau.CodingAgent.Runtime;
-using Tau.WebUi.Contracts;
-using Tau.WebUi.Services;
 
 namespace Tau.CodingAgent.Tests;
 
@@ -827,118 +824,5 @@ file sealed class CompactingTestProvider : IStreamProvider
         var stream = new AssistantMessageStream();
         stream.Push(new DoneEvent(new AssistantMessage([new TextContent("summary result")])));
         return stream;
-    }
-}
-
-public class WebChatStoreTests
-{
-    [Fact]
-    public void SaveAndLoad_RoundTripsSessions()
-    {
-        var path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"tau-webui-{Guid.NewGuid():N}.json");
-        var store = new WebChatStore(path);
-        var sessions = new[]
-        {
-            new WebChatSessionDto(
-                "session-1",
-                "Test Session",
-                "openai",
-                "gpt-5.4",
-                DateTimeOffset.UtcNow.AddMinutes(-2),
-                DateTimeOffset.UtcNow,
-                true,
-                [new WebChatMessageDto("user", "hello", DateTimeOffset.UtcNow)])
-        };
-
-        try
-        {
-            store.Save(sessions);
-            var loaded = store.Load();
-
-            var session = Assert.Single(loaded);
-            Assert.Equal("session-1", session.Id);
-            Assert.Equal("openai", session.Provider);
-            Assert.Equal("gpt-5.4", session.Model);
-            Assert.Single(session.Messages);
-        }
-        finally
-        {
-            if (File.Exists(path))
-            {
-                File.Delete(path);
-            }
-        }
-    }
-
-    [Fact]
-    public async Task SendMessageStreamAsync_PersistsAssistantAndBuildsAttachmentPrompt()
-    {
-        var path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"tau-webui-{Guid.NewGuid():N}.json");
-        var store = new WebChatStore(path);
-        FakeCodingAgentRunner? runner = null;
-        var service = new WebChatService(
-            store,
-            (_, _, _) =>
-            {
-                runner = new FakeCodingAgentRunner(StreamOk);
-                return runner;
-            });
-        var session = service.CreateSession("Web stream", "openai", "gpt-5.4");
-        var attachment = new WebChatAttachmentDto(
-            "att-1",
-            "document",
-            "notes.txt",
-            "text/plain",
-            5,
-            "aGVsbG8=",
-            "hello from attachment");
-        var events = new List<WebChatStreamEventDto>();
-
-        try
-        {
-            await foreach (var streamEvent in service.SendMessageStreamAsync(
-                               session.Id,
-                               "please inspect",
-                               [attachment]))
-            {
-                events.Add(streamEvent);
-            }
-
-            Assert.Equal("user", events[0].Type);
-            Assert.Contains(events, evt => evt is { Type: "text_delta", Text: "stream ok" });
-            var done = Assert.Single(events, evt => evt.Type == "done");
-            Assert.True(done.Session?.Persisted);
-            Assert.Equal(2, done.Session?.Messages.Count);
-
-            Assert.NotNull(runner);
-            var content = Assert.Single(runner!.ContentInputs);
-            var prompt = Assert.IsType<TextContent>(content[0]).Text;
-            Assert.Contains("please inspect", prompt, StringComparison.Ordinal);
-            Assert.Contains("<file name=\"notes.txt\" mimeType=\"text/plain\" size=\"5\">", prompt, StringComparison.Ordinal);
-            Assert.Contains("hello from attachment", prompt, StringComparison.Ordinal);
-
-            var stored = Assert.Single(new WebChatStore(path).Load());
-            Assert.Equal(session.Id, stored.Id);
-            Assert.Equal(2, stored.Messages.Count);
-            Assert.Equal("stream ok", stored.Messages[1].Text);
-            Assert.Single(stored.Messages[0].Attachments!);
-        }
-        finally
-        {
-            if (File.Exists(path))
-            {
-                File.Delete(path);
-            }
-        }
-    }
-
-    private static async IAsyncEnumerable<AgentEvent> StreamOk(
-        string input,
-        [EnumeratorCancellation] CancellationToken cancellationToken = default)
-    {
-        await Task.Yield();
-        var partial = new AssistantMessage([new TextContent("stream ok")]);
-        yield return new MessageUpdateEvent(new TextDeltaEvent(0, "stream ok", partial));
-        yield return new AgentEndEvent();
     }
 }

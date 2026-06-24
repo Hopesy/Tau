@@ -2,8 +2,8 @@ using System.Runtime.ExceptionServices;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading.Channels;
-using Tau.Agent;
-using Tau.Agent.Runtime;
+using Tau.AgentCore;
+using Tau.AgentCore.Runtime;
 using Tau.Ai;
 using Tau.Ai.Observability;
 

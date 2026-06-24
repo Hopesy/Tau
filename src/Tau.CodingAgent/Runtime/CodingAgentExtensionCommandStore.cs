@@ -1,5 +1,5 @@
 using System.Text.Json;
-using Tau.Agent;
+using Tau.AgentCore;
 using Tau.Tui.Abstractions;
 
 namespace Tau.CodingAgent.Runtime;

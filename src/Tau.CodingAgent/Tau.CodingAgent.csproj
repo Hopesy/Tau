@@ -1,8 +1,8 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
     <ProjectReference Include="..\Tau.Ai\Tau.Ai.csproj" />
-    <ProjectReference Include="..\Tau.Agent\Tau.Agent.csproj" />
+    <ProjectReference Include="..\Tau.AgentCore\Tau.AgentCore.csproj" />
     <ProjectReference Include="..\Tau.Tui\Tau.Tui.csproj" />
   </ItemGroup>
 

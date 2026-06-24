@@ -1,4 +1,4 @@
-using Tau.Agent;
+using Tau.AgentCore;
 using Tau.CodingAgent.Runtime;
 
 namespace Tau.CodingAgent.Tests;

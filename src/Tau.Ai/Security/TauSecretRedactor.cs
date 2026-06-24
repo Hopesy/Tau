@@ -7,7 +7,6 @@ public sealed partial class TauSecretRedactor
     public const string Placeholder = "[redacted]";
 
     public const string CodingAgentEnvironmentVariable = "TAU_CODING_AGENT_REDACT_SECRETS";
-    public const string WebUiEnvironmentVariable = "TAU_WEBUI_REDACT_SECRETS";
     public const string TauLogEnvironmentVariable = "TAU_LOG_REDACT_SECRETS";
 
     private static readonly (Regex Pattern, string Label)[] Patterns =

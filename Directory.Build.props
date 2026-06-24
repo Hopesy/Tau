@@ -15,8 +15,8 @@
     <RepositoryType>git</RepositoryType>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
-    <PackageTags>tau;agent;ai;llm;pi-mono</PackageTags>
-    <Description>Tau .NET libraries and applications for pi-mono parity.</Description>
+    <PackageTags>tau;agent;ai;llm;pi</PackageTags>
+    <Description>Tau .NET libraries and applications for pi parity.</Description>
   </PropertyGroup>
 
   <ItemGroup Condition="'$(IsPackable)' != 'false'">

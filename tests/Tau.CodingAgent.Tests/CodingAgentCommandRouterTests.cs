@@ -1,7 +1,7 @@
 using System.Globalization;
 using System.Text.Json;
-using Tau.Agent;
-using Tau.Agent.Runtime;
+using Tau.AgentCore;
+using Tau.AgentCore.Runtime;
 using Tau.Ai;
 using Tau.CodingAgent.Runtime;
 using Tau.CodingAgent.Tools;
@@ -5119,7 +5119,7 @@ public class CodingAgentCommandRouterTests
     public async Task TryHandleAsync_FindCommand_LocatesSubstringInMessages()
     {
         var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
-        runner.MutableMessages.Add(new UserMessage("Tell me about pi-mono port plan"));
+        runner.MutableMessages.Add(new UserMessage("Tell me about pi-main port plan"));
         runner.MutableMessages.Add(new AssistantMessage([new TextContent("the plan covers AWS credential chain")]));
         runner.MutableMessages.Add(new AssistantMessage([new TextContent("unrelated thoughts about kittens")]));
         var router = new CodingAgentCommandRouter(runner);

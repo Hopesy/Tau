@@ -5,7 +5,7 @@ namespace Tau.Ai.Streaming;
 
 /// <summary>
 /// Push-pull bridge: producers Push events, consumers iterate via IAsyncEnumerable.
-/// Mirrors pi-mono's EventStream with Channel-based buffering.
+/// Mirrors pi-main's EventStream with Channel-based buffering.
 /// </summary>
 public class EventStream<TEvent, TResult> : IAsyncEnumerable<TEvent>
 {

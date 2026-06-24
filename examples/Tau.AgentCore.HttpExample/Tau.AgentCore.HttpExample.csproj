@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsAotCompatible>false</IsAotCompatible>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Tau.AgentCore\Tau.AgentCore.csproj" />
+    <ProjectReference Include="..\..\src\Tau.Ai\Tau.Ai.csproj" />
+  </ItemGroup>
+
+</Project>

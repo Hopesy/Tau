@@ -1,6 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using Tau.Agent.Runtime;
+using Tau.AgentCore.Runtime;
 using Tau.Ai;
 
 namespace Tau.CodingAgent.Runtime;

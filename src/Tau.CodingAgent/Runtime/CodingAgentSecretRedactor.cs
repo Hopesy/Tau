@@ -6,7 +6,7 @@ namespace Tau.CodingAgent.Runtime;
 /// Thin shim retained for backwards compatibility with callers that still
 /// reference <see cref="CodingAgentSecretRedactor"/>. Delegates to the shared
 /// <see cref="TauSecretRedactor"/> in Tau.Ai so both the coding agent and the
-/// WebUi exporter use the same patterns.
+/// Other exporters use the same patterns.
 /// </summary>
 public sealed class CodingAgentSecretRedactor
 {

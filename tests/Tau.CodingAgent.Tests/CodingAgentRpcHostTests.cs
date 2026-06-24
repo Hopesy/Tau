@@ -1,8 +1,8 @@
 using System.Runtime.CompilerServices;
 using System.Threading.Channels;
 using System.Text.Json;
-using Tau.Agent;
-using Tau.Agent.Runtime;
+using Tau.AgentCore;
+using Tau.AgentCore.Runtime;
 using Tau.Ai;
 using Tau.CodingAgent.Runtime;
 

@@ -1,6 +1,6 @@
 using System.Diagnostics;
 using System.Text.Json;
-using Tau.Agent;
+using Tau.AgentCore;
 using Tau.Ai;
 
 namespace Tau.CodingAgent.Tools;

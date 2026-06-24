@@ -1,5 +1,5 @@
 using System.Text.Json;
-using Tau.Agent;
+using Tau.AgentCore;
 using Tau.Ai;
 using Tau.Ai.Auth.OAuth;
 using Tau.Ai.Observability;
