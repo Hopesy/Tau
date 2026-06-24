@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text.Json;
 using Tau.AgentCore;
+using Tau.AgentCore.Harness;
 using Tau.AgentCore.Runtime;
 using Tau.Ai;
 using Tau.CodingAgent.Runtime;
