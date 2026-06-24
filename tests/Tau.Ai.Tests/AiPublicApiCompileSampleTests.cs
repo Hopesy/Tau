@@ -50,6 +50,10 @@ public sealed class AiPublicApiCompileSampleTests
         using var response = new HttpResponseMessage(HttpStatusCode.Accepted);
         response.Headers.TryAddWithoutValidation("X-Sample", "sample");
         Assert.Equal("sample", AiHeaderUtilities.ToDictionary(response)["x-sample"]);
+        using var firstCancellation = new CancellationTokenSource();
+        using var secondCancellation = new CancellationTokenSource();
+        using var combinedCancellation = CancellationTokenUtilities.Combine(firstCancellation.Token, secondCancellation.Token);
+        Assert.True(combinedCancellation.Token.CanBeCanceled);
 
         var provider = new SampleProvider();
         var registry = new ProviderRegistry();

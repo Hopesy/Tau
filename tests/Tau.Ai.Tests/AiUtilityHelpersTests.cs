@@ -56,6 +56,52 @@ public sealed class AiUtilityHelpersTests
         Assert.Equal("trace-1", headers["x-trace-id"]);
     }
 
+    [Fact]
+    public void CancellationTokenUtilities_Combine_ReturnsNoneWhenNoTokensCanCancel()
+    {
+        using var combined = CancellationTokenUtilities.Combine(CancellationToken.None, default);
+
+        Assert.False(combined.Token.CanBeCanceled);
+    }
+
+    [Fact]
+    public void CancellationTokenUtilities_Combine_ReusesSingleCancelableToken()
+    {
+        using var source = new CancellationTokenSource();
+        using var combined = CancellationTokenUtilities.Combine(CancellationToken.None, source.Token);
+
+        Assert.Equal(source.Token, combined.Token);
+
+        source.Cancel();
+        Assert.True(combined.Token.IsCancellationRequested);
+    }
+
+    [Fact]
+    public void CancellationTokenUtilities_Combine_CancelsWhenAnySourceCancels()
+    {
+        using var first = new CancellationTokenSource();
+        using var second = new CancellationTokenSource();
+        using var combined = CancellationTokenUtilities.Combine(first.Token, second.Token);
+
+        second.Cancel();
+
+        Assert.False(first.IsCancellationRequested);
+        Assert.True(combined.Token.IsCancellationRequested);
+    }
+
+    [Fact]
+    public void CancellationTokenUtilities_Combine_DisposeStopsFutureCancellationPropagation()
+    {
+        using var first = new CancellationTokenSource();
+        using var second = new CancellationTokenSource();
+        using var combined = CancellationTokenUtilities.Combine(first.Token, second.Token);
+
+        combined.Dispose();
+        first.Cancel();
+
+        Assert.False(combined.Token.IsCancellationRequested);
+    }
+
     [Theory]
     [InlineData("prompt is too long: 213462 tokens > 200000 maximum")]
     [InlineData("Your input exceeds the context window of this model")]

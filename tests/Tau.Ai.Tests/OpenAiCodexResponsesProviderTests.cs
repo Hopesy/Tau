@@ -74,6 +74,25 @@ public sealed class OpenAiCodexResponsesProviderTests
     }
 
     [Fact]
+    public async Task Stream_SseHeaderTimeout_EmitsTimeoutError()
+    {
+        using var handler = new BlockingHandler();
+        using var client = new HttpClient(handler);
+        var provider = new OpenAiCodexResponsesProvider(client, null, TimeSpan.FromMilliseconds(25));
+
+        var events = await OpenAiResponsesProviderTests.CollectAsync(provider.Stream(
+            BuildCodexModel(),
+            new LlmContext { Messages = [new UserMessage("hi")] },
+            new StreamOptions { ApiKey = OpenAiResponsesSharedTests.BuildFakeJwt("acc_timeout") }))
+            .WaitAsync(TimeSpan.FromSeconds(5));
+
+        var error = Assert.Single(events.OfType<ErrorEvent>());
+        Assert.Equal("Codex SSE response headers timed out after 25ms", error.Error);
+        Assert.Equal(1, handler.Calls);
+        Assert.True(handler.CancellationObserved);
+    }
+
+    [Fact]
     public async Task Stream_MapsIncompleteToMaxTokens()
     {
         using var handler = new OpenAiResponsesProviderTests.StubHandler(_ => OpenAiResponsesProviderTests.SseResponse(
@@ -389,6 +408,30 @@ public sealed class OpenAiCodexResponsesProviderTests
         BaseUrl = "https://chatgpt.com/backend-api",
         Reasoning = true
     };
+
+    private sealed class BlockingHandler : HttpMessageHandler
+    {
+        public int Calls { get; private set; }
+        public bool CancellationObserved { get; private set; }
+
+        protected override async Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            Calls++;
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(30), cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                CancellationObserved = true;
+                throw;
+            }
+
+            throw new InvalidOperationException("Blocking handler should only exit through cancellation.");
+        }
+    }
 
     private sealed class FakeCodexWebSocketTransport : ICodexWebSocketTransport
     {

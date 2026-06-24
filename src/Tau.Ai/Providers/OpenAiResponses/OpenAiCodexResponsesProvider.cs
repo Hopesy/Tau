@@ -12,19 +12,35 @@ public sealed class OpenAiCodexResponsesProvider : IStreamProvider, IDisposable
     private const string DefaultBaseUrl = "https://chatgpt.com/backend-api";
     private const string WebSocketBetaHeader = "responses_websockets=2026-02-06";
     private static readonly TimeSpan SessionWebSocketCacheTtl = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan DefaultSseHeaderTimeout = TimeSpan.FromSeconds(20);
     private const int MaxRetries = 3;
     private readonly HttpClient _httpClient;
     private readonly ICodexWebSocketTransport _webSocketTransport;
     private readonly ConcurrentDictionary<string, CachedCodexWebSocketConnection> _webSocketSessionCache = new(StringComparer.Ordinal);
     private readonly IDisposable _sessionCleanupRegistration;
+    private readonly TimeSpan _sseHeaderTimeout;
 
     public OpenAiCodexResponsesProvider(
         HttpClient? httpClient = null,
         ICodexWebSocketTransport? webSocketTransport = null)
+        : this(httpClient, webSocketTransport, DefaultSseHeaderTimeout)
     {
+    }
+
+    internal OpenAiCodexResponsesProvider(
+        HttpClient? httpClient,
+        ICodexWebSocketTransport? webSocketTransport,
+        TimeSpan sseHeaderTimeout)
+    {
+        if (sseHeaderTimeout <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(sseHeaderTimeout), sseHeaderTimeout, "SSE header timeout must be positive.");
+        }
+
         _httpClient = httpClient ?? new HttpClient();
         _webSocketTransport = webSocketTransport ?? new ClientCodexWebSocketTransport();
         _sessionCleanupRegistration = SessionResources.RegisterSessionResourceCleanup(CloseOpenAiCodexWebSocketSessions);
+        _sseHeaderTimeout = sseHeaderTimeout;
     }
 
     public string Api => "openai-codex-responses";
@@ -148,7 +164,7 @@ public sealed class OpenAiCodexResponsesProvider : IStreamProvider, IDisposable
                 Content = new StringContent(bodyJson, Encoding.UTF8, "application/json")
             };
             ApplyCodexHeaders(request, model, options, accountId);
-            response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, options.Signal).ConfigureAwait(false);
+            response = await SendSseRequestAsync(request, options).ConfigureAwait(false);
             if (response.IsSuccessStatusCode)
             {
                 break;
@@ -247,6 +263,27 @@ public sealed class OpenAiCodexResponsesProvider : IStreamProvider, IDisposable
         }
 
         return body;
+    }
+
+    private async Task<HttpResponseMessage> SendSseRequestAsync(HttpRequestMessage request, StreamOptions options)
+    {
+        using var headerTimeoutSource = new CancellationTokenSource(_sseHeaderTimeout);
+        using var combined = CancellationTokenUtilities.Combine(options.Signal, headerTimeoutSource.Token);
+
+        try
+        {
+            return await _httpClient.SendAsync(
+                request,
+                HttpCompletionOption.ResponseHeadersRead,
+                combined.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException ex)
+            when (headerTimeoutSource.IsCancellationRequested && !options.Signal.IsCancellationRequested)
+        {
+            throw new TimeoutException(
+                $"Codex SSE response headers timed out after {(int)_sseHeaderTimeout.TotalMilliseconds}ms",
+                ex);
+        }
     }
 
     private static void AddCodexOptions(Dictionary<string, object> body, Model model, OpenAiCodexResponsesOptions options)
