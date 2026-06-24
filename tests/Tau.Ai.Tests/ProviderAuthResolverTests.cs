@@ -494,7 +494,7 @@ public sealed class ProviderAuthResolverTests
     }
 
     [Fact]
-    public void ResolveApiKey_DoesNotFallbackToEnvironmentWhenStoredOAuthRefreshFails()
+    public void ResolveApiKey_ThrowsOAuthErrorAndPreservesCredentialWhenStoredOAuthRefreshFails()
     {
         using var scope = EnvironmentVariableScope.Acquire();
         var tempDir = Path.Combine(Path.GetTempPath(), $"tau-auth-{Guid.NewGuid():N}");
@@ -519,9 +519,11 @@ public sealed class ProviderAuthResolverTests
                 new OAuthProviderRegistry([new FailingOAuthProvider()]),
                 new OAuthCredentialStore([authPath]));
 
-            var result = resolver.ResolveApiKey("anthropic");
+            var ex = Assert.Throws<ProviderAuthException>(() => resolver.ResolveApiKey("anthropic"));
 
-            Assert.Null(result);
+            Assert.Equal("oauth", ex.Code);
+            Assert.Contains("OAuth refresh failed for anthropic", ex.Message, StringComparison.Ordinal);
+            Assert.Contains("expired-access", File.ReadAllText(authPath), StringComparison.Ordinal);
         }
         finally
         {
@@ -612,6 +614,49 @@ public sealed class ProviderAuthResolverTests
     }
 
     [Fact]
+    public void ResolveModel_WrapsOAuthModelDerivationFailure()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), $"tau-auth-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+
+        try
+        {
+            var authPath = Path.Combine(tempDir, "auth.json");
+            File.WriteAllText(authPath, """
+                {
+                  "broken-oauth": {
+                    "type": "oauth",
+                    "refresh": "refresh-token",
+                    "access": "access-token",
+                    "expiresAt": "2030-01-01T00:00:00Z"
+                  }
+                }
+                """);
+
+            var resolver = new ProviderAuthResolver(
+                new OAuthProviderRegistry([new BrokenModelOAuthProvider()]),
+                new OAuthCredentialStore([authPath]));
+            var model = new Model
+            {
+                Id = "model-1",
+                Name = "Model 1",
+                Api = "openai-responses",
+                Provider = "broken-oauth",
+                BaseUrl = "https://original.example.com"
+            };
+
+            var ex = Assert.Throws<ProviderAuthException>(() => resolver.ResolveModel(model));
+
+            Assert.Equal("oauth", ex.Code);
+            Assert.Contains("OAuth model derivation failed for broken-oauth", ex.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(tempDir, recursive: true);
+        }
+    }
+
+    [Fact]
     public void Logout_RemovesAuthFileCredentialForProvider()
     {
         var tempDir = Path.Combine(Path.GetTempPath(), $"tau-auth-{Guid.NewGuid():N}");
@@ -682,6 +727,23 @@ public sealed class ProviderAuthResolverTests
             throw new InvalidOperationException("refresh failed");
 
         public string GetApiKey(OAuthCredentials credentials) => credentials.Access;
+    }
+
+    private sealed class BrokenModelOAuthProvider : IOAuthProvider
+    {
+        public string Id => "broken-oauth";
+        public string Name => "Broken Model OAuth";
+
+        public Task<OAuthCredentials> LoginAsync(IOAuthLoginCallbacks callbacks, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+
+        public Task<OAuthCredentials> RefreshTokenAsync(OAuthCredentials credentials, CancellationToken cancellationToken = default) =>
+            Task.FromResult(credentials);
+
+        public string GetApiKey(OAuthCredentials credentials) => credentials.Access;
+
+        public Model ModifyModel(Model model, OAuthCredentials credentials) =>
+            throw new InvalidOperationException("model derivation failed");
     }
 
     private sealed class CapturingLogSink : ITauLogSink

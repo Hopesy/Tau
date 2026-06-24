@@ -26,14 +26,23 @@ public static class StreamFunctions
         ModelConfigurationStore? configurationStore = null,
         ProviderAuthResolver? authResolver = null)
     {
-        var resolvedModel = (authResolver ?? AuthResolver).ResolveModel(model);
-        var resolvedOptions = ResolveOptions(
-            resolvedModel,
-            options,
-            configurationStore,
-            authResolver,
-            applyProviderSpecificOptions: true,
-            out _);
+        Model resolvedModel;
+        StreamOptions resolvedOptions;
+        try
+        {
+            resolvedModel = (authResolver ?? AuthResolver).ResolveModel(model);
+            resolvedOptions = ResolveOptions(
+                resolvedModel,
+                options,
+                configurationStore,
+                authResolver,
+                applyProviderSpecificOptions: true,
+                out _);
+        }
+        catch (ProviderAuthException ex)
+        {
+            return CreateAuthErrorStream(model, ex);
+        }
 
         var provider = registry.Get(resolvedModel.Api);
         return provider.Stream(resolvedModel, context, resolvedOptions);
@@ -47,14 +56,24 @@ public static class StreamFunctions
         ModelConfigurationStore? configurationStore = null,
         ProviderAuthResolver? authResolver = null)
     {
-        var resolvedModel = (authResolver ?? AuthResolver).ResolveModel(model);
-        var resolvedOptions = (SimpleStreamOptions)ResolveOptions(
-            resolvedModel,
-            options,
-            configurationStore,
-            authResolver,
-            applyProviderSpecificOptions: false,
-            out var providerSpecific);
+        Model resolvedModel;
+        SimpleStreamOptions resolvedOptions;
+        ModelProviderSpecificOptionsConfiguration? providerSpecific;
+        try
+        {
+            resolvedModel = (authResolver ?? AuthResolver).ResolveModel(model);
+            resolvedOptions = (SimpleStreamOptions)ResolveOptions(
+                resolvedModel,
+                options,
+                configurationStore,
+                authResolver,
+                applyProviderSpecificOptions: false,
+                out providerSpecific);
+        }
+        catch (ProviderAuthException ex)
+        {
+            return CreateAuthErrorStream(model, ex);
+        }
 
         var provider = registry.Get(resolvedModel.Api);
         if (providerSpecific is not null &&
@@ -64,6 +83,23 @@ public static class StreamFunctions
         }
 
         return provider.StreamSimple(resolvedModel, context, resolvedOptions);
+    }
+
+    private static AssistantMessageStream CreateAuthErrorStream(Model model, ProviderAuthException exception)
+    {
+        var stream = new AssistantMessageStream();
+        var message = new AssistantMessage
+        {
+            Api = model.Api,
+            Provider = model.Provider,
+            Model = model.Id,
+            Content = [],
+            StopReason = StopReason.Error,
+            ErrorMessage = exception.Message,
+            Timestamp = DateTimeOffset.UtcNow
+        };
+        stream.Push(new ErrorEvent(exception.Message, Message: message));
+        return stream;
     }
 
     public static async Task<AssistantMessage> CompleteAsync(

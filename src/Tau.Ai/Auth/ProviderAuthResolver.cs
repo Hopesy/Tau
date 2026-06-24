@@ -151,13 +151,20 @@ public sealed class ProviderAuthResolver
                     oauthCredentials = oauthProvider.RefreshTokenAsync(oauthCredentials).GetAwaiter().GetResult();
                     _credentialStore.Save(provider, oauthCredentials);
                 }
-                catch
+                catch (Exception ex)
                 {
-                    return null;
+                    throw new ProviderAuthException("oauth", $"OAuth refresh failed for {provider}.", ex);
                 }
             }
 
-            return oauthProvider.GetApiKey(oauthCredentials);
+            try
+            {
+                return oauthProvider.GetApiKey(oauthCredentials);
+            }
+            catch (Exception ex)
+            {
+                throw new ProviderAuthException("oauth", $"OAuth auth derivation failed for {provider}.", ex);
+            }
         }
 
         var envApiKey = EnvironmentApiKeyResolver.GetApiKey(provider, env);
@@ -178,7 +185,19 @@ public sealed class ProviderAuthResolver
         }
 
         var provider = _oauthProviders.TryGet(model.Provider);
-        return provider?.ModifyModel(model, entry.OAuth) ?? model;
+        if (provider is null)
+        {
+            return model;
+        }
+
+        try
+        {
+            return provider.ModifyModel(model, entry.OAuth);
+        }
+        catch (Exception ex)
+        {
+            throw new ProviderAuthException("oauth", $"OAuth model derivation failed for {model.Provider}.", ex);
+        }
     }
 
     public IOAuthProvider? GetOAuthProvider(string providerId) => _oauthProviders.TryGet(providerId);

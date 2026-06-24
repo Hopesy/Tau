@@ -414,6 +414,64 @@ public sealed class ModelConfigurationStoreTests
     }
 
     [Fact]
+    public async Task StreamFunctions_ReturnsAuthErrorStreamWhenStoredOAuthRefreshFails()
+    {
+        using var scope = EnvironmentVariableScope.Acquire();
+        var tempDir = Path.Combine(Path.GetTempPath(), $"tau-stream-auth-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+
+        try
+        {
+            var authPath = Path.Combine(tempDir, "auth.json");
+            File.WriteAllText(authPath, """
+                {
+                  "anthropic": {
+                    "type": "oauth",
+                    "refresh": "refresh-token",
+                    "access": "expired-access",
+                    "expiresAt": "2000-01-01T00:00:00Z"
+                  }
+                }
+                """);
+            scope.Set("ANTHROPIC_API_KEY", "env-key");
+
+            var provider = new CapturingProvider("anthropic-messages");
+            var registry = new ProviderRegistry();
+            registry.Register("anthropic-messages", () => provider, sourceId: "test");
+            var resolver = new ProviderAuthResolver(
+                new OAuthProviderRegistry([new FailingOAuthProvider("anthropic")]),
+                new OAuthCredentialStore([authPath]));
+            var model = new Model
+            {
+                Id = "claude-test",
+                Name = "Claude Test",
+                Api = "anthropic-messages",
+                Provider = "anthropic"
+            };
+
+            var stream = StreamFunctions.Stream(
+                registry,
+                model,
+                new LlmContext { Messages = [new UserMessage("hi")] },
+                new StreamOptions(),
+                authResolver: resolver);
+            var events = await OpenAiResponsesProviderTests.CollectAsync(stream);
+
+            var error = Assert.Single(events.OfType<ErrorEvent>());
+            Assert.Contains("OAuth refresh failed for anthropic", error.Error, StringComparison.Ordinal);
+            Assert.Equal(StopReason.Error, error.Message?.StopReason);
+            Assert.Equal("anthropic", error.Message?.Provider);
+            Assert.Equal("claude-test", error.Message?.Model);
+            Assert.Null(provider.CapturedOptions);
+            Assert.Contains("expired-access", File.ReadAllText(authPath), StringComparison.Ordinal);
+        }
+        finally
+        {
+            DeleteDirectoryWithRetry(tempDir);
+        }
+    }
+
+    [Fact]
     public async Task StreamFunctions_AppliesModelsJsonRequestOptionsWithModelPrecedence()
     {
         using var scope = EnvironmentVariableScope.Acquire();
@@ -2178,4 +2236,18 @@ public sealed class ModelConfigurationStoreTests
 
     private static string ReadText(IReadOnlyList<ContentBlock> content) =>
         string.Join("\n", content.OfType<TextContent>().Select(static block => block.Text));
+
+    private sealed class FailingOAuthProvider(string id) : IOAuthProvider
+    {
+        public string Id { get; } = id;
+        public string Name => "Failing OAuth";
+
+        public Task<OAuthCredentials> LoginAsync(IOAuthLoginCallbacks callbacks, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+
+        public Task<OAuthCredentials> RefreshTokenAsync(OAuthCredentials credentials, CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("refresh failed");
+
+        public string GetApiKey(OAuthCredentials credentials) => credentials.Access;
+    }
 }
