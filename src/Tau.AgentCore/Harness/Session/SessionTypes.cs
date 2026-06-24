@@ -61,6 +61,32 @@ public sealed record ActiveToolsChangeSessionEntry(
     DateTimeOffset Timestamp,
     IReadOnlyList<string> ActiveToolNames) : SessionTreeEntry("active_tools_change", Id, ParentId, Timestamp);
 
+public sealed record CompactionSessionEntry(
+    string Id,
+    string? ParentId,
+    DateTimeOffset Timestamp,
+    string Summary,
+    string FirstKeptEntryId,
+    int TokensBefore,
+    object? Details = null,
+    bool FromHook = false) : SessionTreeEntry("compaction", Id, ParentId, Timestamp);
+
+public sealed record CustomSessionEntry(
+    string Id,
+    string? ParentId,
+    DateTimeOffset Timestamp,
+    string CustomType,
+    object? Data = null) : SessionTreeEntry("custom", Id, ParentId, Timestamp);
+
+public sealed record CustomMessageSessionEntry(
+    string Id,
+    string? ParentId,
+    DateTimeOffset Timestamp,
+    string CustomType,
+    IReadOnlyList<ContentBlock> Content,
+    bool Display,
+    object? Details = null) : SessionTreeEntry("custom_message", Id, ParentId, Timestamp);
+
 public sealed record LabelSessionEntry(
     string Id,
     string? ParentId,

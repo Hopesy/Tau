@@ -23,6 +23,12 @@ internal sealed record JsonlSessionEntryDto
     public string? Provider { get; init; }
     public string? ModelId { get; init; }
     public IReadOnlyList<string>? ActiveToolNames { get; init; }
+    public string? FirstKeptEntryId { get; init; }
+    public int? TokensBefore { get; init; }
+    public string? CustomType { get; init; }
+    public JsonElement? Data { get; init; }
+    public JsonElement? Content { get; init; }
+    public bool? Display { get; init; }
     public string? TargetId { get; init; }
     public string? Label { get; init; }
     public string? Name { get; init; }
@@ -160,6 +166,31 @@ internal static class JsonlSessionSerialization
                 dto.ParentId,
                 dto.Timestamp,
                 dto.ActiveToolNames.ToArray()),
+            "compaction" when dto.Summary is not null &&
+                dto.FirstKeptEntryId is not null &&
+                dto.TokensBefore is not null => new CompactionSessionEntry(
+                dto.Id,
+                dto.ParentId,
+                dto.Timestamp,
+                dto.Summary,
+                dto.FirstKeptEntryId,
+                dto.TokensBefore.Value,
+                dto.Details,
+                dto.FromHook == true),
+            "custom" when dto.CustomType is not null => new CustomSessionEntry(
+                dto.Id,
+                dto.ParentId,
+                dto.Timestamp,
+                dto.CustomType,
+                dto.Data),
+            "custom_message" when dto.CustomType is not null && dto.Content is not null => new CustomMessageSessionEntry(
+                dto.Id,
+                dto.ParentId,
+                dto.Timestamp,
+                dto.CustomType,
+                ToCustomMessageContent(dto.Content.Value, filePath, lineNumber),
+                dto.Display == true,
+                dto.Details),
             "label" when dto.TargetId is not null => new LabelSessionEntry(
                 dto.Id,
                 dto.ParentId,
@@ -224,6 +255,38 @@ internal static class JsonlSessionSerialization
                 Timestamp = tools.Timestamp,
                 ActiveToolNames = tools.ActiveToolNames.ToArray()
             },
+            CompactionSessionEntry compaction => new JsonlSessionEntryDto
+            {
+                Type = compaction.Type,
+                Id = compaction.Id,
+                ParentId = compaction.ParentId,
+                Timestamp = compaction.Timestamp,
+                Summary = compaction.Summary,
+                FirstKeptEntryId = compaction.FirstKeptEntryId,
+                TokensBefore = compaction.TokensBefore,
+                Details = ToJsonElement(compaction.Details),
+                FromHook = compaction.FromHook
+            },
+            CustomSessionEntry custom => new JsonlSessionEntryDto
+            {
+                Type = custom.Type,
+                Id = custom.Id,
+                ParentId = custom.ParentId,
+                Timestamp = custom.Timestamp,
+                CustomType = custom.CustomType,
+                Data = ToJsonElement(custom.Data)
+            },
+            CustomMessageSessionEntry customMessage => new JsonlSessionEntryDto
+            {
+                Type = customMessage.Type,
+                Id = customMessage.Id,
+                ParentId = customMessage.ParentId,
+                Timestamp = customMessage.Timestamp,
+                CustomType = customMessage.CustomType,
+                Content = FromCustomMessageContent(customMessage.Content),
+                Display = customMessage.Display,
+                Details = ToJsonElement(customMessage.Details)
+            },
             LabelSessionEntry label => new JsonlSessionEntryDto
             {
                 Type = label.Type,
@@ -257,7 +320,7 @@ internal static class JsonlSessionSerialization
                 Timestamp = summary.Timestamp,
                 FromId = summary.FromId,
                 Summary = summary.Summary,
-                Details = ToDetailsElement(summary.Details),
+                Details = ToJsonElement(summary.Details),
                 FromHook = summary.FromHook
             },
             _ => throw new InvalidOperationException($"Unsupported session entry type: {entry.Type}")
@@ -384,6 +447,44 @@ internal static class JsonlSessionSerialization
             _ => null
         };
 
+    private static JsonElement FromCustomMessageContent(IReadOnlyList<ContentBlock> content) =>
+        JsonSerializer.SerializeToElement(
+            content.Select(FromContent).ToArray(),
+            AgentCoreSessionJsonContext.Default.SessionContentDtoArray);
+
+    private static IReadOnlyList<ContentBlock> ToCustomMessageContent(
+        JsonElement content,
+        string filePath,
+        int lineNumber)
+    {
+        if (content.ValueKind == JsonValueKind.String)
+            return [new TextContent(content.GetString() ?? string.Empty)];
+        if (content.ValueKind != JsonValueKind.Array)
+            throw InvalidEntry(filePath, lineNumber, "has invalid custom message content");
+
+        var blocks = new List<ContentBlock>();
+        foreach (var item in content.EnumerateArray())
+        {
+            SessionContentDto? dto;
+            try
+            {
+                dto = JsonSerializer.Deserialize(item.GetRawText(), AgentCoreSessionJsonContext.Default.SessionContentDto);
+            }
+            catch (JsonException ex)
+            {
+                throw InvalidEntry(filePath, lineNumber, "has invalid custom message content", ex);
+            }
+
+            var block = dto is null ? null : ToContent(dto);
+            if (block is null)
+                throw InvalidEntry(filePath, lineNumber, "has invalid custom message content");
+
+            blocks.Add(block);
+        }
+
+        return blocks;
+    }
+
     private static SessionUsageDto? FromUsage(Usage? usage) =>
         usage is null
             ? null
@@ -422,14 +523,14 @@ internal static class JsonlSessionSerialization
                         usage.Cost.CacheRead,
                         usage.Cost.CacheWrite));
 
-    private static JsonElement? ToDetailsElement(object? details)
+    private static JsonElement? ToJsonElement(object? value)
     {
-        return details switch
+        return value switch
         {
             null => null,
             JsonElement element => element.Clone(),
             JsonDocument document => document.RootElement.Clone(),
-            _ => JsonSerializer.SerializeToElement(details.ToString(), AgentCoreSessionJsonContext.Default.String)
+            _ => JsonSerializer.SerializeToElement(value.ToString(), AgentCoreSessionJsonContext.Default.String)
         };
     }
 
@@ -451,6 +552,7 @@ internal static class JsonlSessionSerialization
 [JsonSerializable(typeof(JsonlSessionEntryDto))]
 [JsonSerializable(typeof(SessionMessageDto))]
 [JsonSerializable(typeof(SessionContentDto))]
+[JsonSerializable(typeof(SessionContentDto[]))]
 [JsonSerializable(typeof(SessionUsageDto))]
 [JsonSerializable(typeof(SessionUsageCostDto))]
 [JsonSerializable(typeof(string))]

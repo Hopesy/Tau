@@ -1,3 +1,4 @@
+using Tau.AgentCore.Harness;
 using Tau.Ai;
 
 namespace Tau.AgentCore.Harness.Session;
@@ -98,6 +99,68 @@ public sealed class AgentHarnessSession<TMetadata>
                 activeToolNames.ToArray()),
             cancellationToken).ConfigureAwait(false);
 
+    public async Task<string> AppendCompactionAsync(
+        string summary,
+        string firstKeptEntryId,
+        int tokensBefore,
+        object? details = null,
+        bool fromHook = false,
+        CancellationToken cancellationToken = default) =>
+        await AppendTypedEntryAsync(
+            new CompactionSessionEntry(
+                await _storage.CreateEntryIdAsync(cancellationToken).ConfigureAwait(false),
+                await _storage.GetLeafIdAsync(cancellationToken).ConfigureAwait(false),
+                DateTimeOffset.UtcNow,
+                summary,
+                firstKeptEntryId,
+                tokensBefore,
+                details,
+                fromHook),
+            cancellationToken).ConfigureAwait(false);
+
+    public async Task<string> AppendCustomEntryAsync(
+        string customType,
+        object? data = null,
+        CancellationToken cancellationToken = default) =>
+        await AppendTypedEntryAsync(
+            new CustomSessionEntry(
+                await _storage.CreateEntryIdAsync(cancellationToken).ConfigureAwait(false),
+                await _storage.GetLeafIdAsync(cancellationToken).ConfigureAwait(false),
+                DateTimeOffset.UtcNow,
+                customType,
+                data),
+            cancellationToken).ConfigureAwait(false);
+
+    public async Task<string> AppendCustomMessageEntryAsync(
+        string customType,
+        string content,
+        bool display,
+        object? details = null,
+        CancellationToken cancellationToken = default) =>
+        await AppendCustomMessageEntryAsync(
+            customType,
+            [new TextContent(content)],
+            display,
+            details,
+            cancellationToken).ConfigureAwait(false);
+
+    public async Task<string> AppendCustomMessageEntryAsync(
+        string customType,
+        IReadOnlyList<ContentBlock> content,
+        bool display,
+        object? details = null,
+        CancellationToken cancellationToken = default) =>
+        await AppendTypedEntryAsync(
+            new CustomMessageSessionEntry(
+                await _storage.CreateEntryIdAsync(cancellationToken).ConfigureAwait(false),
+                await _storage.GetLeafIdAsync(cancellationToken).ConfigureAwait(false),
+                DateTimeOffset.UtcNow,
+                customType,
+                content.ToArray(),
+                display,
+                details),
+            cancellationToken).ConfigureAwait(false);
+
     public async Task<string> AppendLabelAsync(
         string targetId,
         string? label,
@@ -164,7 +227,7 @@ public sealed class AgentHarnessSession<TMetadata>
         var thinkingLevel = "off";
         SessionModelReference? model = null;
         IReadOnlyList<string>? activeToolNames = null;
-        var messages = new List<ChatMessage>();
+        CompactionSessionEntry? compaction = null;
 
         foreach (var entry in pathEntries)
         {
@@ -179,13 +242,70 @@ public sealed class AgentHarnessSession<TMetadata>
                 case ActiveToolsChangeSessionEntry tools:
                     activeToolNames = tools.ActiveToolNames.ToArray();
                     break;
+                case CompactionSessionEntry compactionEntry:
+                    compaction = compactionEntry;
+                    break;
                 case MessageSessionEntry { Message: AssistantMessage { Provider: not null, Model: not null } assistant }:
                     model = new SessionModelReference(assistant.Provider, assistant.Model);
-                    messages.Add(assistant);
                     break;
+            }
+        }
+
+        var messages = new List<ChatMessage>();
+        void AppendMessage(SessionTreeEntry entry)
+        {
+            switch (entry)
+            {
                 case MessageSessionEntry message:
                     messages.Add(message.Message);
                     break;
+                case CustomMessageSessionEntry custom:
+                    messages.Add(AgentHarnessMessages.CreateCustomMessage(
+                        custom.CustomType,
+                        custom.Content,
+                        custom.Display,
+                        custom.Details,
+                        custom.Timestamp));
+                    break;
+                case BranchSummarySessionEntry { Summary.Length: > 0 } summary:
+                    messages.Add(AgentHarnessMessages.CreateBranchSummaryMessage(
+                        summary.Summary,
+                        summary.FromId,
+                        summary.Timestamp));
+                    break;
+            }
+        }
+
+        if (compaction is not null)
+        {
+            messages.Add(AgentHarnessMessages.CreateCompactionSummaryMessage(
+                compaction.Summary,
+                compaction.TokensBefore,
+                compaction.Timestamp));
+            var compactionIndex = pathEntries
+                .Select((entry, index) => (entry, index))
+                .FirstOrDefault(pair => pair.entry is CompactionSessionEntry current && current.Id == compaction.Id)
+                .index;
+            var foundFirstKept = false;
+            for (var i = 0; i < compactionIndex; i++)
+            {
+                var entry = pathEntries[i];
+                if (entry.Id == compaction.FirstKeptEntryId)
+                    foundFirstKept = true;
+                if (foundFirstKept)
+                    AppendMessage(entry);
+            }
+
+            for (var i = compactionIndex + 1; i < pathEntries.Count; i++)
+            {
+                AppendMessage(pathEntries[i]);
+            }
+        }
+        else
+        {
+            foreach (var entry in pathEntries)
+            {
+                AppendMessage(entry);
             }
         }
 

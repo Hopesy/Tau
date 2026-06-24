@@ -141,6 +141,63 @@ public sealed class JsonlSessionStorageTests
         Assert.Equal("checkpoint", await loaded.GetLabelAsync("entry-1"));
     }
 
+    [Fact]
+    public async Task OpenAsync_RoundTripsCompactionAndCustomEntries()
+    {
+        using var temp = TempDirectory.Create();
+        var filePath = Path.Combine(temp.Path, "session.jsonl");
+        var storage = await JsonlSessionStorage.CreateAsync(filePath, temp.Path, "session-1");
+        await storage.AppendEntryAsync(new MessageSessionEntry(
+            "user-1",
+            null,
+            DateTimeOffset.Parse("2026-01-01T00:00:00.000Z", System.Globalization.CultureInfo.InvariantCulture),
+            new UserMessage("one")));
+        await storage.AppendEntryAsync(new CustomSessionEntry(
+            "custom-1",
+            "user-1",
+            DateTimeOffset.Parse("2026-01-01T00:00:01.000Z", System.Globalization.CultureInfo.InvariantCulture),
+            "internal",
+            JsonDocument.Parse("""{"status":"ok"}""").RootElement.Clone()));
+        await storage.AppendEntryAsync(new CustomMessageSessionEntry(
+            "custom-message-1",
+            "custom-1",
+            DateTimeOffset.Parse("2026-01-01T00:00:02.000Z", System.Globalization.CultureInfo.InvariantCulture),
+            "visible",
+            [new TextContent("custom text"), new ImageContent("abc", "image/png")],
+            Display: true,
+            JsonDocument.Parse("""{"source":"test"}""").RootElement.Clone()));
+        await storage.AppendEntryAsync(new CompactionSessionEntry(
+            "compaction-1",
+            "custom-message-1",
+            DateTimeOffset.Parse("2026-01-01T00:00:03.000Z", System.Globalization.CultureInfo.InvariantCulture),
+            "summary",
+            "user-1",
+            42,
+            JsonDocument.Parse("""{"files":["README.md"]}""").RootElement.Clone(),
+            FromHook: true));
+
+        var loaded = await JsonlSessionStorage.OpenAsync(filePath);
+        var entries = await loaded.GetEntriesAsync();
+
+        var custom = Assert.IsType<CustomSessionEntry>(entries[1]);
+        var customData = Assert.IsType<JsonElement>(custom.Data);
+        Assert.Equal("ok", customData.GetProperty("status").GetString());
+
+        var customMessage = Assert.IsType<CustomMessageSessionEntry>(entries[2]);
+        Assert.Equal("visible", customMessage.CustomType);
+        Assert.True(customMessage.Display);
+        Assert.Equal("custom text", Assert.IsType<TextContent>(customMessage.Content[0]).Text);
+        Assert.Equal("image/png", Assert.IsType<ImageContent>(customMessage.Content[1]).MimeType);
+        var details = Assert.IsType<JsonElement>(customMessage.Details);
+        Assert.Equal("test", details.GetProperty("source").GetString());
+
+        var compaction = Assert.IsType<CompactionSessionEntry>(entries[3]);
+        Assert.Equal("summary", compaction.Summary);
+        Assert.Equal("user-1", compaction.FirstKeptEntryId);
+        Assert.Equal(42, compaction.TokensBefore);
+        Assert.True(compaction.FromHook);
+    }
+
     private sealed class TempDirectory : IDisposable
     {
         private TempDirectory(string path) => Path = path;

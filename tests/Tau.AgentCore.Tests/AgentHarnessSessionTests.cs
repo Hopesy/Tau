@@ -1,3 +1,4 @@
+using Tau.AgentCore.Harness;
 using Tau.AgentCore.Harness.Session;
 using Tau.Ai;
 
@@ -104,6 +105,57 @@ public sealed class AgentHarnessSessionTests
 
         Assert.Equal("not_found", ex.Code);
         Assert.Equal("Entry missing not found", ex.Message);
+    }
+
+    [Fact]
+    public async Task BuildContextAsync_WithCompactionKeepsSummaryAndRetainedEntries()
+    {
+        var session = CreateSession();
+        await session.AppendMessageAsync(new UserMessage("old"));
+        var firstKept = await session.AppendMessageAsync(new AssistantMessage([new TextContent("kept")]));
+        await session.AppendMessageAsync(new UserMessage("recent"));
+        await session.AppendCompactionAsync("compact summary", firstKept, tokensBefore: 123);
+        await session.AppendMessageAsync(new AssistantMessage([new TextContent("after")]));
+
+        var context = await session.BuildContextAsync();
+
+        Assert.Equal(["compactionSummary", "assistant", "user", "assistant"], context.Messages.Select(static message => message.Role));
+        var summary = Assert.IsType<AgentCompactionSummaryMessage>(context.Messages[0]);
+        Assert.Equal("compact summary", summary.Summary);
+        Assert.Equal(123, summary.TokensBefore);
+        Assert.Equal("kept", Assert.IsType<TextContent>(Assert.Single(Assert.IsType<AssistantMessage>(context.Messages[1]).Content)).Text);
+        Assert.Equal("recent", Assert.IsType<TextContent>(Assert.Single(Assert.IsType<UserMessage>(context.Messages[2]).Content)).Text);
+
+        var llmMessages = AgentHarnessMessages.ConvertToLlm(context.Messages);
+        var llmSummary = Assert.IsType<UserMessage>(llmMessages[0]);
+        Assert.Contains(AgentHarnessMessages.CompactionSummaryPrefix, Assert.IsType<TextContent>(Assert.Single(llmSummary.Content)).Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task BuildContextAsync_WithCustomMessageAndBranchSummaryConvertsToLlmMessages()
+    {
+        var session = CreateSession();
+        var user1 = await session.AppendMessageAsync(new UserMessage("one"));
+        await session.MoveToAsync(user1, new SessionBranchSummary("branch summary"));
+        await session.AppendCustomEntryAsync("internal", "hidden");
+        await session.AppendCustomMessageEntryAsync("visible", "custom body", display: true);
+
+        var context = await session.BuildContextAsync();
+
+        Assert.Equal(["user", "branchSummary", "custom"], context.Messages.Select(static message => message.Role));
+        var custom = Assert.IsType<AgentCustomMessage>(context.Messages[2]);
+        Assert.Equal("visible", custom.CustomType);
+        Assert.True(custom.Display);
+
+        var llmMessages = AgentHarnessMessages.ConvertToLlm(context.Messages);
+        Assert.Equal(["user", "user", "user"], llmMessages.Select(static message => message.Role));
+        Assert.Contains(
+            AgentHarnessMessages.BranchSummaryPrefix,
+            Assert.IsType<TextContent>(Assert.Single(Assert.IsType<UserMessage>(llmMessages[1]).Content)).Text,
+            StringComparison.Ordinal);
+        Assert.Equal(
+            "custom body",
+            Assert.IsType<TextContent>(Assert.Single(Assert.IsType<UserMessage>(llmMessages[2]).Content)).Text);
     }
 
     private static AgentHarnessSession<SessionMetadata> CreateSession() =>
