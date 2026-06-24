@@ -457,6 +457,38 @@ public sealed class AgentRuntimeContractTests
     }
 
     [Fact]
+    public async Task RunAsync_ResolvesApiKeyBeforeEachProviderRequest()
+    {
+        var provider = new RecordingTurnProvider(
+            new AssistantMessage([new ToolCallContent("tool-1", "first", "{}")]),
+            new AssistantMessage([new TextContent("done")]));
+        var tool = new RecordingTool("first", """{"type":"object"}""")
+        {
+            Execute = _ => new ToolResult([new TextContent("first done")])
+        };
+        var runtime = new AgentRuntime();
+        runtime.AddMessage(new UserMessage("use tool"));
+        var resolvedProviders = new List<string>();
+        var resolvedKeys = new Queue<string?>(["dynamic-key", null]);
+        var config = CreateConfig(provider, [tool]) with
+        {
+            StreamOptions = new SimpleStreamOptions { ApiKey = "fallback-key" },
+            GetApiKeyAsync = (providerName, _) =>
+            {
+                resolvedProviders.Add(providerName);
+                return Task.FromResult(resolvedKeys.Count == 0 ? null : resolvedKeys.Dequeue());
+            }
+        };
+
+        await CollectAsync(runtime.RunAsync(config));
+
+        Assert.Equal(["test", "test"], resolvedProviders);
+        Assert.Equal(2, provider.Calls.Count);
+        Assert.Equal("dynamic-key", provider.Calls[0].ApiKey);
+        Assert.Equal("fallback-key", provider.Calls[1].ApiKey);
+    }
+
+    [Fact]
     public async Task RunAsync_ToolExecuteExceptionBecomesErrorToolResult()
     {
         var tool = new RecordingTool("explode", """{"type":"object"}""")
@@ -850,7 +882,8 @@ public sealed class AgentRuntimeContractTests
             Calls.Add(new ProviderTurnCall(
                 model.Id,
                 (context.Tools ?? []).Select(static tool => tool.Name).ToArray(),
-                options?.Reasoning));
+                options?.Reasoning,
+                options?.ApiKey));
             var stream = new AssistantMessageStream();
             var message = _calls < messages.Length
                 ? messages[_calls++]
@@ -863,7 +896,8 @@ public sealed class AgentRuntimeContractTests
     private sealed record ProviderTurnCall(
         string ModelId,
         IReadOnlyList<string> ToolNames,
-        ThinkingLevel? Reasoning);
+        ThinkingLevel? Reasoning,
+        string? ApiKey);
 
     private sealed class EventProvider(params StreamEvent[] events) : IStreamProvider
     {

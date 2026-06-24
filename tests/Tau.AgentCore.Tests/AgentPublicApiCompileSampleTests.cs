@@ -93,6 +93,7 @@ public sealed class AgentPublicApiCompileSampleTests
             },
             LogSink = NullTauLogSink.Instance,
             LogContext = new TauRuntimeLogContext("sample-correlation", "sample-session", "sample-message"),
+            GetApiKeyAsync = (_, _) => Task.FromResult<string?>(null),
             PrepareNextTurnAsync = (_, _) => Task.FromResult<AgentLoopTurnUpdate?>(null),
             ShouldStopAfterTurnAsync = (_, _) => Task.FromResult(false)
         });
@@ -143,6 +144,7 @@ public sealed class AgentPublicApiCompileSampleTests
             ProviderRegistry = registry,
             Tools = [tool],
             DefaultExecutionMode = ToolExecutionMode.Sequential,
+            GetApiKeyAsync = (_, _) => Task.FromResult<string?>(null),
             PrepareNextTurnAsync = (turn, _) => Task.FromResult<AgentLoopTurnUpdate?>(new(
                 Context: turn.Context,
                 SystemPrompt: "low-level system",
@@ -186,6 +188,7 @@ public sealed class AgentPublicApiCompileSampleTests
             .UseSessionId("platform-session")
             .UseSessionStore(sessions)
             .UseLogSink(NullTauLogSink.Instance)
+            .UseApiKeyResolver((_, _) => Task.FromResult<string?>(null))
             .AddTool(
                 "echo",
                 "Echo",

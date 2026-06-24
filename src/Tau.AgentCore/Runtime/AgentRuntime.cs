@@ -161,7 +161,7 @@ public sealed class AgentRuntime
                         yield break;
                     }
 
-                    var streamOptions = currentConfig.StreamOptions ?? new SimpleStreamOptions();
+                    var streamOptions = await ResolveStreamOptionsAsync(currentConfig, token).ConfigureAwait(false);
                     var providerRunStartedAt = LogProviderRunStart(currentConfig, context, streamOptions);
                     var providerRunEnded = false;
                     void LogProviderEnd(
@@ -414,6 +414,22 @@ public sealed class AgentRuntime
             Tools = update.Tools ?? config.Tools,
             StreamOptions = streamOptions
         };
+    }
+
+    private static async Task<SimpleStreamOptions> ResolveStreamOptionsAsync(
+        AgentLoopConfig config,
+        CancellationToken cancellationToken)
+    {
+        var options = config.StreamOptions ?? new SimpleStreamOptions();
+        if (config.GetApiKeyAsync is null)
+        {
+            return options;
+        }
+
+        var apiKey = await config.GetApiKeyAsync(config.Model.Provider, cancellationToken).ConfigureAwait(false);
+        return string.IsNullOrWhiteSpace(apiKey)
+            ? options
+            : options with { ApiKey = apiKey };
     }
 
     private static async Task<StreamReadResult> MoveNextStreamAsync(

@@ -5,6 +5,7 @@ using Tau.Ai;
 using Tau.Ai.Observability;
 using Tau.Ai.Providers;
 using Tau.Ai.Providers.Faux;
+using Tau.Ai.Streaming;
 
 namespace Tau.AgentCore.Tests;
 
@@ -235,6 +236,53 @@ public sealed class AgentPlatformTests
     }
 
     [Fact]
+    public async Task PromptAsync_UsesApiKeyResolverForProviderRequests()
+    {
+        var provider = new ApiKeyRecordingProvider(
+            new AssistantMessage([new ToolCallContent("call-key", "echo", """{"text":"hello"}""")])
+            {
+                StopReason = StopReason.ToolUse
+            },
+            new AssistantMessage([new TextContent("done")]));
+        var registry = new ProviderRegistry();
+        registry.Register(provider.Api, provider);
+        var model = new Model
+        {
+            Provider = "dynamic-provider",
+            Id = "dynamic-model",
+            Name = "Dynamic Model",
+            Api = provider.Api
+        };
+        var resolvedProviders = new List<string>();
+        var resolvedKeys = new Queue<string?>(["dynamic-key", null]);
+
+        var app = AgentApplication.CreateBuilder()
+            .UseProviderRegistry(registry)
+            .UseModel(model)
+            .UseStreamOptions(new SimpleStreamOptions { ApiKey = "fallback-key" })
+            .UseApiKeyResolver((providerName, _) =>
+            {
+                resolvedProviders.Add(providerName);
+                return Task.FromResult(resolvedKeys.Count == 0 ? null : resolvedKeys.Dequeue());
+            })
+            .AddTool(
+                "echo",
+                "Echo",
+                "Echoes text.",
+                Schema("""{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}"""),
+                (context, _ct) => new ToolResult([
+                    new TextContent(context.Arguments.GetProperty("text").GetString() ?? string.Empty)
+                ]))
+            .Build();
+
+        var result = await app.PromptAsync("hello").WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(["dynamic-provider", "dynamic-provider"], resolvedProviders);
+        Assert.Equal(["dynamic-key", "fallback-key"], provider.ApiKeys);
+    }
+
+    [Fact]
     public async Task Build_RestoresMessagesFromSessionStore()
     {
         var sessions = new InMemoryAgentSessionStore();
@@ -358,5 +406,30 @@ public sealed class AgentPlatformTests
         public List<TauLogEvent> Events { get; } = [];
 
         public void Log(TauLogEvent evt) => Events.Add(evt);
+    }
+
+    private sealed class ApiKeyRecordingProvider(params AssistantMessage[] messages) : IStreamProvider
+    {
+        private int _calls;
+
+        public string Api => "agent-platform-api-key-recording";
+        public List<string?> ApiKeys { get; } = [];
+
+        public AssistantMessageStream Stream(Model model, LlmContext context, StreamOptions options) =>
+            Complete(options);
+
+        public AssistantMessageStream StreamSimple(Model model, LlmContext context, SimpleStreamOptions options) =>
+            Complete(options);
+
+        private AssistantMessageStream Complete(StreamOptions options)
+        {
+            ApiKeys.Add(options.ApiKey);
+            var stream = new AssistantMessageStream();
+            var message = _calls < messages.Length
+                ? messages[_calls++]
+                : new AssistantMessage([new TextContent("done")]);
+            stream.Push(new DoneEvent(message));
+            return stream;
+        }
     }
 }

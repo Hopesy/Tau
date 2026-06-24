@@ -20,6 +20,7 @@ public sealed class AgentApplicationBuilder
     private ITauLogSink _logSink = NullTauLogSink.Instance;
     private TauRuntimeLogContext? _logContext;
     private SimpleStreamOptions? _streamOptions;
+    private Func<string, CancellationToken, Task<string?>>? _getApiKeyAsync;
     private Func<IReadOnlyList<ChatMessage>, IReadOnlyList<ChatMessage>>? _transformContext;
     private Func<IReadOnlyList<ChatMessage>, CancellationToken, Task<IReadOnlyList<ChatMessage>>>? _transformContextAsync;
     private Func<IReadOnlyList<ChatMessage>, IReadOnlyList<ChatMessage>>? _convertToLlm;
@@ -79,6 +80,13 @@ public sealed class AgentApplicationBuilder
     public AgentApplicationBuilder UseStreamOptions(SimpleStreamOptions? streamOptions)
     {
         _streamOptions = streamOptions;
+        return this;
+    }
+
+    public AgentApplicationBuilder UseApiKeyResolver(
+        Func<string, CancellationToken, Task<string?>>? getApiKeyAsync)
+    {
+        _getApiKeyAsync = getApiKeyAsync;
         return this;
     }
 
@@ -209,6 +217,7 @@ public sealed class AgentApplicationBuilder
             Tools = _tools.ToArray(),
             Interceptors = _interceptors.ToArray(),
             StreamOptions = streamOptions,
+            GetApiKeyAsync = _getApiKeyAsync,
             TransformContext = _transformContext,
             TransformContextAsync = _transformContextAsync,
             ConvertToLlm = _convertToLlm,

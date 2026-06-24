@@ -33,6 +33,7 @@ public record AgentLoopConfig
     public TauRuntimeLogContext? LogContext { get; init; }
     public string? SystemPrompt { get; init; }
     public SimpleStreamOptions? StreamOptions { get; init; }
+    public Func<string, CancellationToken, Task<string?>>? GetApiKeyAsync { get; init; }
     public ToolExecutionMode DefaultExecutionMode { get; init; } = ToolExecutionMode.Parallel;
     public bool SkipInitialSteeringPoll { get; init; }
 

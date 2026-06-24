@@ -15,6 +15,7 @@ public sealed record AgentOptions
     public IReadOnlyList<IAgentTool> Tools { get; init; } = [];
     public IReadOnlyList<IToolInterceptor> Interceptors { get; init; } = [];
     public SimpleStreamOptions? StreamOptions { get; init; }
+    public Func<string, CancellationToken, Task<string?>>? GetApiKeyAsync { get; init; }
     public Func<IReadOnlyList<ChatMessage>, IReadOnlyList<ChatMessage>>? TransformContext { get; init; }
     public Func<IReadOnlyList<ChatMessage>, CancellationToken, Task<IReadOnlyList<ChatMessage>>>? TransformContextAsync { get; init; }
     public Func<IReadOnlyList<ChatMessage>, IReadOnlyList<ChatMessage>>? ConvertToLlm { get; init; }
@@ -48,6 +49,7 @@ public sealed class Agent
         _tools = options.Tools.ToArray();
         _interceptors = options.Interceptors.ToArray();
         StreamOptions = options.StreamOptions;
+        GetApiKeyAsync = options.GetApiKeyAsync;
         TransformContext = options.TransformContext;
         TransformContextAsync = options.TransformContextAsync;
         ConvertToLlm = options.ConvertToLlm;
@@ -111,6 +113,7 @@ public sealed class Agent
     }
 
     public SimpleStreamOptions? StreamOptions { get; set; }
+    public Func<string, CancellationToken, Task<string?>>? GetApiKeyAsync { get; set; }
     public Func<IReadOnlyList<ChatMessage>, IReadOnlyList<ChatMessage>>? TransformContext { get; set; }
     public Func<IReadOnlyList<ChatMessage>, CancellationToken, Task<IReadOnlyList<ChatMessage>>>? TransformContextAsync { get; set; }
     public Func<IReadOnlyList<ChatMessage>, IReadOnlyList<ChatMessage>>? ConvertToLlm { get; set; }
@@ -388,6 +391,7 @@ public sealed class Agent
             LogContext = LogContext,
             SystemPrompt = _systemPrompt,
             StreamOptions = StreamOptions,
+            GetApiKeyAsync = GetApiKeyAsync,
             DefaultExecutionMode = ToolExecution,
             TransformContext = TransformContext,
             TransformContextAsync = TransformContextAsync,
