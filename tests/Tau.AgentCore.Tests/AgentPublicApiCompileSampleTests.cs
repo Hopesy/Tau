@@ -117,10 +117,13 @@ public sealed class AgentPublicApiCompileSampleTests
         Assert.Equal("echo", toolUpdate.ToolName);
         Assert.Equal("""{"text":"hello"}""", toolUpdate.Args);
         Assert.Equal("partial echo", ReadText(toolUpdate.PartialResult?.Content ?? []));
+        Assert.False(toolUpdate.Update.Terminate);
+        Assert.False(toolUpdate.PartialResult?.Terminate);
 
         var toolEnd = Assert.Single(events.OfType<ToolExecutionEndEvent>());
         Assert.Equal("echo", toolEnd.ToolName);
         Assert.False(toolEnd.IsError);
+        Assert.False(toolEnd.Result.Terminate);
 
         var toolTurn = events.OfType<TurnEndEvent>().Single(turn => turn.ToolResults.Count == 1);
         Assert.Equal("hello", ReadText(Assert.Single(toolTurn.ToolResults).Content));
@@ -282,10 +285,15 @@ public sealed class AgentPublicApiCompileSampleTests
         {
             if (onUpdate is not null)
             {
-                await onUpdate(new ToolUpdate("partial echo", [new TextContent("partial echo")])).ConfigureAwait(false);
+                await onUpdate(new ToolUpdate(
+                    "partial echo",
+                    [new TextContent("partial echo")],
+                    Terminate: false)).ConfigureAwait(false);
             }
 
-            return new ToolResult([new TextContent(args.GetProperty("text").GetString() ?? string.Empty)]);
+            return new ToolResult(
+                [new TextContent(args.GetProperty("text").GetString() ?? string.Empty)],
+                Terminate: false);
         }
 
         private static JsonElement CreateSchema()

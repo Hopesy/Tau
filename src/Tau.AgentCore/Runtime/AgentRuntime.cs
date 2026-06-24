@@ -300,6 +300,7 @@ public sealed class AgentRuntime
                     if (toolCalls.Count > 0)
                     {
                         State.SetPendingToolCalls(toolCalls);
+                        var toolEndResults = new List<ToolResult>();
                         try
                         {
                             await foreach (var toolEvt in ToolExecutor.ExecuteToolCallsAsync(
@@ -311,6 +312,7 @@ public sealed class AgentRuntime
                                 // Add tool results to conversation
                                 if (toolEvt is ToolExecutionEndEvent endEvt)
                                 {
+                                    toolEndResults.Add(endEvt.Result);
                                     var toolResultMessage = new ToolResultMessage(
                                         endEvt.ToolCallId,
                                         endEvt.Result.Content,
@@ -327,7 +329,9 @@ public sealed class AgentRuntime
                             State.SetPendingToolCalls([]);
                         }
 
-                        hasMoreWork = true;
+                        var terminatedByTools = toolEndResults.Count > 0 &&
+                            toolEndResults.All(static result => result.Terminate);
+                        hasMoreWork = !terminatedByTools;
                     }
 
                     // Check for new steering messages

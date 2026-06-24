@@ -143,7 +143,8 @@ public sealed record AgentHarnessToolResultEvent(
 public sealed record AgentHarnessToolResultPatch(
     IReadOnlyList<ContentBlock>? Content = null,
     object? Details = null,
-    bool? IsError = null);
+    bool? IsError = null,
+    bool? Terminate = null);
 
 public sealed record AgentHarnessQueueUpdateEvent(
     IReadOnlyList<ChatMessage> Steer,
@@ -1579,7 +1580,8 @@ public sealed class AgentHarness<TMetadata>
             {
                 Content = patch.Content ?? current.Content,
                 Details = patch.Details ?? current.Details,
-                IsError = patch.IsError ?? current.IsError
+                IsError = patch.IsError ?? current.IsError,
+                Terminate = patch.Terminate ?? current.Terminate
             };
         }
 

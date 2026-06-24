@@ -33,17 +33,19 @@ public enum ToolExecutionMode
 public record ToolResult(
     IReadOnlyList<Ai.ContentBlock> Content,
     bool IsError = false,
-    object? Details = null);
+    object? Details = null,
+    bool Terminate = false);
 
 public record ToolUpdate(
     string Text,
     IReadOnlyList<Ai.ContentBlock>? Content = null,
     bool? IsError = null,
-    object? Details = null)
+    object? Details = null,
+    bool? Terminate = null)
 {
     internal ToolResult ToPartialResult()
     {
         var content = Content ?? [new Ai.TextContent(Text)];
-        return new ToolResult(content, IsError.GetValueOrDefault(), Details);
+        return new ToolResult(content, IsError.GetValueOrDefault(), Details, Terminate.GetValueOrDefault());
     }
 }

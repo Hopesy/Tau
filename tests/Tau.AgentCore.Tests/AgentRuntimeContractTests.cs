@@ -353,6 +353,40 @@ public sealed class AgentRuntimeContractTests
     }
 
     [Fact]
+    public async Task RunAsync_ToolResultTerminateStopsProviderLoop()
+    {
+        var provider = new ScriptedProvider(
+            new AssistantMessage([new ToolCallContent("tool-1", "stop", "{}")]),
+            new AssistantMessage([new TextContent("unexpected follow-up")]));
+        var tool = new RecordingTool("stop", """{"type":"object"}""")
+        {
+            Execute = _ => new ToolResult([new TextContent("terminal tool result")])
+        };
+        var runtime = new AgentRuntime();
+        runtime.AddMessage(new UserMessage("use tool"));
+
+        var events = await CollectAsync(runtime.RunAsync(CreateConfig(
+            provider,
+            [tool],
+            [new TerminatingInterceptor()])));
+
+        Assert.Equal(1, provider.Calls);
+        var end = Assert.IsType<AgentEndEvent>(events.Last());
+        Assert.Collection(
+            end.Messages,
+            message => Assert.Equal("use tool", ReadText(Assert.IsType<UserMessage>(message))),
+            message => Assert.IsType<AssistantMessage>(message),
+            message => Assert.Equal("terminal tool result", ReadText(Assert.IsType<ToolResultMessage>(message))));
+        var toolEnd = Assert.Single(events.OfType<ToolExecutionEndEvent>());
+        Assert.True(toolEnd.Result.Terminate);
+        var turn = Assert.Single(events.OfType<TurnEndEvent>());
+        Assert.Single(turn.ToolResults);
+        Assert.DoesNotContain(
+            runtime.State.Messages.OfType<AssistantMessage>(),
+            message => ReadText(message).Equals("unexpected follow-up", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task RunAsync_ToolExecuteExceptionBecomesErrorToolResult()
     {
         var tool = new RecordingTool("explode", """{"type":"object"}""")
@@ -709,6 +743,7 @@ public sealed class AgentRuntimeContractTests
         private int _calls;
 
         public string Api => "test-agent-contract";
+        public int Calls => _calls;
 
         public AssistantMessageStream Stream(Model model, LlmContext context, StreamOptions options) =>
             Complete();
@@ -858,5 +893,11 @@ public sealed class AgentRuntimeContractTests
 
             return Task.FromResult(result);
         }
+    }
+
+    private sealed class TerminatingInterceptor : IToolInterceptor
+    {
+        public Task<ToolResult> AfterToolCallAsync(ToolCallContext context, ToolResult result, CancellationToken ct = default) =>
+            Task.FromResult(result with { Terminate = true });
     }
 }

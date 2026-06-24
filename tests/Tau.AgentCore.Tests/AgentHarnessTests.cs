@@ -322,6 +322,42 @@ public sealed class AgentHarnessTests
     }
 
     [Fact]
+    public async Task PromptAsync_ToolResultHookTerminateStopsProviderLoop()
+    {
+        var provider = new HookCapturingProvider(
+            new AssistantMessage([new ToolCallContent("call-1", "count", """{"count":"1"}""")])
+            {
+                StopReason = StopReason.ToolUse
+            },
+            new AssistantMessage([new TextContent("unexpected follow-up")]));
+        var tool = new DelegateAgentTool(
+            "count",
+            "Count",
+            "Returns the count.",
+            Json("""{"type":"object"}"""),
+            (context, _) => Task.FromResult(new ToolResult([
+                new TextContent("tool saw " + context.Arguments.GetProperty("count").GetString())
+            ])));
+        var harness = CreateHarness(provider, tools: [tool]);
+        using var toolResult = harness.OnToolResult((_, _) =>
+            Task.FromResult<AgentHarnessToolResultPatch?>(new(
+                Content: [new TextContent("terminal hook result")],
+                Terminate: true)));
+
+        var assistant = await harness.PromptAsync("stop after tool").WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Single(assistant.Content.OfType<ToolCallContent>());
+        Assert.Equal(1, provider.StreamSimpleCallCount);
+        var context = await harness.Session.BuildContextAsync();
+        Assert.Equal(["user", "assistant", "toolResult"], context.Messages.Select(static message => message.Role));
+        var toolResultMessage = Assert.Single(context.Messages.OfType<ToolResultMessage>());
+        Assert.Equal("terminal hook result", ReadText(toolResultMessage.Content));
+        Assert.DoesNotContain(
+            context.Messages.OfType<AssistantMessage>(),
+            message => ReadText(message.Content).Equals("unexpected follow-up", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task PromptAsync_WhenToolCallHookBlocksWithoutReasonUsesDefaultBlockedMessage()
     {
         var provider = new HookCapturingProvider(
@@ -530,12 +566,14 @@ public sealed class AgentHarnessTests
         public SimpleStreamOptions? LastOptions { get; private set; }
         public IDictionary<string, object>? LastPayload { get; private set; }
         public int PayloadCallbackCount { get; private set; }
+        public int StreamSimpleCallCount { get; private set; }
 
         public AssistantMessageStream Stream(Model model, LlmContext context, StreamOptions options) =>
             throw new NotSupportedException();
 
         public AssistantMessageStream StreamSimple(Model model, LlmContext context, SimpleStreamOptions options)
         {
+            StreamSimpleCallCount++;
             LastContext = context;
             LastOptions = options;
             var payload = new Dictionary<string, object>(StringComparer.Ordinal)
