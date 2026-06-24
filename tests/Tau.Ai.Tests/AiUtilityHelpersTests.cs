@@ -212,6 +212,46 @@ public sealed class AiUtilityHelpersTests
     }
 
     [Fact]
+    public void StreamingJsonParser_RepairJson_EscapesControlCharactersInsideStrings()
+    {
+        var malformed = "{\"text\":\"line" + "\n" + "break\",\"tab\":\"a" + "\t" + "b\"}";
+
+        var repaired = StreamingJsonParser.RepairJson(malformed);
+
+        Assert.Equal("""{"text":"line\nbreak","tab":"a\tb"}""", repaired);
+    }
+
+    [Fact]
+    public void StreamingJsonParser_RepairJson_DoublesInvalidEscapesAndPreservesValidEscapes()
+    {
+        var malformed = """{"path":"C:\q\zolder","quote":"hello \"world\"","unicode":"\u263a"}""";
+
+        var repaired = StreamingJsonParser.RepairJson(malformed);
+
+        Assert.Equal("""{"path":"C:\\q\\zolder","quote":"hello \"world\"","unicode":"\u263a"}""", repaired);
+    }
+
+    [Fact]
+    public void StreamingJsonParser_ParseJsonWithRepair_ParsesMalformedStringLiterals()
+    {
+        var malformed = "{\"text\":\"line" + "\n" + "break\",\"path\":\"C:\\q\"}";
+
+        var parsed = StreamingJsonParser.ParseJsonWithRepair(malformed);
+
+        Assert.Equal("line\nbreak", parsed.GetProperty("text").GetString());
+        Assert.Equal(@"C:\q", parsed.GetProperty("path").GetString());
+    }
+
+    [Fact]
+    public void StreamingJsonParser_ParseStreamingJson_RepairsMalformedCompleteJsonBeforePartialParsing()
+    {
+        var parsed = StreamingJsonParser.ParseStreamingJson("""{"path":"C:\q","count":2}""");
+
+        Assert.Equal(@"C:\q", parsed.GetProperty("path").GetString());
+        Assert.Equal(2, parsed.GetProperty("count").GetInt32());
+    }
+
+    [Fact]
     public void StreamingJsonParser_ParseStreamingJson_RecoversIncompleteNestedObject()
     {
         var parsed = StreamingJsonParser.ParseStreamingJson("""{"tool":"read_file","arguments":{"path":"src/Tau""");

@@ -32,6 +32,10 @@ public sealed class AiPublicApiCompileSampleTests
         var partialJson = StreamingJsonParser.ParseStreamingJson("""{"size":"large","count":2,"partial":""");
         Assert.Equal("large", partialJson.GetProperty("size").GetString());
         Assert.False(partialJson.TryGetProperty("partial", out _));
+        var repairedJson = StreamingJsonParser.RepairJson("""{"path":"C:\q"}""");
+        Assert.Equal("""{"path":"C:\\q"}""", repairedJson);
+        var repairedParsed = StreamingJsonParser.ParseJsonWithRepair(repairedJson);
+        Assert.Equal(@"C:\q", repairedParsed.GetProperty("path").GetString());
 
         var diagnostic = AssistantMessageDiagnostics.CreateAssistantMessageDiagnostic(
             "sample_diagnostic",

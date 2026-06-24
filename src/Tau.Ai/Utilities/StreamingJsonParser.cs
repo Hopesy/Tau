@@ -7,6 +7,110 @@ namespace Tau.Ai;
 
 public static class StreamingJsonParser
 {
+    private static readonly HashSet<char> ValidJsonEscapes =
+    [
+        '"',
+        '\\',
+        '/',
+        'b',
+        'f',
+        'n',
+        'r',
+        't',
+        'u'
+    ];
+
+    public static string RepairJson(string json)
+    {
+        ArgumentNullException.ThrowIfNull(json);
+
+        var repaired = new StringBuilder(json.Length);
+        var inString = false;
+
+        for (var index = 0; index < json.Length; index++)
+        {
+            var current = json[index];
+            if (!inString)
+            {
+                repaired.Append(current);
+                if (current == '"')
+                {
+                    inString = true;
+                }
+
+                continue;
+            }
+
+            if (current == '"')
+            {
+                repaired.Append(current);
+                inString = false;
+                continue;
+            }
+
+            if (current == '\\')
+            {
+                if (index + 1 >= json.Length)
+                {
+                    repaired.Append(@"\\");
+                    continue;
+                }
+
+                var next = json[index + 1];
+                if (next == 'u')
+                {
+                    var unicodeDigits = index + 6 <= json.Length
+                        ? json.AsSpan(index + 2, 4)
+                        : ReadOnlySpan<char>.Empty;
+                    if (unicodeDigits.Length == 4 && IsHexDigits(unicodeDigits))
+                    {
+                        repaired.Append(@"\u");
+                        repaired.Append(unicodeDigits);
+                        index += 5;
+                        continue;
+                    }
+                }
+
+                if (ValidJsonEscapes.Contains(next))
+                {
+                    repaired.Append('\\');
+                    repaired.Append(next);
+                    index++;
+                    continue;
+                }
+
+                repaired.Append(@"\\");
+                continue;
+            }
+
+            AppendEscapedControlCharacter(repaired, current);
+        }
+
+        return repaired.ToString();
+    }
+
+    public static JsonElement ParseJsonWithRepair(string json)
+    {
+        ArgumentNullException.ThrowIfNull(json);
+
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            return document.RootElement.Clone();
+        }
+        catch (JsonException)
+        {
+            var repairedJson = RepairJson(json);
+            if (repairedJson != json)
+            {
+                using var repaired = JsonDocument.Parse(repairedJson);
+                return repaired.RootElement.Clone();
+            }
+
+            throw;
+        }
+    }
+
     public static JsonElement ParseStreamingJson(string? partialJson)
     {
         if (string.IsNullOrWhiteSpace(partialJson))
@@ -16,14 +120,29 @@ public static class StreamingJsonParser
 
         try
         {
-            using var complete = JsonDocument.Parse(partialJson);
-            return complete.RootElement.Clone();
+            return ParseJsonWithRepair(partialJson);
         }
         catch (JsonException)
         {
             var parser = new PartialJsonParser(partialJson);
             var parsed = parser.Parse();
-            return parsed.Success ? ToElement(parsed.Node) : EmptyObject();
+            if (parsed.Success)
+            {
+                return ToElement(parsed.Node);
+            }
+
+            var repairedJson = RepairJson(partialJson);
+            if (repairedJson != partialJson)
+            {
+                var repairedParser = new PartialJsonParser(repairedJson);
+                var repairedParsed = repairedParser.Parse();
+                if (repairedParsed.Success)
+                {
+                    return ToElement(repairedParsed.Node);
+                }
+            }
+
+            return EmptyObject();
         }
     }
 
@@ -46,6 +165,40 @@ public static class StreamingJsonParser
     {
         using var document = JsonDocument.Parse(node?.ToJsonString() ?? "null");
         return document.RootElement.Clone();
+    }
+
+    private static bool IsHexDigits(ReadOnlySpan<char> value)
+    {
+        foreach (var c in value)
+        {
+            if (!Uri.IsHexDigit(c))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static void AppendEscapedControlCharacter(StringBuilder builder, char value)
+    {
+        switch (value)
+        {
+            case >= '\u0000' and <= '\u001F':
+                builder.Append(value switch
+                {
+                    '\b' => @"\b",
+                    '\f' => @"\f",
+                    '\n' => @"\n",
+                    '\r' => @"\r",
+                    '\t' => @"\t",
+                    _ => FormattableString.Invariant($@"\u{(int)value:x4}")
+                });
+                break;
+            default:
+                builder.Append(value);
+                break;
+        }
     }
 
     private readonly struct ParseResult(bool success, JsonNode? node = null)
