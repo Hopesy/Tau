@@ -78,6 +78,31 @@ public sealed class ImagesProviderRegistryTests
         Assert.Null(registry.TryGet("b"));
     }
 
+    [Fact]
+    public async Task ImageFunctions_RejectsProviderWhoseApiDoesNotMatchModelApi()
+    {
+        var registry = new ImagesProviderRegistry();
+        registry.Register("openrouter-images", new FakeImagesProvider("other-images"));
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            ImageFunctions.GenerateImagesAsync(
+                registry,
+                new ImagesModel
+                {
+                    Provider = "openrouter",
+                    Id = "openrouter/test-image",
+                    Name = "OpenRouter Test Image",
+                    Api = "openrouter-images"
+                },
+                new ImagesContext([new TextContent("draw")]),
+                new ImagesOptions()));
+
+        Assert.Contains(
+            "Mismatched image provider API: other-images expected openrouter-images.",
+            ex.Message,
+            StringComparison.Ordinal);
+    }
+
     private sealed class FakeImagesProvider(string api) : IImagesProvider
     {
         public string Api { get; } = api;

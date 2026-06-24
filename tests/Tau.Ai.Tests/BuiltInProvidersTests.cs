@@ -20,4 +20,24 @@ public sealed class BuiltInProvidersTests
         Assert.Contains("google-gemini-cli", registry.RegisteredApis);
         Assert.Contains("bedrock-converse-stream", registry.RegisteredApis);
     }
+
+    [Fact]
+    public void CreateBuiltInImagesRegistry_RegistersOpenRouterImageApi()
+    {
+        var registry = BuiltInProviders.CreateBuiltInImagesRegistry();
+
+        Assert.Contains("openrouter-images", registry.RegisteredApis);
+        Assert.Equal("openrouter-images", registry.Get("openrouter-images").Api);
+    }
+
+    [Fact]
+    public void RegisterAllImages_RegistersOpenRouterImageApi()
+    {
+        var registry = new ImagesProviderRegistry();
+
+        BuiltInProviders.RegisterAllImages(registry);
+
+        Assert.Contains("openrouter-images", registry.RegisteredApis);
+        Assert.Equal("openrouter-images", registry.Get("openrouter-images").Api);
+    }
 }

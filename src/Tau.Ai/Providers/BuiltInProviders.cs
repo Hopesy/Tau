@@ -73,6 +73,13 @@ public static class BuiltInProviders
         registry.Register("openrouter-images", () => new OpenRouterImagesProvider(httpClient), sourceId: "builtin");
     }
 
+    public static ImagesProviderRegistry CreateBuiltInImagesRegistry(HttpClient? openRouterHttpClient = null)
+    {
+        var registry = new ImagesProviderRegistry();
+        RegisterOpenRouterImages(registry, openRouterHttpClient);
+        return registry;
+    }
+
     public static IReadOnlyList<ImagesProviderDefinition> GetBuiltInImagesProviders(
         ImageModelCatalog? catalog = null,
         HttpClient? openRouterHttpClient = null) =>

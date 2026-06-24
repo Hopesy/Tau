@@ -188,6 +188,21 @@ public sealed class OpenRouterImagesProviderTests
         Assert.Equal("draw", Assert.IsType<TextContent>(provider.CapturedContext.Input[0]).Text);
     }
 
+    [Fact]
+    public async Task ImageFunctions_DefaultGenerateImagesUsesBuiltInOpenRouterRegistry()
+    {
+        using var scope = EnvironmentVariableScope.Acquire();
+        scope.Set("OPENROUTER_API_KEY", null);
+
+        var result = await ImageFunctions.GenerateImagesAsync(
+            BuildModel(),
+            new ImagesContext([new TextContent("draw")]),
+            new ImagesOptions()).WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(ImagesStopReason.Error, result.StopReason);
+        Assert.Contains("No API key for provider: openrouter", result.ErrorMessage, StringComparison.Ordinal);
+    }
+
     private static ImagesModel BuildModel() => new()
     {
         Id = "openrouter/test-image",

@@ -262,6 +262,8 @@ public sealed class AiPublicApiCompileSampleTests
         var builtInImagesModels = BuiltInProviders.CreateBuiltInImagesModels();
         Assert.Equal("openrouter", Assert.Single(BuiltInProviders.GetBuiltInImagesProviders()).Id);
         Assert.NotNull(builtInImagesModels.GetModel("openrouter", "openrouter/auto"));
+        var builtInImagesRegistry = BuiltInProviders.CreateBuiltInImagesRegistry();
+        Assert.NotNull(builtInImagesRegistry.TryGet("openrouter-images"));
         BuiltInProviders.RegisterOpenRouterImages(imagesRegistry);
         Assert.NotNull(imagesRegistry.TryGet(new OpenRouterImagesProvider().Api));
         imagesRegistry.UnregisterBySource("sample-images-source");
