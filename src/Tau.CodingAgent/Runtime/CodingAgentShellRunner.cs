@@ -1,5 +1,5 @@
 using System.Diagnostics;
-using System.Text;
+using Tau.AgentCore.Harness;
 
 namespace Tau.CodingAgent.Runtime;
 
@@ -30,8 +30,6 @@ public sealed record CodingAgentShellResult(
 
 public sealed class SystemCodingAgentShellRunner : ICodingAgentShellRunner
 {
-    private const int MaxReturnedOutputChars = 64 * 1024;
-
     private readonly object _gate = new();
     private CancellationTokenSource? _activeCts;
     private Process? _activeProcess;
@@ -69,8 +67,9 @@ public sealed class SystemCodingAgentShellRunner : ICodingAgentShellRunner
                 throw new InvalidOperationException("Failed to start shell process.");
             }
 
-            var stdoutTask = ReadStreamAsync(process.StandardOutput, "stdout", progress, cts.Token);
-            var stderrTask = ReadStreamAsync(process.StandardError, "stderr", progress, cts.Token);
+            var capture = new ShellOutputCapture();
+            var stdoutTask = ReadStreamAsync(process.StandardOutput, "stdout", capture, progress, cts.Token);
+            var stderrTask = ReadStreamAsync(process.StandardError, "stderr", capture, progress, cts.Token);
             try
             {
                 await process.WaitForExitAsync(cts.Token).ConfigureAwait(false);
@@ -81,16 +80,15 @@ public sealed class SystemCodingAgentShellRunner : ICodingAgentShellRunner
             }
 
             var cancelled = cts.IsCancellationRequested;
-            var stdout = await ReadCompletedOrEmptyAsync(stdoutTask).ConfigureAwait(false);
-            var stderr = await ReadCompletedOrEmptyAsync(stderrTask).ConfigureAwait(false);
-            var output = BuildOutput(stdout, stderr);
-            var truncatedOutput = TruncateTail(output, out var truncated, out var fullOutputPath);
+            await WaitForReaderAsync(stdoutTask).ConfigureAwait(false);
+            await WaitForReaderAsync(stderrTask).ConfigureAwait(false);
+            var captured = capture.Complete(cancelled ? null : process.ExitCode, cancelled);
             return new CodingAgentShellResult(
-                truncatedOutput,
-                cancelled ? null : process.ExitCode,
-                cancelled,
-                truncated,
-                fullOutputPath);
+                captured.Output,
+                captured.ExitCode,
+                captured.Cancelled,
+                captured.Truncated,
+                captured.FullOutputPath);
         }
         finally
         {
@@ -147,14 +145,14 @@ public sealed class SystemCodingAgentShellRunner : ICodingAgentShellRunner
         return new Process { StartInfo = startInfo };
     }
 
-    private static async Task<string> ReadStreamAsync(
+    private static async Task ReadStreamAsync(
         StreamReader reader,
         string stream,
+        ShellOutputCapture capture,
         IProgress<CodingAgentShellEvent>? progress,
         CancellationToken cancellationToken)
     {
         var buffer = new char[4096];
-        var builder = new StringBuilder();
         while (true)
         {
             int read;
@@ -181,87 +179,28 @@ public sealed class SystemCodingAgentShellRunner : ICodingAgentShellRunner
                 break;
             }
 
-            var text = NormalizeOutput(new string(buffer, 0, read));
+            var text = capture.AppendChunk(new string(buffer, 0, read));
             if (text.Length == 0)
             {
                 continue;
             }
 
-            builder.Append(text);
             progress?.Report(new CodingAgentShellEvent(stream, text, DateTimeOffset.UtcNow));
         }
-
-        return builder.ToString();
     }
 
-    private static async Task<string> ReadCompletedOrEmptyAsync(Task<string> task)
+    private static async Task WaitForReaderAsync(Task task)
     {
         try
         {
-            return await task.ConfigureAwait(false);
+            await task.ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
-            return string.Empty;
         }
         catch (InvalidOperationException)
         {
-            return string.Empty;
         }
-    }
-
-    private static string BuildOutput(string stdout, string stderr)
-    {
-        var builder = new StringBuilder();
-        if (!string.IsNullOrEmpty(stdout))
-        {
-            builder.Append(NormalizeOutput(stdout));
-        }
-
-        if (!string.IsNullOrEmpty(stderr))
-        {
-            if (builder.Length > 0 && builder[^1] != '\n')
-            {
-                builder.AppendLine();
-            }
-
-            builder.Append(NormalizeOutput(stderr));
-        }
-
-        return builder.ToString();
-    }
-
-    private static string NormalizeOutput(string text)
-    {
-        var builder = new StringBuilder(text.Length);
-        foreach (var character in text.Replace("\r", string.Empty, StringComparison.Ordinal))
-        {
-            if (character == '\n' || character == '\t' || !char.IsControl(character))
-            {
-                builder.Append(character);
-            }
-            else
-            {
-                builder.Append(' ');
-            }
-        }
-
-        return builder.ToString();
-    }
-
-    private static string TruncateTail(string output, out bool truncated, out string? fullOutputPath)
-    {
-        fullOutputPath = null;
-        if (output.Length <= MaxReturnedOutputChars)
-        {
-            truncated = false;
-            return output;
-        }
-
-        fullOutputPath = Path.Combine(Path.GetTempPath(), $"tau-bash-{Guid.NewGuid():N}.log");
-        File.WriteAllText(fullOutputPath, output, Encoding.UTF8);
-        truncated = true;
-        return output[^MaxReturnedOutputChars..];
     }
 
     private static void KillProcessTree(Process process)
