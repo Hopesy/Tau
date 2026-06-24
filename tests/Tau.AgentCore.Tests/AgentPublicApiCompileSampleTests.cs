@@ -33,6 +33,14 @@ public sealed class AgentPublicApiCompileSampleTests
         var generatedSessionId = UuidV7.Create();
         Assert.True(Guid.TryParse(generatedSessionId, out _));
         Assert.Equal('7', generatedSessionId[14]);
+        var harnessRepo = new InMemorySessionRepo();
+        var harnessSession = await harnessRepo.CreateAsync("sample-harness-session");
+        var harnessEntryId = await harnessSession.AppendMessageAsync(new UserMessage("stored in harness"));
+        Assert.Equal(
+            "stored in harness",
+            Assert.IsType<TextContent>(Assert.Single(
+                Assert.IsType<UserMessage>(Assert.Single((await harnessSession.BuildContextAsync()).Messages)).Content)).Text);
+        Assert.Equal([harnessEntryId], (await harnessSession.GetEntriesAsync()).Select(static entry => entry.Id));
 
         var agent = new Tau.AgentCore.Agent(new AgentOptions
         {
