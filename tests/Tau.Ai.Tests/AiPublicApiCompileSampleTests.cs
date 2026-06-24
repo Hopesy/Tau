@@ -211,7 +211,11 @@ public sealed class AiPublicApiCompileSampleTests
         var imagesRegistry = new ImagesProviderRegistry();
         var imagesProvider = new SampleImagesProvider();
         imagesRegistry.Register(imagesProvider.Api, imagesProvider, sourceId: "sample-images-source");
-        var imagesModel = new ImagesModel
+        var imageCatalog = new ImageModelCatalog();
+        var builtInImageModel = imageCatalog.GetModel("openrouter", "openrouter/auto");
+        Assert.Equal("openrouter-images", builtInImageModel.Api);
+        Assert.Contains("text", builtInImageModel.OutputModalities);
+        imageCatalog.RegisterModel(new ImagesModel
         {
             Provider = "openrouter",
             Id = "openrouter/sample-image",
@@ -221,7 +225,8 @@ public sealed class AiPublicApiCompileSampleTests
             InputModalities = ["text", "image"],
             OutputModalities = ["image", "text"],
             Cost = new ModelCost(2m, 4m, 0.5m, 1m)
-        };
+        });
+        var imagesModel = imageCatalog.GetModel("openrouter", "openrouter/sample-image");
         var imagesOptions = new ImagesOptions
         {
             ApiKey = "explicit-image-key",
