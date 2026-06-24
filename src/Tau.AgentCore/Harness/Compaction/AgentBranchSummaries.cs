@@ -181,6 +181,39 @@ public static class AgentBranchSummaries
             AgentCompaction.FormatFileOperations(details.ReadFiles, details.ModifiedFiles);
     }
 
+    public static async Task<AgentBranchSummaryResult> GenerateBranchSummaryAsync(
+        IReadOnlyList<SessionTreeEntry> entries,
+        AgentSummaryGenerationOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(entries);
+        ArgumentNullException.ThrowIfNull(options);
+
+        var contextWindow = options.Model.ContextWindow is > 0 ? options.Model.ContextWindow.Value : 128_000;
+        var reserveTokens = options.ReserveTokens ?? AgentCompactionSettings.Default.ReserveTokens;
+        var tokenBudget = contextWindow - reserveTokens;
+        var preparation = PrepareBranchEntries(entries, tokenBudget);
+
+        if (preparation.Messages.Count == 0)
+            return new AgentBranchSummaryResult("No content to summarize", [], []);
+
+        var prompt = BuildBranchSummaryPrompt(
+            preparation,
+            options.CustomInstructions,
+            options.ReplaceInstructions);
+        var generatedSummary = await AgentCompactionSummaries.GeneratePromptSummaryAsync(
+            prompt,
+            options,
+            maxTokens: 2_048,
+            abortedMessage: "Branch summary aborted",
+            failurePrefix: "Branch summary failed").ConfigureAwait(false);
+
+        var summary = CompleteBranchSummaryText(
+            string.IsNullOrWhiteSpace(generatedSummary) ? "No summary generated" : generatedSummary,
+            preparation.FileOperations);
+        var details = AgentCompaction.ComputeFileLists(preparation.FileOperations);
+        return new AgentBranchSummaryResult(summary, details.ReadFiles, details.ModifiedFiles);
+    }
+
     private static ChatMessage? GetMessageFromEntry(SessionTreeEntry entry) =>
         entry switch
         {
