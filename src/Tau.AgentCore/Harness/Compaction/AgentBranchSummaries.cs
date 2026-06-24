@@ -203,7 +203,7 @@ public static class AgentBranchSummaries
         var generatedSummary = await AgentCompactionSummaries.GeneratePromptSummaryAsync(
             prompt,
             options,
-            maxTokens: 2_048,
+            maxTokens: options.MaxTokens ?? 2_048,
             abortedMessage: "Branch summary aborted",
             failurePrefix: "Branch summary failed").ConfigureAwait(false);
 

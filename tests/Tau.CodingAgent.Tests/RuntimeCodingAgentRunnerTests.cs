@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Tau.AgentCore;
+using Tau.AgentCore.Harness;
 using Tau.Ai;
 using Tau.Ai.Observability;
 using Tau.Ai.Providers;
@@ -267,16 +268,21 @@ public class RuntimeCodingAgentRunnerTests
 
         var runtime = new AgentRuntime();
         runtime.AddMessage(new UserMessage("first"));
-        runtime.AddMessage(new AssistantMessage([new TextContent("second")]));
+        runtime.AddMessage(new AssistantMessage(
+        [
+            new TextContent("second"),
+            new ToolCallContent("call-1", "read_file", """{"path":"README.md"}"""),
+            new ToolCallContent("call-2", "write", """{"path":"src/New.cs"}""")
+        ]));
 
-        var registry = new ProviderRegistry();
-        registry.Register("test-api", () => new CompactingTestProvider(), sourceId: "test");
+        LlmContext? capturedContext = null;
+        var registry = CreatePromptCapturingRegistry(context => capturedContext = context);
 
         var runner = new RuntimeCodingAgentRunner(
             runtime,
             new AgentLoopConfig
             {
-                Model = model,
+                Model = model with { Api = "prompt-capture-test" },
                 ProviderRegistry = registry,
                 Tools = [],
                 SystemPrompt = "test",
@@ -286,15 +292,20 @@ public class RuntimeCodingAgentRunnerTests
 
         var result = await runner.CompactAsync("focus on current blocker");
 
-        Assert.Equal("summary result", result.Summary);
+        Assert.Contains("summary result", result.Summary, StringComparison.Ordinal);
+        Assert.Contains("<read-files>\nREADME.md\n</read-files>", result.Summary, StringComparison.Ordinal);
+        Assert.Contains("<modified-files>\nsrc/New.cs\n</modified-files>", result.Summary, StringComparison.Ordinal);
         Assert.Equal(2, result.MessagesBefore);
         Assert.Equal(1, result.MessagesAfter);
+        Assert.NotNull(capturedContext);
+        Assert.Equal(AgentCompactionSummaries.SummarizationSystemPrompt, capturedContext!.Value.SystemPrompt);
 
         var compacted = Assert.Single(runner.Messages);
         var user = Assert.IsType<UserMessage>(compacted);
         var text = Assert.IsType<TextContent>(Assert.Single(user.Content)).Text;
         Assert.Contains("The conversation history before this point was compacted", text);
         Assert.Contains("summary result", text);
+        Assert.Contains("<read-files>\nREADME.md\n</read-files>", text);
     }
 
     [Fact]
@@ -316,6 +327,7 @@ public class RuntimeCodingAgentRunnerTests
         Assert.Contains("summary result", result.Summary, StringComparison.Ordinal);
         Assert.NotNull(capturedContext);
         var context = capturedContext!.Value;
+        Assert.Equal(AgentCompactionSummaries.SummarizationSystemPrompt, context.SystemPrompt);
         var promptMessage = Assert.IsType<UserMessage>(Assert.Single(context.Messages));
         var prompt = Assert.IsType<TextContent>(Assert.Single(promptMessage.Content)).Text;
         Assert.Contains("Summarize only blockers and next commands.", prompt, StringComparison.Ordinal);
@@ -808,21 +820,6 @@ file sealed class OptionsCapturingProvider : IStreamProvider
     {
         var stream = new AssistantMessageStream();
         stream.Push(new DoneEvent(new AssistantMessage([new TextContent("ok")])));
-        return stream;
-    }
-}
-
-file sealed class CompactingTestProvider : IStreamProvider
-{
-    public string Api => "test-api";
-
-    public AssistantMessageStream Stream(Model model, LlmContext context, StreamOptions options) =>
-        throw new NotSupportedException();
-
-    public AssistantMessageStream StreamSimple(Model model, LlmContext context, SimpleStreamOptions options)
-    {
-        var stream = new AssistantMessageStream();
-        stream.Push(new DoneEvent(new AssistantMessage([new TextContent("summary result")])));
         return stream;
     }
 }

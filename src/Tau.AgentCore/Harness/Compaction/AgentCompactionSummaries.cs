@@ -22,6 +22,7 @@ public sealed record AgentSummaryGenerationOptions
     public string? CustomInstructions { get; init; }
     public bool ReplaceInstructions { get; init; }
     public int? ReserveTokens { get; init; }
+    public int? MaxTokens { get; init; }
     public ThinkingLevel? ThinkingLevel { get; init; }
     public CancellationToken CancellationToken { get; init; }
 }
@@ -192,7 +193,7 @@ public static class AgentCompactionSummaries
         return await GeneratePromptSummaryAsync(
             prompt,
             options,
-            maxTokens: ResolveMaxTokens(options.Model, reserveTokens, 0.8),
+            maxTokens: options.MaxTokens ?? ResolveMaxTokens(options.Model, reserveTokens, 0.8),
             abortedMessage: "Summarization aborted",
             failurePrefix: "Summarization failed").ConfigureAwait(false);
     }
@@ -215,7 +216,7 @@ public static class AgentCompactionSummaries
         return await GeneratePromptSummaryAsync(
             prompt,
             options,
-            maxTokens: ResolveMaxTokens(options.Model, reserveTokens, 0.8),
+            maxTokens: options.MaxTokens ?? ResolveMaxTokens(options.Model, reserveTokens, 0.8),
             abortedMessage: "Summarization aborted",
             failurePrefix: "Summarization failed").ConfigureAwait(false);
     }
@@ -231,7 +232,7 @@ public static class AgentCompactionSummaries
         return await GeneratePromptSummaryAsync(
             BuildTurnPrefixSummaryPrompt(messages),
             options with { CustomInstructions = null },
-            maxTokens: ResolveMaxTokens(options.Model, reserveTokens, 0.5),
+            maxTokens: options.MaxTokens ?? ResolveMaxTokens(options.Model, reserveTokens, 0.5),
             abortedMessage: "Turn prefix summarization aborted",
             failurePrefix: "Turn prefix summarization failed").ConfigureAwait(false);
     }
