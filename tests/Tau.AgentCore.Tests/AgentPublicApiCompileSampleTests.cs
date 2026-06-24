@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Tau.AgentCore.Harness;
 using Tau.AgentCore.Harness.Session;
 using Tau.AgentCore.Platform;
 using Tau.AgentCore.Proxy;
@@ -41,6 +42,33 @@ public sealed class AgentPublicApiCompileSampleTests
             Assert.IsType<TextContent>(Assert.Single(
                 Assert.IsType<UserMessage>(Assert.Single((await harnessSession.BuildContextAsync()).Messages)).Content)).Text);
         Assert.Equal([harnessEntryId], (await harnessSession.GetEntriesAsync()).Select(static entry => entry.Id));
+
+        var publicHarnessProvider = new SampleProvider(new AssistantMessage([new TextContent("harness done")]));
+        var publicHarnessRegistry = new ProviderRegistry();
+        publicHarnessRegistry.Register(publicHarnessProvider.Api, publicHarnessProvider);
+        var publicHarnessEvents = new List<object>();
+        var publicHarness = new AgentHarness<SessionMetadata>(new AgentHarnessOptions<SessionMetadata>
+        {
+            Session = new AgentHarnessSession<SessionMetadata>(new InMemorySessionStorage<SessionMetadata>()),
+            ProviderRegistry = publicHarnessRegistry,
+            Model = model,
+            SystemPrompt = "harness system",
+            Resources = new AgentHarnessResources(
+                PromptTemplates:
+                [
+                    new AgentPromptTemplate("sample", "Sample template", "Run $1 through harness.")
+                ])
+        });
+        using var publicHarnessSubscription = publicHarness.Subscribe(publicHarnessEvents.Add);
+        var harnessAssistant = await publicHarness
+            .PromptFromTemplateAsync("sample", ["public-api"])
+            .WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal("harness done", ReadText(harnessAssistant.Content));
+        Assert.Contains(publicHarnessEvents, static evt => evt is AgentHarnessSavePointEvent);
+        Assert.Equal(
+            ["message", "message"],
+            (await publicHarness.Session.GetBranchAsync()).Select(static entry => entry.Type));
 
         var agent = new Tau.AgentCore.Agent(new AgentOptions
         {
