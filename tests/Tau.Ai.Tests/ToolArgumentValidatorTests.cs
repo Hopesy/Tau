@@ -59,6 +59,86 @@ public sealed class ToolArgumentValidatorTests
     }
 
     [Fact]
+    public void ValidateToolArguments_CoercesPrimitiveJsonSchemaValuesLikeTypeBox()
+    {
+        var tool = CreateTool("coerce", """
+            {
+              "type": "object",
+              "properties": {
+                "count": { "type": "integer" },
+                "ratio": { "type": "number" },
+                "enabled": { "type": "boolean" },
+                "label": { "type": "string" },
+                "cleared": { "type": "null" }
+              },
+              "required": ["count", "ratio", "enabled", "label", "cleared"]
+            }
+            """);
+        var toolCall = new ToolCallContent("call-1", "coerce",
+            """{"count":true,"ratio":null,"enabled":1,"label":null,"cleared":""}""");
+
+        var validated = ToolArgumentValidator.ValidateToolArguments(tool, toolCall);
+
+        Assert.Equal(1, validated.GetProperty("count").GetInt32());
+        Assert.Equal(0, validated.GetProperty("ratio").GetDouble());
+        Assert.True(validated.GetProperty("enabled").GetBoolean());
+        Assert.Equal(string.Empty, validated.GetProperty("label").GetString());
+        Assert.Equal(JsonValueKind.Null, validated.GetProperty("cleared").ValueKind);
+    }
+
+    [Fact]
+    public void ValidateToolArguments_PreservesExistingUnionMemberType()
+    {
+        var tool = CreateTool("union", """
+            {
+              "type": "object",
+              "properties": {
+                "value": { "type": ["string", "number"] },
+                "nullableText": { "type": ["null", "string"] }
+              },
+              "required": ["value", "nullableText"]
+            }
+            """);
+        var toolCall = new ToolCallContent("call-1", "union", """{"value":42,"nullableText":""}""");
+
+        var validated = ToolArgumentValidator.ValidateToolArguments(tool, toolCall);
+
+        Assert.Equal(JsonValueKind.Number, validated.GetProperty("value").ValueKind);
+        Assert.Equal(42, validated.GetProperty("value").GetInt32());
+        Assert.Equal(JsonValueKind.String, validated.GetProperty("nullableText").ValueKind);
+        Assert.Equal(string.Empty, validated.GetProperty("nullableText").GetString());
+    }
+
+    [Fact]
+    public void ValidateToolArguments_CoercesTupleItemsByIndex()
+    {
+        var tool = CreateTool("tuple", """
+            {
+              "type": "object",
+              "properties": {
+                "items": {
+                  "type": "array",
+                  "items": [
+                    { "type": "integer" },
+                    { "type": "boolean" },
+                    { "type": "string" }
+                  ]
+                }
+              },
+              "required": ["items"]
+            }
+            """);
+        var toolCall = new ToolCallContent("call-1", "tuple", """{"items":["7",1,false]}""");
+
+        var validated = ToolArgumentValidator.ValidateToolArguments(tool, toolCall);
+        var items = validated.GetProperty("items");
+
+        Assert.Equal(7, items[0].GetInt32());
+        Assert.True(items[1].GetBoolean());
+        Assert.Equal("false", items[2].GetString());
+    }
+
+    [Fact]
     public void ValidateToolArguments_RejectsAdditionalPropertiesAndValidatesPatternProperties()
     {
         var tool = CreateTool("headers", """
@@ -203,7 +283,7 @@ public sealed class ToolArgumentValidatorTests
         Assert.Equal(42, validated.GetProperty("target").GetInt32());
 
         var invalidCall = new ToolCallContent("call-2", "composed",
-            """{"kind":"dir","path":"x","mode":"delete","target":true}""");
+            """{"kind":"dir","path":"x","mode":"delete","target":{}}""");
         var error = Assert.Throws<ToolArgumentValidationException>(() =>
             ToolArgumentValidator.ValidateToolArguments(tool, invalidCall));
 

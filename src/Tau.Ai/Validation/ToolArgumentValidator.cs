@@ -126,13 +126,29 @@ public static class ToolArgumentValidator
         }
         else if (node is JsonArray array && schema.TryGetProperty("items", out var itemsElement))
         {
-            for (var i = 0; i < array.Count; i++)
+            if (itemsElement.ValueKind == JsonValueKind.Array)
             {
-                var item = array[i];
-                var validated = ValidateSchema(itemsElement, item, $"{path}/{i}", errors);
-                if (!ReferenceEquals(validated, item))
+                var itemSchemas = itemsElement.EnumerateArray().ToArray();
+                for (var i = 0; i < array.Count && i < itemSchemas.Length; i++)
                 {
-                    array[i] = validated;
+                    var item = array[i];
+                    var validated = ValidateSchema(itemSchemas[i], item, $"{path}/{i}", errors);
+                    if (!ReferenceEquals(validated, item))
+                    {
+                        array[i] = validated;
+                    }
+                }
+            }
+            else
+            {
+                for (var i = 0; i < array.Count; i++)
+                {
+                    var item = array[i];
+                    var validated = ValidateSchema(itemsElement, item, $"{path}/{i}", errors);
+                    if (!ReferenceEquals(validated, item))
+                    {
+                        array[i] = validated;
+                    }
                 }
             }
         }
@@ -422,6 +438,14 @@ public static class ToolArgumentValidator
 
         foreach (var allowedType in allowedTypes)
         {
+            if (MatchesJsonType(node, allowedType))
+            {
+                return node;
+            }
+        }
+
+        foreach (var allowedType in allowedTypes)
+        {
             if (TryCoerce(node, allowedType, out var coerced))
             {
                 return coerced;
@@ -430,6 +454,25 @@ public static class ToolArgumentValidator
 
         errors.Add($"{DisplayPath(path)}: must be {string.Join(" or ", allowedTypes)}");
         return node;
+    }
+
+    private static bool MatchesJsonType(JsonNode? node, string expectedType)
+    {
+        var raw = node?.ToJsonString() ?? "null";
+        using var document = JsonDocument.Parse(raw);
+        var element = document.RootElement;
+
+        return expectedType switch
+        {
+            "object" => node is JsonObject,
+            "array" => node is JsonArray,
+            "null" => element.ValueKind == JsonValueKind.Null,
+            "string" => element.ValueKind == JsonValueKind.String,
+            "integer" => element.ValueKind == JsonValueKind.Number && element.TryGetInt64(out _),
+            "number" => element.ValueKind == JsonValueKind.Number,
+            "boolean" => element.ValueKind is JsonValueKind.True or JsonValueKind.False,
+            _ => false
+        };
     }
 
     private static IReadOnlyList<string> ReadAllowedTypes(JsonElement typeElement)
@@ -468,11 +511,40 @@ public static class ToolArgumentValidator
             case "array":
                 return node is JsonArray;
             case "null":
-                coerced = null;
-                return element.ValueKind == JsonValueKind.Null;
+                if (element.ValueKind == JsonValueKind.Null)
+                {
+                    coerced = null;
+                    return true;
+                }
+
+                if (element.ValueKind == JsonValueKind.String && string.IsNullOrEmpty(element.GetString()))
+                {
+                    coerced = null;
+                    return true;
+                }
+
+                if (element.ValueKind == JsonValueKind.Number && element.TryGetDouble(out var nullNumber) && nullNumber == 0)
+                {
+                    coerced = null;
+                    return true;
+                }
+
+                if (element.ValueKind == JsonValueKind.False)
+                {
+                    coerced = null;
+                    return true;
+                }
+
+                return false;
             case "string":
                 if (element.ValueKind == JsonValueKind.String)
                 {
+                    return true;
+                }
+
+                if (element.ValueKind == JsonValueKind.Null)
+                {
+                    coerced = JsonValue.Create(string.Empty);
                     return true;
                 }
 
@@ -490,10 +562,28 @@ public static class ToolArgumentValidator
                     return true;
                 }
 
+                if (element.ValueKind == JsonValueKind.Null)
+                {
+                    coerced = JsonValue.Create(0);
+                    return true;
+                }
+
                 if (element.ValueKind == JsonValueKind.String &&
                     long.TryParse(element.GetString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsedInteger))
                 {
                     coerced = JsonValue.Create(parsedInteger);
+                    return true;
+                }
+
+                if (element.ValueKind == JsonValueKind.True)
+                {
+                    coerced = JsonValue.Create(1);
+                    return true;
+                }
+
+                if (element.ValueKind == JsonValueKind.False)
+                {
+                    coerced = JsonValue.Create(0);
                     return true;
                 }
 
@@ -504,10 +594,28 @@ public static class ToolArgumentValidator
                     return true;
                 }
 
+                if (element.ValueKind == JsonValueKind.Null)
+                {
+                    coerced = JsonValue.Create(0);
+                    return true;
+                }
+
                 if (element.ValueKind == JsonValueKind.String &&
                     double.TryParse(element.GetString(), NumberStyles.Float, CultureInfo.InvariantCulture, out var parsedNumber))
                 {
                     coerced = JsonValue.Create(parsedNumber);
+                    return true;
+                }
+
+                if (element.ValueKind == JsonValueKind.True)
+                {
+                    coerced = JsonValue.Create(1);
+                    return true;
+                }
+
+                if (element.ValueKind == JsonValueKind.False)
+                {
+                    coerced = JsonValue.Create(0);
                     return true;
                 }
 
@@ -518,10 +626,24 @@ public static class ToolArgumentValidator
                     return true;
                 }
 
+                if (element.ValueKind == JsonValueKind.Null)
+                {
+                    coerced = JsonValue.Create(false);
+                    return true;
+                }
+
                 if (element.ValueKind == JsonValueKind.String &&
                     bool.TryParse(element.GetString(), out var parsedBoolean))
                 {
                     coerced = JsonValue.Create(parsedBoolean);
+                    return true;
+                }
+
+                if (element.ValueKind == JsonValueKind.Number &&
+                    element.TryGetDouble(out var booleanNumber) &&
+                    (booleanNumber == 1 || booleanNumber == 0))
+                {
+                    coerced = JsonValue.Create(booleanNumber == 1);
                     return true;
                 }
 
