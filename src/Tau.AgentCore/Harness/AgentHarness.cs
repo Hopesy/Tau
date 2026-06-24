@@ -909,6 +909,32 @@ public sealed class AgentHarness<TMetadata>
         return current;
     }
 
+    private async Task<StreamOptions> EmitBeforeProviderRequestHookAsync(
+        Model model,
+        string sessionId,
+        StreamOptions options,
+        CancellationToken cancellationToken)
+    {
+        var handlers = SnapshotHandlers(_beforeProviderRequestHandlers);
+        if (handlers.Length == 0)
+            return CloneBaseStreamOptions(options);
+
+        var current = CloneBaseStreamOptions(options);
+        foreach (var handler in handlers)
+        {
+            var result = await handler(
+                new AgentHarnessBeforeProviderRequestEvent(
+                    model,
+                    sessionId,
+                    ToSimpleStreamOptionsSnapshot(current)),
+                cancellationToken).ConfigureAwait(false);
+            if (result?.StreamOptions is { } patch)
+                current = ApplyBaseStreamOptionsPatch(current, patch);
+        }
+
+        return current;
+    }
+
     private async ValueTask<object?> EmitBeforeProviderPayloadHookAsync(
         Model model,
         object payload,
@@ -975,6 +1001,36 @@ public sealed class AgentHarness<TMetadata>
         };
     }
 
+    private StreamOptions AttachProviderHookCallbacks(
+        StreamOptions options,
+        CancellationToken cancellationToken)
+    {
+        var previousPayload = options.OnPayload;
+        var previousResponse = options.OnResponse;
+
+        return options with
+        {
+            OnPayload = async (payload, model) =>
+            {
+                object? current = payload;
+                if (previousPayload is not null)
+                    current = await previousPayload(payload, model).ConfigureAwait(false) ?? current;
+
+                return await EmitBeforeProviderPayloadHookAsync(
+                    model,
+                    current ?? payload,
+                    cancellationToken).ConfigureAwait(false);
+            },
+            OnResponse = async (response, model) =>
+            {
+                if (previousResponse is not null)
+                    await previousResponse(response, model).ConfigureAwait(false);
+
+                await EmitAfterProviderResponseHookAsync(response, cancellationToken).ConfigureAwait(false);
+            }
+        };
+    }
+
     private static SimpleStreamOptions CloneStreamOptions(SimpleStreamOptions? options)
     {
         var source = options ?? new SimpleStreamOptions();
@@ -989,8 +1045,74 @@ public sealed class AgentHarness<TMetadata>
         };
     }
 
+    private static StreamOptions CloneBaseStreamOptions(StreamOptions? options)
+    {
+        var source = options ?? new StreamOptions();
+        return source with
+        {
+            Headers = source.Headers is null
+                ? null
+                : new Dictionary<string, string>(source.Headers, StringComparer.OrdinalIgnoreCase),
+            Metadata = source.Metadata is null
+                ? null
+                : new Dictionary<string, object>(source.Metadata, StringComparer.Ordinal)
+        };
+    }
+
+    private static SimpleStreamOptions ToSimpleStreamOptionsSnapshot(StreamOptions options)
+    {
+        var simple = options as SimpleStreamOptions;
+        return new SimpleStreamOptions
+        {
+            Temperature = options.Temperature,
+            MaxTokens = options.MaxTokens,
+            TopP = options.TopP,
+            ApiKey = options.ApiKey,
+            Signal = options.Signal,
+            OnResponse = options.OnResponse,
+            OnPayload = options.OnPayload,
+            Transport = options.Transport,
+            CacheRetention = options.CacheRetention,
+            SessionId = options.SessionId,
+            Headers = options.Headers is null
+                ? null
+                : new Dictionary<string, string>(options.Headers, StringComparer.OrdinalIgnoreCase),
+            MaxRetryDelay = options.MaxRetryDelay,
+            Metadata = options.Metadata is null
+                ? null
+                : new Dictionary<string, object>(options.Metadata, StringComparer.Ordinal),
+            Reasoning = simple?.Reasoning,
+            ThinkingBudgets = simple?.ThinkingBudgets
+        };
+    }
+
     private static SimpleStreamOptions ApplyStreamOptionsPatch(
         SimpleStreamOptions options,
+        AgentHarnessStreamOptionsPatch patch)
+    {
+        var current = options;
+        if (patch.Temperature.HasValue)
+            current = current with { Temperature = patch.Temperature };
+        if (patch.MaxTokens.HasValue)
+            current = current with { MaxTokens = patch.MaxTokens };
+        if (patch.TopP.HasValue)
+            current = current with { TopP = patch.TopP };
+        if (patch.Transport.HasValue)
+            current = current with { Transport = patch.Transport.Value };
+        if (patch.CacheRetention.HasValue)
+            current = current with { CacheRetention = patch.CacheRetention.Value };
+        if (patch.MaxRetryDelay.HasValue)
+            current = current with { MaxRetryDelay = patch.MaxRetryDelay };
+        if (patch.Headers is not null)
+            current = current with { Headers = ApplyStringPatch(current.Headers, patch.Headers) };
+        if (patch.Metadata is not null)
+            current = current with { Metadata = ApplyObjectPatch(current.Metadata, patch.Metadata) };
+
+        return current;
+    }
+
+    private static StreamOptions ApplyBaseStreamOptionsPatch(
+        StreamOptions options,
         AgentHarnessStreamOptionsPatch patch)
     {
         var current = options;
@@ -1343,8 +1465,32 @@ public sealed class AgentHarness<TMetadata>
     {
         public string Api => inner.Api;
 
-        public AssistantMessageStream Stream(Model model, LlmContext context, StreamOptions options) =>
-            inner.Stream(model, context, options);
+        public AssistantMessageStream Stream(Model model, LlmContext context, StreamOptions options)
+        {
+            var output = new AssistantMessageStream();
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    var cancellationToken = options.Signal;
+                    var requestOptions = await harness
+                        .EmitBeforeProviderRequestHookAsync(model, sessionId, options, cancellationToken)
+                        .ConfigureAwait(false);
+                    requestOptions = harness.AttachProviderHookCallbacks(requestOptions, cancellationToken);
+                    var innerStream = inner.Stream(model, context, requestOptions);
+                    await foreach (var evt in innerStream)
+                    {
+                        output.Push(evt);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    output.Fault(ex);
+                }
+            }, CancellationToken.None);
+
+            return output;
+        }
 
         public AssistantMessageStream StreamSimple(Model model, LlmContext context, SimpleStreamOptions options)
         {

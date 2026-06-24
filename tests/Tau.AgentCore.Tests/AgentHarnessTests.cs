@@ -4,6 +4,7 @@ using Tau.AgentCore.Harness.Session;
 using Tau.AgentCore.Platform;
 using Tau.Ai;
 using Tau.Ai.Providers;
+using Tau.Ai.Providers.OpenAi;
 using Tau.Ai.Streaming;
 
 namespace Tau.AgentCore.Tests;
@@ -268,10 +269,102 @@ public sealed class AgentHarnessTests
         Assert.Equal("Tool call blocked.", ReadText(toolResultMessage.Content));
     }
 
+    [Fact]
+    public async Task PromptAsync_AppliesProviderHooksWhenProviderSpecificOptionsUseStreamPath()
+    {
+        using var scope = EnvironmentVariableScope.Acquire();
+        var tempDir = Path.Combine(Path.GetTempPath(), $"tau-agent-harness-stream-hooks-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+
+        try
+        {
+            var modelsPath = Path.Combine(tempDir, "models.json");
+            var authPath = Path.Combine(tempDir, "auth.json");
+            File.WriteAllText(authPath, "{}");
+            File.WriteAllText(modelsPath, """
+                {
+                  "providers": {
+                    "openai": {
+                      "models": [
+                        {
+                          "id": "gpt-5.4",
+                          "options": {
+                            "toolChoice": {
+                              "type": "function",
+                              "function": {
+                                "name": "read_file"
+                              }
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  }
+                }
+                """);
+            scope.Set("TAU_MODELS_FILE", modelsPath);
+            scope.Set("TAU_AUTH_FILE", authPath);
+
+            var provider = new StreamPathHookCapturingProvider();
+            var harness = CreateHarness(
+                provider,
+                model: Model with
+                {
+                    Id = "gpt-5.4",
+                    Name = "GPT-5.4",
+                    Api = "openai-chat-completions",
+                    Provider = "openai"
+                });
+            var responseCount = 0;
+
+            using var beforeProviderRequest = harness.OnBeforeProviderRequest((_, _) =>
+                Task.FromResult<AgentHarnessBeforeProviderRequestResult?>(new(
+                    new AgentHarnessStreamOptionsPatch
+                    {
+                        MaxTokens = 321,
+                        Headers = new Dictionary<string, string?> { ["x-hook"] = "stream" },
+                        Metadata = new Dictionary<string, object?> { ["hook"] = "stream-path" }
+                    })));
+            using var beforeProviderPayload = harness.OnBeforeProviderPayload((evt, _) =>
+            {
+                var payload = Assert.IsAssignableFrom<IDictionary<string, object>>(evt.Payload);
+                payload["hooked"] = true;
+                return Task.FromResult<AgentHarnessBeforeProviderPayloadResult?>(new(payload));
+            });
+            using var afterProviderResponse = harness.OnAfterProviderResponse((evt, _) =>
+            {
+                responseCount++;
+                Assert.Equal(201, evt.Status);
+                Assert.Equal("stream", evt.Headers["x-provider"]);
+                return Task.CompletedTask;
+            });
+
+            var assistant = await harness.PromptAsync("hello stream path").WaitAsync(TimeSpan.FromSeconds(5));
+
+            Assert.Equal("stream path done", ReadText(assistant.Content));
+            Assert.Equal(1, provider.StreamCallCount);
+            Assert.Equal(0, provider.StreamSimpleCallCount);
+            var options = Assert.IsType<OpenAiOptions>(provider.LastOptions);
+            Assert.Equal(321, options.MaxTokens);
+            Assert.True(options.ToolChoice?.IsFunction);
+            Assert.Equal("read_file", options.ToolChoice?.FunctionName);
+            Assert.Equal("stream", options.Headers?["x-hook"]);
+            Assert.Equal("stream-path", options.Metadata?["hook"]);
+            Assert.True(provider.LastPayload?.TryGetValue("hooked", out var hooked) == true && hooked is true);
+            Assert.Equal(1, provider.PayloadCallbackCount);
+            Assert.Equal(1, responseCount);
+        }
+        finally
+        {
+            Directory.Delete(tempDir, recursive: true);
+        }
+    }
+
     private static AgentHarness<SessionMetadata> CreateHarness(
         IStreamProvider provider,
         Func<AgentHarnessSystemPromptContext<SessionMetadata>, string>? systemPromptFactory = null,
-        IReadOnlyList<IAgentTool>? tools = null)
+        IReadOnlyList<IAgentTool>? tools = null,
+        Model? model = null)
     {
         var registry = new ProviderRegistry();
         registry.Register(provider.Api, provider);
@@ -279,7 +372,7 @@ public sealed class AgentHarnessTests
         {
             Session = new AgentHarnessSession<SessionMetadata>(new InMemorySessionStorage<SessionMetadata>()),
             ProviderRegistry = registry,
-            Model = Model,
+            Model = model ?? Model,
             Tools = tools ?? [],
             Resources = new AgentHarnessResources(
                 Skills:
@@ -386,6 +479,51 @@ public sealed class AgentHarnessTests
                 : _responses.Dequeue();
             stream.Push(new DoneEvent(message));
             return stream;
+        }
+    }
+
+    private sealed class StreamPathHookCapturingProvider : IStreamProvider
+    {
+        public string Api => "openai-chat-completions";
+        public StreamOptions? LastOptions { get; private set; }
+        public IDictionary<string, object>? LastPayload { get; private set; }
+        public int PayloadCallbackCount { get; private set; }
+        public int StreamCallCount { get; private set; }
+        public int StreamSimpleCallCount { get; private set; }
+
+        public AssistantMessageStream Stream(Model model, LlmContext context, StreamOptions options)
+        {
+            StreamCallCount++;
+            LastOptions = options;
+            var payload = new Dictionary<string, object>(StringComparer.Ordinal)
+            {
+                ["request"] = StreamCallCount
+            };
+            if (options.OnPayload is not null)
+            {
+                PayloadCallbackCount++;
+                var replacement = options.OnPayload(payload, model).GetAwaiter().GetResult();
+                LastPayload = Assert.IsAssignableFrom<IDictionary<string, object>>(replacement ?? payload);
+            }
+
+            options.OnResponse?.Invoke(
+                new ProviderResponse(
+                    201,
+                    new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                    {
+                        ["x-provider"] = "stream"
+                    }),
+                model).GetAwaiter().GetResult();
+
+            var stream = new AssistantMessageStream();
+            stream.Push(new DoneEvent(new AssistantMessage([new TextContent("stream path done")])));
+            return stream;
+        }
+
+        public AssistantMessageStream StreamSimple(Model model, LlmContext context, SimpleStreamOptions options)
+        {
+            StreamSimpleCallCount++;
+            throw new NotSupportedException("Provider-specific harness options must dispatch through Stream.");
         }
     }
 }
