@@ -64,13 +64,6 @@ public sealed class ProviderAuthResolver
             return new ProviderAuthStatus(provider, true, "explicit", false, false, "API key provided explicitly for this request.");
         }
 
-        var envApiKey = EnvironmentApiKeyResolver.GetApiKey(provider, env);
-        if (!string.IsNullOrWhiteSpace(envApiKey))
-        {
-            var source = EnvironmentApiKeyResolver.IsAuthenticatedMarker(envApiKey) ? "environment/ambient" : "environment";
-            return new ProviderAuthStatus(provider, true, source, false, false, "Credentials are available from environment or ambient provider credentials.");
-        }
-
         var authEntries = _credentialStore.LoadEntries();
         if (authEntries.TryGetValue(provider, out var entry))
         {
@@ -94,6 +87,13 @@ public sealed class ProviderAuthResolver
 
                 return new ProviderAuthStatus(provider, true, "auth.json oauth", true, true, "OAuth credentials found in auth.json.");
             }
+        }
+
+        var envApiKey = EnvironmentApiKeyResolver.GetApiKey(provider, env);
+        if (!string.IsNullOrWhiteSpace(envApiKey))
+        {
+            var source = EnvironmentApiKeyResolver.IsAuthenticatedMarker(envApiKey) ? "environment/ambient" : "environment";
+            return new ProviderAuthStatus(provider, true, source, false, false, "Credentials are available from environment or ambient provider credentials.");
         }
 
         var requestConfig = model is null
@@ -124,49 +124,49 @@ public sealed class ProviderAuthResolver
             return explicitApiKey;
         }
 
+        var authEntries = _credentialStore.LoadEntries();
+        if (authEntries.TryGetValue(provider, out var entry))
+        {
+            if (!string.IsNullOrWhiteSpace(entry.ApiKey))
+            {
+                return entry.ApiKey;
+            }
+
+            var oauthCredentials = entry.OAuth;
+            if (oauthCredentials is null)
+            {
+                return null;
+            }
+
+            var oauthProvider = _oauthProviders.TryGet(provider);
+            if (oauthProvider is null)
+            {
+                return null;
+            }
+
+            if (oauthCredentials.IsExpired())
+            {
+                try
+                {
+                    oauthCredentials = oauthProvider.RefreshTokenAsync(oauthCredentials).GetAwaiter().GetResult();
+                    _credentialStore.Save(provider, oauthCredentials);
+                }
+                catch
+                {
+                    return null;
+                }
+            }
+
+            return oauthProvider.GetApiKey(oauthCredentials);
+        }
+
         var envApiKey = EnvironmentApiKeyResolver.GetApiKey(provider, env);
         if (!string.IsNullOrWhiteSpace(envApiKey))
         {
             return envApiKey;
         }
 
-        var authEntries = _credentialStore.LoadEntries();
-        if (!authEntries.TryGetValue(provider, out var entry))
-        {
-            return null;
-        }
-
-        if (!string.IsNullOrWhiteSpace(entry.ApiKey))
-        {
-            return entry.ApiKey;
-        }
-
-        var oauthCredentials = entry.OAuth;
-        if (oauthCredentials is null)
-        {
-            return null;
-        }
-
-        var oauthProvider = _oauthProviders.TryGet(provider);
-        if (oauthProvider is null)
-        {
-            return null;
-        }
-
-        if (oauthCredentials.IsExpired())
-        {
-            try
-            {
-                oauthCredentials = oauthProvider.RefreshTokenAsync(oauthCredentials).GetAwaiter().GetResult();
-                _credentialStore.Save(provider, oauthCredentials);
-            }
-            catch
-            {
-                return null;
-            }
-        }
-
-        return oauthProvider.GetApiKey(oauthCredentials);
+        return null;
     }
 
     public Model ResolveModel(Model model)

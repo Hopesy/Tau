@@ -388,6 +388,77 @@ public sealed class ProviderAuthResolverTests
     }
 
     [Fact]
+    public void ResolveApiKey_PrefersAuthFileApiKeyEntryOverEnvironment()
+    {
+        using var scope = EnvironmentVariableScope.Acquire();
+        var tempDir = Path.Combine(Path.GetTempPath(), $"tau-auth-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+
+        try
+        {
+            var authPath = Path.Combine(tempDir, "auth.json");
+            File.WriteAllText(authPath, """
+                {
+                  "openrouter": {
+                    "type": "api_key",
+                    "key": "auth-file-key"
+                  }
+                }
+                """);
+            scope.Set("OPENROUTER_API_KEY", "env-key");
+
+            var resolver = new ProviderAuthResolver(
+                credentialStore: new OAuthCredentialStore([authPath]));
+
+            var result = resolver.ResolveApiKey("openrouter");
+
+            Assert.Equal("auth-file-key", result);
+        }
+        finally
+        {
+            Directory.Delete(tempDir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void GetStatus_PrefersAuthFileApiKeyEntryOverEnvironmentWithoutLeakingSecret()
+    {
+        using var scope = EnvironmentVariableScope.Acquire();
+        var tempDir = Path.Combine(Path.GetTempPath(), $"tau-auth-status-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+
+        try
+        {
+            var authPath = Path.Combine(tempDir, "auth.json");
+            File.WriteAllText(authPath, """
+                {
+                  "openrouter": {
+                    "type": "api_key",
+                    "key": "auth-file-secret"
+                  }
+                }
+                """);
+            scope.Set("OPENROUTER_API_KEY", "env-secret");
+
+            var resolver = new ProviderAuthResolver(
+                credentialStore: new OAuthCredentialStore([authPath]));
+
+            var status = resolver.GetStatus("openrouter");
+
+            Assert.True(status.IsConfigured);
+            Assert.Equal("auth.json api_key", status.Source);
+            Assert.False(status.UsesOAuth);
+            Assert.False(status.CanLogin);
+            Assert.DoesNotContain("auth-file-secret", status.Message, StringComparison.Ordinal);
+            Assert.DoesNotContain("env-secret", status.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(tempDir, recursive: true);
+        }
+    }
+
+    [Fact]
     public void ResolveApiKey_RefreshesExpiredOAuthCredentials()
     {
         var tempDir = Path.Combine(Path.GetTempPath(), $"tau-auth-{Guid.NewGuid():N}");
@@ -415,6 +486,42 @@ public sealed class ProviderAuthResolverTests
             var result = resolver.ResolveApiKey("custom-oauth");
 
             Assert.Equal("refreshed-access", result);
+        }
+        finally
+        {
+            Directory.Delete(tempDir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void ResolveApiKey_DoesNotFallbackToEnvironmentWhenStoredOAuthRefreshFails()
+    {
+        using var scope = EnvironmentVariableScope.Acquire();
+        var tempDir = Path.Combine(Path.GetTempPath(), $"tau-auth-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+
+        try
+        {
+            var authPath = Path.Combine(tempDir, "auth.json");
+            File.WriteAllText(authPath, """
+                {
+                  "anthropic": {
+                    "type": "oauth",
+                    "refresh": "refresh-token",
+                    "access": "expired-access",
+                    "expiresAt": "2000-01-01T00:00:00Z"
+                  }
+                }
+                """);
+            scope.Set("ANTHROPIC_API_KEY", "env-key");
+
+            var resolver = new ProviderAuthResolver(
+                new OAuthProviderRegistry([new FailingOAuthProvider()]),
+                new OAuthCredentialStore([authPath]));
+
+            var result = resolver.ResolveApiKey("anthropic");
+
+            Assert.Null(result);
         }
         finally
         {
@@ -561,6 +668,20 @@ public sealed class ProviderAuthResolverTests
 
         public Model ModifyModel(Model model, OAuthCredentials credentials) =>
             model with { BaseUrl = "https://mutated.example.com" };
+    }
+
+    private sealed class FailingOAuthProvider : IOAuthProvider
+    {
+        public string Id => "anthropic";
+        public string Name => "Failing OAuth";
+
+        public Task<OAuthCredentials> LoginAsync(IOAuthLoginCallbacks callbacks, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+
+        public Task<OAuthCredentials> RefreshTokenAsync(OAuthCredentials credentials, CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("refresh failed");
+
+        public string GetApiKey(OAuthCredentials credentials) => credentials.Access;
     }
 
     private sealed class CapturingLogSink : ITauLogSink
