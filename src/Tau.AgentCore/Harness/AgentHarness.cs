@@ -1,7 +1,9 @@
+using System.Text.Json;
 using Tau.AgentCore.Harness.Session;
 using Tau.AgentCore.Runtime;
 using Tau.Ai;
 using Tau.Ai.Providers;
+using Tau.Ai.Streaming;
 
 namespace Tau.AgentCore.Harness;
 
@@ -35,6 +37,7 @@ public sealed record AgentHarnessOptions<TMetadata>
     public required ProviderRegistry ProviderRegistry { get; init; }
     public required Model Model { get; init; }
     public IReadOnlyList<IAgentTool> Tools { get; init; } = [];
+    public IReadOnlyList<IToolInterceptor> Interceptors { get; init; } = [];
     public IReadOnlyList<string>? ActiveToolNames { get; init; }
     public AgentHarnessResources Resources { get; init; } = new();
     public string? SystemPrompt { get; init; }
@@ -53,6 +56,94 @@ public sealed record AgentHarnessSystemPromptContext<TMetadata>(
     IReadOnlyList<IAgentTool> ActiveTools,
     AgentHarnessResources Resources)
     where TMetadata : SessionMetadata;
+
+public sealed record AgentHarnessBeforeAgentStartEvent(
+    string Prompt,
+    IReadOnlyList<ImageContent> Images,
+    string SystemPrompt,
+    AgentHarnessResources Resources)
+{
+    public string Type => "before_agent_start";
+}
+
+public sealed record AgentHarnessBeforeAgentStartResult(
+    IReadOnlyList<ChatMessage>? Messages = null,
+    string? SystemPrompt = null);
+
+public sealed record AgentHarnessContextEvent(IReadOnlyList<ChatMessage> Messages)
+{
+    public string Type => "context";
+}
+
+public sealed record AgentHarnessContextResult(IReadOnlyList<ChatMessage> Messages);
+
+public sealed record AgentHarnessStreamOptionsPatch
+{
+    public float? Temperature { get; init; }
+    public int? MaxTokens { get; init; }
+    public float? TopP { get; init; }
+    public StreamTransport? Transport { get; init; }
+    public CacheRetention? CacheRetention { get; init; }
+    public TimeSpan? MaxRetryDelay { get; init; }
+    public IReadOnlyDictionary<string, string?>? Headers { get; init; }
+    public IReadOnlyDictionary<string, object?>? Metadata { get; init; }
+}
+
+public sealed record AgentHarnessBeforeProviderRequestEvent(
+    Model Model,
+    string SessionId,
+    SimpleStreamOptions StreamOptions)
+{
+    public string Type => "before_provider_request";
+}
+
+public sealed record AgentHarnessBeforeProviderRequestResult(
+    AgentHarnessStreamOptionsPatch? StreamOptions = null);
+
+public sealed record AgentHarnessBeforeProviderPayloadEvent(
+    Model Model,
+    object Payload)
+{
+    public string Type => "before_provider_payload";
+}
+
+public sealed record AgentHarnessBeforeProviderPayloadResult(object? Payload);
+
+public sealed record AgentHarnessAfterProviderResponseEvent(
+    int Status,
+    IReadOnlyDictionary<string, string> Headers)
+{
+    public string Type => "after_provider_response";
+}
+
+public sealed record AgentHarnessToolCallEvent(
+    string ToolCallId,
+    string ToolName,
+    JsonElement Input)
+{
+    public string Type => "tool_call";
+}
+
+public sealed record AgentHarnessToolCallResult(
+    bool Blocked = false,
+    string? Reason = null,
+    JsonElement? Arguments = null);
+
+public sealed record AgentHarnessToolResultEvent(
+    string ToolCallId,
+    string ToolName,
+    JsonElement Input,
+    IReadOnlyList<ContentBlock> Content,
+    object? Details,
+    bool IsError)
+{
+    public string Type => "tool_result";
+}
+
+public sealed record AgentHarnessToolResultPatch(
+    IReadOnlyList<ContentBlock>? Content = null,
+    object? Details = null,
+    bool? IsError = null);
 
 public sealed record AgentHarnessQueueUpdateEvent(
     IReadOnlyList<ChatMessage> Steer,
@@ -131,6 +222,13 @@ public sealed class AgentHarness<TMetadata>
 
     private readonly object _sync = new();
     private readonly List<Func<object, CancellationToken, Task>> _listeners = [];
+    private readonly List<Func<AgentHarnessBeforeAgentStartEvent, CancellationToken, Task<AgentHarnessBeforeAgentStartResult?>>> _beforeAgentStartHandlers = [];
+    private readonly List<Func<AgentHarnessContextEvent, CancellationToken, Task<AgentHarnessContextResult?>>> _contextHandlers = [];
+    private readonly List<Func<AgentHarnessBeforeProviderRequestEvent, CancellationToken, Task<AgentHarnessBeforeProviderRequestResult?>>> _beforeProviderRequestHandlers = [];
+    private readonly List<Func<AgentHarnessBeforeProviderPayloadEvent, CancellationToken, Task<AgentHarnessBeforeProviderPayloadResult?>>> _beforeProviderPayloadHandlers = [];
+    private readonly List<Func<AgentHarnessAfterProviderResponseEvent, CancellationToken, Task>> _afterProviderResponseHandlers = [];
+    private readonly List<Func<AgentHarnessToolCallEvent, CancellationToken, Task<AgentHarnessToolCallResult?>>> _toolCallHandlers = [];
+    private readonly List<Func<AgentHarnessToolResultEvent, CancellationToken, Task<AgentHarnessToolResultPatch?>>> _toolResultHandlers = [];
     private readonly List<ChatMessage> _steerQueue = [];
     private readonly List<ChatMessage> _followUpQueue = [];
     private readonly List<ChatMessage> _nextTurnQueue = [];
@@ -139,6 +237,7 @@ public sealed class AgentHarness<TMetadata>
     private Model _model;
     private ThinkingLevel? _thinkingLevel;
     private IReadOnlyList<IAgentTool> _tools;
+    private IReadOnlyList<IToolInterceptor> _interceptors;
     private IReadOnlyList<string> _activeToolNames;
     private AgentHarnessResources _resources;
     private string? _systemPrompt;
@@ -156,6 +255,7 @@ public sealed class AgentHarness<TMetadata>
         ProviderRegistry = options.ProviderRegistry ?? throw new ArgumentNullException(nameof(options.ProviderRegistry));
         _model = options.Model ?? throw new ArgumentNullException(nameof(options.Model));
         _tools = options.Tools.ToArray();
+        _interceptors = options.Interceptors.ToArray();
         ValidateUniqueNames(_tools.Select(static tool => tool.Name), "Duplicate tool name(s)");
         _activeToolNames = options.ActiveToolNames?.ToArray() ?? _tools.Select(static tool => tool.Name).ToArray();
         ValidateToolNames(_activeToolNames, _tools);
@@ -177,6 +277,7 @@ public sealed class AgentHarness<TMetadata>
     public ThinkingLevel? GetThinkingLevel() => _thinkingLevel;
     public IReadOnlyList<IAgentTool> GetTools() => _tools.ToArray();
     public IReadOnlyList<IAgentTool> GetActiveTools() => ResolveActiveTools(_activeToolNames, _tools);
+    public IReadOnlyList<IToolInterceptor> GetInterceptors() => _interceptors.ToArray();
     public AgentHarnessResources GetResources() => CloneResources(_resources);
     public SimpleStreamOptions? GetStreamOptions() => _streamOptions;
 
@@ -206,6 +307,34 @@ public sealed class AgentHarness<TMetadata>
             }
         });
     }
+
+    public IDisposable OnBeforeAgentStart(
+        Func<AgentHarnessBeforeAgentStartEvent, CancellationToken, Task<AgentHarnessBeforeAgentStartResult?>> handler) =>
+        AddHandler(_beforeAgentStartHandlers, handler);
+
+    public IDisposable OnContext(
+        Func<AgentHarnessContextEvent, CancellationToken, Task<AgentHarnessContextResult?>> handler) =>
+        AddHandler(_contextHandlers, handler);
+
+    public IDisposable OnBeforeProviderRequest(
+        Func<AgentHarnessBeforeProviderRequestEvent, CancellationToken, Task<AgentHarnessBeforeProviderRequestResult?>> handler) =>
+        AddHandler(_beforeProviderRequestHandlers, handler);
+
+    public IDisposable OnBeforeProviderPayload(
+        Func<AgentHarnessBeforeProviderPayloadEvent, CancellationToken, Task<AgentHarnessBeforeProviderPayloadResult?>> handler) =>
+        AddHandler(_beforeProviderPayloadHandlers, handler);
+
+    public IDisposable OnAfterProviderResponse(
+        Func<AgentHarnessAfterProviderResponseEvent, CancellationToken, Task> handler) =>
+        AddHandler(_afterProviderResponseHandlers, handler);
+
+    public IDisposable OnToolCall(
+        Func<AgentHarnessToolCallEvent, CancellationToken, Task<AgentHarnessToolCallResult?>> handler) =>
+        AddHandler(_toolCallHandlers, handler);
+
+    public IDisposable OnToolResult(
+        Func<AgentHarnessToolResultEvent, CancellationToken, Task<AgentHarnessToolResultPatch?>> handler) =>
+        AddHandler(_toolResultHandlers, handler);
 
     public Task<AssistantMessage> PromptAsync(
         string text,
@@ -569,16 +698,24 @@ public sealed class AgentHarness<TMetadata>
         var context = await Session.BuildContextAsync(cancellationToken).ConfigureAwait(false);
         var activeToolNames = context.ActiveToolNames ?? _activeToolNames;
         var activeTools = ResolveActiveTools(activeToolNames, _tools);
+        var sessionMetadata = await Session.GetMetadataAsync(cancellationToken).ConfigureAwait(false);
         var systemPrompt = await ResolveSystemPromptAsync(activeTools, cancellationToken).ConfigureAwait(false);
+        var beforeAgentStart = await EmitBeforeAgentStartHookAsync(
+            promptMessages,
+            systemPrompt,
+            cancellationToken).ConfigureAwait(false);
         var streamOptions = BuildStreamOptions(context);
+        var providerRegistry = CreateHookedProviderRegistry(sessionMetadata.Id);
         var agent = new Agent(new AgentOptions
         {
             Model = _model,
-            ProviderRegistry = ProviderRegistry,
-            SystemPrompt = systemPrompt,
+            ProviderRegistry = providerRegistry,
+            SystemPrompt = beforeAgentStart.SystemPrompt,
             Messages = context.Messages,
             Tools = activeTools,
+            Interceptors = [new AgentHarnessToolHookInterceptor(this), .. _interceptors],
             StreamOptions = streamOptions,
+            TransformContextAsync = EmitContextHookAsync,
             ConvertToLlm = AgentHarnessMessages.ConvertToLlm,
             SteeringMode = _steeringMode,
             FollowUpMode = _followUpMode,
@@ -593,7 +730,7 @@ public sealed class AgentHarness<TMetadata>
         });
 
         _activeAgent = agent;
-        var runTask = agent.PromptAsync(promptMessages, cancellationToken);
+        var runTask = agent.PromptAsync(beforeAgentStart.Messages, cancellationToken);
         lock (_sync)
         {
             _runTask = runTask;
@@ -633,6 +770,65 @@ public sealed class AgentHarness<TMetadata>
             await Session.AppendMessageAsync(messages[i], cancellationToken).ConfigureAwait(false);
     }
 
+    private async Task<(IReadOnlyList<ChatMessage> Messages, string SystemPrompt)> EmitBeforeAgentStartHookAsync(
+        IReadOnlyList<ChatMessage> promptMessages,
+        string systemPrompt,
+        CancellationToken cancellationToken)
+    {
+        var handlers = SnapshotHandlers(_beforeAgentStartHandlers);
+        if (handlers.Length == 0)
+            return (promptMessages, systemPrompt);
+
+        var effectiveMessages = promptMessages.ToArray();
+        var eventPrompt = effectiveMessages.LastOrDefault() is UserMessage user
+            ? ReadText(user.Content)
+            : string.Empty;
+        var images = effectiveMessages
+            .OfType<UserMessage>()
+            .SelectMany(static message => message.Content.OfType<ImageContent>())
+            .ToArray();
+        var effectiveSystemPrompt = systemPrompt;
+
+        foreach (var handler in handlers)
+        {
+            var result = await handler(
+                new AgentHarnessBeforeAgentStartEvent(
+                    eventPrompt,
+                    images,
+                    effectiveSystemPrompt,
+                    GetResources()),
+                cancellationToken).ConfigureAwait(false);
+            if (result is null)
+                continue;
+
+            if (result.Messages is { Count: > 0 })
+                effectiveMessages = effectiveMessages.Concat(result.Messages).ToArray();
+            if (!string.IsNullOrWhiteSpace(result.SystemPrompt))
+                effectiveSystemPrompt = result.SystemPrompt;
+        }
+
+        return (effectiveMessages, effectiveSystemPrompt);
+    }
+
+    private async Task<IReadOnlyList<ChatMessage>> EmitContextHookAsync(
+        IReadOnlyList<ChatMessage> messages,
+        CancellationToken cancellationToken)
+    {
+        var handlers = SnapshotHandlers(_contextHandlers);
+        if (handlers.Length == 0)
+            return messages;
+
+        var current = messages.ToArray();
+        foreach (var handler in handlers)
+        {
+            var result = await handler(new AgentHarnessContextEvent(current), cancellationToken).ConfigureAwait(false);
+            if (result?.Messages is { } patched)
+                current = patched.ToArray();
+        }
+
+        return current;
+    }
+
     private async Task<string> ResolveSystemPromptAsync(
         IReadOnlyList<IAgentTool> activeTools,
         CancellationToken cancellationToken)
@@ -667,6 +863,193 @@ public sealed class AgentHarness<TMetadata>
         }
 
         return options;
+    }
+
+    private ProviderRegistry CreateHookedProviderRegistry(string sessionId)
+    {
+        var registry = new ProviderRegistry();
+        var registered = ProviderRegistry.RegisteredApis.ToArray();
+        foreach (var api in registered)
+        {
+            registry.Register(
+                api,
+                new AgentHarnessHookProvider(ProviderRegistry.Get(api), this, sessionId));
+        }
+
+        if (!registered.Contains(_model.Api, StringComparer.OrdinalIgnoreCase))
+        {
+            registry.Register(
+                _model.Api,
+                new AgentHarnessHookProvider(ProviderRegistry.Get(_model.Api), this, sessionId));
+        }
+
+        return registry;
+    }
+
+    private async Task<SimpleStreamOptions> EmitBeforeProviderRequestHookAsync(
+        Model model,
+        string sessionId,
+        SimpleStreamOptions options,
+        CancellationToken cancellationToken)
+    {
+        var handlers = SnapshotHandlers(_beforeProviderRequestHandlers);
+        if (handlers.Length == 0)
+            return CloneStreamOptions(options);
+
+        var current = CloneStreamOptions(options);
+        foreach (var handler in handlers)
+        {
+            var result = await handler(
+                new AgentHarnessBeforeProviderRequestEvent(model, sessionId, CloneStreamOptions(current)),
+                cancellationToken).ConfigureAwait(false);
+            if (result?.StreamOptions is { } patch)
+                current = ApplyStreamOptionsPatch(current, patch);
+        }
+
+        return current;
+    }
+
+    private async ValueTask<object?> EmitBeforeProviderPayloadHookAsync(
+        Model model,
+        object payload,
+        CancellationToken cancellationToken)
+    {
+        var handlers = SnapshotHandlers(_beforeProviderPayloadHandlers);
+        if (handlers.Length == 0)
+            return payload;
+
+        object? current = payload;
+        foreach (var handler in handlers)
+        {
+            var eventPayload = current ?? new Dictionary<string, object>(StringComparer.Ordinal);
+            var result = await handler(
+                new AgentHarnessBeforeProviderPayloadEvent(model, eventPayload),
+                cancellationToken).ConfigureAwait(false);
+            if (result is not null)
+                current = result.Payload;
+        }
+
+        return current;
+    }
+
+    private async ValueTask EmitAfterProviderResponseHookAsync(
+        ProviderResponse response,
+        CancellationToken cancellationToken)
+    {
+        var handlers = SnapshotHandlers(_afterProviderResponseHandlers);
+        foreach (var handler in handlers)
+        {
+            await handler(
+                new AgentHarnessAfterProviderResponseEvent(response.Status, response.Headers),
+                cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private SimpleStreamOptions AttachProviderHookCallbacks(
+        SimpleStreamOptions options,
+        CancellationToken cancellationToken)
+    {
+        var previousPayload = options.OnPayload;
+        var previousResponse = options.OnResponse;
+
+        return options with
+        {
+            OnPayload = async (payload, model) =>
+            {
+                object? current = payload;
+                if (previousPayload is not null)
+                    current = await previousPayload(payload, model).ConfigureAwait(false) ?? current;
+
+                return await EmitBeforeProviderPayloadHookAsync(
+                    model,
+                    current ?? payload,
+                    cancellationToken).ConfigureAwait(false);
+            },
+            OnResponse = async (response, model) =>
+            {
+                if (previousResponse is not null)
+                    await previousResponse(response, model).ConfigureAwait(false);
+
+                await EmitAfterProviderResponseHookAsync(response, cancellationToken).ConfigureAwait(false);
+            }
+        };
+    }
+
+    private static SimpleStreamOptions CloneStreamOptions(SimpleStreamOptions? options)
+    {
+        var source = options ?? new SimpleStreamOptions();
+        return source with
+        {
+            Headers = source.Headers is null
+                ? null
+                : new Dictionary<string, string>(source.Headers, StringComparer.OrdinalIgnoreCase),
+            Metadata = source.Metadata is null
+                ? null
+                : new Dictionary<string, object>(source.Metadata, StringComparer.Ordinal)
+        };
+    }
+
+    private static SimpleStreamOptions ApplyStreamOptionsPatch(
+        SimpleStreamOptions options,
+        AgentHarnessStreamOptionsPatch patch)
+    {
+        var current = options;
+        if (patch.Temperature.HasValue)
+            current = current with { Temperature = patch.Temperature };
+        if (patch.MaxTokens.HasValue)
+            current = current with { MaxTokens = patch.MaxTokens };
+        if (patch.TopP.HasValue)
+            current = current with { TopP = patch.TopP };
+        if (patch.Transport.HasValue)
+            current = current with { Transport = patch.Transport.Value };
+        if (patch.CacheRetention.HasValue)
+            current = current with { CacheRetention = patch.CacheRetention.Value };
+        if (patch.MaxRetryDelay.HasValue)
+            current = current with { MaxRetryDelay = patch.MaxRetryDelay };
+        if (patch.Headers is not null)
+            current = current with { Headers = ApplyStringPatch(current.Headers, patch.Headers) };
+        if (patch.Metadata is not null)
+            current = current with { Metadata = ApplyObjectPatch(current.Metadata, patch.Metadata) };
+
+        return current;
+    }
+
+    private static IDictionary<string, string>? ApplyStringPatch(
+        IDictionary<string, string>? source,
+        IReadOnlyDictionary<string, string?> patch)
+    {
+        var result = source is null
+            ? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            : new Dictionary<string, string>(source, StringComparer.OrdinalIgnoreCase);
+
+        foreach (var item in patch)
+        {
+            if (item.Value is null)
+                result.Remove(item.Key);
+            else
+                result[item.Key] = item.Value;
+        }
+
+        return result.Count == 0 ? null : result;
+    }
+
+    private static IDictionary<string, object>? ApplyObjectPatch(
+        IDictionary<string, object>? source,
+        IReadOnlyDictionary<string, object?> patch)
+    {
+        var result = source is null
+            ? new Dictionary<string, object>(StringComparer.Ordinal)
+            : new Dictionary<string, object>(source, StringComparer.Ordinal);
+
+        foreach (var item in patch)
+        {
+            if (item.Value is null)
+                result.Remove(item.Key);
+            else
+                result[item.Key] = item.Value;
+        }
+
+        return result.Count == 0 ? null : result;
     }
 
     private AgentSummaryGenerationOptions CreateSummaryOptions(
@@ -843,6 +1226,152 @@ public sealed class AgentHarness<TMetadata>
             return new AgentHarnessException(fallbackCode, summaryError.Message, summaryError);
 
         return new AgentHarnessException(fallbackCode, error.Message, error);
+    }
+
+    private IDisposable AddHandler<THandler>(List<THandler> handlers, THandler handler)
+        where THandler : Delegate
+    {
+        ArgumentNullException.ThrowIfNull(handler);
+        lock (_sync)
+        {
+            handlers.Add(handler);
+        }
+
+        return new Subscription(() =>
+        {
+            lock (_sync)
+            {
+                handlers.Remove(handler);
+            }
+        });
+    }
+
+    private THandler[] SnapshotHandlers<THandler>(List<THandler> handlers)
+    {
+        lock (_sync)
+        {
+            return handlers.ToArray();
+        }
+    }
+
+    private async Task<ToolCallDecision> EmitToolCallHookAsync(
+        ToolCallContext context,
+        CancellationToken cancellationToken)
+    {
+        var handlers = SnapshotHandlers(_toolCallHandlers);
+        if (handlers.Length == 0)
+            return ToolCallDecision.Allow;
+
+        var currentContext = context;
+        JsonElement? currentArguments = null;
+        foreach (var handler in handlers)
+        {
+            var result = await handler(
+                new AgentHarnessToolCallEvent(
+                    currentContext.ToolCallId,
+                    currentContext.ToolName,
+                    currentContext.Arguments.Clone()),
+                cancellationToken).ConfigureAwait(false);
+            if (result is null)
+                continue;
+
+            if (result.Blocked)
+                return ToolCallDecision.Block(result.Reason ?? string.Empty);
+            if (result.Arguments.HasValue)
+            {
+                currentArguments = result.Arguments.Value.Clone();
+                currentContext = currentContext with { Arguments = currentArguments.Value };
+            }
+        }
+
+        return currentArguments.HasValue
+            ? ToolCallDecision.AllowWithArguments(currentArguments.Value)
+            : ToolCallDecision.Allow;
+    }
+
+    private async Task<ToolResult> EmitToolResultHookAsync(
+        ToolCallContext context,
+        ToolResult result,
+        CancellationToken cancellationToken)
+    {
+        var handlers = SnapshotHandlers(_toolResultHandlers);
+        if (handlers.Length == 0)
+            return result;
+
+        var current = result;
+        foreach (var handler in handlers)
+        {
+            var patch = await handler(
+                new AgentHarnessToolResultEvent(
+                    context.ToolCallId,
+                    context.ToolName,
+                    context.Arguments.Clone(),
+                    current.Content,
+                    current.Details,
+                    current.IsError),
+                cancellationToken).ConfigureAwait(false);
+            if (patch is null)
+                continue;
+
+            current = current with
+            {
+                Content = patch.Content ?? current.Content,
+                Details = patch.Details ?? current.Details,
+                IsError = patch.IsError ?? current.IsError
+            };
+        }
+
+        return current;
+    }
+
+    private sealed class AgentHarnessToolHookInterceptor(AgentHarness<TMetadata> harness) : IToolInterceptor
+    {
+        public Task<ToolCallDecision> BeforeToolCallAsync(ToolCallContext context, CancellationToken ct = default) =>
+            harness.EmitToolCallHookAsync(context, ct);
+
+        public Task<ToolResult> AfterToolCallAsync(
+            ToolCallContext context,
+            ToolResult result,
+            CancellationToken ct = default) =>
+            harness.EmitToolResultHookAsync(context, result, ct);
+    }
+
+    private sealed class AgentHarnessHookProvider(
+        IStreamProvider inner,
+        AgentHarness<TMetadata> harness,
+        string sessionId) : IStreamProvider
+    {
+        public string Api => inner.Api;
+
+        public AssistantMessageStream Stream(Model model, LlmContext context, StreamOptions options) =>
+            inner.Stream(model, context, options);
+
+        public AssistantMessageStream StreamSimple(Model model, LlmContext context, SimpleStreamOptions options)
+        {
+            var output = new AssistantMessageStream();
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    var cancellationToken = options.Signal;
+                    var requestOptions = await harness
+                        .EmitBeforeProviderRequestHookAsync(model, sessionId, options, cancellationToken)
+                        .ConfigureAwait(false);
+                    requestOptions = harness.AttachProviderHookCallbacks(requestOptions, cancellationToken);
+                    var innerStream = inner.StreamSimple(model, context, requestOptions);
+                    await foreach (var evt in innerStream)
+                    {
+                        output.Push(evt);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    output.Fault(ex);
+                }
+            }, CancellationToken.None);
+
+            return output;
+        }
     }
 
     private sealed class Subscription(Action unsubscribe) : IDisposable

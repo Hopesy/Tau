@@ -142,8 +142,134 @@ public sealed class AgentHarnessTests
         Assert.Equal(["echo"], context.ActiveToolNames);
     }
 
+    [Fact]
+    public async Task PromptAsync_AppliesHarnessHookResultsAcrossContextProviderAndTools()
+    {
+        var provider = new HookCapturingProvider(
+            new AssistantMessage([new ToolCallContent("call-1", "count", """{"count":"1"}""")])
+            {
+                StopReason = StopReason.ToolUse
+            },
+            new AssistantMessage([new TextContent("done")]));
+        var tool = new DelegateAgentTool(
+            "count",
+            "Count",
+            "Returns the count.",
+            Json("""
+            {
+                "type": "object",
+                "properties": {
+                    "count": { "type": "string" }
+                },
+                "required": ["count"]
+            }
+            """),
+            (context, _) => Task.FromResult(new ToolResult([
+                new TextContent("tool saw " + context.Arguments.GetProperty("count").GetString())
+            ])));
+        var harness = CreateHarness(provider, tools: [tool]);
+        var afterProviderResponseCount = 0;
+
+        using var beforeAgentStart = harness.OnBeforeAgentStart((evt, _) =>
+            Task.FromResult<AgentHarnessBeforeAgentStartResult?>(new(
+                Messages: [new UserMessage("hook-added prompt")],
+                SystemPrompt: evt.SystemPrompt + " + before")));
+        using var contextHook = harness.OnContext((evt, _) =>
+            Task.FromResult<AgentHarnessContextResult?>(new(
+                [.. evt.Messages, new UserMessage("context-only prompt")])));
+        using var beforeProviderRequest = harness.OnBeforeProviderRequest((_, _) =>
+            Task.FromResult<AgentHarnessBeforeProviderRequestResult?>(new(
+                new AgentHarnessStreamOptionsPatch
+                {
+                    MaxTokens = 123,
+                    Headers = new Dictionary<string, string?> { ["x-hook"] = "enabled" },
+                    Metadata = new Dictionary<string, object?> { ["hook"] = "metadata" }
+                })));
+        using var beforeProviderPayload = harness.OnBeforeProviderPayload((evt, _) =>
+        {
+            var payload = Assert.IsAssignableFrom<IDictionary<string, object>>(evt.Payload);
+            payload["hooked"] = true;
+            return Task.FromResult<AgentHarnessBeforeProviderPayloadResult?>(new(payload));
+        });
+        using var afterProviderResponse = harness.OnAfterProviderResponse((evt, _) =>
+        {
+            afterProviderResponseCount++;
+            Assert.Equal(200, evt.Status);
+            Assert.Equal("ok", evt.Headers["x-provider"]);
+            return Task.CompletedTask;
+        });
+        using var toolCall = harness.OnToolCall((evt, _) =>
+        {
+            Assert.Equal("count", evt.ToolName);
+            Assert.Equal("1", evt.Input.GetProperty("count").GetString());
+            return Task.FromResult<AgentHarnessToolCallResult?>(new(
+                Arguments: Json("""{"count":"2"}""")));
+        });
+        using var toolResult = harness.OnToolResult((evt, _) =>
+        {
+            Assert.Equal("tool saw 2", ReadText(evt.Content));
+            return Task.FromResult<AgentHarnessToolResultPatch?>(new(
+                Content: [new TextContent("hooked tool result")],
+                IsError: false));
+        });
+
+        var assistant = await harness.PromptAsync("hello hooks").WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal("done", ReadText(assistant.Content));
+        Assert.NotNull(provider.LastContext);
+        Assert.Equal("system + before", provider.LastContext.Value.SystemPrompt);
+        Assert.Equal(
+            ["hello hooks", "hook-added prompt", "context-only prompt"],
+            provider.LastContext.Value.Messages
+                .OfType<UserMessage>()
+                .Select(static message => ReadText(message.Content))
+                .ToArray());
+        Assert.Equal(123, provider.LastOptions?.MaxTokens);
+        Assert.Equal("enabled", provider.LastOptions?.Headers?["x-hook"]);
+        Assert.Equal("metadata", provider.LastOptions?.Metadata?["hook"]);
+        Assert.True(provider.LastPayload?.TryGetValue("hooked", out var hooked) == true && hooked is true);
+        Assert.Equal(2, provider.PayloadCallbackCount);
+        Assert.Equal(2, afterProviderResponseCount);
+
+        var toolResultMessage = Assert.Single((await harness.Session.BuildContextAsync()).Messages.OfType<ToolResultMessage>());
+        Assert.Equal("hooked tool result", ReadText(toolResultMessage.Content));
+    }
+
+    [Fact]
+    public async Task PromptAsync_WhenToolCallHookBlocksWithoutReasonUsesDefaultBlockedMessage()
+    {
+        var provider = new HookCapturingProvider(
+            new AssistantMessage([new ToolCallContent("call-1", "count", """{"count":"1"}""")])
+            {
+                StopReason = StopReason.ToolUse
+            },
+            new AssistantMessage([new TextContent("done")]));
+        var toolRan = false;
+        var tool = new DelegateAgentTool(
+            "count",
+            "Count",
+            "Returns the count.",
+            Json("""{"type":"object"}"""),
+            (_, _) =>
+            {
+                toolRan = true;
+                return Task.FromResult(new ToolResult([new TextContent("unexpected")]));
+            });
+        var harness = CreateHarness(provider, tools: [tool]);
+        using var toolCall = harness.OnToolCall((_, _) =>
+            Task.FromResult<AgentHarnessToolCallResult?>(new(Blocked: true)));
+
+        var assistant = await harness.PromptAsync("block tool").WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal("done", ReadText(assistant.Content));
+        Assert.False(toolRan);
+        var toolResultMessage = Assert.Single((await harness.Session.BuildContextAsync()).Messages.OfType<ToolResultMessage>());
+        Assert.True(toolResultMessage.IsError);
+        Assert.Equal("Tool call blocked.", ReadText(toolResultMessage.Content));
+    }
+
     private static AgentHarness<SessionMetadata> CreateHarness(
-        CapturingProvider provider,
+        IStreamProvider provider,
         Func<AgentHarnessSystemPromptContext<SessionMetadata>, string>? systemPromptFactory = null,
         IReadOnlyList<IAgentTool>? tools = null)
     {
@@ -213,6 +339,52 @@ public sealed class AgentHarnessTests
             var stream = new AssistantMessageStream();
             var text = _responses.Count == 0 ? "done" : _responses.Dequeue();
             stream.Push(new DoneEvent(new AssistantMessage([new TextContent(text)])));
+            return stream;
+        }
+    }
+
+    private sealed class HookCapturingProvider(params AssistantMessage[] responses) : IStreamProvider
+    {
+        private readonly Queue<AssistantMessage> _responses = new(responses);
+
+        public string Api => "capture";
+        public LlmContext? LastContext { get; private set; }
+        public SimpleStreamOptions? LastOptions { get; private set; }
+        public IDictionary<string, object>? LastPayload { get; private set; }
+        public int PayloadCallbackCount { get; private set; }
+
+        public AssistantMessageStream Stream(Model model, LlmContext context, StreamOptions options) =>
+            throw new NotSupportedException();
+
+        public AssistantMessageStream StreamSimple(Model model, LlmContext context, SimpleStreamOptions options)
+        {
+            LastContext = context;
+            LastOptions = options;
+            var payload = new Dictionary<string, object>(StringComparer.Ordinal)
+            {
+                ["request"] = PayloadCallbackCount + 1
+            };
+            if (options.OnPayload is not null)
+            {
+                PayloadCallbackCount++;
+                var replacement = options.OnPayload(payload, model).GetAwaiter().GetResult();
+                LastPayload = Assert.IsAssignableFrom<IDictionary<string, object>>(replacement ?? payload);
+            }
+
+            options.OnResponse?.Invoke(
+                new ProviderResponse(
+                    200,
+                    new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                    {
+                        ["x-provider"] = "ok"
+                    }),
+                model).GetAwaiter().GetResult();
+
+            var stream = new AssistantMessageStream();
+            var message = _responses.Count == 0
+                ? new AssistantMessage([new TextContent("done")])
+                : _responses.Dequeue();
+            stream.Push(new DoneEvent(message));
             return stream;
         }
     }
