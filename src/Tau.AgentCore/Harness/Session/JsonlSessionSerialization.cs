@@ -534,6 +534,9 @@ internal static class JsonlSessionSerialization
             AgentCompactionDetails details => JsonSerializer.SerializeToElement(
                 details,
                 AgentCoreSessionJsonContext.Default.AgentCompactionDetails),
+            AgentBranchSummaryDetails details => JsonSerializer.SerializeToElement(
+                details,
+                AgentCoreSessionJsonContext.Default.AgentBranchSummaryDetails),
             _ => JsonSerializer.SerializeToElement(value.ToString(), AgentCoreSessionJsonContext.Default.String)
         };
     }
@@ -560,5 +563,6 @@ internal static class JsonlSessionSerialization
 [JsonSerializable(typeof(SessionUsageDto))]
 [JsonSerializable(typeof(SessionUsageCostDto))]
 [JsonSerializable(typeof(AgentCompactionDetails))]
+[JsonSerializable(typeof(AgentBranchSummaryDetails))]
 [JsonSerializable(typeof(string))]
 internal sealed partial class AgentCoreSessionJsonContext : JsonSerializerContext;
