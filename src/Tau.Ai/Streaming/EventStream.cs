@@ -26,7 +26,7 @@ public class EventStream<TEvent, TResult> : IAsyncEnumerable<TEvent>
     public void Push(TEvent evt)
     {
         if (!_channel.Writer.TryWrite(evt))
-            throw new InvalidOperationException("Stream already completed.");
+            return;
 
         if (_isComplete(evt))
         {

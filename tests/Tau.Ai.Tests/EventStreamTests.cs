@@ -41,12 +41,20 @@ public sealed class EventStreamTests
     }
 
     [Fact]
-    public void Push_AfterCompletion_Throws()
+    public async Task Push_AfterCompletion_IsIgnored()
     {
         var stream = CreateStream();
         stream.Push("END");
+        stream.Push("late");
 
-        Assert.Throws<InvalidOperationException>(() => stream.Push("late"));
+        var collected = new List<string>();
+        await foreach (var e in stream)
+        {
+            collected.Add(e);
+        }
+
+        Assert.Equal(["END"], collected);
+        Assert.Equal("final-result", await stream.ResultAsync);
     }
 
     [Fact]
@@ -145,6 +153,25 @@ public sealed class AssistantMessageStreamTests
         var message = new AssistantMessage { ErrorMessage = "explicit" };
         stream.Push(new ErrorEvent("some error", Message: message));
 
+        Assert.Same(message, await stream.ResultAsync);
+    }
+
+    [Fact]
+    public async Task Push_AfterAssistantTerminalEvent_IsIgnored()
+    {
+        var stream = new AssistantMessageStream();
+        var message = new AssistantMessage([new TextContent("done")]) { StopReason = StopReason.EndTurn };
+        stream.Push(new DoneEvent(message));
+        stream.Push(new ErrorEvent("late error"));
+
+        var events = new List<StreamEvent>();
+        await foreach (var evt in stream)
+        {
+            events.Add(evt);
+        }
+
+        Assert.Single(events);
+        Assert.IsType<DoneEvent>(events[0]);
         Assert.Same(message, await stream.ResultAsync);
     }
 
