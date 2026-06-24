@@ -99,9 +99,17 @@ public static class StreamFunctions
         out ModelProviderSpecificOptionsConfiguration? providerSpecific)
     {
         var resolver = authResolver ?? AuthResolver;
-        var requestConfig = (configurationStore ?? new ModelConfigurationStore()).ResolveRequestConfiguration(model);
+        var store = configurationStore ?? new ModelConfigurationStore();
+        var requestConfig = store.ResolveRequestConfiguration(model, options.Env);
+        var env = ProviderEnvironment.Merge(requestConfig.Options.Env, options.Env);
+        if (env is not null)
+        {
+            requestConfig = store.ResolveRequestConfiguration(model, env);
+            env = ProviderEnvironment.Merge(requestConfig.Options.Env, options.Env);
+        }
+
         providerSpecific = requestConfig.Options.ProviderSpecific;
-        var apiKey = resolver.ResolveApiKey(model.Provider, options.ApiKey) ?? requestConfig.ApiKey;
+        var apiKey = resolver.ResolveApiKey(model.Provider, options.ApiKey, env) ?? requestConfig.ApiKey;
         var configuredHeaders = MergeHeaders(requestConfig.Headers, requestConfig.Options.Headers);
         var headers = MergeHeaders(configuredHeaders, options.Headers);
         var metadata = MergeMetadata(requestConfig.Options.Metadata, options.Metadata);
@@ -125,7 +133,8 @@ public static class StreamFunctions
             MaxRetryDelay = options.MaxRetryDelay ?? requestConfig.Options.MaxRetryDelay,
             MaxRetries = options.MaxRetries ?? requestConfig.Options.MaxRetries,
             WebSocketConnectTimeout = options.WebSocketConnectTimeout ?? requestConfig.Options.WebSocketConnectTimeout,
-            Metadata = metadata
+            Metadata = metadata,
+            Env = env
         };
 
         if (!options.HasExplicitTransport && requestConfig.Options.Transport is { } transport)
@@ -200,6 +209,7 @@ public static class StreamFunctions
             MaxRetries = resolvedOptions.MaxRetries,
             WebSocketConnectTimeout = resolvedOptions.WebSocketConnectTimeout,
             Metadata = resolvedOptions.Metadata,
+            Env = resolvedOptions.Env,
             ToolChoice = ToOpenAiToolChoice(configured.ToolChoice),
             ReasoningEffort = ResolveOpenAiReasoningEffort(model, resolvedOptions, explicitOptions, configured)
         };
@@ -227,6 +237,7 @@ public static class StreamFunctions
             MaxRetries = resolvedOptions.MaxRetries,
             WebSocketConnectTimeout = resolvedOptions.WebSocketConnectTimeout,
             Metadata = resolvedOptions.Metadata,
+            Env = resolvedOptions.Env,
             ReasoningEffort = ResolveReasoningEffort(model, resolvedOptions, explicitOptions, configured),
             ReasoningSummary = configured.ReasoningSummary,
             ServiceTier = configured.ServiceTier
@@ -255,6 +266,7 @@ public static class StreamFunctions
             MaxRetries = resolvedOptions.MaxRetries,
             WebSocketConnectTimeout = resolvedOptions.WebSocketConnectTimeout,
             Metadata = resolvedOptions.Metadata,
+            Env = resolvedOptions.Env,
             ReasoningEffort = ResolveReasoningEffort(model, resolvedOptions, explicitOptions, configured),
             ReasoningSummary = configured.ReasoningSummary,
             ServiceTier = configured.ServiceTier,
@@ -284,6 +296,7 @@ public static class StreamFunctions
             MaxRetries = resolvedOptions.MaxRetries,
             WebSocketConnectTimeout = resolvedOptions.WebSocketConnectTimeout,
             Metadata = resolvedOptions.Metadata,
+            Env = resolvedOptions.Env,
             ReasoningEffort = ResolveReasoningEffort(model, resolvedOptions, explicitOptions, configured),
             ReasoningSummary = configured.ReasoningSummary,
             AzureApiVersion = configured.AzureApiVersion,
@@ -315,6 +328,7 @@ public static class StreamFunctions
             MaxRetries = resolvedOptions.MaxRetries,
             WebSocketConnectTimeout = resolvedOptions.WebSocketConnectTimeout,
             Metadata = resolvedOptions.Metadata,
+            Env = resolvedOptions.Env,
             ToolChoice = ToMistralToolChoice(configured.ToolChoice),
             PromptMode = ResolveMistralPromptMode(model, resolvedOptions, explicitOptions, configured),
             ReasoningEffort = ResolveMistralReasoningEffort(model, resolvedOptions, explicitOptions, configured)
@@ -454,6 +468,7 @@ public static class StreamFunctions
             MaxRetries = options.MaxRetries,
             WebSocketConnectTimeout = options.WebSocketConnectTimeout,
             Metadata = options.Metadata,
+            Env = options.Env,
             ToolChoice = typed?.ToolChoice ?? ToOpenAiToolChoice(configured.ToolChoice),
             ReasoningEffort = typed?.ReasoningEffort ?? configured.ReasoningEffort
         };
@@ -482,6 +497,7 @@ public static class StreamFunctions
             MaxRetries = options.MaxRetries,
             WebSocketConnectTimeout = options.WebSocketConnectTimeout,
             Metadata = options.Metadata,
+            Env = options.Env,
             ReasoningEffort = typed?.ReasoningEffort ?? configured.ReasoningEffort,
             ReasoningSummary = typed?.ReasoningSummary ?? configured.ReasoningSummary,
             ServiceTier = typed?.ServiceTier ?? configured.ServiceTier
@@ -511,6 +527,7 @@ public static class StreamFunctions
             MaxRetries = options.MaxRetries,
             WebSocketConnectTimeout = options.WebSocketConnectTimeout,
             Metadata = options.Metadata,
+            Env = options.Env,
             ReasoningEffort = typed?.ReasoningEffort ?? configured.ReasoningEffort,
             ReasoningSummary = typed?.ReasoningSummary ?? configured.ReasoningSummary,
             ServiceTier = typed?.ServiceTier ?? configured.ServiceTier,
@@ -541,6 +558,7 @@ public static class StreamFunctions
             MaxRetries = options.MaxRetries,
             WebSocketConnectTimeout = options.WebSocketConnectTimeout,
             Metadata = options.Metadata,
+            Env = options.Env,
             ReasoningEffort = typed?.ReasoningEffort ?? configured.ReasoningEffort,
             ReasoningSummary = typed?.ReasoningSummary ?? configured.ReasoningSummary,
             AzureApiVersion = typed?.AzureApiVersion ?? configured.AzureApiVersion,
@@ -574,6 +592,7 @@ public static class StreamFunctions
             MaxRetries = resolvedOptions.MaxRetries,
             WebSocketConnectTimeout = resolvedOptions.WebSocketConnectTimeout,
             Metadata = resolvedOptions.Metadata,
+            Env = resolvedOptions.Env,
             ThinkingEnabled = ResolveAnthropicThinkingEnabled(resolvedOptions, explicitOptions, configured),
             ThinkingBudgetTokens = ResolveAnthropicThinkingBudget(model, resolvedOptions, explicitOptions, configured),
             Effort = ResolveAnthropicEffort(model, resolvedOptions, explicitOptions, configured),
@@ -609,6 +628,7 @@ public static class StreamFunctions
             MaxRetries = options.MaxRetries,
             WebSocketConnectTimeout = options.WebSocketConnectTimeout,
             Metadata = options.Metadata,
+            Env = options.Env,
             ThinkingEnabled = typed?.ThinkingEnabled ?? configured.ThinkingEnabled,
             ThinkingBudgetTokens = typed?.ThinkingBudgetTokens ?? configured.ThinkingBudgetTokens,
             Effort = typed?.Effort ?? configured.Effort,
@@ -703,6 +723,7 @@ public static class StreamFunctions
             MaxRetries = options.MaxRetries,
             WebSocketConnectTimeout = options.WebSocketConnectTimeout,
             Metadata = options.Metadata,
+            Env = options.Env,
             ToolChoice = typed?.ToolChoice ?? ToMistralToolChoice(configured.ToolChoice),
             PromptMode = typed?.PromptMode ?? configured.PromptMode,
             ReasoningEffort = typed?.ReasoningEffort ?? configured.ReasoningEffort
@@ -732,6 +753,7 @@ public static class StreamFunctions
             MaxRetries = resolvedOptions.MaxRetries,
             WebSocketConnectTimeout = resolvedOptions.WebSocketConnectTimeout,
             Metadata = resolvedOptions.Metadata,
+            Env = resolvedOptions.Env,
             ToolChoice = configured.ToolChoice?.Kind,
             Thinking = CreateGoogleThinking(model, resolvedOptions, explicitOptions, configured)
         };
@@ -759,6 +781,7 @@ public static class StreamFunctions
             MaxRetries = resolvedOptions.MaxRetries,
             WebSocketConnectTimeout = resolvedOptions.WebSocketConnectTimeout,
             Metadata = resolvedOptions.Metadata,
+            Env = resolvedOptions.Env,
             Project = configured.Project,
             Location = configured.Location,
             ToolChoice = configured.ToolChoice?.Kind,
@@ -788,6 +811,7 @@ public static class StreamFunctions
             MaxRetries = resolvedOptions.MaxRetries,
             WebSocketConnectTimeout = resolvedOptions.WebSocketConnectTimeout,
             Metadata = resolvedOptions.Metadata,
+            Env = resolvedOptions.Env,
             ProjectId = configured.ProjectId,
             ToolChoice = configured.ToolChoice?.Kind,
             Thinking = CreateGoogleThinking(model, resolvedOptions, explicitOptions, configured)
@@ -817,6 +841,7 @@ public static class StreamFunctions
             MaxRetries = options.MaxRetries,
             WebSocketConnectTimeout = options.WebSocketConnectTimeout,
             Metadata = options.Metadata,
+            Env = options.Env,
             ToolChoice = typed?.ToolChoice ?? configured.ToolChoice?.Kind,
             Thinking = typed?.Thinking ?? CreateGoogleThinking(model, null, null, configured)
         };
@@ -846,6 +871,7 @@ public static class StreamFunctions
             MaxRetries = options.MaxRetries,
             WebSocketConnectTimeout = options.WebSocketConnectTimeout,
             Metadata = options.Metadata,
+            Env = options.Env,
             AccessToken = typed?.AccessToken,
             CredentialsFile = typed?.CredentialsFile,
             Project = typed?.Project ?? configured.Project,
@@ -879,6 +905,7 @@ public static class StreamFunctions
             MaxRetries = options.MaxRetries,
             WebSocketConnectTimeout = options.WebSocketConnectTimeout,
             Metadata = options.Metadata,
+            Env = options.Env,
             ProjectId = typed?.ProjectId ?? configured.ProjectId,
             ToolChoice = typed?.ToolChoice ?? configured.ToolChoice?.Kind,
             Thinking = typed?.Thinking ?? CreateGoogleThinking(model, null, null, configured)
@@ -910,6 +937,7 @@ public static class StreamFunctions
             MaxRetries = resolvedOptions.MaxRetries,
             WebSocketConnectTimeout = resolvedOptions.WebSocketConnectTimeout,
             Metadata = resolvedOptions.Metadata,
+            Env = resolvedOptions.Env,
             Region = configured.Region,
             Profile = configured.Profile,
             BearerToken = configured.BearerToken,
@@ -949,6 +977,7 @@ public static class StreamFunctions
             MaxRetries = options.MaxRetries,
             WebSocketConnectTimeout = options.WebSocketConnectTimeout,
             Metadata = options.Metadata,
+            Env = options.Env,
             Region = typed?.Region ?? configured.Region,
             BearerToken = typed?.BearerToken ?? configured.BearerToken,
             AccessKeyId = typed?.AccessKeyId,

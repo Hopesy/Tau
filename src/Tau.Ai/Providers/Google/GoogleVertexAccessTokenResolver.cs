@@ -222,7 +222,7 @@ internal sealed class GoogleVertexAccessTokenResolver
                 : throw new InvalidOperationException($"Vertex ADC credentials file does not exist: {configured}");
         }
 
-        var envPath = Environment.GetEnvironmentVariable("GOOGLE_APPLICATION_CREDENTIALS");
+        var envPath = ProviderEnvironment.GetValue("GOOGLE_APPLICATION_CREDENTIALS", options.Env);
         if (!string.IsNullOrWhiteSpace(envPath))
         {
             return File.Exists(envPath)

@@ -255,7 +255,7 @@ internal static class BedrockInstanceMetadataResolver
             return true;
         }
 
-        var raw = Environment.GetEnvironmentVariable("AWS_EC2_METADATA_DISABLED");
+        var raw = ProviderEnvironment.GetValue("AWS_EC2_METADATA_DISABLED", options.Env);
         if (string.Equals(raw, "false", StringComparison.OrdinalIgnoreCase))
         {
             return false;
@@ -271,7 +271,7 @@ internal static class BedrockInstanceMetadataResolver
             return true;
         }
 
-        var raw = Environment.GetEnvironmentVariable("AWS_EC2_METADATA_V1_DISABLED");
+        var raw = ProviderEnvironment.GetValue("AWS_EC2_METADATA_V1_DISABLED", options.Env);
         return string.Equals(raw, "true", StringComparison.OrdinalIgnoreCase);
     }
 
@@ -280,7 +280,7 @@ internal static class BedrockInstanceMetadataResolver
         error = null;
         var raw = FirstNonEmpty(
             options.Ec2MetadataServiceEndpoint,
-            Environment.GetEnvironmentVariable("AWS_EC2_METADATA_SERVICE_ENDPOINT"));
+            ProviderEnvironment.GetValue("AWS_EC2_METADATA_SERVICE_ENDPOINT", options.Env));
         if (string.IsNullOrWhiteSpace(raw))
         {
             endpoint = new Uri(DefaultEndpoint, UriKind.Absolute);
@@ -305,7 +305,7 @@ internal static class BedrockInstanceMetadataResolver
             return explicitTimeout;
         }
 
-        var raw = Environment.GetEnvironmentVariable("AWS_METADATA_SERVICE_TIMEOUT");
+        var raw = ProviderEnvironment.GetValue("AWS_METADATA_SERVICE_TIMEOUT", options.Env);
         if (!string.IsNullOrWhiteSpace(raw) &&
             int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var seconds) &&
             seconds > 0)

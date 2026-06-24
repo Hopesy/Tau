@@ -17,11 +17,11 @@ internal static class BedrockWebIdentityResolver
     {
         var tokenFile = FirstNonEmpty(
             options.WebIdentityTokenFile,
-            Environment.GetEnvironmentVariable("AWS_WEB_IDENTITY_TOKEN_FILE"),
+            ProviderEnvironment.GetValue("AWS_WEB_IDENTITY_TOKEN_FILE", options.Env),
             profile?.WebIdentityTokenFile);
         var roleArn = FirstNonEmpty(
             options.WebIdentityRoleArn,
-            Environment.GetEnvironmentVariable("AWS_ROLE_ARN"),
+            ProviderEnvironment.GetValue("AWS_ROLE_ARN", options.Env),
             profile?.RoleArn);
 
         if (string.IsNullOrWhiteSpace(tokenFile) || string.IsNullOrWhiteSpace(roleArn))
@@ -54,11 +54,11 @@ internal static class BedrockWebIdentityResolver
 
         var sessionName = FirstNonEmpty(
             options.WebIdentityRoleSessionName,
-            Environment.GetEnvironmentVariable("AWS_ROLE_SESSION_NAME"),
+            ProviderEnvironment.GetValue("AWS_ROLE_SESSION_NAME", options.Env),
             profile?.RoleSessionName)
             ?? $"tau-bedrock-{clock().ToUnixTimeSeconds()}";
 
-        var endpoint = new Uri(BedrockStsResponseParser.ResolveStsEndpoint(options.StsEndpoint, region), UriKind.Absolute);
+        var endpoint = new Uri(BedrockStsResponseParser.ResolveStsEndpoint(options.StsEndpoint, region, options.Env), UriKind.Absolute);
         var formContent = BuildAssumeRoleFormContent(roleArn!, sessionName, token);
 
         using var request = new HttpRequestMessage(HttpMethod.Post, endpoint)

@@ -5,7 +5,7 @@ internal static class BedrockProfileCredentialsResolver
     public static BedrockProfileSnapshot? Load(BedrockOptions options, string? profileNameOverride = null)
     {
         var profileName = profileNameOverride
-            ?? FirstNonEmpty(options.Profile, Environment.GetEnvironmentVariable("AWS_PROFILE"))
+            ?? FirstNonEmpty(options.Profile, ProviderEnvironment.GetValue("AWS_PROFILE", options.Env))
             ?? "default";
         var credentialsPath = ResolveCredentialsFile(options);
         var configPath = ResolveConfigFile(options);
@@ -145,12 +145,12 @@ internal static class BedrockProfileCredentialsResolver
 
     private static string ResolveCredentialsFile(BedrockOptions options) => FirstNonEmpty(
         options.CredentialsFile,
-        Environment.GetEnvironmentVariable("AWS_SHARED_CREDENTIALS_FILE"),
+        ProviderEnvironment.GetValue("AWS_SHARED_CREDENTIALS_FILE", options.Env),
         CombineUserProfile(".aws", "credentials")) ?? string.Empty;
 
     private static string ResolveConfigFile(BedrockOptions options) => FirstNonEmpty(
         options.ConfigFile,
-        Environment.GetEnvironmentVariable("AWS_CONFIG_FILE"),
+        ProviderEnvironment.GetValue("AWS_CONFIG_FILE", options.Env),
         CombineUserProfile(".aws", "config")) ?? string.Empty;
 
     private static string? CombineUserProfile(params string[] segments)

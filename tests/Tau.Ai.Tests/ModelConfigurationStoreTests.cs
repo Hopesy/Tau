@@ -256,6 +256,104 @@ public sealed class ModelConfigurationStoreTests
     }
 
     [Fact]
+    public async Task StreamFunctions_ResolvesModelsJsonScopedEnvironmentAndExplicitOverrides()
+    {
+        using var scope = EnvironmentVariableScope.Acquire();
+        var tempDir = Path.Combine(Path.GetTempPath(), $"tau-models-env-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+
+        try
+        {
+            var modelsPath = Path.Combine(tempDir, "models.json");
+            var authPath = Path.Combine(tempDir, "auth.json");
+            File.WriteAllText(authPath, "{}");
+            File.WriteAllText(modelsPath, """
+                {
+                  "providers": {
+                    "custom-provider": {
+                      "apiKey": "TAU_SCOPED_MODELS_API_KEY",
+                      "authHeader": true,
+                      "headers": {
+                        "X-Provider": "TAU_SCOPED_PROVIDER_HEADER"
+                      },
+                      "options": {
+                        "env": {
+                          "TAU_SCOPED_MODELS_API_KEY": "configured-key",
+                          "TAU_SCOPED_PROVIDER_HEADER": "configured-provider",
+                          "TAU_SCOPED_OPTION_HEADER": "configured-option",
+                          "TAU_SCOPED_ONLY_CONFIGURED": "configured-only"
+                        }
+                      },
+                      "models": [
+                        {
+                          "id": "custom-model",
+                          "headers": {
+                            "X-Model": "TAU_SCOPED_MODEL_HEADER"
+                          },
+                          "options": {
+                            "env": {
+                              "TAU_SCOPED_MODEL_HEADER": "configured-model",
+                              "TAU_SCOPED_OPTION_HEADER": "model-option"
+                            },
+                            "headers": {
+                              "X-Option": "TAU_SCOPED_OPTION_HEADER"
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  }
+                }
+                """);
+            scope.Set("TAU_MODELS_FILE", modelsPath);
+            scope.Set("TAU_AUTH_FILE", authPath);
+
+            var provider = new CapturingProvider();
+            var registry = new ProviderRegistry();
+            registry.Register("test-api", () => provider, sourceId: "test");
+
+            var model = new Model
+            {
+                Id = "custom-model",
+                Name = "Custom Model",
+                Api = "test-api",
+                Provider = "custom-provider"
+            };
+
+            await OpenAiResponsesProviderTests.CollectAsync(StreamFunctions.Stream(
+                registry,
+                model,
+                new LlmContext { Messages = [new UserMessage("hi")] },
+                new StreamOptions
+                {
+                    Env = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                    {
+                        ["TAU_SCOPED_MODELS_API_KEY"] = "explicit-key",
+                        ["TAU_SCOPED_PROVIDER_HEADER"] = "explicit-provider",
+                        ["TAU_SCOPED_EXPLICIT_ONLY"] = "explicit-only"
+                    }
+                }));
+
+            var options = provider.CapturedOptions!;
+            Assert.Equal("explicit-key", options.ApiKey);
+            Assert.Equal("explicit-provider", options.Headers!["X-Provider"]);
+            Assert.Equal("configured-model", options.Headers["X-Model"]);
+            Assert.Equal("model-option", options.Headers["X-Option"]);
+            Assert.Equal("Bearer explicit-key", options.Headers["Authorization"]);
+            Assert.Equal("explicit-key", options.Env!["TAU_SCOPED_MODELS_API_KEY"]);
+            Assert.Equal("explicit-provider", options.Env["TAU_SCOPED_PROVIDER_HEADER"]);
+            Assert.Equal("configured-model", options.Env["TAU_SCOPED_MODEL_HEADER"]);
+            Assert.Equal("model-option", options.Env["TAU_SCOPED_OPTION_HEADER"]);
+            Assert.Equal("configured-only", options.Env["TAU_SCOPED_ONLY_CONFIGURED"]);
+            Assert.Equal("explicit-only", options.Env["TAU_SCOPED_EXPLICIT_ONLY"]);
+        }
+        finally
+        {
+            DeleteDirectoryWithRetry(tempDir);
+        }
+    }
+
+    [Fact]
     public async Task StreamFunctions_PreservesExplicitApiKeyAndSimpleOptionsWhenApplyingModelsJsonAuthHeader()
     {
         using var scope = EnvironmentVariableScope.Acquire();

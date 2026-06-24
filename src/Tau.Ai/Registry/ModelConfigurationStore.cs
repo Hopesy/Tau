@@ -39,7 +39,9 @@ public sealed class ModelConfigurationStore
         }
     }
 
-    internal ModelRequestConfiguration ResolveRequestConfiguration(Model model)
+    internal ModelRequestConfiguration ResolveRequestConfiguration(
+        Model model,
+        IReadOnlyDictionary<string, string>? env = null)
     {
         var doc = LoadDocument();
         if (doc is null)
@@ -55,33 +57,54 @@ public sealed class ModelConfigurationStore
                 return ModelRequestConfiguration.Empty;
             }
 
-            var apiKey = ResolveConfigValue(GetString(providerConfig, "apiKey"));
-            var authHeader = GetBool(providerConfig, "authHeader") ?? false;
-            var headers = ResolveHeaders(ParseStringDictionary(providerConfig, "headers"));
-            var options = ParseRequestOptions(providerConfig);
+            JsonElement? overrideConfig = null;
+            JsonElement? configuredModel = null;
+            IReadOnlyDictionary<string, string>? configuredEnv = ParseRequestOptionEnv(providerConfig);
 
             if (providerConfig.TryGetProperty("modelOverrides", out var overrides) &&
                 overrides.ValueKind == JsonValueKind.Object &&
-                TryGetObjectProperty(overrides, model.Id, out var overrideConfig))
+                TryGetObjectProperty(overrides, model.Id, out var matchingOverrideConfig))
             {
-                headers = MergeHeaders(headers, ResolveHeaders(ParseStringDictionary(overrideConfig, "headers")));
-                options = MergeRequestOptions(options, ParseRequestOptions(overrideConfig));
+                overrideConfig = matchingOverrideConfig;
+                configuredEnv = ProviderEnvironment.Merge(configuredEnv, ParseRequestOptionEnv(matchingOverrideConfig));
             }
 
             if (providerConfig.TryGetProperty("models", out var configuredModels) &&
                 configuredModels.ValueKind == JsonValueKind.Array)
             {
-                foreach (var configuredModel in configuredModels.EnumerateArray())
+                foreach (var candidateModel in configuredModels.EnumerateArray())
                 {
-                    if (configuredModel.ValueKind == JsonValueKind.Object &&
-                        TryGetString(configuredModel, "id", out var modelId) &&
+                    if (candidateModel.ValueKind == JsonValueKind.Object &&
+                        TryGetString(candidateModel, "id", out var modelId) &&
                         model.Id.Equals(modelId, StringComparison.OrdinalIgnoreCase))
                     {
-                        headers = MergeHeaders(headers, ResolveHeaders(ParseStringDictionary(configuredModel, "headers")));
-                        options = MergeRequestOptions(options, ParseRequestOptions(configuredModel));
+                        configuredModel = candidateModel;
+                        configuredEnv = ProviderEnvironment.Merge(configuredEnv, ParseRequestOptionEnv(candidateModel));
                         break;
                     }
                 }
+            }
+
+            var effectiveEnv = ProviderEnvironment.Merge(configuredEnv, env);
+            var apiKey = ResolveConfigValue(GetString(providerConfig, "apiKey"), effectiveEnv);
+            var authHeader = GetBool(providerConfig, "authHeader") ?? false;
+            var headers = ResolveHeaders(ParseStringDictionary(providerConfig, "headers"), effectiveEnv);
+            var options = ParseRequestOptions(providerConfig, effectiveEnv);
+
+            if (overrideConfig is { } resolvedOverrideConfig)
+            {
+                headers = MergeHeaders(
+                    headers,
+                    ResolveHeaders(ParseStringDictionary(resolvedOverrideConfig, "headers"), effectiveEnv));
+                options = MergeRequestOptions(options, ParseRequestOptions(resolvedOverrideConfig, effectiveEnv));
+            }
+
+            if (configuredModel is { } resolvedConfiguredModel)
+            {
+                headers = MergeHeaders(
+                    headers,
+                    ResolveHeaders(ParseStringDictionary(resolvedConfiguredModel, "headers"), effectiveEnv));
+                options = MergeRequestOptions(options, ParseRequestOptions(resolvedConfiguredModel, effectiveEnv));
             }
 
             return new ModelRequestConfiguration(apiKey, headers, authHeader, options);
@@ -516,7 +539,9 @@ public sealed class ModelConfigurationStore
         return result.Count == 0 ? null : result;
     }
 
-    private static ModelRequestOptionsConfiguration ParseRequestOptions(JsonElement element)
+    private static ModelRequestOptionsConfiguration ParseRequestOptions(
+        JsonElement element,
+        IReadOnlyDictionary<string, string>? env = null)
     {
         if (!element.TryGetProperty("options", out var options) || options.ValueKind != JsonValueKind.Object)
         {
@@ -534,11 +559,19 @@ public sealed class ModelConfigurationStore
             MaxRetryDelay: ParseMaxRetryDelay(options),
             MaxRetries: ParseMaxRetries(options),
             WebSocketConnectTimeout: ParseWebSocketConnectTimeout(options),
-            Headers: ResolveHeaders(ParseRequestOptionHeaders(element)),
+            Headers: ResolveHeaders(ParseRequestOptionHeaders(element), env),
             Metadata: ParseObjectDictionary(options, "metadata"),
+            Env: ParseStringDictionary(options, "env"),
             Reasoning: ParseEnum<ThinkingLevel>(GetString(options, "reasoning")),
             ThinkingBudgets: ParseThinkingBudgets(options),
             ProviderSpecific: ParseProviderSpecificOptions(options));
+    }
+
+    private static IReadOnlyDictionary<string, string>? ParseRequestOptionEnv(JsonElement element)
+    {
+        return element.TryGetProperty("options", out var options) && options.ValueKind == JsonValueKind.Object
+            ? ParseStringDictionary(options, "env")
+            : null;
     }
 
     private static ModelRequestOptionsConfiguration MergeRequestOptions(
@@ -568,6 +601,7 @@ public sealed class ModelConfigurationStore
             WebSocketConnectTimeout: overrideOptions.WebSocketConnectTimeout ?? baseOptions.WebSocketConnectTimeout,
             Headers: MergeHeaders(baseOptions.Headers, overrideOptions.Headers),
             Metadata: MergeObjectDictionaries(baseOptions.Metadata, overrideOptions.Metadata),
+            Env: ProviderEnvironment.Merge(baseOptions.Env, overrideOptions.Env),
             Reasoning: overrideOptions.Reasoning ?? baseOptions.Reasoning,
             ThinkingBudgets: MergeThinkingBudgets(baseOptions.ThinkingBudgets, overrideOptions.ThinkingBudgets),
             ProviderSpecific: MergeProviderSpecificOptions(baseOptions.ProviderSpecific, overrideOptions.ProviderSpecific));
@@ -949,7 +983,9 @@ public sealed class ModelConfigurationStore
         return false;
     }
 
-    private static IDictionary<string, string>? ResolveHeaders(IDictionary<string, string>? headers)
+    private static IDictionary<string, string>? ResolveHeaders(
+        IDictionary<string, string>? headers,
+        IReadOnlyDictionary<string, string>? env = null)
     {
         if (headers is null || headers.Count == 0)
         {
@@ -959,7 +995,7 @@ public sealed class ModelConfigurationStore
         var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         foreach (var (key, value) in headers)
         {
-            var resolved = ResolveConfigValue(value);
+            var resolved = ResolveConfigValue(value, env);
             if (!string.IsNullOrWhiteSpace(resolved))
             {
                 result[key] = resolved;
@@ -1019,7 +1055,9 @@ public sealed class ModelConfigurationStore
     private static bool IsCommandBackedValue(string? value) =>
         !string.IsNullOrWhiteSpace(value) && value.TrimStart().StartsWith('!');
 
-    private static string? ResolveConfigValue(string? value)
+    private static string? ResolveConfigValue(
+        string? value,
+        IReadOnlyDictionary<string, string>? env = null)
     {
         if (string.IsNullOrWhiteSpace(value))
         {
@@ -1032,7 +1070,7 @@ public sealed class ModelConfigurationStore
             return ResolveCommandValue(value[1..].Trim());
         }
 
-        var environmentValue = Environment.GetEnvironmentVariable(value);
+        var environmentValue = ProviderEnvironment.GetValue(value, env);
         return string.IsNullOrWhiteSpace(environmentValue) ? value : environmentValue;
     }
 
@@ -1233,11 +1271,13 @@ internal sealed record ModelRequestOptionsConfiguration(
     TimeSpan? WebSocketConnectTimeout,
     IDictionary<string, string>? Headers,
     IDictionary<string, object>? Metadata,
+    IReadOnlyDictionary<string, string>? Env,
     ThinkingLevel? Reasoning,
     ThinkingBudgets? ThinkingBudgets,
     ModelProviderSpecificOptionsConfiguration? ProviderSpecific)
 {
     public static ModelRequestOptionsConfiguration Empty { get; } = new(
+        null,
         null,
         null,
         null,

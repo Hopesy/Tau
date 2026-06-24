@@ -59,6 +59,7 @@ public sealed class AzureOpenAiResponsesProvider : IStreamProvider
             MaxRetries = options.MaxRetries,
             WebSocketConnectTimeout = options.WebSocketConnectTimeout,
             Metadata = options.Metadata,
+            Env = options.Env,
             ReasoningEffort = reasoningEffort
         };
         return Stream(model, context, azureOptions);
@@ -89,7 +90,7 @@ public sealed class AzureOpenAiResponsesProvider : IStreamProvider
         {
             Content = new StringContent(json, Encoding.UTF8, "application/json")
         };
-        ApplyAuthHeader(request, ResolveApiKey(options.ApiKey));
+        ApplyAuthHeader(request, ResolveApiKey(azureOptions));
         ApplyHeaders(request, model.Headers);
         ApplyHeaders(request, options.Headers);
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
@@ -199,15 +200,15 @@ public sealed class AzureOpenAiResponsesProvider : IStreamProvider
     {
         var apiVersion = FirstNonEmpty(
             options?.AzureApiVersion,
-            Environment.GetEnvironmentVariable("AZURE_OPENAI_API_VERSION"),
+            ProviderEnvironment.GetValue("AZURE_OPENAI_API_VERSION", options?.Env),
             DefaultAzureApiVersion)!;
 
         var baseUrl = FirstNonEmpty(
             options?.AzureBaseUrl,
-            Environment.GetEnvironmentVariable("AZURE_OPENAI_BASE_URL"));
+            ProviderEnvironment.GetValue("AZURE_OPENAI_BASE_URL", options?.Env));
         var resourceName = FirstNonEmpty(
             options?.AzureResourceName,
-            Environment.GetEnvironmentVariable("AZURE_OPENAI_RESOURCE_NAME"));
+            ProviderEnvironment.GetValue("AZURE_OPENAI_RESOURCE_NAME", options?.Env));
 
         if (string.IsNullOrWhiteSpace(baseUrl) && !string.IsNullOrWhiteSpace(resourceName))
         {
@@ -235,7 +236,7 @@ public sealed class AzureOpenAiResponsesProvider : IStreamProvider
             return options.AzureDeploymentName!;
         }
 
-        var map = ParseDeploymentNameMap(Environment.GetEnvironmentVariable("AZURE_OPENAI_DEPLOYMENT_NAME_MAP"));
+        var map = ParseDeploymentNameMap(ProviderEnvironment.GetValue("AZURE_OPENAI_DEPLOYMENT_NAME_MAP", options?.Env));
         return map.TryGetValue(model.Id, out var deploymentName) ? deploymentName : model.Id;
     }
 
@@ -263,10 +264,10 @@ public sealed class AzureOpenAiResponsesProvider : IStreamProvider
         return map;
     }
 
-    private static string? ResolveApiKey(string? apiKey) =>
-        string.IsNullOrWhiteSpace(apiKey)
-            ? Environment.GetEnvironmentVariable("AZURE_OPENAI_API_KEY")
-            : apiKey;
+    private static string? ResolveApiKey(AzureOpenAiResponsesOptions? options) =>
+        string.IsNullOrWhiteSpace(options?.ApiKey)
+            ? ProviderEnvironment.GetValue("AZURE_OPENAI_API_KEY", options?.Env)
+            : options.ApiKey;
 
     private static void ApplyAuthHeader(HttpRequestMessage request, string? apiKey)
     {

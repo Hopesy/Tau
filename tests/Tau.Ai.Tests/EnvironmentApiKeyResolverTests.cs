@@ -4,6 +4,23 @@ namespace Tau.Ai.Tests;
 
 public sealed class EnvironmentApiKeyResolverTests
 {
+    [Fact]
+    public void GetApiKey_PrefersScopedEnvironmentOverAmbientEnvironment()
+    {
+        using var scope = EnvironmentVariableScope.Acquire();
+        scope.Set("OPENAI_API_KEY", "ambient-key");
+
+        var apiKey = EnvironmentApiKeyResolver.GetApiKey(
+            "openai",
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["OPENAI_API_KEY"] = "scoped-key"
+            });
+
+        Assert.Equal("scoped-key", apiKey);
+        Assert.Equal("ambient-key", Environment.GetEnvironmentVariable("OPENAI_API_KEY"));
+    }
+
     [Theory]
     [InlineData("oauth-token", "api-key", "oauth-token")]
     [InlineData(null, "api-key", "api-key")]
@@ -80,6 +97,41 @@ public sealed class EnvironmentApiKeyResolverTests
             var apiKey = EnvironmentApiKeyResolver.GetApiKey("google-vertex");
 
             Assert.Equal(EnvironmentApiKeyResolver.AuthenticatedMarker, apiKey);
+        }
+        finally
+        {
+            Directory.Delete(tempDir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void GetApiKey_ReturnsAuthenticatedMarker_ForScopedVertexCredentials()
+    {
+        using var scope = EnvironmentVariableScope.Acquire();
+        var tempDir = Path.Combine(Path.GetTempPath(), $"tau-vertex-scoped-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+
+        try
+        {
+            var credentialsPath = Path.Combine(tempDir, "adc.json");
+            File.WriteAllText(credentialsPath, "{}");
+
+            scope.Set("GOOGLE_CLOUD_API_KEY", null);
+            scope.Set("GOOGLE_APPLICATION_CREDENTIALS", null);
+            scope.Set("GOOGLE_CLOUD_PROJECT", null);
+            scope.Set("GOOGLE_CLOUD_LOCATION", null);
+
+            var apiKey = EnvironmentApiKeyResolver.GetApiKey(
+                "google-vertex",
+                new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["GOOGLE_APPLICATION_CREDENTIALS"] = credentialsPath,
+                    ["GOOGLE_CLOUD_PROJECT"] = "scoped-project",
+                    ["GOOGLE_CLOUD_LOCATION"] = "us-central1"
+                });
+
+            Assert.Equal(EnvironmentApiKeyResolver.AuthenticatedMarker, apiKey);
+            Assert.Null(Environment.GetEnvironmentVariable("GOOGLE_APPLICATION_CREDENTIALS"));
         }
         finally
         {

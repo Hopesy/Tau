@@ -78,7 +78,7 @@ internal static class BedrockEcsContainerResolver
         error = null;
         var fullUri = FirstNonEmpty(
             options.ContainerCredentialsFullUri,
-            Environment.GetEnvironmentVariable("AWS_CONTAINER_CREDENTIALS_FULL_URI"));
+            ProviderEnvironment.GetValue("AWS_CONTAINER_CREDENTIALS_FULL_URI", options.Env));
         if (!string.IsNullOrWhiteSpace(fullUri))
         {
             if (!Uri.TryCreate(fullUri, UriKind.Absolute, out var parsed))
@@ -92,7 +92,7 @@ internal static class BedrockEcsContainerResolver
 
         var relativeUri = FirstNonEmpty(
             options.ContainerCredentialsRelativeUri,
-            Environment.GetEnvironmentVariable("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI"));
+            ProviderEnvironment.GetValue("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI", options.Env));
         if (!string.IsNullOrWhiteSpace(relativeUri))
         {
             if (!relativeUri!.StartsWith('/'))
@@ -161,7 +161,7 @@ internal static class BedrockEcsContainerResolver
     {
         var tokenFile = FirstNonEmpty(
             options.ContainerAuthorizationTokenFile,
-            Environment.GetEnvironmentVariable("AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE"));
+            ProviderEnvironment.GetValue("AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE", options.Env));
         if (!string.IsNullOrWhiteSpace(tokenFile))
         {
             var content = await File.ReadAllTextAsync(tokenFile, cancellationToken).ConfigureAwait(false);
@@ -170,7 +170,7 @@ internal static class BedrockEcsContainerResolver
 
         return FirstNonEmpty(
             options.ContainerAuthorizationToken,
-            Environment.GetEnvironmentVariable("AWS_CONTAINER_AUTHORIZATION_TOKEN"));
+            ProviderEnvironment.GetValue("AWS_CONTAINER_AUTHORIZATION_TOKEN", options.Env));
     }
 
     internal static BedrockCredentialProcessOutcome ParseEcsCredentialsJson(string json, Func<DateTimeOffset> clock)

@@ -61,7 +61,7 @@ internal static class BedrockAssumeRoleResolver
         var payload = Encoding.UTF8.GetBytes(formContent);
 
         var endpoint = new Uri(
-            BedrockStsResponseParser.ResolveStsEndpoint(options.StsEndpoint, region),
+            BedrockStsResponseParser.ResolveStsEndpoint(options.StsEndpoint, region, options.Env),
             UriKind.Absolute);
 
         using var request = new HttpRequestMessage(HttpMethod.Post, endpoint)
@@ -150,9 +150,9 @@ internal static class BedrockAssumeRoleResolver
     {
         if (string.Equals(credentialSource, "Environment", StringComparison.OrdinalIgnoreCase))
         {
-            var accessKey = Environment.GetEnvironmentVariable("AWS_ACCESS_KEY_ID");
-            var secretKey = Environment.GetEnvironmentVariable("AWS_SECRET_ACCESS_KEY");
-            var session = Environment.GetEnvironmentVariable("AWS_SESSION_TOKEN");
+            var accessKey = ProviderEnvironment.GetValue("AWS_ACCESS_KEY_ID", options.Env);
+            var secretKey = ProviderEnvironment.GetValue("AWS_SECRET_ACCESS_KEY", options.Env);
+            var session = ProviderEnvironment.GetValue("AWS_SESSION_TOKEN", options.Env);
             if (string.IsNullOrWhiteSpace(accessKey) || string.IsNullOrWhiteSpace(secretKey))
             {
                 return (null, "credential_source=Environment requires AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY.");

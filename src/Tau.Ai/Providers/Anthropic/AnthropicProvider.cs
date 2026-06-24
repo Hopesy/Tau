@@ -91,7 +91,7 @@ public sealed class AnthropicProvider : IStreamProvider
         using var request = new HttpRequestMessage(HttpMethod.Post, url);
         request.Content = new StringContent(json, Encoding.UTF8, "application/json");
 
-        var apiKey = options.ApiKey ?? Environment.GetEnvironmentVariable("ANTHROPIC_API_KEY");
+        var apiKey = options.ApiKey ?? ProviderEnvironment.GetValue("ANTHROPIC_API_KEY", options.Env);
         if (!string.IsNullOrEmpty(apiKey))
             request.Headers.TryAddWithoutValidation("x-api-key", apiKey);
 

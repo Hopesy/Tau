@@ -59,6 +59,7 @@ public sealed class OpenAiResponsesProvider : IStreamProvider
             MaxRetries = options.MaxRetries,
             WebSocketConnectTimeout = options.WebSocketConnectTimeout,
             Metadata = options.Metadata,
+            Env = options.Env,
             ReasoningEffort = reasoningEffort
         };
         return Stream(model, context, responseOptions);

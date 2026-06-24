@@ -23,14 +23,21 @@ public sealed class ProviderAuthResolver
         _configurationStore = configurationStore ?? new ModelConfigurationStore();
     }
 
-    public ProviderAuthStatus GetStatus(Model model, string? explicitApiKey = null)
+    public ProviderAuthStatus GetStatus(
+        Model model,
+        string? explicitApiKey = null,
+        IReadOnlyDictionary<string, string>? env = null)
     {
-        return GetStatus(model.Provider, model, explicitApiKey);
+        return GetStatus(model.Provider, model, explicitApiKey, env);
     }
 
-    public ProviderAuthStatus GetStatus(string provider, Model? model = null, string? explicitApiKey = null)
+    public ProviderAuthStatus GetStatus(
+        string provider,
+        Model? model = null,
+        string? explicitApiKey = null,
+        IReadOnlyDictionary<string, string>? env = null)
     {
-        var status = ResolveStatus(provider, model, explicitApiKey);
+        var status = ResolveStatus(provider, model, explicitApiKey, env);
         _logSink.Log(new TauLogEvent(
             "auth",
             "status.checked",
@@ -46,14 +53,18 @@ public sealed class ProviderAuthResolver
         return status;
     }
 
-    private ProviderAuthStatus ResolveStatus(string provider, Model? model = null, string? explicitApiKey = null)
+    private ProviderAuthStatus ResolveStatus(
+        string provider,
+        Model? model = null,
+        string? explicitApiKey = null,
+        IReadOnlyDictionary<string, string>? env = null)
     {
         if (!string.IsNullOrWhiteSpace(explicitApiKey))
         {
             return new ProviderAuthStatus(provider, true, "explicit", false, false, "API key provided explicitly for this request.");
         }
 
-        var envApiKey = EnvironmentApiKeyResolver.GetApiKey(provider);
+        var envApiKey = EnvironmentApiKeyResolver.GetApiKey(provider, env);
         if (!string.IsNullOrWhiteSpace(envApiKey))
         {
             var source = EnvironmentApiKeyResolver.IsAuthenticatedMarker(envApiKey) ? "environment/ambient" : "environment";
@@ -103,14 +114,17 @@ public sealed class ProviderAuthResolver
         return new ProviderAuthStatus(provider, false, "none", false, canLogin, message);
     }
 
-    public string? ResolveApiKey(string provider, string? explicitApiKey = null)
+    public string? ResolveApiKey(
+        string provider,
+        string? explicitApiKey = null,
+        IReadOnlyDictionary<string, string>? env = null)
     {
         if (!string.IsNullOrWhiteSpace(explicitApiKey))
         {
             return explicitApiKey;
         }
 
-        var envApiKey = EnvironmentApiKeyResolver.GetApiKey(provider);
+        var envApiKey = EnvironmentApiKeyResolver.GetApiKey(provider, env);
         if (!string.IsNullOrWhiteSpace(envApiKey))
         {
             return envApiKey;

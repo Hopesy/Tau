@@ -88,6 +88,7 @@ public sealed class OpenAiCodexResponsesProvider : IStreamProvider, IDisposable
             MaxRetries = options.MaxRetries,
             WebSocketConnectTimeout = options.WebSocketConnectTimeout,
             Metadata = options.Metadata,
+            Env = options.Env,
             Transport = options.Transport,
             ReasoningEffort = reasoningEffort
         };

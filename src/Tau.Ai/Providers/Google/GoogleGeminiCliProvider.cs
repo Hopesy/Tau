@@ -339,7 +339,7 @@ public sealed class GoogleGeminiCliProvider : IStreamProvider
 
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
-        ApplyDefaultHeaders(request, isAntigravity);
+        ApplyDefaultHeaders(request, isAntigravity, options.Env);
         if (NeedsClaudeThinkingBetaHeader(model))
         {
             request.Headers.TryAddWithoutValidation("anthropic-beta", ClaudeThinkingBetaHeader);
@@ -616,11 +616,14 @@ public sealed class GoogleGeminiCliProvider : IStreamProvider
             : [DefaultEndpoint];
     }
 
-    private static void ApplyDefaultHeaders(HttpRequestMessage request, bool isAntigravity)
+    private static void ApplyDefaultHeaders(
+        HttpRequestMessage request,
+        bool isAntigravity,
+        IReadOnlyDictionary<string, string>? env)
     {
         if (isAntigravity)
         {
-            var version = Environment.GetEnvironmentVariable("PI_AI_ANTIGRAVITY_VERSION");
+            var version = ProviderEnvironment.GetValue("PI_AI_ANTIGRAVITY_VERSION", env);
             request.Headers.TryAddWithoutValidation("User-Agent", $"antigravity/{(string.IsNullOrWhiteSpace(version) ? DefaultAntigravityVersion : version)} darwin/arm64");
             return;
         }

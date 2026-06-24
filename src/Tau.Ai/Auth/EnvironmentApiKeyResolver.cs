@@ -6,7 +6,9 @@ public static class EnvironmentApiKeyResolver
 {
     public const string AuthenticatedMarker = "<authenticated>";
 
-    public static string? GetApiKey(string provider)
+    public static string? GetApiKey(
+        string provider,
+        IReadOnlyDictionary<string, string>? env = null)
     {
         if (string.IsNullOrWhiteSpace(provider))
         {
@@ -18,31 +20,31 @@ public static class EnvironmentApiKeyResolver
         if (provider.Equals("github-copilot", StringComparison.OrdinalIgnoreCase))
         {
             return FirstNonEmpty(
-                Environment.GetEnvironmentVariable("COPILOT_GITHUB_TOKEN"),
-                Environment.GetEnvironmentVariable("GH_TOKEN"),
-                Environment.GetEnvironmentVariable("GITHUB_TOKEN"));
+                ProviderEnvironment.GetValue("COPILOT_GITHUB_TOKEN", env),
+                ProviderEnvironment.GetValue("GH_TOKEN", env),
+                ProviderEnvironment.GetValue("GITHUB_TOKEN", env));
         }
 
         if (provider.Equals("anthropic", StringComparison.OrdinalIgnoreCase))
         {
             return FirstNonEmpty(
-                Environment.GetEnvironmentVariable("ANTHROPIC_OAUTH_TOKEN"),
-                Environment.GetEnvironmentVariable("ANTHROPIC_API_KEY"));
+                ProviderEnvironment.GetValue("ANTHROPIC_OAUTH_TOKEN", env),
+                ProviderEnvironment.GetValue("ANTHROPIC_API_KEY", env));
         }
 
         if (provider.Equals("google-vertex", StringComparison.OrdinalIgnoreCase))
         {
-            var apiKey = Environment.GetEnvironmentVariable("GOOGLE_CLOUD_API_KEY");
+            var apiKey = ProviderEnvironment.GetValue("GOOGLE_CLOUD_API_KEY", env);
             if (!string.IsNullOrWhiteSpace(apiKey))
             {
                 return apiKey;
             }
 
-            if (HasVertexAdcCredentials() &&
+            if (HasVertexAdcCredentials(env) &&
                 !string.IsNullOrWhiteSpace(FirstNonEmpty(
-                    Environment.GetEnvironmentVariable("GOOGLE_CLOUD_PROJECT"),
-                    Environment.GetEnvironmentVariable("GCLOUD_PROJECT"))) &&
-                !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("GOOGLE_CLOUD_LOCATION")))
+                    ProviderEnvironment.GetValue("GOOGLE_CLOUD_PROJECT", env),
+                    ProviderEnvironment.GetValue("GCLOUD_PROJECT", env))) &&
+                !string.IsNullOrWhiteSpace(ProviderEnvironment.GetValue("GOOGLE_CLOUD_LOCATION", env)))
             {
                 return AuthenticatedMarker;
             }
@@ -53,37 +55,37 @@ public static class EnvironmentApiKeyResolver
         if (provider.Equals("amazon-bedrock", StringComparison.OrdinalIgnoreCase))
         {
             var hasAwsCreds =
-                !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("AWS_PROFILE")) ||
-                (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("AWS_ACCESS_KEY_ID")) &&
-                 !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("AWS_SECRET_ACCESS_KEY"))) ||
-                !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("AWS_BEARER_TOKEN_BEDROCK")) ||
-                !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI")) ||
-                !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("AWS_CONTAINER_CREDENTIALS_FULL_URI")) ||
-                !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("AWS_WEB_IDENTITY_TOKEN_FILE"));
+                !string.IsNullOrWhiteSpace(ProviderEnvironment.GetValue("AWS_PROFILE", env)) ||
+                (!string.IsNullOrWhiteSpace(ProviderEnvironment.GetValue("AWS_ACCESS_KEY_ID", env)) &&
+                 !string.IsNullOrWhiteSpace(ProviderEnvironment.GetValue("AWS_SECRET_ACCESS_KEY", env))) ||
+                !string.IsNullOrWhiteSpace(ProviderEnvironment.GetValue("AWS_BEARER_TOKEN_BEDROCK", env)) ||
+                !string.IsNullOrWhiteSpace(ProviderEnvironment.GetValue("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI", env)) ||
+                !string.IsNullOrWhiteSpace(ProviderEnvironment.GetValue("AWS_CONTAINER_CREDENTIALS_FULL_URI", env)) ||
+                !string.IsNullOrWhiteSpace(ProviderEnvironment.GetValue("AWS_WEB_IDENTITY_TOKEN_FILE", env));
 
             return hasAwsCreds ? AuthenticatedMarker : null;
         }
 
         return provider.ToLowerInvariant() switch
         {
-            "openai" => Environment.GetEnvironmentVariable("OPENAI_API_KEY"),
-            "azure-openai-responses" => Environment.GetEnvironmentVariable("AZURE_OPENAI_API_KEY"),
+            "openai" => ProviderEnvironment.GetValue("OPENAI_API_KEY", env),
+            "azure-openai-responses" => ProviderEnvironment.GetValue("AZURE_OPENAI_API_KEY", env),
             "google" => FirstNonEmpty(
-                Environment.GetEnvironmentVariable("GEMINI_API_KEY"),
-                Environment.GetEnvironmentVariable("GOOGLE_API_KEY")),
-            "mistral" => Environment.GetEnvironmentVariable("MISTRAL_API_KEY"),
-            "openrouter" => Environment.GetEnvironmentVariable("OPENROUTER_API_KEY"),
-            "groq" => Environment.GetEnvironmentVariable("GROQ_API_KEY"),
-            "cerebras" => Environment.GetEnvironmentVariable("CEREBRAS_API_KEY"),
-            "xai" => Environment.GetEnvironmentVariable("XAI_API_KEY"),
-            "zai" => Environment.GetEnvironmentVariable("ZAI_API_KEY"),
-            "vercel-ai-gateway" => Environment.GetEnvironmentVariable("AI_GATEWAY_API_KEY"),
-            "minimax" => Environment.GetEnvironmentVariable("MINIMAX_API_KEY"),
-            "minimax-cn" => Environment.GetEnvironmentVariable("MINIMAX_CN_API_KEY"),
-            "huggingface" => Environment.GetEnvironmentVariable("HF_TOKEN"),
-            "opencode" => Environment.GetEnvironmentVariable("OPENCODE_API_KEY"),
-            "opencode-go" => Environment.GetEnvironmentVariable("OPENCODE_API_KEY"),
-            "kimi-coding" => Environment.GetEnvironmentVariable("KIMI_API_KEY"),
+                ProviderEnvironment.GetValue("GEMINI_API_KEY", env),
+                ProviderEnvironment.GetValue("GOOGLE_API_KEY", env)),
+            "mistral" => ProviderEnvironment.GetValue("MISTRAL_API_KEY", env),
+            "openrouter" => ProviderEnvironment.GetValue("OPENROUTER_API_KEY", env),
+            "groq" => ProviderEnvironment.GetValue("GROQ_API_KEY", env),
+            "cerebras" => ProviderEnvironment.GetValue("CEREBRAS_API_KEY", env),
+            "xai" => ProviderEnvironment.GetValue("XAI_API_KEY", env),
+            "zai" => ProviderEnvironment.GetValue("ZAI_API_KEY", env),
+            "vercel-ai-gateway" => ProviderEnvironment.GetValue("AI_GATEWAY_API_KEY", env),
+            "minimax" => ProviderEnvironment.GetValue("MINIMAX_API_KEY", env),
+            "minimax-cn" => ProviderEnvironment.GetValue("MINIMAX_CN_API_KEY", env),
+            "huggingface" => ProviderEnvironment.GetValue("HF_TOKEN", env),
+            "opencode" => ProviderEnvironment.GetValue("OPENCODE_API_KEY", env),
+            "opencode-go" => ProviderEnvironment.GetValue("OPENCODE_API_KEY", env),
+            "kimi-coding" => ProviderEnvironment.GetValue("KIMI_API_KEY", env),
             _ => null
         };
     }
@@ -94,16 +96,16 @@ public static class EnvironmentApiKeyResolver
     private static string? FirstNonEmpty(params string?[] values) =>
         values.FirstOrDefault(value => !string.IsNullOrWhiteSpace(value));
 
-    private static bool HasVertexAdcCredentials()
+    private static bool HasVertexAdcCredentials(IReadOnlyDictionary<string, string>? env)
     {
-        var envPath = Environment.GetEnvironmentVariable("GOOGLE_APPLICATION_CREDENTIALS");
+        var envPath = ProviderEnvironment.GetValue("GOOGLE_APPLICATION_CREDENTIALS", env);
         if (!string.IsNullOrWhiteSpace(envPath) && File.Exists(envPath))
         {
             return true;
         }
 
         var applicationData = FirstNonEmpty(
-            Environment.GetEnvironmentVariable("APPDATA"),
+            ProviderEnvironment.GetValue("APPDATA", env),
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData));
         if (!string.IsNullOrWhiteSpace(applicationData))
         {

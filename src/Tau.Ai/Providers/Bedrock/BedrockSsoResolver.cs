@@ -886,7 +886,7 @@ internal static class BedrockSsoResolver
     {
         var overrideEndpoint = FirstNonEmpty(
             options.SsoPortalEndpoint,
-            Environment.GetEnvironmentVariable("AWS_ENDPOINT_URL_SSO"));
+            ProviderEnvironment.GetValue("AWS_ENDPOINT_URL_SSO", options.Env));
         if (!string.IsNullOrWhiteSpace(overrideEndpoint))
         {
             return overrideEndpoint!;
@@ -899,7 +899,7 @@ internal static class BedrockSsoResolver
     {
         var overrideEndpoint = FirstNonEmpty(
             options.SsoOidcEndpoint,
-            Environment.GetEnvironmentVariable("AWS_ENDPOINT_URL_SSO_OIDC"));
+            ProviderEnvironment.GetValue("AWS_ENDPOINT_URL_SSO_OIDC", options.Env));
         if (!string.IsNullOrWhiteSpace(overrideEndpoint))
         {
             return overrideEndpoint!;

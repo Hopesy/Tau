@@ -54,6 +54,7 @@ public record StreamOptions
     public int? MaxRetries { get; init; }
     public TimeSpan? WebSocketConnectTimeout { get; init; }
     public IDictionary<string, object>? Metadata { get; init; }
+    public IReadOnlyDictionary<string, string>? Env { get; init; }
 
     internal bool HasExplicitTransport => _transportWasSet;
     internal bool HasExplicitCacheRetention => _cacheRetentionWasSet;

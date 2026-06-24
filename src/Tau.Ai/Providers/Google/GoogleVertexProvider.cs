@@ -165,10 +165,10 @@ public sealed class GoogleVertexProvider : IStreamProvider
         }
 
         var project = GoogleVertexAccessTokenResolver.ResolveProjectId(options) ??
-                      Environment.GetEnvironmentVariable("GOOGLE_CLOUD_PROJECT") ??
-                      Environment.GetEnvironmentVariable("GCLOUD_PROJECT");
+                      ProviderEnvironment.GetValue("GOOGLE_CLOUD_PROJECT", options.Env) ??
+                      ProviderEnvironment.GetValue("GCLOUD_PROJECT", options.Env);
         var location = GoogleVertexAccessTokenResolver.ResolveLocation(options) ??
-                       Environment.GetEnvironmentVariable("GOOGLE_CLOUD_LOCATION");
+                       ProviderEnvironment.GetValue("GOOGLE_CLOUD_LOCATION", options.Env);
         if (string.IsNullOrWhiteSpace(project) || string.IsNullOrWhiteSpace(location))
         {
             throw new InvalidOperationException("Vertex AI requires GOOGLE_CLOUD_PROJECT/GCLOUD_PROJECT and GOOGLE_CLOUD_LOCATION when model.BaseUrl is not set.");

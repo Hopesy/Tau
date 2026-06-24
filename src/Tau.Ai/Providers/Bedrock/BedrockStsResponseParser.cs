@@ -97,12 +97,15 @@ internal static class BedrockStsResponseParser
         }
     }
 
-    public static string ResolveStsEndpoint(string? optionsOverride, string region)
+    public static string ResolveStsEndpoint(
+        string? optionsOverride,
+        string region,
+        IReadOnlyDictionary<string, string>? env = null)
     {
         var overrideEndpoint = FirstNonEmpty(
             optionsOverride,
-            Environment.GetEnvironmentVariable("AWS_ENDPOINT_URL_STS"),
-            Environment.GetEnvironmentVariable("AWS_STS_ENDPOINT_URL"));
+            ProviderEnvironment.GetValue("AWS_ENDPOINT_URL_STS", env),
+            ProviderEnvironment.GetValue("AWS_STS_ENDPOINT_URL", env));
         if (!string.IsNullOrWhiteSpace(overrideEndpoint))
         {
             return overrideEndpoint!;

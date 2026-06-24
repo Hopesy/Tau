@@ -70,6 +70,7 @@ public sealed class BedrockProvider : IStreamProvider
             MaxRetries = options.MaxRetries,
             WebSocketConnectTimeout = options.WebSocketConnectTimeout,
             Metadata = options.Metadata,
+            Env = options.Env,
             Reasoning = model.Reasoning ? options.Reasoning : null,
             ThinkingBudgets = options.ThinkingBudgets
         };
@@ -106,7 +107,7 @@ public sealed class BedrockProvider : IStreamProvider
         ApplyHeaders(request, model.Headers);
         ApplyHeaders(request, options.Headers);
 
-        var skipAuth = string.Equals(Environment.GetEnvironmentVariable("AWS_BEDROCK_SKIP_AUTH"), "1", StringComparison.Ordinal);
+        var skipAuth = string.Equals(ProviderEnvironment.GetValue("AWS_BEDROCK_SKIP_AUTH", options.Env), "1", StringComparison.Ordinal);
         if (!skipAuth)
         {
             var bearerToken = ResolveBearerToken(options);
@@ -192,7 +193,8 @@ public sealed class BedrockProvider : IStreamProvider
             MaxRetryDelay = options.MaxRetryDelay,
             MaxRetries = options.MaxRetries,
             WebSocketConnectTimeout = options.WebSocketConnectTimeout,
-            Metadata = options.Metadata
+            Metadata = options.Metadata,
+            Env = options.Env
         };
     }
 
@@ -207,8 +209,8 @@ public sealed class BedrockProvider : IStreamProvider
 
     private static string ResolveRegion(BedrockOptions options, BedrockProfileSnapshot? profile) => FirstNonEmpty(
         options.Region,
-        Environment.GetEnvironmentVariable("AWS_REGION"),
-        Environment.GetEnvironmentVariable("AWS_DEFAULT_REGION"),
+        ProviderEnvironment.GetValue("AWS_REGION", options.Env),
+        ProviderEnvironment.GetValue("AWS_DEFAULT_REGION", options.Env),
         profile?.Region) ?? "us-east-1";
 
     private static string? ResolveBearerToken(BedrockOptions options)
@@ -223,7 +225,7 @@ public sealed class BedrockProvider : IStreamProvider
             return options.ApiKey;
         }
 
-        return Environment.GetEnvironmentVariable("AWS_BEARER_TOKEN_BEDROCK");
+        return ProviderEnvironment.GetValue("AWS_BEARER_TOKEN_BEDROCK", options.Env);
     }
 
     private async Task<BedrockCredentialResolution> ResolveCredentialsAsync(BedrockOptions options, BedrockProfileSnapshot? profile, string region)
@@ -342,9 +344,9 @@ public sealed class BedrockProvider : IStreamProvider
 
     private static BedrockAwsCredentials? ResolveStaticCredentials(BedrockOptions options, BedrockProfileSnapshot? profile)
     {
-        var accessKeyId = FirstNonEmpty(options.AccessKeyId, Environment.GetEnvironmentVariable("AWS_ACCESS_KEY_ID"));
-        var secretAccessKey = FirstNonEmpty(options.SecretAccessKey, Environment.GetEnvironmentVariable("AWS_SECRET_ACCESS_KEY"));
-        var sessionToken = FirstNonEmpty(options.SessionToken, Environment.GetEnvironmentVariable("AWS_SESSION_TOKEN"));
+        var accessKeyId = FirstNonEmpty(options.AccessKeyId, ProviderEnvironment.GetValue("AWS_ACCESS_KEY_ID", options.Env));
+        var secretAccessKey = FirstNonEmpty(options.SecretAccessKey, ProviderEnvironment.GetValue("AWS_SECRET_ACCESS_KEY", options.Env));
+        var sessionToken = FirstNonEmpty(options.SessionToken, ProviderEnvironment.GetValue("AWS_SESSION_TOKEN", options.Env));
         if (!string.IsNullOrWhiteSpace(accessKeyId) && !string.IsNullOrWhiteSpace(secretAccessKey))
         {
             return new BedrockAwsCredentials(accessKeyId!, secretAccessKey!, sessionToken, Source: "static");
