@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Tau.AgentCore.Harness.Session;
 using Tau.AgentCore.Platform;
 using Tau.AgentCore.Proxy;
 using Tau.AgentCore.Runtime;
@@ -29,6 +30,9 @@ public sealed class AgentPublicApiCompileSampleTests
         };
         var tool = new EchoTool();
         var events = new List<AgentEvent>();
+        var generatedSessionId = UuidV7.Create();
+        Assert.True(Guid.TryParse(generatedSessionId, out _));
+        Assert.Equal('7', generatedSessionId[14]);
 
         var agent = new Tau.AgentCore.Agent(new AgentOptions
         {

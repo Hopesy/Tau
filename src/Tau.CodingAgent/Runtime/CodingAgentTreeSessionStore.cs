@@ -2,6 +2,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.Json.Serialization.Metadata;
+using Tau.AgentCore.Harness.Session;
 using Tau.Ai;
 
 namespace Tau.CodingAgent.Runtime;
@@ -2127,7 +2128,7 @@ public sealed class CodingAgentTreeSessionStore
         return Guid.NewGuid().ToString("N");
     }
 
-    private static string CreateSessionId() => $"{DateTimeOffset.UtcNow:yyyyMMddHHmmss}-{Guid.NewGuid():N}";
+    private static string CreateSessionId() => UuidV7.Create();
 
     private string GetCloneSessionDirectory()
     {

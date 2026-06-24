@@ -53,6 +53,9 @@ public sealed class CodingAgentSessionTargetTests
         Assert.NotNull(target.TreeSessionController);
         Assert.True(target.PreferTreeSession);
         Assert.Equal(Path.GetFullPath(path), target.TreeSessionController!.Path);
+        var sessionId = target.TreeSessionController.GetSummary().SessionId;
+        Assert.True(Guid.TryParse(sessionId, out _));
+        Assert.Equal('7', sessionId[14]);
         Assert.Equal("tree session", snapshot.Name);
         Assert.Equal("openai", snapshot.Provider);
         Assert.Equal("gpt-5.4", snapshot.Model);

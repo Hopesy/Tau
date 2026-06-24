@@ -1,3 +1,5 @@
+using Tau.AgentCore.Harness.Session;
+
 namespace Tau.CodingAgent.Runtime;
 
 internal sealed record CodingAgentSessionTarget(
@@ -199,7 +201,7 @@ internal sealed record CodingAgentSessionTarget(
         string path;
         do
         {
-            path = Path.Combine(directory, $"{DateTimeOffset.UtcNow:yyyyMMddHHmmss}-{Guid.NewGuid():N}.jsonl");
+            path = Path.Combine(directory, $"{UuidV7.Create()}.jsonl");
         }
         while (File.Exists(path));
 

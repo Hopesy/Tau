@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using Tau.AgentCore.Harness;
+using Tau.AgentCore.Harness.Session;
 using Tau.Ai;
 using Tau.CodingAgent.Tools;
 
@@ -3767,7 +3768,7 @@ public static class CodingAgentHtmlSessionExporter
         return Guid.NewGuid().ToString("N");
     }
 
-    private static string CreateSessionId() => $"{DateTimeOffset.UtcNow:yyyyMMddHHmmss}-{Guid.NewGuid():N}";
+    private static string CreateSessionId() => UuidV7.Create();
 
     private static string SanitizeFileName(string value)
     {
