@@ -7,7 +7,7 @@ using Tau.Ai.Streaming;
 
 namespace Tau.Ai.Providers.OpenAiResponses;
 
-public sealed class OpenAiCodexResponsesProvider : IStreamProvider
+public sealed class OpenAiCodexResponsesProvider : IStreamProvider, IDisposable
 {
     private const string DefaultBaseUrl = "https://chatgpt.com/backend-api";
     private const string WebSocketBetaHeader = "responses_websockets=2026-02-06";
@@ -16,6 +16,7 @@ public sealed class OpenAiCodexResponsesProvider : IStreamProvider
     private readonly HttpClient _httpClient;
     private readonly ICodexWebSocketTransport _webSocketTransport;
     private readonly ConcurrentDictionary<string, CachedCodexWebSocketConnection> _webSocketSessionCache = new(StringComparer.Ordinal);
+    private readonly IDisposable _sessionCleanupRegistration;
 
     public OpenAiCodexResponsesProvider(
         HttpClient? httpClient = null,
@@ -23,6 +24,7 @@ public sealed class OpenAiCodexResponsesProvider : IStreamProvider
     {
         _httpClient = httpClient ?? new HttpClient();
         _webSocketTransport = webSocketTransport ?? new ClientCodexWebSocketTransport();
+        _sessionCleanupRegistration = SessionResources.RegisterSessionResourceCleanup(CloseOpenAiCodexWebSocketSessions);
     }
 
     public string Api => "openai-codex-responses";
@@ -412,6 +414,27 @@ public sealed class OpenAiCodexResponsesProvider : IStreamProvider
         });
     }
 
+    public void CloseOpenAiCodexWebSocketSessions(string? sessionId = null)
+    {
+        if (!string.IsNullOrWhiteSpace(sessionId))
+        {
+            if (_webSocketSessionCache.TryRemove(sessionId!, out var entry))
+            {
+                CloseCachedWebSocket(entry, "debug_close");
+            }
+
+            return;
+        }
+
+        foreach (var key in _webSocketSessionCache.Keys)
+        {
+            if (_webSocketSessionCache.TryRemove(key, out var entry))
+            {
+                CloseCachedWebSocket(entry, "debug_close");
+            }
+        }
+    }
+
     private void ScheduleSessionWebSocketExpiry(string sessionId, CachedCodexWebSocketConnection entry)
     {
         entry.IdleTimer?.Dispose();
@@ -547,11 +570,22 @@ public sealed class OpenAiCodexResponsesProvider : IStreamProvider
     private static bool IsWebSocketReusable(ICodexWebSocketConnection connection) =>
         connection.State == System.Net.WebSockets.WebSocketState.Open;
 
-    private static void CloseWebSocketSilently(ICodexWebSocketConnection connection)
+    private static void CloseCachedWebSocket(CachedCodexWebSocketConnection entry, string reason)
+    {
+        lock (entry.SyncRoot)
+        {
+            entry.IdleTimer?.Dispose();
+            entry.IdleTimer = null;
+            entry.Busy = false;
+            CloseWebSocketSilently(entry.Connection, reason);
+        }
+    }
+
+    private static void CloseWebSocketSilently(ICodexWebSocketConnection connection, string reason = "done")
     {
         try
         {
-            connection.CloseAsync(1000, "done").AsTask().GetAwaiter().GetResult();
+            connection.CloseAsync(1000, reason).AsTask().GetAwaiter().GetResult();
             connection.DisposeAsync().AsTask().GetAwaiter().GetResult();
         }
         catch
@@ -562,6 +596,13 @@ public sealed class OpenAiCodexResponsesProvider : IStreamProvider
 
     private static string CreateCodexRequestId() =>
         $"codex_{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}_{Guid.NewGuid():N}"[..36];
+
+    public void Dispose()
+    {
+        _sessionCleanupRegistration.Dispose();
+        CloseOpenAiCodexWebSocketSessions();
+        GC.SuppressFinalize(this);
+    }
 
     private static string ClampCodexReasoningEffort(string modelId, string effort)
     {

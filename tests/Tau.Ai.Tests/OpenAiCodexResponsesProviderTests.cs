@@ -276,6 +276,101 @@ public sealed class OpenAiCodexResponsesProviderTests
         Assert.Equal("resp_2", done.Message.ResponseId);
     }
 
+    [Fact]
+    public async Task Stream_WebSocketTransport_CleanupSessionResourcesClosesCachedSocket()
+    {
+        var connections = new List<FakeCodexWebSocketConnection>();
+        var webSocket = new FakeCodexWebSocketTransport(connectIndex =>
+        {
+            var connection = new FakeCodexWebSocketConnection(sendIndex =>
+            [
+                "{\"type\":\"response.done\",\"response\":{\"id\":\"resp_" + connectIndex + "_" + sendIndex + "\",\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}"
+            ]);
+            connections.Add(connection);
+            return connection;
+        });
+        using var handler = new OpenAiResponsesProviderTests.StubHandler(_ =>
+            throw new InvalidOperationException("SSE fallback should not be used"));
+        using var client = new HttpClient(handler);
+        using var provider = new OpenAiCodexResponsesProvider(client, webSocket);
+        var options = new OpenAiCodexResponsesOptions
+        {
+            ApiKey = OpenAiResponsesSharedTests.BuildFakeJwt("acc_cleanup"),
+            Transport = StreamTransport.WebSocket,
+            SessionId = "session-cleanup"
+        };
+
+        _ = await OpenAiResponsesProviderTests.CollectAsync(provider.Stream(
+            BuildCodexModel(),
+            new LlmContext { Messages = [new UserMessage("first")] },
+            options));
+        SessionResources.CleanupSessionResources("session-cleanup");
+        var secondEvents = await OpenAiResponsesProviderTests.CollectAsync(provider.Stream(
+            BuildCodexModel(),
+            new LlmContext { Messages = [new UserMessage("second")] },
+            options));
+
+        Assert.Equal(2, webSocket.Connects.Count);
+        Assert.Equal(2, connections.Count);
+        Assert.True(connections[0].CloseCalled);
+        Assert.False(connections[1].CloseCalled);
+        var done = Assert.Single(secondEvents.OfType<DoneEvent>());
+        Assert.Equal("resp_2_1", done.Message.ResponseId);
+    }
+
+    [Fact]
+    public void SessionResources_RegisterCleanup_ReturnsUnregisterHandle()
+    {
+        var calls = new List<string?>();
+        var registration = SessionResources.RegisterSessionResourceCleanup(calls.Add);
+
+        SessionResources.CleanupSessionResources("resource-unregister");
+        registration.Dispose();
+        SessionResources.CleanupSessionResources("resource-unregister-again");
+
+        Assert.Equal(["resource-unregister"], calls);
+    }
+
+    [Fact]
+    public void SessionResources_CleanupSessionResources_AggregatesErrorsAndContinues()
+    {
+        var calls = new List<string>();
+        var first = SessionResources.RegisterSessionResourceCleanup(sessionId =>
+        {
+            calls.Add($"first:{sessionId}");
+            throw new InvalidOperationException("first failed");
+        });
+        var second = SessionResources.RegisterSessionResourceCleanup(sessionId =>
+        {
+            calls.Add($"second:{sessionId}");
+            throw new ApplicationException("second failed");
+        });
+        var third = SessionResources.RegisterSessionResourceCleanup(sessionId =>
+        {
+            calls.Add($"third:{sessionId}");
+        });
+
+        try
+        {
+            var error = Assert.Throws<AggregateException>(() =>
+                SessionResources.CleanupSessionResources("resource-aggregate"));
+
+            Assert.StartsWith("Failed to cleanup session resources.", error.Message, StringComparison.Ordinal);
+            Assert.Collection(error.InnerExceptions,
+                firstError => Assert.IsType<InvalidOperationException>(firstError),
+                secondError => Assert.IsType<ApplicationException>(secondError));
+            Assert.Equal(
+                ["first:resource-aggregate", "second:resource-aggregate", "third:resource-aggregate"],
+                calls);
+        }
+        finally
+        {
+            first.Dispose();
+            second.Dispose();
+            third.Dispose();
+        }
+    }
+
     private static Model BuildCodexModel() => new()
     {
         Id = "gpt-5.2-codex",
@@ -289,11 +384,17 @@ public sealed class OpenAiCodexResponsesProviderTests
     private sealed class FakeCodexWebSocketTransport : ICodexWebSocketTransport
     {
         private readonly FakeCodexWebSocketConnection? _connection;
+        private readonly Func<int, FakeCodexWebSocketConnection>? _connectionFactory;
         private readonly Exception? _connectError;
 
         public FakeCodexWebSocketTransport(FakeCodexWebSocketConnection connection)
         {
             _connection = connection;
+        }
+
+        public FakeCodexWebSocketTransport(Func<int, FakeCodexWebSocketConnection> connectionFactory)
+        {
+            _connectionFactory = connectionFactory;
         }
 
         public FakeCodexWebSocketTransport(Exception connectError)
@@ -314,7 +415,8 @@ public sealed class OpenAiCodexResponsesProviderTests
                 throw _connectError;
             }
 
-            return Task.FromResult<ICodexWebSocketConnection>(_connection!);
+            return Task.FromResult<ICodexWebSocketConnection>(
+                _connectionFactory?.Invoke(Connects.Count) ?? _connection!);
         }
     }
 
