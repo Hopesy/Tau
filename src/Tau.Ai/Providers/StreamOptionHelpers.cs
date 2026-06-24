@@ -7,6 +7,8 @@ internal static class StreamOptionHelpers
 {
     public const string AbortedErrorMessage = "Request was aborted";
 
+    public static StreamRequestTimeout CreateRequestTimeout(StreamOptions options) => new(options);
+
     public static void PushAborted(
         AssistantMessageStream stream,
         Model model,
@@ -156,5 +158,41 @@ internal static class StreamOptionHelpers
         {
             target[header.Key] = string.Join(",", header.Value);
         }
+    }
+}
+
+internal sealed class StreamRequestTimeout : IDisposable
+{
+    private readonly CancellationToken _signal;
+    private readonly CancellationTokenSource? _timeoutSource;
+    private readonly CombinedCancellationToken _combined;
+    private readonly TimeSpan _timeout;
+
+    public StreamRequestTimeout(StreamOptions options)
+    {
+        _signal = options.Signal;
+        _timeout = options.Timeout ?? TimeSpan.Zero;
+        if (_timeout <= TimeSpan.Zero)
+        {
+            _combined = CancellationTokenUtilities.Combine(_signal);
+            return;
+        }
+
+        _timeoutSource = new CancellationTokenSource(_timeout);
+        _combined = CancellationTokenUtilities.Combine(_signal, _timeoutSource.Token);
+    }
+
+    public CancellationToken Token => _combined.Token;
+
+    public bool IsTimeoutCancellation =>
+        _timeoutSource?.IsCancellationRequested == true && !_signal.IsCancellationRequested;
+
+    public TimeoutException CreateTimeoutException(OperationCanceledException cause) =>
+        new($"Request timed out after {(int)_timeout.TotalMilliseconds}ms", cause);
+
+    public void Dispose()
+    {
+        _combined.Dispose();
+        _timeoutSource?.Dispose();
     }
 }

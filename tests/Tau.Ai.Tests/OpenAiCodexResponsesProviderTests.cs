@@ -125,6 +125,29 @@ public sealed class OpenAiCodexResponsesProviderTests
     }
 
     [Fact]
+    public async Task Stream_RequestTimeout_EmitsTimeoutError()
+    {
+        using var handler = new BlockingHandler();
+        using var client = new HttpClient(handler);
+        var provider = new OpenAiCodexResponsesProvider(client, null, TimeSpan.FromSeconds(30));
+
+        var events = await OpenAiResponsesProviderTests.CollectAsync(provider.Stream(
+            BuildCodexModel(),
+            new LlmContext { Messages = [new UserMessage("hi")] },
+            new StreamOptions
+            {
+                ApiKey = OpenAiResponsesSharedTests.BuildFakeJwt("acc_request_timeout"),
+                Timeout = TimeSpan.FromMilliseconds(25)
+            }))
+            .WaitAsync(TimeSpan.FromSeconds(5));
+
+        var error = Assert.Single(events.OfType<ErrorEvent>());
+        Assert.Equal("Request timed out after 25ms", error.Error);
+        Assert.Equal(1, handler.Calls);
+        Assert.True(handler.CancellationObserved);
+    }
+
+    [Fact]
     public async Task Stream_MapsIncompleteToMaxTokens()
     {
         using var handler = new OpenAiResponsesProviderTests.StubHandler(_ => OpenAiResponsesProviderTests.SseResponse(
@@ -285,6 +308,35 @@ public sealed class OpenAiCodexResponsesProviderTests
         Assert.Equal("WebSocket connect timeout after 25ms", error.Error);
         Assert.Equal(1, webSocket.Connects);
         Assert.True(webSocket.CancellationObserved);
+        Assert.Empty(handler.Requests);
+    }
+
+    [Fact]
+    public async Task Stream_WebSocketTransport_IdleTimeoutEmitsTimeoutError()
+    {
+        var connection = new IdleCodexWebSocketConnection();
+        var webSocket = new FakeCodexWebSocketTransport(connection);
+        using var handler = new OpenAiResponsesProviderTests.StubHandler(_ =>
+            throw new InvalidOperationException("SSE fallback should not be used"));
+        using var client = new HttpClient(handler);
+        var provider = new OpenAiCodexResponsesProvider(client, webSocket);
+
+        var events = await OpenAiResponsesProviderTests.CollectAsync(provider.Stream(
+            BuildCodexModel(),
+            new LlmContext { Messages = [new UserMessage("hi")] },
+            new OpenAiCodexResponsesOptions
+            {
+                ApiKey = OpenAiResponsesSharedTests.BuildFakeJwt("acc_ws_idle_timeout"),
+                Transport = StreamTransport.WebSocket,
+                Timeout = TimeSpan.FromMilliseconds(25)
+            }))
+            .WaitAsync(TimeSpan.FromSeconds(5));
+
+        var error = Assert.Single(events.OfType<ErrorEvent>());
+        Assert.Equal("WebSocket idle timeout after 25ms", error.Error);
+        Assert.Single(webSocket.Connects);
+        Assert.Single(connection.SentFrames);
+        Assert.Contains("idle_timeout", connection.CloseReasons);
         Assert.Empty(handler.Requests);
     }
 
@@ -519,11 +571,11 @@ public sealed class OpenAiCodexResponsesProviderTests
 
     private sealed class FakeCodexWebSocketTransport : ICodexWebSocketTransport
     {
-        private readonly FakeCodexWebSocketConnection? _connection;
+        private readonly ICodexWebSocketConnection? _connection;
         private readonly Func<int, FakeCodexWebSocketConnection>? _connectionFactory;
         private readonly Exception? _connectError;
 
-        public FakeCodexWebSocketTransport(FakeCodexWebSocketConnection connection)
+        public FakeCodexWebSocketTransport(ICodexWebSocketConnection connection)
         {
             _connection = connection;
         }
@@ -598,6 +650,38 @@ public sealed class OpenAiCodexResponsesProviderTests
         public ValueTask CloseAsync(int statusCode, string reason, CancellationToken cancellationToken = default)
         {
             CloseCalled = true;
+            State = WebSocketState.Closed;
+            return ValueTask.CompletedTask;
+        }
+
+        public ValueTask DisposeAsync()
+        {
+            return ValueTask.CompletedTask;
+        }
+    }
+
+    private sealed class IdleCodexWebSocketConnection : ICodexWebSocketConnection
+    {
+        public WebSocketState State { get; private set; } = WebSocketState.Open;
+        public List<string> SentFrames { get; } = [];
+        public List<string> CloseReasons { get; } = [];
+
+        public Task SendTextAsync(string text, CancellationToken cancellationToken = default)
+        {
+            SentFrames.Add(text);
+            return Task.CompletedTask;
+        }
+
+        public async IAsyncEnumerable<string> ReadTextMessagesAsync(
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+        {
+            await Task.Delay(TimeSpan.FromSeconds(30), cancellationToken).ConfigureAwait(false);
+            yield break;
+        }
+
+        public ValueTask CloseAsync(int statusCode, string reason, CancellationToken cancellationToken = default)
+        {
+            CloseReasons.Add(reason);
             State = WebSocketState.Closed;
             return ValueTask.CompletedTask;
         }

@@ -110,6 +110,7 @@ public sealed class AiPublicApiCompileSampleTests
             Signal = CancellationToken.None,
             OnResponse = (_, _) => ValueTask.CompletedTask,
             Headers = new Dictionary<string, string> { ["x-sample"] = "1" },
+            Timeout = TimeSpan.FromSeconds(10),
             MaxRetries = 2,
             WebSocketConnectTimeout = TimeSpan.FromSeconds(15),
             Metadata = new Dictionary<string, object> { ["source"] = "public-api-sample" }
@@ -181,6 +182,7 @@ public sealed class AiPublicApiCompileSampleTests
         Assert.False(ContextOverflowDetector.IsContextOverflow(result, contextWindow: 128_000));
         Assert.Equal("explicit-sample-key", provider.LastOptions?.ApiKey);
         Assert.Equal("sample-session", provider.LastOptions?.SessionId);
+        Assert.Equal(TimeSpan.FromSeconds(10), provider.LastOptions?.Timeout);
         Assert.Equal(2, provider.LastOptions?.MaxRetries);
         Assert.Equal(TimeSpan.FromSeconds(15), provider.LastOptions?.WebSocketConnectTimeout);
         Assert.Equal("You are a sample.", provider.LastContext?.SystemPrompt);

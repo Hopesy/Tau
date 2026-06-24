@@ -530,6 +530,7 @@ public sealed class ModelConfigurationStore
             Transport: ParseEnum<StreamTransport>(GetString(options, "transport")),
             CacheRetention: ParseEnum<CacheRetention>(GetString(options, "cacheRetention")),
             SessionId: GetString(options, "sessionId"),
+            Timeout: ParseTimeout(options),
             MaxRetryDelay: ParseMaxRetryDelay(options),
             MaxRetries: ParseMaxRetries(options),
             WebSocketConnectTimeout: ParseWebSocketConnectTimeout(options),
@@ -561,6 +562,7 @@ public sealed class ModelConfigurationStore
             Transport: overrideOptions.Transport ?? baseOptions.Transport,
             CacheRetention: overrideOptions.CacheRetention ?? baseOptions.CacheRetention,
             SessionId: overrideOptions.SessionId ?? baseOptions.SessionId,
+            Timeout: overrideOptions.Timeout ?? baseOptions.Timeout,
             MaxRetryDelay: overrideOptions.MaxRetryDelay ?? baseOptions.MaxRetryDelay,
             MaxRetries: overrideOptions.MaxRetries ?? baseOptions.MaxRetries,
             WebSocketConnectTimeout: overrideOptions.WebSocketConnectTimeout ?? baseOptions.WebSocketConnectTimeout,
@@ -695,6 +697,17 @@ public sealed class ModelConfigurationStore
         }
 
         return TimeSpan.FromMilliseconds(Math.Max(0, delayMs.Value));
+    }
+
+    private static TimeSpan? ParseTimeout(JsonElement options)
+    {
+        var timeoutMs = GetInt(options, "timeoutMs");
+        if (timeoutMs is null)
+        {
+            return null;
+        }
+
+        return TimeSpan.FromMilliseconds(Math.Max(0, timeoutMs.Value));
     }
 
     private static int? ParseMaxRetries(JsonElement options)
@@ -1214,6 +1227,7 @@ internal sealed record ModelRequestOptionsConfiguration(
     StreamTransport? Transport,
     CacheRetention? CacheRetention,
     string? SessionId,
+    TimeSpan? Timeout,
     TimeSpan? MaxRetryDelay,
     int? MaxRetries,
     TimeSpan? WebSocketConnectTimeout,
@@ -1224,6 +1238,7 @@ internal sealed record ModelRequestOptionsConfiguration(
     ModelProviderSpecificOptionsConfiguration? ProviderSpecific)
 {
     public static ModelRequestOptionsConfiguration Empty { get; } = new(
+        null,
         null,
         null,
         null,

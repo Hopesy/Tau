@@ -102,41 +102,49 @@ public sealed class GoogleProvider : IStreamProvider
             foreach (var (key, value) in options.Headers)
                 request.Headers.TryAddWithoutValidation(key, value);
 
-        using var response = await _httpClient.SendAsync(
-            request, HttpCompletionOption.ResponseHeadersRead, options.Signal).ConfigureAwait(false);
-        await StreamOptionHelpers.InvokeResponseCallbackAsync(options, model, response).ConfigureAwait(false);
-
-        if (!response.IsSuccessStatusCode)
+        using var requestTimeout = StreamOptionHelpers.CreateRequestTimeout(options);
+        try
         {
-            var errorBody = await response.Content.ReadAsStringAsync(options.Signal).ConfigureAwait(false);
-            stream.Push(new ErrorEvent($"Google API error {(int)response.StatusCode}: {errorBody}"));
-            return;
-        }
+            using var response = await _httpClient.SendAsync(
+                request, HttpCompletionOption.ResponseHeadersRead, requestTimeout.Token).ConfigureAwait(false);
+            await StreamOptionHelpers.InvokeResponseCallbackAsync(options, model, response).ConfigureAwait(false);
 
-        await using var responseStream = await response.Content.ReadAsStreamAsync(options.Signal).ConfigureAwait(false);
-
-        var initial = new AssistantMessage
-        {
-            Api = Api,
-            Provider = model.Provider,
-            Model = model.Id,
-            Content = []
-        };
-
-        var parser = new GoogleStreamParser(initial, stream);
-        parser.EmitStart();
-
-        await foreach (var sse in SseParser.ParseAsync(responseStream, options.Signal))
-        {
-            if (string.IsNullOrEmpty(sse.Data))
-                continue;
-            if (parser.ParseChunk(sse.Data))
+            if (!response.IsSuccessStatusCode)
             {
+                var errorBody = await response.Content.ReadAsStringAsync(requestTimeout.Token).ConfigureAwait(false);
+                stream.Push(new ErrorEvent($"Google API error {(int)response.StatusCode}: {errorBody}"));
                 return;
             }
-        }
 
-        parser.EmitDone();
+            await using var responseStream = await response.Content.ReadAsStreamAsync(requestTimeout.Token).ConfigureAwait(false);
+
+            var initial = new AssistantMessage
+            {
+                Api = Api,
+                Provider = model.Provider,
+                Model = model.Id,
+                Content = []
+            };
+
+            var parser = new GoogleStreamParser(initial, stream);
+            parser.EmitStart();
+
+            await foreach (var sse in SseParser.ParseAsync(responseStream, requestTimeout.Token))
+            {
+                if (string.IsNullOrEmpty(sse.Data))
+                    continue;
+                if (parser.ParseChunk(sse.Data))
+                {
+                    return;
+                }
+            }
+
+            parser.EmitDone();
+        }
+        catch (OperationCanceledException ex) when (requestTimeout.IsTimeoutCancellation)
+        {
+            throw requestTimeout.CreateTimeoutException(ex);
+        }
     }
 
     private static Dictionary<string, object> BuildRequestBody(

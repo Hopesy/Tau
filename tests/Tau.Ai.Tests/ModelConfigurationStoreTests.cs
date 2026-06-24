@@ -338,6 +338,7 @@ public sealed class ModelConfigurationStoreTests
                         "transport": "websocket",
                         "cacheRetention": "long",
                         "sessionId": "provider-session",
+                        "timeoutMs": 900,
                         "maxRetryDelayMs": 2500,
                         "maxRetries": 2,
                         "websocketConnectTimeoutMs": 1500,
@@ -421,6 +422,7 @@ public sealed class ModelConfigurationStoreTests
             Assert.Equal(StreamTransport.WebSocket, options.Transport);
             Assert.Equal(CacheRetention.Long, options.CacheRetention);
             Assert.Equal("model-session", options.SessionId);
+            Assert.Equal(TimeSpan.FromMilliseconds(900), options.Timeout);
             Assert.Equal(TimeSpan.FromMilliseconds(2500), options.MaxRetryDelay);
             Assert.Equal(2, options.MaxRetries);
             Assert.Equal(TimeSpan.FromMilliseconds(1500), options.WebSocketConnectTimeout);
@@ -463,6 +465,7 @@ public sealed class ModelConfigurationStoreTests
                         "transport": "websocket",
                         "cacheRetention": "long",
                         "sessionId": "provider-session",
+                        "timeoutMs": 900,
                         "maxRetryDelayMs": 2500,
                         "maxRetries": 2,
                         "websocketConnectTimeoutMs": 1500,
@@ -519,6 +522,7 @@ public sealed class ModelConfigurationStoreTests
                     Transport = StreamTransport.Sse,
                     CacheRetention = CacheRetention.None,
                     SessionId = "explicit-session",
+                    Timeout = TimeSpan.FromMilliseconds(42),
                     MaxRetryDelay = TimeSpan.Zero,
                     MaxRetries = 4,
                     WebSocketConnectTimeout = TimeSpan.FromMilliseconds(42),
@@ -540,6 +544,7 @@ public sealed class ModelConfigurationStoreTests
             Assert.Equal(StreamTransport.Sse, options.Transport);
             Assert.Equal(CacheRetention.None, options.CacheRetention);
             Assert.Equal("explicit-session", options.SessionId);
+            Assert.Equal(TimeSpan.FromMilliseconds(42), options.Timeout);
             Assert.Equal(TimeSpan.Zero, options.MaxRetryDelay);
             Assert.Equal(4, options.MaxRetries);
             Assert.Equal(TimeSpan.FromMilliseconds(42), options.WebSocketConnectTimeout);

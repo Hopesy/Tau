@@ -203,49 +203,57 @@ public sealed class GoogleGeminiCliProvider : IStreamProvider
             BuildRequestBody(model, context, projectId, options, reasoning, isAntigravity)).ConfigureAwait(false);
         var json = JsonSerializer.Serialize(body, GoogleGeminiCliRequestJsonContext.Default.DictionaryStringObject);
 
-        using var responseWithEndpoint = await SendWithRetryAsync(
-            model,
-            options,
-            credentials.Token,
-            endpoints,
-            json,
-            isAntigravity,
-            options.Signal).ConfigureAwait(false);
-        var initial = new AssistantMessage
+        using var requestTimeout = StreamOptionHelpers.CreateRequestTimeout(options);
+        try
         {
-            Api = Api,
-            Provider = model.Provider,
-            Model = model.Id,
-            Content = []
-        };
-
-        for (var emptyAttempt = 0; emptyAttempt <= MaxEmptyStreamRetries; emptyAttempt++)
-        {
-            var activeResponse = emptyAttempt == 0
-                ? responseWithEndpoint.Response
-                : await SendSingleAsync(
-                    model,
-                    options,
-                    credentials.Token,
-                    responseWithEndpoint.Endpoint,
-                    json,
-                    isAntigravity,
-                    options.Signal).ConfigureAwait(false);
-
-            await StreamOptionHelpers.InvokeResponseCallbackAsync(options, model, activeResponse).ConfigureAwait(false);
-            var emitted = await ParseResponseAsync(activeResponse, stream, initial, options.Signal).ConfigureAwait(false);
-            if (activeResponse != responseWithEndpoint.Response)
+            using var responseWithEndpoint = await SendWithRetryAsync(
+                model,
+                options,
+                credentials.Token,
+                endpoints,
+                json,
+                isAntigravity,
+                requestTimeout.Token).ConfigureAwait(false);
+            var initial = new AssistantMessage
             {
-                activeResponse.Dispose();
+                Api = Api,
+                Provider = model.Provider,
+                Model = model.Id,
+                Content = []
+            };
+
+            for (var emptyAttempt = 0; emptyAttempt <= MaxEmptyStreamRetries; emptyAttempt++)
+            {
+                var activeResponse = emptyAttempt == 0
+                    ? responseWithEndpoint.Response
+                    : await SendSingleAsync(
+                        model,
+                        options,
+                        credentials.Token,
+                        responseWithEndpoint.Endpoint,
+                        json,
+                        isAntigravity,
+                        requestTimeout.Token).ConfigureAwait(false);
+
+                await StreamOptionHelpers.InvokeResponseCallbackAsync(options, model, activeResponse).ConfigureAwait(false);
+                var emitted = await ParseResponseAsync(activeResponse, stream, initial, requestTimeout.Token).ConfigureAwait(false);
+                if (activeResponse != responseWithEndpoint.Response)
+                {
+                    activeResponse.Dispose();
+                }
+
+                if (emitted)
+                {
+                    return;
+                }
             }
 
-            if (emitted)
-            {
-                return;
-            }
+            stream.Push(new ErrorEvent("Cloud Code Assist API returned an empty response."));
         }
-
-        stream.Push(new ErrorEvent("Cloud Code Assist API returned an empty response."));
+        catch (OperationCanceledException ex) when (requestTimeout.IsTimeoutCancellation)
+        {
+            throw requestTimeout.CreateTimeoutException(ex);
+        }
     }
 
     private async Task<GeminiCliResponse> SendWithRetryAsync(

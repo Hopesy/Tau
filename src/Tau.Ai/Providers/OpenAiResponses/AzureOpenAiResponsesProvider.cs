@@ -54,6 +54,7 @@ public sealed class AzureOpenAiResponsesProvider : IStreamProvider
             CacheRetention = options.CacheRetention,
             SessionId = options.SessionId,
             Headers = options.Headers,
+            Timeout = options.Timeout,
             MaxRetryDelay = options.MaxRetryDelay,
             MaxRetries = options.MaxRetries,
             WebSocketConnectTimeout = options.WebSocketConnectTimeout,
@@ -93,30 +94,41 @@ public sealed class AzureOpenAiResponsesProvider : IStreamProvider
         ApplyHeaders(request, options.Headers);
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
 
-        using var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, options.Signal).ConfigureAwait(false);
-        await StreamOptionHelpers.InvokeResponseCallbackAsync(options, model, response).ConfigureAwait(false);
-        if (!response.IsSuccessStatusCode)
+        using var requestTimeout = StreamOptionHelpers.CreateRequestTimeout(options);
+        try
         {
-            var errorBody = await response.Content.ReadAsStringAsync(options.Signal).ConfigureAwait(false);
-            stream.Push(new ErrorEvent($"{Api} error {(int)response.StatusCode}: {errorBody}"));
-            return;
+            using var response = await _httpClient.SendAsync(
+                request,
+                HttpCompletionOption.ResponseHeadersRead,
+                requestTimeout.Token).ConfigureAwait(false);
+            await StreamOptionHelpers.InvokeResponseCallbackAsync(options, model, response).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode)
+            {
+                var errorBody = await response.Content.ReadAsStringAsync(requestTimeout.Token).ConfigureAwait(false);
+                stream.Push(new ErrorEvent($"{Api} error {(int)response.StatusCode}: {errorBody}"));
+                return;
+            }
+
+            var partial = new AssistantMessage
+            {
+                Api = Api,
+                Provider = model.Provider,
+                Model = model.Id,
+                Content = []
+            };
+            stream.Push(new StartEvent(partial));
+
+            await using var responseStream = await response.Content.ReadAsStreamAsync(requestTimeout.Token).ConfigureAwait(false);
+            await OpenAiResponsesShared.ProcessResponsesStreamAsync(
+                responseStream,
+                partial,
+                stream,
+                cancellationToken: requestTimeout.Token).ConfigureAwait(false);
         }
-
-        var partial = new AssistantMessage
+        catch (OperationCanceledException ex) when (requestTimeout.IsTimeoutCancellation)
         {
-            Api = Api,
-            Provider = model.Provider,
-            Model = model.Id,
-            Content = []
-        };
-        stream.Push(new StartEvent(partial));
-
-        await using var responseStream = await response.Content.ReadAsStreamAsync(options.Signal).ConfigureAwait(false);
-        await OpenAiResponsesShared.ProcessResponsesStreamAsync(
-            responseStream,
-            partial,
-            stream,
-            cancellationToken: options.Signal).ConfigureAwait(false);
+            throw requestTimeout.CreateTimeoutException(ex);
+        }
     }
 
     private static Dictionary<string, object> BuildRequestBody(

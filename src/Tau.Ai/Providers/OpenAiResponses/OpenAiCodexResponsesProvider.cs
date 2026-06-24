@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Net.Http.Headers;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
@@ -82,6 +83,7 @@ public sealed class OpenAiCodexResponsesProvider : IStreamProvider, IDisposable
             CacheRetention = options.CacheRetention,
             SessionId = options.SessionId,
             Headers = options.Headers,
+            Timeout = options.Timeout,
             MaxRetryDelay = options.MaxRetryDelay,
             MaxRetries = options.MaxRetries,
             WebSocketConnectTimeout = options.WebSocketConnectTimeout,
@@ -158,61 +160,69 @@ public sealed class OpenAiCodexResponsesProvider : IStreamProvider, IDisposable
             }
         }
 
-        HttpResponseMessage? response = null;
-        string? lastError = null;
-        var maxRetries = Math.Max(0, options.MaxRetries ?? DefaultMaxRetries);
-        for (var attempt = 0; attempt <= maxRetries; attempt++)
+        using var requestTimeout = StreamOptionHelpers.CreateRequestTimeout(options);
+        try
         {
-            using var request = new HttpRequestMessage(HttpMethod.Post, url)
+            HttpResponseMessage? response = null;
+            string? lastError = null;
+            var maxRetries = Math.Max(0, options.MaxRetries ?? DefaultMaxRetries);
+            for (var attempt = 0; attempt <= maxRetries; attempt++)
             {
-                Content = new StringContent(bodyJson, Encoding.UTF8, "application/json")
-            };
-            ApplyCodexHeaders(request, model, options, accountId);
-            response = await SendSseRequestAsync(request, options).ConfigureAwait(false);
-            if (response.IsSuccessStatusCode)
-            {
-                break;
+                using var request = new HttpRequestMessage(HttpMethod.Post, url)
+                {
+                    Content = new StringContent(bodyJson, Encoding.UTF8, "application/json")
+                };
+                ApplyCodexHeaders(request, model, options, accountId);
+                response = await SendSseRequestAsync(request, options, requestTimeout).ConfigureAwait(false);
+                if (response.IsSuccessStatusCode)
+                {
+                    break;
+                }
+
+                lastError = await response.Content.ReadAsStringAsync(requestTimeout.Token).ConfigureAwait(false);
+                if (attempt == maxRetries || !OpenAiResponsesShared.IsRetryableError((int)response.StatusCode, lastError))
+                {
+                    stream.Push(new ErrorEvent($"{Api} error {(int)response.StatusCode}: {lastError}"));
+                    return;
+                }
+
+                response.Dispose();
+                await Task.Delay(GetRetryDelay(options, attempt), requestTimeout.Token).ConfigureAwait(false);
             }
 
-            lastError = await response.Content.ReadAsStringAsync(options.Signal).ConfigureAwait(false);
-            if (attempt == maxRetries || !OpenAiResponsesShared.IsRetryableError((int)response.StatusCode, lastError))
+            if (response is null)
             {
-                stream.Push(new ErrorEvent($"{Api} error {(int)response.StatusCode}: {lastError}"));
+                stream.Push(new ErrorEvent(lastError ?? "Codex Responses request failed."));
                 return;
             }
 
-            response.Dispose();
-            await Task.Delay(GetRetryDelay(options, attempt), options.Signal).ConfigureAwait(false);
-        }
-
-        if (response is null)
-        {
-            stream.Push(new ErrorEvent(lastError ?? "Codex Responses request failed."));
-            return;
-        }
-
-        using (response)
-        {
-            await StreamOptionHelpers.InvokeResponseCallbackAsync(options, model, response).ConfigureAwait(false);
-            var partial = new AssistantMessage
+            using (response)
             {
-                Api = Api,
-                Provider = model.Provider,
-                Model = model.Id,
-                Diagnostics = diagnostics,
-                Content = []
-            };
-            stream.Push(new StartEvent(partial));
+                await StreamOptionHelpers.InvokeResponseCallbackAsync(options, model, response).ConfigureAwait(false);
+                var partial = new AssistantMessage
+                {
+                    Api = Api,
+                    Provider = model.Provider,
+                    Model = model.Id,
+                    Diagnostics = diagnostics,
+                    Content = []
+                };
+                stream.Push(new StartEvent(partial));
 
-            await using var responseStream = await response.Content.ReadAsStreamAsync(options.Signal).ConfigureAwait(false);
-            await OpenAiResponsesShared.ProcessResponsesStreamAsync(
-                responseStream,
-                partial,
-                stream,
-                OpenAiResponsesShared.MapCodexEvent,
-                requestedServiceTier: (options as OpenAiCodexResponsesOptions)?.ServiceTier,
-                resolveServiceTier: ResolveCodexServiceTier,
-                cancellationToken: options.Signal).ConfigureAwait(false);
+                await using var responseStream = await response.Content.ReadAsStreamAsync(requestTimeout.Token).ConfigureAwait(false);
+                await OpenAiResponsesShared.ProcessResponsesStreamAsync(
+                    responseStream,
+                    partial,
+                    stream,
+                    OpenAiResponsesShared.MapCodexEvent,
+                    requestedServiceTier: (options as OpenAiCodexResponsesOptions)?.ServiceTier,
+                    resolveServiceTier: ResolveCodexServiceTier,
+                    cancellationToken: requestTimeout.Token).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException ex) when (requestTimeout.IsTimeoutCancellation)
+        {
+            throw requestTimeout.CreateTimeoutException(ex);
         }
     }
 
@@ -269,10 +279,13 @@ public sealed class OpenAiCodexResponsesProvider : IStreamProvider, IDisposable
         return body;
     }
 
-    private async Task<HttpResponseMessage> SendSseRequestAsync(HttpRequestMessage request, StreamOptions options)
+    private async Task<HttpResponseMessage> SendSseRequestAsync(
+        HttpRequestMessage request,
+        StreamOptions options,
+        StreamRequestTimeout requestTimeout)
     {
         using var headerTimeoutSource = new CancellationTokenSource(_sseHeaderTimeout);
-        using var combined = CancellationTokenUtilities.Combine(options.Signal, headerTimeoutSource.Token);
+        using var combined = CancellationTokenUtilities.Combine(requestTimeout.Token, headerTimeoutSource.Token);
 
         try
         {
@@ -287,6 +300,10 @@ public sealed class OpenAiCodexResponsesProvider : IStreamProvider, IDisposable
             throw new TimeoutException(
                 $"Codex SSE response headers timed out after {(int)_sseHeaderTimeout.TotalMilliseconds}ms",
                 ex);
+        }
+        catch (OperationCanceledException ex) when (requestTimeout.IsTimeoutCancellation)
+        {
+            throw requestTimeout.CreateTimeoutException(ex);
         }
     }
 
@@ -370,7 +387,7 @@ public sealed class OpenAiCodexResponsesProvider : IStreamProvider, IDisposable
             stream.Push(new StartEvent(partial));
 
             var completed = await OpenAiResponsesShared.ProcessResponsesJsonEventsAsync(
-                lease.Connection.ReadTextMessagesAsync(options.Signal),
+                ReadTextMessagesWithIdleTimeoutAsync(lease.Connection, options.Timeout, options.Signal),
                 partial,
                 stream,
                 OpenAiResponsesShared.MapCodexEvent,
@@ -392,6 +409,57 @@ public sealed class OpenAiCodexResponsesProvider : IStreamProvider, IDisposable
         finally
         {
             Release(keepConnection);
+        }
+    }
+
+    private static async IAsyncEnumerable<string> ReadTextMessagesWithIdleTimeoutAsync(
+        ICodexWebSocketConnection connection,
+        TimeSpan? idleTimeout,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        if (idleTimeout is null || idleTimeout <= TimeSpan.Zero)
+        {
+            await foreach (var message in connection.ReadTextMessagesAsync(cancellationToken).WithCancellation(cancellationToken))
+            {
+                yield return message;
+            }
+
+            yield break;
+        }
+
+        using var idleTimeoutSource = new CancellationTokenSource();
+        using var combined = CancellationTokenUtilities.Combine(cancellationToken, idleTimeoutSource.Token);
+        await using var enumerator = connection.ReadTextMessagesAsync(combined.Token).GetAsyncEnumerator(combined.Token);
+        while (true)
+        {
+            idleTimeoutSource.CancelAfter(idleTimeout.Value);
+            bool hasNext;
+            try
+            {
+                hasNext = await enumerator.MoveNextAsync().ConfigureAwait(false);
+            }
+            catch (OperationCanceledException ex)
+                when (idleTimeoutSource.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+            {
+                await CloseWebSocketSilentlyAsync(connection, "idle_timeout").ConfigureAwait(false);
+                throw new TimeoutException(
+                    $"WebSocket idle timeout after {(int)idleTimeout.Value.TotalMilliseconds}ms",
+                    ex);
+            }
+            finally
+            {
+                if (!idleTimeoutSource.IsCancellationRequested)
+                {
+                    idleTimeoutSource.CancelAfter(Timeout.InfiniteTimeSpan);
+                }
+            }
+
+            if (!hasNext)
+            {
+                yield break;
+            }
+
+            yield return enumerator.Current;
         }
     }
 
@@ -707,6 +775,19 @@ public sealed class OpenAiCodexResponsesProvider : IStreamProvider, IDisposable
         {
             connection.CloseAsync(1000, reason).AsTask().GetAwaiter().GetResult();
             connection.DisposeAsync().AsTask().GetAwaiter().GetResult();
+        }
+        catch
+        {
+            // Best effort cleanup.
+        }
+    }
+
+    private static async ValueTask CloseWebSocketSilentlyAsync(ICodexWebSocketConnection connection, string reason = "done")
+    {
+        try
+        {
+            await connection.CloseAsync(1000, reason).ConfigureAwait(false);
+            await connection.DisposeAsync().ConfigureAwait(false);
         }
         catch
         {

@@ -49,6 +49,7 @@ public record StreamOptions
     }
     public string? SessionId { get; init; }
     public IDictionary<string, string>? Headers { get; init; }
+    public TimeSpan? Timeout { get; init; }
     public TimeSpan? MaxRetryDelay { get; init; }
     public int? MaxRetries { get; init; }
     public TimeSpan? WebSocketConnectTimeout { get; init; }

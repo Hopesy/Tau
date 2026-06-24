@@ -83,42 +83,53 @@ internal sealed class OpenAiCompatibleProvider : IStreamProvider
         ApplyHeaders(request, model.Headers);
         ApplyHeaders(request, options.Headers);
 
-        using var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, options.Signal).ConfigureAwait(false);
-        await StreamOptionHelpers.InvokeResponseCallbackAsync(options, model, response).ConfigureAwait(false);
-        if (!response.IsSuccessStatusCode)
+        using var requestTimeout = StreamOptionHelpers.CreateRequestTimeout(options);
+        try
         {
-            var errorBody = await response.Content.ReadAsStringAsync(options.Signal).ConfigureAwait(false);
-            stream.Push(new ErrorEvent($"{_api} error {(int)response.StatusCode}: {errorBody}"));
-            return;
-        }
-
-        await using var responseStream = await response.Content.ReadAsStreamAsync(options.Signal).ConfigureAwait(false);
-
-        var partial = new AssistantMessage
-        {
-            Api = _api,
-            Provider = model.Provider,
-            Model = model.Id,
-            Content = []
-        };
-        stream.Push(new StartEvent(partial));
-
-        var toolCallAccumulators = new Dictionary<int, OpenAi.OpenAiStreamParser.ToolCallAccumulator>();
-        var contentIndex = 0;
-
-        await foreach (var sse in SseParser.ParseAsync(responseStream, options.Signal))
-        {
-            if (sse.Data == "[DONE]")
+            using var response = await _httpClient.SendAsync(
+                request,
+                HttpCompletionOption.ResponseHeadersRead,
+                requestTimeout.Token).ConfigureAwait(false);
+            await StreamOptionHelpers.InvokeResponseCallbackAsync(options, model, response).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode)
             {
-                break;
+                var errorBody = await response.Content.ReadAsStringAsync(requestTimeout.Token).ConfigureAwait(false);
+                stream.Push(new ErrorEvent($"{_api} error {(int)response.StatusCode}: {errorBody}"));
+                return;
             }
 
-            OpenAi.OpenAiStreamParser.ParseChunk(
-                sse.Data,
-                stream,
-                ref partial,
-                ref toolCallAccumulators,
-                ref contentIndex);
+            await using var responseStream = await response.Content.ReadAsStreamAsync(requestTimeout.Token).ConfigureAwait(false);
+
+            var partial = new AssistantMessage
+            {
+                Api = _api,
+                Provider = model.Provider,
+                Model = model.Id,
+                Content = []
+            };
+            stream.Push(new StartEvent(partial));
+
+            var toolCallAccumulators = new Dictionary<int, OpenAi.OpenAiStreamParser.ToolCallAccumulator>();
+            var contentIndex = 0;
+
+            await foreach (var sse in SseParser.ParseAsync(responseStream, requestTimeout.Token))
+            {
+                if (sse.Data == "[DONE]")
+                {
+                    break;
+                }
+
+                OpenAi.OpenAiStreamParser.ParseChunk(
+                    sse.Data,
+                    stream,
+                    ref partial,
+                    ref toolCallAccumulators,
+                    ref contentIndex);
+            }
+        }
+        catch (OperationCanceledException ex) when (requestTimeout.IsTimeoutCancellation)
+        {
+            throw requestTimeout.CreateTimeoutException(ex);
         }
     }
 
