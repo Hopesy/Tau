@@ -532,6 +532,7 @@ public sealed class ModelConfigurationStore
             SessionId: GetString(options, "sessionId"),
             MaxRetryDelay: ParseMaxRetryDelay(options),
             MaxRetries: ParseMaxRetries(options),
+            WebSocketConnectTimeout: ParseWebSocketConnectTimeout(options),
             Headers: ResolveHeaders(ParseRequestOptionHeaders(element)),
             Metadata: ParseObjectDictionary(options, "metadata"),
             Reasoning: ParseEnum<ThinkingLevel>(GetString(options, "reasoning")),
@@ -562,6 +563,7 @@ public sealed class ModelConfigurationStore
             SessionId: overrideOptions.SessionId ?? baseOptions.SessionId,
             MaxRetryDelay: overrideOptions.MaxRetryDelay ?? baseOptions.MaxRetryDelay,
             MaxRetries: overrideOptions.MaxRetries ?? baseOptions.MaxRetries,
+            WebSocketConnectTimeout: overrideOptions.WebSocketConnectTimeout ?? baseOptions.WebSocketConnectTimeout,
             Headers: MergeHeaders(baseOptions.Headers, overrideOptions.Headers),
             Metadata: MergeObjectDictionaries(baseOptions.Metadata, overrideOptions.Metadata),
             Reasoning: overrideOptions.Reasoning ?? baseOptions.Reasoning,
@@ -699,6 +701,17 @@ public sealed class ModelConfigurationStore
     {
         var retries = GetInt(options, "maxRetries");
         return retries is null ? null : Math.Max(0, retries.Value);
+    }
+
+    private static TimeSpan? ParseWebSocketConnectTimeout(JsonElement options)
+    {
+        var timeoutMs = GetInt(options, "websocketConnectTimeoutMs");
+        if (timeoutMs is null)
+        {
+            return null;
+        }
+
+        return TimeSpan.FromMilliseconds(Math.Max(0, timeoutMs.Value));
     }
 
     private static ThinkingBudgets? ParseThinkingBudgets(JsonElement options)
@@ -1203,6 +1216,7 @@ internal sealed record ModelRequestOptionsConfiguration(
     string? SessionId,
     TimeSpan? MaxRetryDelay,
     int? MaxRetries,
+    TimeSpan? WebSocketConnectTimeout,
     IDictionary<string, string>? Headers,
     IDictionary<string, object>? Metadata,
     ThinkingLevel? Reasoning,
@@ -1210,6 +1224,7 @@ internal sealed record ModelRequestOptionsConfiguration(
     ModelProviderSpecificOptionsConfiguration? ProviderSpecific)
 {
     public static ModelRequestOptionsConfiguration Empty { get; } = new(
+        null,
         null,
         null,
         null,

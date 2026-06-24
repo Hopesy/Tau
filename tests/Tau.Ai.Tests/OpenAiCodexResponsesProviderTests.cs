@@ -262,6 +262,33 @@ public sealed class OpenAiCodexResponsesProviderTests
     }
 
     [Fact]
+    public async Task Stream_WebSocketTransport_ConnectTimeoutEmitsTimeoutError()
+    {
+        var webSocket = new SlowCodexWebSocketTransport();
+        using var handler = new OpenAiResponsesProviderTests.StubHandler(_ =>
+            throw new InvalidOperationException("SSE fallback should not be used"));
+        using var client = new HttpClient(handler);
+        var provider = new OpenAiCodexResponsesProvider(client, webSocket);
+
+        var events = await OpenAiResponsesProviderTests.CollectAsync(provider.Stream(
+            BuildCodexModel(),
+            new LlmContext { Messages = [new UserMessage("hi")] },
+            new OpenAiCodexResponsesOptions
+            {
+                ApiKey = OpenAiResponsesSharedTests.BuildFakeJwt("acc_ws_timeout"),
+                Transport = StreamTransport.WebSocket,
+                WebSocketConnectTimeout = TimeSpan.FromMilliseconds(25)
+            }))
+            .WaitAsync(TimeSpan.FromSeconds(5));
+
+        var error = Assert.Single(events.OfType<ErrorEvent>());
+        Assert.Equal("WebSocket connect timeout after 25ms", error.Error);
+        Assert.Equal(1, webSocket.Connects);
+        Assert.True(webSocket.CancellationObserved);
+        Assert.Empty(handler.Requests);
+    }
+
+    [Fact]
     public async Task Stream_AutoTransport_FallsBackToSseWhenWebSocketFailsBeforeStart()
     {
         var webSocket = new FakeCodexWebSocketTransport(new InvalidOperationException("websocket unavailable"));
@@ -462,6 +489,31 @@ public sealed class OpenAiCodexResponsesProviderTests
             }
 
             throw new InvalidOperationException("Blocking handler should only exit through cancellation.");
+        }
+    }
+
+    private sealed class SlowCodexWebSocketTransport : ICodexWebSocketTransport
+    {
+        public int Connects { get; private set; }
+        public bool CancellationObserved { get; private set; }
+
+        public async Task<ICodexWebSocketConnection> ConnectAsync(
+            Uri url,
+            IReadOnlyDictionary<string, string> headers,
+            CancellationToken cancellationToken = default)
+        {
+            Connects++;
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(30), cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                CancellationObserved = true;
+                throw;
+            }
+
+            throw new InvalidOperationException("Slow WebSocket transport should only exit through cancellation.");
         }
     }
 

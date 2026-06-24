@@ -51,6 +51,7 @@ public record StreamOptions
     public IDictionary<string, string>? Headers { get; init; }
     public TimeSpan? MaxRetryDelay { get; init; }
     public int? MaxRetries { get; init; }
+    public TimeSpan? WebSocketConnectTimeout { get; init; }
     public IDictionary<string, object>? Metadata { get; init; }
 
     internal bool HasExplicitTransport => _transportWasSet;

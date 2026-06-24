@@ -67,6 +67,7 @@ public sealed class BedrockProvider : IStreamProvider
             Headers = options.Headers,
             MaxRetryDelay = options.MaxRetryDelay,
             MaxRetries = options.MaxRetries,
+            WebSocketConnectTimeout = options.WebSocketConnectTimeout,
             Metadata = options.Metadata,
             Reasoning = model.Reasoning ? options.Reasoning : null,
             ThinkingBudgets = options.ThinkingBudgets
@@ -177,6 +178,7 @@ public sealed class BedrockProvider : IStreamProvider
             Headers = options.Headers,
             MaxRetryDelay = options.MaxRetryDelay,
             MaxRetries = options.MaxRetries,
+            WebSocketConnectTimeout = options.WebSocketConnectTimeout,
             Metadata = options.Metadata
         };
     }

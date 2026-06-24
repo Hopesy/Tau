@@ -340,6 +340,7 @@ public sealed class ModelConfigurationStoreTests
                         "sessionId": "provider-session",
                         "maxRetryDelayMs": 2500,
                         "maxRetries": 2,
+                        "websocketConnectTimeoutMs": 1500,
                         "headers": {
                           "X-Provider-Option": "provider-option",
                           "X-Option-Shared": "provider-option"
@@ -422,6 +423,7 @@ public sealed class ModelConfigurationStoreTests
             Assert.Equal("model-session", options.SessionId);
             Assert.Equal(TimeSpan.FromMilliseconds(2500), options.MaxRetryDelay);
             Assert.Equal(2, options.MaxRetries);
+            Assert.Equal(TimeSpan.FromMilliseconds(1500), options.WebSocketConnectTimeout);
             Assert.Equal("provider-option", options.Headers!["X-Provider-Option"]);
             Assert.Equal("override-option", options.Headers["X-Override-Option"]);
             Assert.Equal("model-option", options.Headers["X-Model-Option"]);
@@ -463,6 +465,7 @@ public sealed class ModelConfigurationStoreTests
                         "sessionId": "provider-session",
                         "maxRetryDelayMs": 2500,
                         "maxRetries": 2,
+                        "websocketConnectTimeoutMs": 1500,
                         "reasoning": "xhigh",
                         "thinkingBudgets": {
                           "minimal": 100,
@@ -518,6 +521,7 @@ public sealed class ModelConfigurationStoreTests
                     SessionId = "explicit-session",
                     MaxRetryDelay = TimeSpan.Zero,
                     MaxRetries = 4,
+                    WebSocketConnectTimeout = TimeSpan.FromMilliseconds(42),
                     Metadata = new Dictionary<string, object>
                     {
                         ["shared"] = "explicit"
@@ -538,6 +542,7 @@ public sealed class ModelConfigurationStoreTests
             Assert.Equal("explicit-session", options.SessionId);
             Assert.Equal(TimeSpan.Zero, options.MaxRetryDelay);
             Assert.Equal(4, options.MaxRetries);
+            Assert.Equal(TimeSpan.FromMilliseconds(42), options.WebSocketConnectTimeout);
             Assert.Equal("explicit", options.Metadata!["shared"]);
             Assert.Equal("present", Assert.IsType<JsonElement>(options.Metadata["configuredOnly"]).GetString());
             Assert.Equal(ThinkingLevel.Low, options.Reasoning);

@@ -57,6 +57,7 @@ public sealed class MistralProvider : IStreamProvider
             Headers = options.Headers,
             MaxRetryDelay = options.MaxRetryDelay,
             MaxRetries = options.MaxRetries,
+            WebSocketConnectTimeout = options.WebSocketConnectTimeout,
             Metadata = options.Metadata,
             PromptMode = model.Reasoning && options.Reasoning is not null && !UsesReasoningEffort(model)
                 ? "reasoning"

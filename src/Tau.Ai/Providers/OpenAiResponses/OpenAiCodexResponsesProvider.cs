@@ -13,6 +13,7 @@ public sealed class OpenAiCodexResponsesProvider : IStreamProvider, IDisposable
     private const string WebSocketBetaHeader = "responses_websockets=2026-02-06";
     private static readonly TimeSpan SessionWebSocketCacheTtl = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan DefaultSseHeaderTimeout = TimeSpan.FromSeconds(20);
+    private static readonly TimeSpan DefaultWebSocketConnectTimeout = TimeSpan.FromSeconds(15);
     private const int DefaultMaxRetries = 0;
     private readonly HttpClient _httpClient;
     private readonly ICodexWebSocketTransport _webSocketTransport;
@@ -83,6 +84,7 @@ public sealed class OpenAiCodexResponsesProvider : IStreamProvider, IDisposable
             Headers = options.Headers,
             MaxRetryDelay = options.MaxRetryDelay,
             MaxRetries = options.MaxRetries,
+            WebSocketConnectTimeout = options.WebSocketConnectTimeout,
             Metadata = options.Metadata,
             Transport = options.Transport,
             ReasoningEffort = reasoningEffort
@@ -329,7 +331,12 @@ public sealed class OpenAiCodexResponsesProvider : IStreamProvider, IDisposable
             : options.SessionId!;
         var headers = BuildWebSocketHeaders(model, options, accountId, requestId);
         var webSocketUrl = ResolveCodexWebSocketUrl(sseUrl);
-        var lease = await AcquireWebSocketAsync(webSocketUrl, headers, options.SessionId, options.Signal).ConfigureAwait(false);
+        var lease = await AcquireWebSocketAsync(
+            webSocketUrl,
+            headers,
+            options.SessionId,
+            options.Signal,
+            options.WebSocketConnectTimeout).ConfigureAwait(false);
         var keepConnection = true;
         var released = false;
         void Release(bool keep)
@@ -392,11 +399,12 @@ public sealed class OpenAiCodexResponsesProvider : IStreamProvider, IDisposable
         Uri url,
         IReadOnlyDictionary<string, string> headers,
         string? sessionId,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        TimeSpan? connectTimeout)
     {
         if (string.IsNullOrWhiteSpace(sessionId))
         {
-            var connection = await _webSocketTransport.ConnectAsync(url, headers, cancellationToken).ConfigureAwait(false);
+            var connection = await ConnectWebSocketAsync(url, headers, cancellationToken, connectTimeout).ConfigureAwait(false);
             return new CodexWebSocketLease(connection, _ => CloseWebSocketSilently(connection));
         }
 
@@ -437,12 +445,12 @@ public sealed class OpenAiCodexResponsesProvider : IStreamProvider, IDisposable
 
             if (cached.Busy)
             {
-                var overflowConnection = await _webSocketTransport.ConnectAsync(url, headers, cancellationToken).ConfigureAwait(false);
+                var overflowConnection = await ConnectWebSocketAsync(url, headers, cancellationToken, connectTimeout).ConfigureAwait(false);
                 return new CodexWebSocketLease(overflowConnection, _ => CloseWebSocketSilently(overflowConnection));
             }
         }
 
-        var newConnection = await _webSocketTransport.ConnectAsync(url, headers, cancellationToken).ConfigureAwait(false);
+        var newConnection = await ConnectWebSocketAsync(url, headers, cancellationToken, connectTimeout).ConfigureAwait(false);
         var entry = new CachedCodexWebSocketConnection(newConnection)
         {
             Busy = true
@@ -468,6 +476,34 @@ public sealed class OpenAiCodexResponsesProvider : IStreamProvider, IDisposable
                 ScheduleSessionWebSocketExpiry(sessionId!, entry);
             }
         });
+    }
+
+    private async Task<ICodexWebSocketConnection> ConnectWebSocketAsync(
+        Uri url,
+        IReadOnlyDictionary<string, string> headers,
+        CancellationToken cancellationToken,
+        TimeSpan? connectTimeout)
+    {
+        var timeout = connectTimeout ?? DefaultWebSocketConnectTimeout;
+        if (timeout <= TimeSpan.Zero)
+        {
+            return await _webSocketTransport.ConnectAsync(url, headers, cancellationToken).ConfigureAwait(false);
+        }
+
+        using var timeoutSource = new CancellationTokenSource(timeout);
+        using var combined = CancellationTokenUtilities.Combine(cancellationToken, timeoutSource.Token);
+
+        try
+        {
+            return await _webSocketTransport.ConnectAsync(url, headers, combined.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException ex)
+            when (timeoutSource.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+        {
+            throw new TimeoutException(
+                $"WebSocket connect timeout after {(int)timeout.TotalMilliseconds}ms",
+                ex);
+        }
     }
 
     public void CloseOpenAiCodexWebSocketSessions(string? sessionId = null)
