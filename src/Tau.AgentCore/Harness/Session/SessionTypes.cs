@@ -4,6 +4,13 @@ namespace Tau.AgentCore.Harness.Session;
 
 public record SessionMetadata(string Id, string CreatedAt);
 
+public record JsonlSessionMetadata(
+    string Id,
+    string CreatedAt,
+    string Cwd,
+    string Path,
+    string? ParentSessionPath = null) : SessionMetadata(Id, CreatedAt);
+
 public sealed record SessionModelReference(string Provider, string ModelId);
 
 public sealed record SessionContext(
