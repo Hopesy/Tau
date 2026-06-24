@@ -97,6 +97,7 @@ public sealed class OpenAiCodexResponsesProvider : IStreamProvider, IDisposable
             model,
             BuildRequestBody(model, context, options)).ConfigureAwait(false);
         var bodyJson = JsonSerializer.Serialize(body, OpenAiResponsesJsonContext.Default.DictionaryStringObject);
+        List<AssistantMessageDiagnostic>? diagnostics = null;
 
         if (options.Transport is StreamTransport.WebSocket or StreamTransport.Auto)
         {
@@ -115,11 +116,26 @@ public sealed class OpenAiCodexResponsesProvider : IStreamProvider, IDisposable
             }
             catch (Exception ex)
             {
+                var diagnostic = CreateTransportFailureDiagnostic(options.Transport, webSocketStarted, ex, bodyJson);
                 if (options.Transport is StreamTransport.WebSocket || webSocketStarted)
                 {
-                    stream.Push(new ErrorEvent(ex.Message));
+                    stream.Push(new ErrorEvent(
+                        ex.Message,
+                        Message: new AssistantMessage
+                        {
+                            Api = Api,
+                            Provider = model.Provider,
+                            Model = model.Id,
+                            StopReason = StopReason.Error,
+                            ErrorMessage = ex.Message,
+                            Diagnostics = [diagnostic],
+                            Timestamp = DateTimeOffset.UtcNow
+                        }));
                     return;
                 }
+
+                diagnostics ??= [];
+                diagnostics.Add(diagnostic);
             }
         }
 
@@ -163,6 +179,7 @@ public sealed class OpenAiCodexResponsesProvider : IStreamProvider, IDisposable
                 Api = Api,
                 Provider = model.Provider,
                 Model = model.Id,
+                Diagnostics = diagnostics,
                 Content = []
             };
             stream.Push(new StartEvent(partial));
@@ -512,6 +529,34 @@ public sealed class OpenAiCodexResponsesProvider : IStreamProvider, IDisposable
         headers["session_id"] = requestId;
         return headers;
     }
+
+    private static AssistantMessageDiagnostic CreateTransportFailureDiagnostic(
+        StreamTransport configuredTransport,
+        bool webSocketStarted,
+        Exception error,
+        string requestBody)
+    {
+        return AssistantMessageDiagnostics.CreateAssistantMessageDiagnostic(
+            "provider_transport_failure",
+            error,
+            new Dictionary<string, object?>
+            {
+                ["configuredTransport"] = FormatTransport(configuredTransport),
+                ["fallbackTransport"] = webSocketStarted ? null : "sse",
+                ["eventsEmitted"] = webSocketStarted,
+                ["phase"] = webSocketStarted ? "after_message_stream_start" : "before_message_stream_start",
+                ["requestBytes"] = Encoding.UTF8.GetByteCount(requestBody)
+            });
+    }
+
+    private static string FormatTransport(StreamTransport transport) =>
+        transport switch
+        {
+            StreamTransport.Auto => "auto",
+            StreamTransport.Sse => "sse",
+            StreamTransport.WebSocket => "websocket",
+            _ => transport.ToString()
+        };
 
     private static void CopyHeaders(IDictionary<string, string> target, IDictionary<string, string>? source)
     {

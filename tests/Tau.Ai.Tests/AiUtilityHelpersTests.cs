@@ -113,6 +113,47 @@ public sealed class AiUtilityHelpersTests
     }
 
     [Fact]
+    public void AssistantMessageDiagnostics_ExtractDiagnosticError_FormatsExceptionsAndThrownValues()
+    {
+        var exception = new InvalidOperationException("diagnostic failed");
+        exception.Data["code"] = 429;
+        var error = AssistantMessageDiagnostics.ExtractDiagnosticError(exception);
+
+        Assert.Equal(nameof(InvalidOperationException), error.Name);
+        Assert.Equal("diagnostic failed", error.Message);
+        Assert.Equal(429, error.Code);
+
+        var thrownValue = AssistantMessageDiagnostics.ExtractDiagnosticError("plain failure");
+        Assert.Equal("ThrownValue", thrownValue.Name);
+        Assert.Equal("plain failure", thrownValue.Message);
+        Assert.Equal("null", AssistantMessageDiagnostics.FormatThrownValue(null));
+    }
+
+    [Fact]
+    public void AssistantMessageDiagnostics_AppendAssistantMessageDiagnostic_PreservesExistingDiagnostics()
+    {
+        var originalDiagnostic = AssistantMessageDiagnostics.CreateAssistantMessageDiagnostic(
+            "first",
+            "first error",
+            timestamp: DateTimeOffset.UnixEpoch);
+        var nextDiagnostic = AssistantMessageDiagnostics.CreateAssistantMessageDiagnostic(
+            "second",
+            new InvalidOperationException("second error"),
+            new Dictionary<string, object?> { ["phase"] = "test" },
+            DateTimeOffset.UnixEpoch.AddSeconds(1));
+        var message = new AssistantMessage([new TextContent("done")])
+        {
+            Diagnostics = [originalDiagnostic]
+        };
+
+        var updated = AssistantMessageDiagnostics.AppendAssistantMessageDiagnostic(message, nextDiagnostic);
+
+        Assert.Single(message.Diagnostics!);
+        Assert.Equal(["first", "second"], updated.Diagnostics!.Select(static diagnostic => diagnostic.Type).ToArray());
+        Assert.Equal("test", updated.Diagnostics![1].Details!["phase"]);
+    }
+
+    [Fact]
     public void JsonSchemaHelpers_StringEnum_BuildsProviderCompatibleSchema()
     {
         var schema = JsonSchemaHelpers.StringEnum(

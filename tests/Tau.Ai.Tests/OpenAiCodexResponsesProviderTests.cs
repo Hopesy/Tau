@@ -238,7 +238,16 @@ public sealed class OpenAiCodexResponsesProviderTests
 
         Assert.Equal(1, httpCalls);
         Assert.Single(webSocket.Connects);
-        Assert.Contains(events, evt => evt is DoneEvent);
+        var done = Assert.Single(events.OfType<DoneEvent>());
+        var diagnostic = Assert.Single(done.Message.Diagnostics!);
+        Assert.Equal("provider_transport_failure", diagnostic.Type);
+        Assert.Equal("InvalidOperationException", diagnostic.Error!.Name);
+        Assert.Equal("websocket unavailable", diagnostic.Error.Message);
+        Assert.Equal("auto", diagnostic.Details!["configuredTransport"]);
+        Assert.Equal("sse", diagnostic.Details["fallbackTransport"]);
+        Assert.Equal(false, diagnostic.Details["eventsEmitted"]);
+        Assert.Equal("before_message_stream_start", diagnostic.Details["phase"]);
+        Assert.IsType<int>(diagnostic.Details["requestBytes"]);
     }
 
     [Fact]

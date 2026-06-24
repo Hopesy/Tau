@@ -33,6 +33,16 @@ public sealed class AiPublicApiCompileSampleTests
         Assert.Equal("large", partialJson.GetProperty("size").GetString());
         Assert.False(partialJson.TryGetProperty("partial", out _));
 
+        var diagnostic = AssistantMessageDiagnostics.CreateAssistantMessageDiagnostic(
+            "sample_diagnostic",
+            new InvalidOperationException("sample diagnostic"),
+            new Dictionary<string, object?> { ["phase"] = "public-api-sample" },
+            DateTimeOffset.UnixEpoch);
+        var diagnosticMessage = AssistantMessageDiagnostics.AppendAssistantMessageDiagnostic(
+            new AssistantMessage([new TextContent("diagnostic")]),
+            diagnostic);
+        Assert.Equal("sample_diagnostic", Assert.Single(diagnosticMessage.Diagnostics!).Type);
+
         using var response = new HttpResponseMessage(HttpStatusCode.Accepted);
         response.Headers.TryAddWithoutValidation("X-Sample", "sample");
         Assert.Equal("sample", AiHeaderUtilities.ToDictionary(response)["x-sample"]);

@@ -21,6 +21,7 @@ public sealed record AssistantMessage : ChatMessage
     public Usage? Usage { get; init; }
     public StopReason? StopReason { get; init; }
     public string? ErrorMessage { get; init; }
+    public IReadOnlyList<AssistantMessageDiagnostic>? Diagnostics { get; init; }
     public string? Api { get; init; }
     public string? Provider { get; init; }
     public string? Model { get; init; }
