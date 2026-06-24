@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Tau.AgentCore.Harness;
 using Tau.AgentCore.Harness.Session;
 using Tau.Ai;
 
@@ -196,6 +197,34 @@ public sealed class JsonlSessionStorageTests
         Assert.Equal("user-1", compaction.FirstKeptEntryId);
         Assert.Equal(42, compaction.TokensBefore);
         Assert.True(compaction.FromHook);
+    }
+
+    [Fact]
+    public async Task OpenAsync_RoundTripsTypedCompactionDetailsAsJson()
+    {
+        using var temp = TempDirectory.Create();
+        var filePath = Path.Combine(temp.Path, "session.jsonl");
+        var storage = await JsonlSessionStorage.CreateAsync(filePath, temp.Path, "session-1");
+        await storage.AppendEntryAsync(new MessageSessionEntry(
+            "user-1",
+            null,
+            DateTimeOffset.Parse("2026-01-01T00:00:00.000Z", System.Globalization.CultureInfo.InvariantCulture),
+            new UserMessage("one")));
+        await storage.AppendEntryAsync(new CompactionSessionEntry(
+            "compaction-1",
+            "user-1",
+            DateTimeOffset.Parse("2026-01-01T00:00:01.000Z", System.Globalization.CultureInfo.InvariantCulture),
+            "summary",
+            "user-1",
+            42,
+            new AgentCompactionDetails(["README.md"], ["src/Program.cs"])));
+
+        var loaded = await JsonlSessionStorage.OpenAsync(filePath);
+        var compaction = Assert.IsType<CompactionSessionEntry>((await loaded.GetEntriesAsync()).Last());
+        var details = Assert.IsType<JsonElement>(compaction.Details);
+
+        Assert.Equal("README.md", details.GetProperty("readFiles")[0].GetString());
+        Assert.Equal("src/Program.cs", details.GetProperty("modifiedFiles")[0].GetString());
     }
 
     private sealed class TempDirectory : IDisposable

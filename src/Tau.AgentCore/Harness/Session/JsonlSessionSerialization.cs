@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Tau.AgentCore.Harness;
 using Tau.Ai;
 
 namespace Tau.AgentCore.Harness.Session;
@@ -530,6 +531,9 @@ internal static class JsonlSessionSerialization
             null => null,
             JsonElement element => element.Clone(),
             JsonDocument document => document.RootElement.Clone(),
+            AgentCompactionDetails details => JsonSerializer.SerializeToElement(
+                details,
+                AgentCoreSessionJsonContext.Default.AgentCompactionDetails),
             _ => JsonSerializer.SerializeToElement(value.ToString(), AgentCoreSessionJsonContext.Default.String)
         };
     }
@@ -555,5 +559,6 @@ internal static class JsonlSessionSerialization
 [JsonSerializable(typeof(SessionContentDto[]))]
 [JsonSerializable(typeof(SessionUsageDto))]
 [JsonSerializable(typeof(SessionUsageCostDto))]
+[JsonSerializable(typeof(AgentCompactionDetails))]
 [JsonSerializable(typeof(string))]
 internal sealed partial class AgentCoreSessionJsonContext : JsonSerializerContext;
