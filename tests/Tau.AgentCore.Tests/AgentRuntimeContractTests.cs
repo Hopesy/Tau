@@ -387,6 +387,76 @@ public sealed class AgentRuntimeContractTests
     }
 
     [Fact]
+    public async Task RunAsync_ShouldStopAfterTurnStopsBeforeQueuePolling()
+    {
+        var provider = new ScriptedProvider(new AssistantMessage([new TextContent("done")]));
+        var runtime = new AgentRuntime();
+        runtime.AddMessage(new UserMessage("hello"));
+        var config = CreateConfig(provider, []) with
+        {
+            ShouldStopAfterTurnAsync = (_, _) =>
+            {
+                runtime.Steer(new UserMessage("late steer"));
+                runtime.FollowUp(new UserMessage("late follow"));
+                return Task.FromResult(true);
+            }
+        };
+
+        var events = await CollectAsync(runtime.RunAsync(config));
+
+        Assert.Equal(1, provider.Calls);
+        Assert.Equal(2, runtime.PendingMessageCount);
+        var end = Assert.IsType<AgentEndEvent>(events.Last());
+        Assert.Collection(
+            end.Messages,
+            message => Assert.Equal("hello", ReadText(Assert.IsType<UserMessage>(message))),
+            message => Assert.Equal("done", ReadText(Assert.IsType<AssistantMessage>(message))));
+    }
+
+    [Fact]
+    public async Task RunAsync_PrepareNextTurnUpdatesNextProviderRequestState()
+    {
+        var provider = new RecordingTurnProvider(
+            new AssistantMessage([new ToolCallContent("tool-1", "first", "{}")]),
+            new AssistantMessage([new TextContent("done")]));
+        var firstTool = new RecordingTool("first", """{"type":"object"}""")
+        {
+            Execute = _ => new ToolResult([new TextContent("first done")])
+        };
+        var secondTool = new RecordingTool("second", """{"type":"object"}""");
+        var nextModel = new Model
+        {
+            Provider = "test-next",
+            Id = "next-model",
+            Name = "Next Model",
+            Api = provider.Api,
+            Reasoning = true
+        };
+        var runtime = new AgentRuntime();
+        runtime.AddMessage(new UserMessage("use tool"));
+        var config = CreateConfig(provider, [firstTool]) with
+        {
+            StreamOptions = new SimpleStreamOptions { Reasoning = ThinkingLevel.Low },
+            PrepareNextTurnAsync = (_, _) => Task.FromResult<AgentLoopTurnUpdate?>(new(
+                Model: nextModel,
+                Tools: [secondTool],
+                Reasoning: ThinkingLevel.High))
+        };
+
+        await CollectAsync(runtime.RunAsync(config));
+
+        Assert.Equal(2, provider.Calls.Count);
+        Assert.Equal("test-model", provider.Calls[0].ModelId);
+        Assert.Equal(["first"], provider.Calls[0].ToolNames);
+        Assert.Equal(ThinkingLevel.Low, provider.Calls[0].Reasoning);
+        Assert.Equal("next-model", provider.Calls[1].ModelId);
+        Assert.Equal(["second"], provider.Calls[1].ToolNames);
+        Assert.Equal(ThinkingLevel.High, provider.Calls[1].Reasoning);
+        Assert.Equal("next-model", runtime.State.Model?.Id);
+        Assert.Equal(["second"], runtime.State.Tools.Select(static tool => tool.Name));
+    }
+
+    [Fact]
     public async Task RunAsync_ToolExecuteExceptionBecomesErrorToolResult()
     {
         var tool = new RecordingTool("explode", """{"type":"object"}""")
@@ -761,6 +831,39 @@ public sealed class AgentRuntimeContractTests
             return stream;
         }
     }
+
+    private sealed class RecordingTurnProvider(params AssistantMessage[] messages) : IStreamProvider
+    {
+        private int _calls;
+
+        public string Api => "test-agent-contract-recording-turn";
+        public List<ProviderTurnCall> Calls { get; } = [];
+
+        public AssistantMessageStream Stream(Model model, LlmContext context, StreamOptions options) =>
+            Complete(model, context, options as SimpleStreamOptions);
+
+        public AssistantMessageStream StreamSimple(Model model, LlmContext context, SimpleStreamOptions options) =>
+            Complete(model, context, options);
+
+        private AssistantMessageStream Complete(Model model, LlmContext context, SimpleStreamOptions? options)
+        {
+            Calls.Add(new ProviderTurnCall(
+                model.Id,
+                (context.Tools ?? []).Select(static tool => tool.Name).ToArray(),
+                options?.Reasoning));
+            var stream = new AssistantMessageStream();
+            var message = _calls < messages.Length
+                ? messages[_calls++]
+                : new AssistantMessage([new TextContent("done")]);
+            stream.Push(new DoneEvent(message));
+            return stream;
+        }
+    }
+
+    private sealed record ProviderTurnCall(
+        string ModelId,
+        IReadOnlyList<string> ToolNames,
+        ThinkingLevel? Reasoning);
 
     private sealed class EventProvider(params StreamEvent[] events) : IStreamProvider
     {

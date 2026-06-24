@@ -5,6 +5,21 @@ using Tau.Ai.Streaming;
 
 namespace Tau.AgentCore.Runtime;
 
+public sealed record AgentLoopTurnContext(
+    AssistantMessage Message,
+    IReadOnlyList<ToolResultMessage> ToolResults,
+    IReadOnlyList<ChatMessage> Context,
+    IReadOnlyList<ChatMessage> NewMessages);
+
+public sealed record AgentLoopTurnUpdate(
+    IReadOnlyList<ChatMessage>? Context = null,
+    Model? Model = null,
+    string? SystemPrompt = null,
+    IReadOnlyList<IAgentTool>? Tools = null,
+    SimpleStreamOptions? StreamOptions = null,
+    ThinkingLevel? Reasoning = null,
+    bool ClearReasoning = false);
+
 /// <summary>
 /// Configuration for a single agent run.
 /// </summary>
@@ -36,4 +51,16 @@ public record AgentLoopConfig
     /// Convert agent messages to LLM-visible messages (filter custom types).
     /// </summary>
     public Func<IReadOnlyList<ChatMessage>, IReadOnlyList<ChatMessage>>? ConvertToLlm { get; init; }
+
+    /// <summary>
+    /// Called after turn_end to replace state used by the next provider request.
+    /// Mirrors pi-main prepareNextTurn.
+    /// </summary>
+    public Func<AgentLoopTurnContext, CancellationToken, Task<AgentLoopTurnUpdate?>>? PrepareNextTurnAsync { get; init; }
+
+    /// <summary>
+    /// Called after prepare-next-turn and before steering/follow-up queues are polled.
+    /// Mirrors pi-main shouldStopAfterTurn.
+    /// </summary>
+    public Func<AgentLoopTurnContext, CancellationToken, Task<bool>>? ShouldStopAfterTurnAsync { get; init; }
 }

@@ -92,7 +92,9 @@ public sealed class AgentPublicApiCompileSampleTests
                 SessionId = "sample-session"
             },
             LogSink = NullTauLogSink.Instance,
-            LogContext = new TauRuntimeLogContext("sample-correlation", "sample-session", "sample-message")
+            LogContext = new TauRuntimeLogContext("sample-correlation", "sample-session", "sample-message"),
+            PrepareNextTurnAsync = (_, _) => Task.FromResult<AgentLoopTurnUpdate?>(null),
+            ShouldStopAfterTurnAsync = (_, _) => Task.FromResult(false)
         });
 
         using var subscription = agent.Subscribe((evt, _) =>
@@ -140,7 +142,13 @@ public sealed class AgentPublicApiCompileSampleTests
             Model = model,
             ProviderRegistry = registry,
             Tools = [tool],
-            DefaultExecutionMode = ToolExecutionMode.Sequential
+            DefaultExecutionMode = ToolExecutionMode.Sequential,
+            PrepareNextTurnAsync = (turn, _) => Task.FromResult<AgentLoopTurnUpdate?>(new(
+                Context: turn.Context,
+                SystemPrompt: "low-level system",
+                Tools: [tool],
+                Reasoning: ThinkingLevel.Low)),
+            ShouldStopAfterTurnAsync = (_, _) => Task.FromResult(false)
         };
         Assert.NotNull(lowLevelRuntime.State);
         Assert.Equal(ToolExecutionMode.Sequential, lowLevelConfig.DefaultExecutionMode);
@@ -150,6 +158,7 @@ public sealed class AgentPublicApiCompileSampleTests
         var lowLevelResult = await lowLevelStream.ResultAsync.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.IsType<AgentEndEvent>(lowLevelEvents.Last());
         Assert.Equal("done", ReadText(Assert.IsType<AssistantMessage>(lowLevelResult.Last()).Content));
+        Assert.Equal("low-level system", lowLevelRuntime.State.SystemPrompt);
 
         var proxyProvider = new ProxyStreamProvider();
         var proxyOptions = new ProxyStreamOptions

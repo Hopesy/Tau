@@ -18,6 +18,8 @@ public sealed record AgentOptions
     public Func<IReadOnlyList<ChatMessage>, IReadOnlyList<ChatMessage>>? TransformContext { get; init; }
     public Func<IReadOnlyList<ChatMessage>, CancellationToken, Task<IReadOnlyList<ChatMessage>>>? TransformContextAsync { get; init; }
     public Func<IReadOnlyList<ChatMessage>, IReadOnlyList<ChatMessage>>? ConvertToLlm { get; init; }
+    public Func<AgentLoopTurnContext, CancellationToken, Task<AgentLoopTurnUpdate?>>? PrepareNextTurnAsync { get; init; }
+    public Func<AgentLoopTurnContext, CancellationToken, Task<bool>>? ShouldStopAfterTurnAsync { get; init; }
     public AgentQueueMode SteeringMode { get; init; } = AgentQueueMode.OneAtATime;
     public AgentQueueMode FollowUpMode { get; init; } = AgentQueueMode.OneAtATime;
     public ToolExecutionMode ToolExecution { get; init; } = ToolExecutionMode.Parallel;
@@ -49,6 +51,8 @@ public sealed class Agent
         TransformContext = options.TransformContext;
         TransformContextAsync = options.TransformContextAsync;
         ConvertToLlm = options.ConvertToLlm;
+        PrepareNextTurnAsync = options.PrepareNextTurnAsync;
+        ShouldStopAfterTurnAsync = options.ShouldStopAfterTurnAsync;
         ToolExecution = options.ToolExecution;
         LogSink = options.LogSink;
         LogContext = options.LogContext;
@@ -110,6 +114,8 @@ public sealed class Agent
     public Func<IReadOnlyList<ChatMessage>, IReadOnlyList<ChatMessage>>? TransformContext { get; set; }
     public Func<IReadOnlyList<ChatMessage>, CancellationToken, Task<IReadOnlyList<ChatMessage>>>? TransformContextAsync { get; set; }
     public Func<IReadOnlyList<ChatMessage>, IReadOnlyList<ChatMessage>>? ConvertToLlm { get; set; }
+    public Func<AgentLoopTurnContext, CancellationToken, Task<AgentLoopTurnUpdate?>>? PrepareNextTurnAsync { get; set; }
+    public Func<AgentLoopTurnContext, CancellationToken, Task<bool>>? ShouldStopAfterTurnAsync { get; set; }
     public ToolExecutionMode ToolExecution { get; set; }
     public ITauLogSink LogSink { get; set; }
     public TauRuntimeLogContext? LogContext { get; set; }
@@ -386,6 +392,8 @@ public sealed class Agent
             TransformContext = TransformContext,
             TransformContextAsync = TransformContextAsync,
             ConvertToLlm = ConvertToLlm,
+            PrepareNextTurnAsync = PrepareNextTurnAsync,
+            ShouldStopAfterTurnAsync = ShouldStopAfterTurnAsync,
             SkipInitialSteeringPoll = skipInitialSteeringPoll
         };
 

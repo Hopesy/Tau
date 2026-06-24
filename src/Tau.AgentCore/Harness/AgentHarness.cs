@@ -783,6 +783,8 @@ public sealed class AgentHarness<TMetadata>
             cancellationToken).ConfigureAwait(false);
         var streamOptions = BuildStreamOptions(context);
         var providerRegistry = CreateHookedProviderRegistry(sessionMetadata.Id);
+        var persistedMessageCount = context.Messages.Count;
+        Agent? runningAgent = null;
         var agent = new Agent(new AgentOptions
         {
             Model = _model,
@@ -794,10 +796,30 @@ public sealed class AgentHarness<TMetadata>
             StreamOptions = streamOptions,
             TransformContextAsync = EmitContextHookAsync,
             ConvertToLlm = AgentHarnessMessages.ConvertToLlm,
+            PrepareNextTurnAsync = async (_, token) =>
+            {
+                if (runningAgent is null)
+                    return null;
+
+                await AppendNewMessagesAsync(persistedMessageCount, runningAgent.State.Messages, token)
+                    .ConfigureAwait(false);
+                persistedMessageCount = runningAgent.State.Messages.Count;
+
+                var nextContext = await Session.BuildContextAsync(token).ConfigureAwait(false);
+                var nextActiveTools = ResolveActiveTools(nextContext.ActiveToolNames ?? _activeToolNames, _tools);
+                var nextSystemPrompt = await ResolveSystemPromptAsync(nextActiveTools, token).ConfigureAwait(false);
+                return new AgentLoopTurnUpdate(
+                    Context: nextContext.Messages,
+                    Model: _model,
+                    SystemPrompt: nextSystemPrompt,
+                    Tools: nextActiveTools,
+                    StreamOptions: BuildStreamOptions(nextContext));
+            },
             SteeringMode = _steeringMode,
             FollowUpMode = _followUpMode,
             ToolExecution = _toolExecution
         });
+        runningAgent = agent;
 
         var events = new List<AgentEvent>();
         using var subscription = agent.Subscribe(async (evt, token) =>
@@ -816,7 +838,7 @@ public sealed class AgentHarness<TMetadata>
         try
         {
             await runTask.ConfigureAwait(false);
-            await AppendNewMessagesAsync(context.Messages.Count, agent.State.Messages, cancellationToken).ConfigureAwait(false);
+            await AppendNewMessagesAsync(persistedMessageCount, agent.State.Messages, cancellationToken).ConfigureAwait(false);
             ClearLiveQueues();
             await EmitAsync(new AgentHarnessSavePointEvent(HadPendingMutations: false), cancellationToken).ConfigureAwait(false);
             await EmitAsync(new AgentHarnessSettledEvent(GetNextTurnCount()), cancellationToken).ConfigureAwait(false);

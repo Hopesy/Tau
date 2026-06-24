@@ -303,7 +303,8 @@ public sealed class AgentHarnessTests
 
         Assert.Equal("done", ReadText(assistant.Content));
         Assert.NotNull(provider.LastContext);
-        Assert.Equal("system + before", provider.LastContext.Value.SystemPrompt);
+        Assert.Equal("system + before", provider.Calls[0].SystemPrompt);
+        Assert.Equal("system", provider.LastContext.Value.SystemPrompt);
         Assert.Equal(
             ["hello hooks", "hook-added prompt", "context-only prompt"],
             provider.LastContext.Value.Messages
@@ -355,6 +356,77 @@ public sealed class AgentHarnessTests
         Assert.DoesNotContain(
             context.Messages.OfType<AssistantMessage>(),
             message => ReadText(message.Content).Equals("unexpected follow-up", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task PromptAsync_PrepareNextTurnRefreshesSessionBackedState()
+    {
+        var provider = new HookCapturingProvider(
+            new AssistantMessage([new ToolCallContent("call-1", "switch", "{}")])
+            {
+                StopReason = StopReason.ToolUse
+            },
+            new AssistantMessage([new TextContent("done")]));
+        var registry = new ProviderRegistry();
+        registry.Register(provider.Api, provider);
+        var initialModel = Model with
+        {
+            Id = "initial-model",
+            Name = "Initial Model",
+            Api = provider.Api,
+            Reasoning = true
+        };
+        var nextModel = Model with
+        {
+            Id = "next-model",
+            Name = "Next Model",
+            Api = provider.Api,
+            Reasoning = true
+        };
+        AgentHarness<SessionMetadata>? harness = null;
+        var switchTool = new DelegateAgentTool(
+            "switch",
+            "Switch",
+            "Switches turn state.",
+            Json("""{"type":"object"}"""),
+            async (_, cancellationToken) =>
+            {
+                await harness!.SetModelAsync(nextModel, cancellationToken).ConfigureAwait(false);
+                await harness.SetThinkingLevelAsync(ThinkingLevel.High, cancellationToken).ConfigureAwait(false);
+                await harness.SetActiveToolsAsync(["next"], cancellationToken).ConfigureAwait(false);
+                return new ToolResult([new TextContent("switched")]);
+            });
+        var nextTool = new DelegateAgentTool(
+            "next",
+            "Next",
+            "Next active tool.",
+            Json("""{"type":"object"}"""),
+            (_, _) => Task.FromResult(new ToolResult([new TextContent("next")])));
+        harness = new AgentHarness<SessionMetadata>(new AgentHarnessOptions<SessionMetadata>
+        {
+            Session = new AgentHarnessSession<SessionMetadata>(new InMemorySessionStorage<SessionMetadata>()),
+            ProviderRegistry = registry,
+            Model = initialModel,
+            Tools = [switchTool, nextTool],
+            ActiveToolNames = ["switch"],
+            SystemPrompt = "system",
+            ThinkingLevel = ThinkingLevel.Low
+        });
+
+        var assistant = await harness.PromptAsync("refresh next turn").WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal("done", ReadText(assistant.Content));
+        Assert.Equal(2, provider.Calls.Count);
+        Assert.Equal("initial-model", provider.Calls[0].ModelId);
+        Assert.Equal(["switch"], provider.Calls[0].ToolNames);
+        Assert.Equal(ThinkingLevel.Low, provider.Calls[0].Reasoning);
+        Assert.Equal("next-model", provider.Calls[1].ModelId);
+        Assert.Equal(["next"], provider.Calls[1].ToolNames);
+        Assert.Equal(ThinkingLevel.High, provider.Calls[1].Reasoning);
+        var context = await harness.Session.BuildContextAsync();
+        Assert.Equal("next-model", context.Model?.ModelId);
+        Assert.Equal("high", context.ThinkingLevel);
+        Assert.Equal(["next"], context.ActiveToolNames);
     }
 
     [Fact]
@@ -567,6 +639,7 @@ public sealed class AgentHarnessTests
         public IDictionary<string, object>? LastPayload { get; private set; }
         public int PayloadCallbackCount { get; private set; }
         public int StreamSimpleCallCount { get; private set; }
+        public List<HookProviderCall> Calls { get; } = [];
 
         public AssistantMessageStream Stream(Model model, LlmContext context, StreamOptions options) =>
             throw new NotSupportedException();
@@ -576,6 +649,11 @@ public sealed class AgentHarnessTests
             StreamSimpleCallCount++;
             LastContext = context;
             LastOptions = options;
+            Calls.Add(new HookProviderCall(
+                model.Id,
+                context.SystemPrompt,
+                (context.Tools ?? []).Select(static tool => tool.Name).ToArray(),
+                options.Reasoning));
             var payload = new Dictionary<string, object>(StringComparer.Ordinal)
             {
                 ["request"] = PayloadCallbackCount + 1
@@ -604,6 +682,12 @@ public sealed class AgentHarnessTests
             return stream;
         }
     }
+
+    private sealed record HookProviderCall(
+        string ModelId,
+        string? SystemPrompt,
+        IReadOnlyList<string> ToolNames,
+        ThinkingLevel? Reasoning);
 
     private sealed class StreamPathHookCapturingProvider : IStreamProvider
     {

@@ -105,7 +105,8 @@ public sealed class AgentRuntime
     {
         _runCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         var token = _runCts.Token;
-        State.Configure(config.SystemPrompt, config.Model, config.Tools);
+        var currentConfig = config;
+        State.Configure(currentConfig.SystemPrompt, currentConfig.Model, currentConfig.Tools);
 
         yield return new AgentStartEvent();
 
@@ -139,12 +140,12 @@ public sealed class AgentRuntime
                     AssistantMessage? contextFailureMessage = null;
                     try
                     {
-                        context = await ContextTransformer.BuildAsync(config, State.Messages, token).ConfigureAwait(false);
+                        context = await ContextTransformer.BuildAsync(currentConfig, State.Messages, token).ConfigureAwait(false);
                     }
                     catch (OperationCanceledException) when (token.IsCancellationRequested)
                     {
                         const string error = "Operation canceled.";
-                        var failureMessage = CreateFailureMessage(error, StopReason.Aborted, config.Model);
+                        var failureMessage = CreateFailureMessage(error, StopReason.Aborted, currentConfig.Model);
                         State.SetStreaming(false);
                         State.SetError(error);
                         State.AddMessage(failureMessage);
@@ -160,8 +161,8 @@ public sealed class AgentRuntime
                         yield break;
                     }
 
-                    var streamOptions = config.StreamOptions ?? new SimpleStreamOptions();
-                    var providerRunStartedAt = LogProviderRunStart(config, context, streamOptions);
+                    var streamOptions = currentConfig.StreamOptions ?? new SimpleStreamOptions();
+                    var providerRunStartedAt = LogProviderRunStart(currentConfig, context, streamOptions);
                     var providerRunEnded = false;
                     void LogProviderEnd(
                         bool success,
@@ -176,7 +177,7 @@ public sealed class AgentRuntime
 
                         providerRunEnded = true;
                         LogProviderRunEnd(
-                            config,
+                            currentConfig,
                             context,
                             streamOptions,
                             providerRunStartedAt,
@@ -187,8 +188,8 @@ public sealed class AgentRuntime
                     }
 
                     var stream = StartProviderStream(
-                        config.ProviderRegistry,
-                        config.Model,
+                        currentConfig.ProviderRegistry,
+                        currentConfig.Model,
                         context,
                         streamOptions,
                         ex => LogProviderEnd(false, "exception", State.StreamingMessage, ex.GetType().Name));
@@ -208,7 +209,7 @@ public sealed class AgentRuntime
                         if (streamRead.Cancelled)
                         {
                             const string error = "Operation canceled.";
-                            assistantMessage = CreateFailureMessage(error, StopReason.Aborted, config.Model, State.StreamingMessage);
+                            assistantMessage = CreateFailureMessage(error, StopReason.Aborted, currentConfig.Model, State.StreamingMessage);
                             LogProviderEnd(false, "cancelled", assistantMessage);
                             State.SetStreaming(false);
                             State.SetError(error);
@@ -237,7 +238,7 @@ public sealed class AgentRuntime
                         }
                         else if (evt is DoneEvent done)
                         {
-                            assistantMessage = EnrichAssistantMessage(done.Message, config.Model);
+                            assistantMessage = EnrichAssistantMessage(done.Message, currentConfig.Model);
                             var success = IsSuccessfulProviderMessage(assistantMessage);
                             LogProviderEnd(success, success ? "none" : GetProviderFailureKind(assistantMessage), assistantMessage);
                             State.SetStreaming(false);
@@ -255,7 +256,7 @@ public sealed class AgentRuntime
                                 ErrorMessage = error.Error,
                                 StopReason = error.Message?.StopReason ?? error.Partial?.StopReason ?? StopReason.Error
                             };
-                            assistantMessage = EnrichAssistantMessage(assistantMessage, config.Model);
+                            assistantMessage = EnrichAssistantMessage(assistantMessage, currentConfig.Model);
                             LogProviderEnd(false, "stream-error", assistantMessage);
                             State.SetStreaming(false);
                             State.SetError(error.Error);
@@ -278,7 +279,7 @@ public sealed class AgentRuntime
                     if (assistantMessage is null)
                     {
                         const string error = "Stream ended without a message.";
-                        assistantMessage = CreateFailureMessage(error, StopReason.Error, config.Model);
+                        assistantMessage = CreateFailureMessage(error, StopReason.Error, currentConfig.Model);
                         LogProviderEnd(false, "stream-ended-without-message", assistantMessage);
                         State.SetError(error);
                         if (!assistantStarted)
@@ -304,8 +305,8 @@ public sealed class AgentRuntime
                         try
                         {
                             await foreach (var toolEvt in ToolExecutor.ExecuteToolCallsAsync(
-                                toolCalls, config.Tools, config.Interceptors,
-                                State.Messages, config.DefaultExecutionMode, config.LogSink, config.LogContext, token))
+                                toolCalls, currentConfig.Tools, currentConfig.Interceptors,
+                                State.Messages, currentConfig.DefaultExecutionMode, currentConfig.LogSink, currentConfig.LogContext, token))
                             {
                                 yield return toolEvt;
 
@@ -334,11 +335,35 @@ public sealed class AgentRuntime
                         hasMoreWork = !terminatedByTools;
                     }
 
-                    // Check for new steering messages
+                    yield return new TurnEndEvent(turnIndex, assistantMessage, turnToolResults);
+
+                    var turnContext = CreateTurnContext(assistantMessage, turnToolResults);
+                    if (currentConfig.PrepareNextTurnAsync is not null)
+                    {
+                        var update = await currentConfig.PrepareNextTurnAsync(turnContext, token).ConfigureAwait(false);
+                        if (update is not null)
+                        {
+                            currentConfig = ApplyTurnUpdate(currentConfig, update);
+                            if (update.Context is not null)
+                            {
+                                State.SetMessages(update.Context.ToList());
+                            }
+
+                            State.Configure(currentConfig.SystemPrompt, currentConfig.Model, currentConfig.Tools);
+                        }
+                    }
+
+                    if (currentConfig.ShouldStopAfterTurnAsync is not null &&
+                        await currentConfig.ShouldStopAfterTurnAsync(CreateTurnContext(assistantMessage, turnToolResults), token).ConfigureAwait(false))
+                    {
+                        yield return new AgentEndEvent(messages: State.Messages.ToArray());
+                        yield break;
+                    }
+
+                    // Check for new steering messages after turn hooks have had a chance to stop.
                     if (_steeringQueue.Reader.TryPeek(out _))
                         hasMoreWork = true;
 
-                    yield return new TurnEndEvent(turnIndex, assistantMessage, turnToolResults);
                     turnIndex++;
 
                 } while (hasMoreWork && !token.IsCancellationRequested);
@@ -359,6 +384,37 @@ public sealed class AgentRuntime
         new(
             isComplete: static evt => evt is AgentEndEvent,
             extractResult: static evt => evt is AgentEndEvent end ? end.Messages.ToArray() : null);
+
+    private AgentLoopTurnContext CreateTurnContext(
+        AssistantMessage message,
+        IReadOnlyList<ToolResultMessage> toolResults) =>
+        new(
+            message,
+            toolResults.ToArray(),
+            State.Messages.ToArray(),
+            State.Messages.ToArray());
+
+    private static AgentLoopConfig ApplyTurnUpdate(AgentLoopConfig config, AgentLoopTurnUpdate update)
+    {
+        var streamOptions = update.StreamOptions ?? config.StreamOptions;
+        if (update.ClearReasoning && streamOptions is not null)
+        {
+            streamOptions = streamOptions with { Reasoning = null };
+        }
+
+        if (update.Reasoning is { } reasoning)
+        {
+            streamOptions = (streamOptions ?? new SimpleStreamOptions()) with { Reasoning = reasoning };
+        }
+
+        return config with
+        {
+            Model = update.Model ?? config.Model,
+            SystemPrompt = update.SystemPrompt ?? config.SystemPrompt,
+            Tools = update.Tools ?? config.Tools,
+            StreamOptions = streamOptions
+        };
+    }
 
     private static async Task<StreamReadResult> MoveNextStreamAsync(
         IAsyncEnumerator<StreamEvent> enumerator,
