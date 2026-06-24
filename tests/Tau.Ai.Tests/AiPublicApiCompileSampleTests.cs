@@ -8,6 +8,7 @@ using Tau.Ai.Providers;
 using Tau.Ai.Providers.Anthropic;
 using Tau.Ai.Providers.Faux;
 using Tau.Ai.Providers.OpenAi;
+using Tau.Ai.Providers.OpenRouter;
 using Tau.Ai.Registry;
 using Tau.Ai.Streaming;
 
@@ -206,6 +207,44 @@ public sealed class AiPublicApiCompileSampleTests
         var completed = await StreamFunctions.CompleteSimpleAsync(registry, model, context, options)
             .WaitAsync(TimeSpan.FromSeconds(5));
         Assert.Equal("hello from sample-model", ReadText(completed.Content));
+
+        var imagesRegistry = new ImagesProviderRegistry();
+        var imagesProvider = new SampleImagesProvider();
+        imagesRegistry.Register(imagesProvider.Api, imagesProvider, sourceId: "sample-images-source");
+        var imagesModel = new ImagesModel
+        {
+            Provider = "openrouter",
+            Id = "openrouter/sample-image",
+            Name = "Sample Image Model",
+            Api = imagesProvider.Api,
+            BaseUrl = "https://example.invalid/api/v1",
+            InputModalities = ["text", "image"],
+            OutputModalities = ["image", "text"],
+            Cost = new ModelCost(2m, 4m, 0.5m, 1m)
+        };
+        var imagesOptions = new ImagesOptions
+        {
+            ApiKey = "explicit-image-key",
+            Headers = new Dictionary<string, string> { ["x-image"] = "1" },
+            Timeout = TimeSpan.FromSeconds(10),
+            MaxRetries = 1,
+            Env = new Dictionary<string, string> { ["OPENROUTER_API_KEY"] = "scoped-image-key" },
+            OnResponse = (_, _) => ValueTask.CompletedTask,
+            OnPayload = (_, _) => ValueTask.FromResult<object?>(null)
+        };
+        var images = await ImageFunctions.GenerateImagesAsync(
+            imagesRegistry,
+            imagesModel,
+            new ImagesContext([new TextContent("draw sample"), new ImageContent("aW1hZ2U=", "image/png")]),
+            imagesOptions).WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(ImagesStopReason.Stop, images.StopReason);
+        Assert.Equal("image/png", Assert.IsType<ImageContent>(images.Output[0]).MimeType);
+        Assert.Equal("explicit-image-key", imagesProvider.LastOptions?.ApiKey);
+        Assert.Equal("draw sample", Assert.IsType<TextContent>(imagesProvider.LastContext.Input[0]).Text);
+        BuiltInProviders.RegisterOpenRouterImages(imagesRegistry);
+        Assert.NotNull(imagesRegistry.TryGet(new OpenRouterImagesProvider().Api));
+        imagesRegistry.UnregisterBySource("sample-images-source");
+        Assert.Null(imagesRegistry.TryGet(imagesProvider.Api));
 
         var authStatus = new ProviderAuthResolver(logSink: NullTauLogSink.Instance)
             .GetStatus(model, explicitApiKey: "explicit-sample-key");
@@ -440,6 +479,32 @@ public sealed class AiPublicApiCompileSampleTests
             stream.Push(new StartEvent(new AssistantMessage()));
             stream.Push(new DoneEvent(message));
             return stream;
+        }
+    }
+
+    private sealed class SampleImagesProvider : IImagesProvider
+    {
+        public string Api => "sample-images-api";
+
+        public ImagesContext LastContext { get; private set; }
+
+        public ImagesOptions? LastOptions { get; private set; }
+
+        public Task<AssistantImages> GenerateImagesAsync(
+            ImagesModel model,
+            ImagesContext context,
+            ImagesOptions options)
+        {
+            LastContext = context;
+            LastOptions = options;
+            return Task.FromResult(new AssistantImages
+            {
+                Api = model.Api,
+                Provider = model.Provider,
+                Model = model.Id,
+                Output = [new ImageContent("aW1hZ2U=", "image/png")],
+                Usage = new Usage(InputTokens: 1, OutputTokens: 2)
+            });
         }
     }
 

@@ -5,6 +5,7 @@ using Tau.Ai.Providers.Mistral;
 using Tau.Ai.Providers.OpenAi;
 using Tau.Ai.Providers.OpenAiCompat;
 using Tau.Ai.Providers.OpenAiResponses;
+using Tau.Ai.Providers.OpenRouter;
 using Tau.Ai.Registry;
 
 namespace Tau.Ai.Providers;
@@ -59,6 +60,16 @@ public static class BuiltInProviders
     public static void RegisterGoogle(ProviderRegistry registry, HttpClient? httpClient = null)
     {
         registry.Register("google-generative-language", () => new GoogleProvider(httpClient), sourceId: "builtin");
+    }
+
+    public static void RegisterAllImages(ImagesProviderRegistry registry)
+    {
+        registry.Register("openrouter-images", () => new OpenRouterImagesProvider(), sourceId: "builtin");
+    }
+
+    public static void RegisterOpenRouterImages(ImagesProviderRegistry registry, HttpClient? httpClient = null)
+    {
+        registry.Register("openrouter-images", () => new OpenRouterImagesProvider(httpClient), sourceId: "builtin");
     }
 
     public static void RegisterConfiguredProviders(
