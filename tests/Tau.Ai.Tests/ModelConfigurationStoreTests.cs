@@ -339,6 +339,7 @@ public sealed class ModelConfigurationStoreTests
                         "cacheRetention": "long",
                         "sessionId": "provider-session",
                         "maxRetryDelayMs": 2500,
+                        "maxRetries": 2,
                         "headers": {
                           "X-Provider-Option": "provider-option",
                           "X-Option-Shared": "provider-option"
@@ -420,6 +421,7 @@ public sealed class ModelConfigurationStoreTests
             Assert.Equal(CacheRetention.Long, options.CacheRetention);
             Assert.Equal("model-session", options.SessionId);
             Assert.Equal(TimeSpan.FromMilliseconds(2500), options.MaxRetryDelay);
+            Assert.Equal(2, options.MaxRetries);
             Assert.Equal("provider-option", options.Headers!["X-Provider-Option"]);
             Assert.Equal("override-option", options.Headers["X-Override-Option"]);
             Assert.Equal("model-option", options.Headers["X-Model-Option"]);
@@ -460,6 +462,7 @@ public sealed class ModelConfigurationStoreTests
                         "cacheRetention": "long",
                         "sessionId": "provider-session",
                         "maxRetryDelayMs": 2500,
+                        "maxRetries": 2,
                         "reasoning": "xhigh",
                         "thinkingBudgets": {
                           "minimal": 100,
@@ -514,6 +517,7 @@ public sealed class ModelConfigurationStoreTests
                     CacheRetention = CacheRetention.None,
                     SessionId = "explicit-session",
                     MaxRetryDelay = TimeSpan.Zero,
+                    MaxRetries = 4,
                     Metadata = new Dictionary<string, object>
                     {
                         ["shared"] = "explicit"
@@ -533,6 +537,7 @@ public sealed class ModelConfigurationStoreTests
             Assert.Equal(CacheRetention.None, options.CacheRetention);
             Assert.Equal("explicit-session", options.SessionId);
             Assert.Equal(TimeSpan.Zero, options.MaxRetryDelay);
+            Assert.Equal(4, options.MaxRetries);
             Assert.Equal("explicit", options.Metadata!["shared"]);
             Assert.Equal("present", Assert.IsType<JsonElement>(options.Metadata["configuredOnly"]).GetString());
             Assert.Equal(ThinkingLevel.Low, options.Reasoning);

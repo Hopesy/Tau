@@ -40,6 +40,37 @@ public sealed class OpenAiCodexResponsesProviderTests
     }
 
     [Fact]
+    public async Task Stream_DefaultMaxRetries_DoesNotRetryRetryableCodexErrors()
+    {
+        var calls = 0;
+        using var handler = new OpenAiResponsesProviderTests.StubHandler(_ =>
+        {
+            calls++;
+            return calls == 1
+                ? new HttpResponseMessage((HttpStatusCode)429)
+                {
+                    Content = new StringContent("rate limit", Encoding.UTF8, "text/plain")
+                }
+                : OpenAiResponsesProviderTests.SseResponse(
+                    """
+                    data: {"type":"response.done","response":{"id":"resp_1","status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}
+
+                    """);
+        });
+        using var client = new HttpClient(handler);
+        var provider = new OpenAiCodexResponsesProvider(client);
+
+        var events = await OpenAiResponsesProviderTests.CollectAsync(provider.Stream(
+            BuildCodexModel(),
+            new LlmContext { Messages = [new UserMessage("hi")] },
+            new StreamOptions { ApiKey = OpenAiResponsesSharedTests.BuildFakeJwt("acc_no_retry") }));
+
+        var error = Assert.Single(events.OfType<ErrorEvent>());
+        Assert.Equal("openai-codex-responses error 429: rate limit", error.Error);
+        Assert.Equal(1, calls);
+    }
+
+    [Fact]
     public async Task Stream_RetriesRetryableCodexErrors()
     {
         var calls = 0;
@@ -66,7 +97,8 @@ public sealed class OpenAiCodexResponsesProviderTests
             new StreamOptions
             {
                 ApiKey = OpenAiResponsesSharedTests.BuildFakeJwt("acc_retry"),
-                MaxRetryDelay = TimeSpan.Zero
+                MaxRetryDelay = TimeSpan.Zero,
+                MaxRetries = 1
             }));
 
         Assert.Equal(2, calls);

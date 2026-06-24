@@ -13,7 +13,7 @@ public sealed class OpenAiCodexResponsesProvider : IStreamProvider, IDisposable
     private const string WebSocketBetaHeader = "responses_websockets=2026-02-06";
     private static readonly TimeSpan SessionWebSocketCacheTtl = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan DefaultSseHeaderTimeout = TimeSpan.FromSeconds(20);
-    private const int MaxRetries = 3;
+    private const int DefaultMaxRetries = 0;
     private readonly HttpClient _httpClient;
     private readonly ICodexWebSocketTransport _webSocketTransport;
     private readonly ConcurrentDictionary<string, CachedCodexWebSocketConnection> _webSocketSessionCache = new(StringComparer.Ordinal);
@@ -82,6 +82,7 @@ public sealed class OpenAiCodexResponsesProvider : IStreamProvider, IDisposable
             SessionId = options.SessionId,
             Headers = options.Headers,
             MaxRetryDelay = options.MaxRetryDelay,
+            MaxRetries = options.MaxRetries,
             Metadata = options.Metadata,
             Transport = options.Transport,
             ReasoningEffort = reasoningEffort
@@ -157,7 +158,8 @@ public sealed class OpenAiCodexResponsesProvider : IStreamProvider, IDisposable
 
         HttpResponseMessage? response = null;
         string? lastError = null;
-        for (var attempt = 0; attempt <= MaxRetries; attempt++)
+        var maxRetries = Math.Max(0, options.MaxRetries ?? DefaultMaxRetries);
+        for (var attempt = 0; attempt <= maxRetries; attempt++)
         {
             using var request = new HttpRequestMessage(HttpMethod.Post, url)
             {
@@ -171,7 +173,7 @@ public sealed class OpenAiCodexResponsesProvider : IStreamProvider, IDisposable
             }
 
             lastError = await response.Content.ReadAsStringAsync(options.Signal).ConfigureAwait(false);
-            if (attempt == MaxRetries || !OpenAiResponsesShared.IsRetryableError((int)response.StatusCode, lastError))
+            if (attempt == maxRetries || !OpenAiResponsesShared.IsRetryableError((int)response.StatusCode, lastError))
             {
                 stream.Push(new ErrorEvent($"{Api} error {(int)response.StatusCode}: {lastError}"));
                 return;

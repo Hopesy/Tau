@@ -531,6 +531,7 @@ public sealed class ModelConfigurationStore
             CacheRetention: ParseEnum<CacheRetention>(GetString(options, "cacheRetention")),
             SessionId: GetString(options, "sessionId"),
             MaxRetryDelay: ParseMaxRetryDelay(options),
+            MaxRetries: ParseMaxRetries(options),
             Headers: ResolveHeaders(ParseRequestOptionHeaders(element)),
             Metadata: ParseObjectDictionary(options, "metadata"),
             Reasoning: ParseEnum<ThinkingLevel>(GetString(options, "reasoning")),
@@ -560,6 +561,7 @@ public sealed class ModelConfigurationStore
             CacheRetention: overrideOptions.CacheRetention ?? baseOptions.CacheRetention,
             SessionId: overrideOptions.SessionId ?? baseOptions.SessionId,
             MaxRetryDelay: overrideOptions.MaxRetryDelay ?? baseOptions.MaxRetryDelay,
+            MaxRetries: overrideOptions.MaxRetries ?? baseOptions.MaxRetries,
             Headers: MergeHeaders(baseOptions.Headers, overrideOptions.Headers),
             Metadata: MergeObjectDictionaries(baseOptions.Metadata, overrideOptions.Metadata),
             Reasoning: overrideOptions.Reasoning ?? baseOptions.Reasoning,
@@ -691,6 +693,12 @@ public sealed class ModelConfigurationStore
         }
 
         return TimeSpan.FromMilliseconds(Math.Max(0, delayMs.Value));
+    }
+
+    private static int? ParseMaxRetries(JsonElement options)
+    {
+        var retries = GetInt(options, "maxRetries");
+        return retries is null ? null : Math.Max(0, retries.Value);
     }
 
     private static ThinkingBudgets? ParseThinkingBudgets(JsonElement options)
@@ -1194,6 +1202,7 @@ internal sealed record ModelRequestOptionsConfiguration(
     CacheRetention? CacheRetention,
     string? SessionId,
     TimeSpan? MaxRetryDelay,
+    int? MaxRetries,
     IDictionary<string, string>? Headers,
     IDictionary<string, object>? Metadata,
     ThinkingLevel? Reasoning,
@@ -1201,6 +1210,7 @@ internal sealed record ModelRequestOptionsConfiguration(
     ModelProviderSpecificOptionsConfiguration? ProviderSpecific)
 {
     public static ModelRequestOptionsConfiguration Empty { get; } = new(
+        null,
         null,
         null,
         null,

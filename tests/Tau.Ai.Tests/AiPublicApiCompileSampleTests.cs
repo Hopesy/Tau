@@ -110,6 +110,7 @@ public sealed class AiPublicApiCompileSampleTests
             Signal = CancellationToken.None,
             OnResponse = (_, _) => ValueTask.CompletedTask,
             Headers = new Dictionary<string, string> { ["x-sample"] = "1" },
+            MaxRetries = 2,
             Metadata = new Dictionary<string, object> { ["source"] = "public-api-sample" }
         };
 
@@ -179,6 +180,7 @@ public sealed class AiPublicApiCompileSampleTests
         Assert.False(ContextOverflowDetector.IsContextOverflow(result, contextWindow: 128_000));
         Assert.Equal("explicit-sample-key", provider.LastOptions?.ApiKey);
         Assert.Equal("sample-session", provider.LastOptions?.SessionId);
+        Assert.Equal(2, provider.LastOptions?.MaxRetries);
         Assert.Equal("You are a sample.", provider.LastContext?.SystemPrompt);
 
         var faux = Faux.Register(registry);

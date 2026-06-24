@@ -55,6 +55,7 @@ public sealed class AzureOpenAiResponsesProvider : IStreamProvider
             SessionId = options.SessionId,
             Headers = options.Headers,
             MaxRetryDelay = options.MaxRetryDelay,
+            MaxRetries = options.MaxRetries,
             Metadata = options.Metadata,
             ReasoningEffort = reasoningEffort
         };
