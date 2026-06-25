@@ -41,6 +41,16 @@ public class CodingAgentThemeStoreTests
             Assert.Contains(status.Diagnostics, diagnostic =>
                 diagnostic.Message.Contains("collision", StringComparison.OrdinalIgnoreCase) &&
                 diagnostic.Path == Path.Combine(projectThemes, "dark.json"));
+            var collision = Assert.Single(status.ResourceDiagnostics, diagnostic =>
+                diagnostic.Type == CodingAgentResourceDiagnosticTypes.Collision &&
+                diagnostic.Collision?.Name == "dark");
+            Assert.Equal(Path.Combine(projectThemes, "dark.json"), collision.Path);
+            Assert.NotNull(collision.Collision);
+            Assert.Equal(CodingAgentResourceTypes.Theme, collision.Collision.ResourceType);
+            Assert.Equal(Path.Combine(projectThemes, "dark.json"), collision.Collision.WinnerPath);
+            Assert.Equal("<builtin>", collision.Collision.LoserPath);
+            Assert.Equal("project", collision.Collision.WinnerSource);
+            Assert.Equal("builtin", collision.Collision.LoserSource);
         }
         finally
         {
@@ -108,6 +118,14 @@ public class CodingAgentThemeStoreTests
                 diagnostic.Message == "theme json missing required color 'accent'");
             Assert.Contains(status.Diagnostics, diagnostic =>
                 diagnostic.Severity == "warning" &&
+                diagnostic.Path == missingPath &&
+                diagnostic.Message == "theme path does not exist");
+            Assert.Contains(status.ResourceDiagnostics, diagnostic =>
+                diagnostic.Type == CodingAgentResourceDiagnosticTypes.Error &&
+                diagnostic.Path == badJson &&
+                diagnostic.Message.StartsWith("failed to load theme json:", StringComparison.Ordinal));
+            Assert.Contains(status.ResourceDiagnostics, diagnostic =>
+                diagnostic.Type == CodingAgentResourceDiagnosticTypes.Warning &&
                 diagnostic.Path == missingPath &&
                 diagnostic.Message == "theme path does not exist");
         }

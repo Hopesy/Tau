@@ -14,11 +14,16 @@ public sealed record CodingAgentThemeDiagnostic(
     string Severity,
     string Message,
     string Path,
-    string Scope);
+    string Scope,
+    CodingAgentResourceCollision? Collision = null);
 
 public sealed record CodingAgentThemeStatus(
     IReadOnlyList<CodingAgentTheme> Themes,
-    IReadOnlyList<CodingAgentThemeDiagnostic> Diagnostics);
+    IReadOnlyList<CodingAgentThemeDiagnostic> Diagnostics)
+{
+    public IReadOnlyList<CodingAgentResourceDiagnostic> ResourceDiagnostics =>
+        CodingAgentResourceDiagnostics.FromThemes(Diagnostics);
+}
 
 public sealed class CodingAgentThemeStore
 {
@@ -192,13 +197,22 @@ public sealed class CodingAgentThemeStore
         var winners = new Dictionary<string, CodingAgentTheme>(StringComparer.OrdinalIgnoreCase);
         foreach (var theme in themes)
         {
-            if (winners.ContainsKey(theme.Name))
+            if (winners.TryGetValue(theme.Name, out var previous))
             {
+                var winnerPath = theme.FilePath ?? "<builtin>";
+                var loserPath = previous.FilePath ?? "<builtin>";
                 diagnostics.Add(new CodingAgentThemeDiagnostic(
                     "warning",
                     $"theme name \"{theme.Name}\" collision; later theme wins",
-                    theme.FilePath ?? "<builtin>",
-                    theme.Scope));
+                    winnerPath,
+                    theme.Scope,
+                    new CodingAgentResourceCollision(
+                        CodingAgentResourceTypes.Theme,
+                        theme.Name,
+                        winnerPath,
+                        loserPath,
+                        theme.Scope,
+                        previous.Scope)));
             }
 
             winners[theme.Name] = theme;

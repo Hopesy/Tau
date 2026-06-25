@@ -37,7 +37,11 @@ public sealed record CodingAgentPackageResources(
     IReadOnlyList<string> SkillPaths,
     IReadOnlyList<string> PromptPaths,
     IReadOnlyList<string> ThemePaths,
-    IReadOnlyList<CodingAgentPackageDiagnostic> Diagnostics);
+    IReadOnlyList<CodingAgentPackageDiagnostic> Diagnostics)
+{
+    public IReadOnlyList<CodingAgentResourceDiagnostic> ResourceDiagnostics =>
+        CodingAgentResourceDiagnostics.FromPackages(Diagnostics);
+}
 
 public sealed record CodingAgentPackageCommand(
     string FileName,

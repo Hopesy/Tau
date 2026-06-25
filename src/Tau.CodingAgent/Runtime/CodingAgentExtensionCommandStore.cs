@@ -130,7 +130,11 @@ public sealed record CodingAgentExtensionStatus(
     IReadOnlyList<CodingAgentExtensionFileStatus> Files,
     IReadOnlyList<CodingAgentExtensionModule> Modules,
     IReadOnlyList<CodingAgentExtensionEventHandler> EventHandlers,
-    IReadOnlyList<CodingAgentExtensionDiagnostic> Diagnostics);
+    IReadOnlyList<CodingAgentExtensionDiagnostic> Diagnostics)
+{
+    public IReadOnlyList<CodingAgentResourceDiagnostic> ResourceDiagnostics =>
+        CodingAgentResourceDiagnostics.FromExtensions(Diagnostics);
+}
 
 public sealed class CodingAgentExtensionCommandStore
 {
