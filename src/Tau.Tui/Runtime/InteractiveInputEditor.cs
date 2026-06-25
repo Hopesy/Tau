@@ -1024,48 +1024,247 @@ public sealed class InteractiveInputEditor
 
     internal static int FindPreviousWordBoundary(IReadOnlyList<char> chars, int cursor)
     {
+        cursor = Math.Clamp(cursor, 0, chars.Count);
         if (cursor <= 0)
         {
             return 0;
         }
 
-        var index = cursor;
-        // Skip trailing whitespace before the cursor.
-        while (index > 0 && char.IsWhiteSpace(chars[index - 1]))
+        var segments = SegmentWords(chars, endExclusive: cursor);
+        var index = segments.Count - 1;
+        while (index >= 0 && segments[index].Kind == WordSegmentKind.Whitespace)
         {
             index--;
         }
 
-        // Skip the previous run of non-whitespace characters.
-        while (index > 0 && !char.IsWhiteSpace(chars[index - 1]))
+        if (index < 0)
         {
+            return cursor;
+        }
+
+        var segment = segments[index];
+        if (segment.Kind is WordSegmentKind.WordLike or WordSegmentKind.Cjk)
+        {
+            return segment.Start;
+        }
+
+        var kind = segment.Kind;
+        var start = segment.Start;
+        index--;
+        while (index >= 0 && segments[index].Kind == kind)
+        {
+            start = segments[index].Start;
             index--;
         }
 
-        return index;
+        return start;
     }
 
     internal static int FindNextWordBoundary(IReadOnlyList<char> chars, int cursor)
     {
+        cursor = Math.Clamp(cursor, 0, chars.Count);
         if (cursor >= chars.Count)
         {
             return chars.Count;
         }
 
-        var index = cursor;
-        // Skip leading whitespace at the cursor.
-        while (index < chars.Count && char.IsWhiteSpace(chars[index]))
+        var segments = SegmentWords(chars, startInclusive: cursor);
+        var index = 0;
+        while (index < segments.Count && segments[index].Kind == WordSegmentKind.Whitespace)
         {
             index++;
         }
 
-        // Skip the next run of non-whitespace characters.
-        while (index < chars.Count && !char.IsWhiteSpace(chars[index]))
+        if (index >= segments.Count)
         {
+            return cursor;
+        }
+
+        var segment = segments[index];
+        if (segment.Kind is WordSegmentKind.WordLike or WordSegmentKind.Cjk)
+        {
+            return segment.End;
+        }
+
+        var kind = segment.Kind;
+        var end = segment.End;
+        index++;
+        while (index < segments.Count && segments[index].Kind == kind)
+        {
+            end = segments[index].End;
             index++;
         }
 
-        return index;
+        return end;
+    }
+
+    private static List<WordSegment> SegmentWords(
+        IReadOnlyList<char> chars,
+        int startInclusive = 0,
+        int? endExclusive = null)
+    {
+        var start = Math.Clamp(startInclusive, 0, chars.Count);
+        var end = Math.Clamp(endExclusive ?? chars.Count, start, chars.Count);
+        var text = new string(chars.ToArray());
+        var segments = new List<WordSegment>();
+        var enumerator = StringInfo.GetTextElementEnumerator(text);
+
+        while (enumerator.MoveNext())
+        {
+            var elementStart = enumerator.ElementIndex;
+            var element = enumerator.GetTextElement();
+            var elementEnd = elementStart + element.Length;
+            if (elementEnd <= start)
+            {
+                continue;
+            }
+
+            if (elementStart >= end)
+            {
+                break;
+            }
+
+            var segment = new WordSegment(elementStart, elementEnd, ClassifyWordElement(element));
+            AddWordSegment(segments, segment);
+        }
+
+        return segments;
+    }
+
+    private static void AddWordSegment(List<WordSegment> segments, WordSegment segment)
+    {
+        if (segments.Count == 0 || segment.Kind == WordSegmentKind.Cjk)
+        {
+            segments.Add(segment);
+            return;
+        }
+
+        var previous = segments[^1];
+        if (previous.Kind != segment.Kind || previous.Kind == WordSegmentKind.Cjk)
+        {
+            segments.Add(segment);
+            return;
+        }
+
+        segments[^1] = previous with { End = segment.End };
+    }
+
+    private static WordSegmentKind ClassifyWordElement(string element)
+    {
+        if (string.IsNullOrEmpty(element))
+        {
+            return WordSegmentKind.Other;
+        }
+
+        if (IsWhitespaceElement(element))
+        {
+            return WordSegmentKind.Whitespace;
+        }
+
+        if (IsCjkElement(element))
+        {
+            return WordSegmentKind.Cjk;
+        }
+
+        if (IsAsciiPunctuationElement(element))
+        {
+            return WordSegmentKind.Punctuation;
+        }
+
+        var category = CharUnicodeInfo.GetUnicodeCategory(element, 0);
+        return category is UnicodeCategory.UppercaseLetter
+                or UnicodeCategory.LowercaseLetter
+                or UnicodeCategory.TitlecaseLetter
+                or UnicodeCategory.ModifierLetter
+                or UnicodeCategory.OtherLetter
+                or UnicodeCategory.DecimalDigitNumber
+                or UnicodeCategory.LetterNumber
+                or UnicodeCategory.NonSpacingMark
+                or UnicodeCategory.SpacingCombiningMark
+                or UnicodeCategory.ConnectorPunctuation
+            ? WordSegmentKind.WordLike
+            : WordSegmentKind.Other;
+    }
+
+    private static bool IsWhitespaceElement(string element)
+    {
+        for (var i = 0; i < element.Length; i++)
+        {
+            if (!char.IsWhiteSpace(element[i]))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static bool IsAsciiPunctuationElement(string element)
+    {
+        for (var i = 0; i < element.Length; i++)
+        {
+            if (IsAsciiWordPunctuation(element[i]))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool IsAsciiWordPunctuation(char ch) =>
+        ch is '(' or ')' or '{' or '}' or '[' or ']' or '<' or '>' or '.' or ',' or ';' or ':' or '\''
+            or '"' or '!' or '?' or '+' or '-' or '=' or '*' or '/' or '\\' or '|' or '&' or '%' or '^'
+            or '$' or '#' or '@' or '~' or '`';
+
+    private static bool IsCjkElement(string element)
+    {
+        for (var i = 0; i < element.Length; i++)
+        {
+            var ch = element[i];
+            int codePoint;
+            if (char.IsHighSurrogate(ch) && i + 1 < element.Length && char.IsLowSurrogate(element[i + 1]))
+            {
+                codePoint = char.ConvertToUtf32(ch, element[i + 1]);
+                i++;
+            }
+            else
+            {
+                codePoint = ch;
+            }
+
+            if (IsCjkCodePoint(codePoint))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool IsCjkCodePoint(int codePoint) =>
+        codePoint is >= 0x3400 and <= 0x4DBF
+            or >= 0x4E00 and <= 0x9FFF
+            or >= 0xF900 and <= 0xFAFF
+            or >= 0x20000 and <= 0x2EBEF
+            or >= 0x3040 and <= 0x309F
+            or >= 0x30A0 and <= 0x30FF
+            or >= 0x31F0 and <= 0x31FF
+            or >= 0x1100 and <= 0x11FF
+            or >= 0x3130 and <= 0x318F
+            or >= 0xAC00 and <= 0xD7AF
+            or >= 0x3100 and <= 0x312F
+            or >= 0x31A0 and <= 0x31BF;
+
+    private readonly record struct WordSegment(int Start, int End, WordSegmentKind Kind);
+
+    private enum WordSegmentKind
+    {
+        Whitespace,
+        WordLike,
+        Cjk,
+        Punctuation,
+        Other,
     }
 }
 

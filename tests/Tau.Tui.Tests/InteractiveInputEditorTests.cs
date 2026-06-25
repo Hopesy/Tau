@@ -855,12 +855,56 @@ public sealed class InteractiveInputEditorTests
         Assert.Equal(" beta gamma", result.Text);
     }
 
+    [Fact]
+    public async Task ReadLineAsync_CtrlBackspaceStopsAtAsciiPunctuationBoundary()
+    {
+        var reader = new FakeKeyReader();
+        foreach (var ch in "alpha.beta")
+        {
+            reader.Enqueue(ch);
+        }
+        reader.EnqueueRaw(new ConsoleKeyInfo('\0', ConsoleKey.Backspace, shift: false, alt: false, control: true));
+        reader.EnqueueKey(ConsoleKey.Enter);
+
+        var renderer = new FakeRenderer();
+        var editor = new InteractiveInputEditor(reader, renderer);
+
+        var result = await editor.ReadLineAsync("> ");
+
+        Assert.Equal("alpha.", result.Text);
+    }
+
+    [Fact]
+    public async Task ReadLineAsync_CtrlDeleteStopsAtAsciiPunctuationBoundary()
+    {
+        var reader = new FakeKeyReader();
+        foreach (var ch in "alpha.beta")
+        {
+            reader.Enqueue(ch);
+        }
+        reader.EnqueueKey(ConsoleKey.Home);
+        reader.EnqueueRaw(new ConsoleKeyInfo('\0', ConsoleKey.Delete, shift: false, alt: false, control: true));
+        reader.EnqueueKey(ConsoleKey.Enter);
+
+        var renderer = new FakeRenderer();
+        var editor = new InteractiveInputEditor(reader, renderer);
+
+        var result = await editor.ReadLineAsync("> ");
+
+        Assert.Equal(".beta", result.Text);
+    }
+
     [Theory]
     [InlineData("hello world", 11, 6)]
     [InlineData("hello world", 6, 0)]
     [InlineData("hello", 5, 0)]
     [InlineData("", 0, 0)]
     [InlineData("  spaces", 8, 2)]
+    [InlineData("alpha.beta", 10, 6)]
+    [InlineData("alpha.beta", 6, 5)]
+    [InlineData("alpha::beta", 7, 5)]
+    [InlineData("e\u0301/foo", 2, 0)]
+    [InlineData("你好abc", 2, 1)]
     public void FindPreviousWordBoundary_HandlesWhitespaceRuns(string text, int cursor, int expected)
     {
         Assert.Equal(expected, InteractiveInputEditor.FindPreviousWordBoundary(text.ToCharArray(), cursor));
@@ -872,6 +916,11 @@ public sealed class InteractiveInputEditorTests
     [InlineData("hello", 0, 5)]
     [InlineData("hello", 5, 5)]
     [InlineData("   trailing   ", 0, 11)]
+    [InlineData("alpha.beta", 0, 5)]
+    [InlineData("alpha.beta", 5, 6)]
+    [InlineData("alpha::beta", 5, 7)]
+    [InlineData("e\u0301/foo", 0, 2)]
+    [InlineData("你好abc", 0, 1)]
     public void FindNextWordBoundary_HandlesWhitespaceRuns(string text, int cursor, int expected)
     {
         Assert.Equal(expected, InteractiveInputEditor.FindNextWordBoundary(text.ToCharArray(), cursor));
@@ -1391,6 +1440,14 @@ public sealed class InteractiveInputEditorTests
                             new TuiAutocompleteItem("/models ", "models")
                         ],
                         "/mo"));
+            }
+
+            if (text == "/")
+            {
+                return ValueTask.FromResult<TuiAutocompleteSuggestions?>(
+                    new TuiAutocompleteSuggestions(
+                        [new TuiAutocompleteItem("/model ", "model")],
+                        "/"));
             }
 
             if (string.IsNullOrEmpty(text))
