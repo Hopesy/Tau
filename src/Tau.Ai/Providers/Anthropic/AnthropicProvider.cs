@@ -371,7 +371,7 @@ public sealed class AnthropicProvider : IStreamProvider
     }
 
     private static bool UsesAdaptiveThinking(Model model) =>
-        model.Compat?.ForceAdaptiveThinking == true || SupportsAdaptiveThinking(model.Id);
+        model.Compat?.ForceAdaptiveThinking ?? SupportsAdaptiveThinking(model.Id);
 
     private static bool SupportsAdaptiveThinking(string modelId) =>
         modelId.Contains("opus-4-6", StringComparison.OrdinalIgnoreCase) ||

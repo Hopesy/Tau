@@ -85,6 +85,41 @@ public sealed class AnthropicProviderTests
     }
 
     [Fact]
+    public async Task Stream_WithForceAdaptiveThinkingFalse_UsesLegacyThinkingForAdaptiveModelId()
+    {
+        using var handler = new OpenAiResponsesProviderTests.StubHandler(_ => new HttpResponseMessage(HttpStatusCode.BadRequest)
+        {
+            Content = new StringContent("stop after payload", Encoding.UTF8, "text/plain")
+        });
+        using var client = new HttpClient(handler);
+        var provider = new AnthropicProvider(client);
+        var model = BuildModel("claude-opus-4-7-20260101", reasoning: true) with
+        {
+            Compat = new ModelCompatibility { ForceAdaptiveThinking = false }
+        };
+
+        await OpenAiResponsesProviderTests.CollectAsync(provider.Stream(
+            model,
+            new LlmContext { Messages = [new UserMessage("think")] },
+            new AnthropicOptions
+            {
+                ApiKey = "anthropic-key",
+                ThinkingEnabled = true,
+                ThinkingBudgetTokens = 2048,
+                Effort = "medium",
+                ThinkingDisplay = "summarized"
+            }));
+
+        using var doc = JsonDocument.Parse(handler.CapturedBody);
+        var root = doc.RootElement;
+        var thinking = root.GetProperty("thinking");
+        Assert.Equal("enabled", thinking.GetProperty("type").GetString());
+        Assert.Equal(2048, thinking.GetProperty("budget_tokens").GetInt32());
+        Assert.Equal("summarized", thinking.GetProperty("display").GetString());
+        Assert.False(root.TryGetProperty("output_config", out _));
+    }
+
+    [Fact]
     public async Task Stream_WithMixedProviderCompatibility_AddsSessionAffinityAndForcesAdaptiveThinking()
     {
         using var handler = new OpenAiResponsesProviderTests.StubHandler(_ => new HttpResponseMessage(HttpStatusCode.BadRequest)
