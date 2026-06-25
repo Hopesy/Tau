@@ -57,6 +57,7 @@ public sealed class ModelCatalogTests
         var opencode = catalog.GetModel("opencode", "claude-sonnet-4-6");
         var fireworks = catalog.GetModel("fireworks", "accounts/fireworks/models/kimi-k2p6");
         var cloudflareAiGateway = catalog.GetModel("cloudflare-ai-gateway", "claude-sonnet-4-6");
+        var fable = catalog.GetModel("cloudflare-ai-gateway", "claude-fable-5");
 
         Assert.Equal("azure-openai-responses", azure.Api);
         Assert.Equal(128_000, azure.MaxOutputTokens);
@@ -108,6 +109,8 @@ public sealed class ModelCatalogTests
         Assert.Contains("{CLOUDFLARE_ACCOUNT_ID}", cloudflareAiGateway.BaseUrl);
         Assert.True(cloudflareAiGateway.Compat!.SendSessionAffinityHeaders);
         Assert.True(cloudflareAiGateway.Compat.ForceAdaptiveThinking);
+        Assert.True(fable.Compat!.ForceAdaptiveThinking);
+        Assert.False(fable.Compat.SupportsDisabledThinking);
     }
 
     [Fact]

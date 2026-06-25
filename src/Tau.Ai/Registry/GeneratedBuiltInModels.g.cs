@@ -104,8 +104,14 @@ public static class GeneratedBuiltInModels
     {
         if (!element.TryGetProperty("compat", out var compat) || compat.ValueKind != JsonValueKind.Object)
         {
-            return ParseReasoningEffortMap(element) is { } map
-                ? new ModelCompatibility { ReasoningEffortMap = map }
+            var map = ParseReasoningEffortMap(element);
+            var supportsDisabledThinking = ParseSupportsDisabledThinking(element);
+            return map is not null || supportsDisabledThinking.HasValue
+                ? new ModelCompatibility
+                {
+                    ReasoningEffortMap = map,
+                    SupportsDisabledThinking = supportsDisabledThinking
+                }
                 : null;
         }
 
@@ -133,7 +139,8 @@ public static class GeneratedBuiltInModels
             ForceAdaptiveThinking = GetBool(compat, "forceAdaptiveThinking"),
             SupportsEagerToolInputStreaming = GetBool(compat, "supportsEagerToolInputStreaming"),
             SupportsCacheControlOnTools = GetBool(compat, "supportsCacheControlOnTools"),
-            AllowEmptySignature = GetBool(compat, "allowEmptySignature")
+            AllowEmptySignature = GetBool(compat, "allowEmptySignature"),
+            SupportsDisabledThinking = ParseSupportsDisabledThinking(element)
         };
 
         return parsed;
@@ -141,6 +148,18 @@ public static class GeneratedBuiltInModels
 
     private static IReadOnlyDictionary<string, string>? ParseReasoningEffortMap(JsonElement element) =>
         ParseStringDictionary(element, "reasoningEffortMap") ?? ParseStringDictionary(element, "thinkingLevelMap");
+
+    private static bool? ParseSupportsDisabledThinking(JsonElement element)
+    {
+        if (!element.TryGetProperty("thinkingLevelMap", out var map) ||
+            map.ValueKind != JsonValueKind.Object ||
+            !map.TryGetProperty("off", out var off))
+        {
+            return null;
+        }
+
+        return off.ValueKind == JsonValueKind.Null ? false : true;
+    }
 
     private static VercelGatewayRouting? ParseVercelGatewayRouting(JsonElement element, string propertyName)
     {

@@ -41,6 +41,7 @@ public record ModelCompatibility
     public bool? SupportsEagerToolInputStreaming { get; init; }
     public bool? SupportsCacheControlOnTools { get; init; }
     public bool? AllowEmptySignature { get; init; }
+    public bool? SupportsDisabledThinking { get; init; }
 }
 
 public record VercelGatewayRouting

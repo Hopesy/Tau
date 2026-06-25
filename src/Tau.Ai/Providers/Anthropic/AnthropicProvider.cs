@@ -287,7 +287,9 @@ public sealed class AnthropicProvider : IStreamProvider
         if (options is AnthropicOptions anthropicOptions)
         {
             if (anthropicOptions.ThinkingEnabled == false)
-                return new Dictionary<string, object> { ["type"] = "disabled" };
+                return model.Compat?.SupportsDisabledThinking == false
+                    ? null
+                    : new Dictionary<string, object> { ["type"] = "disabled" };
 
             if (anthropicOptions.ThinkingEnabled == true)
             {

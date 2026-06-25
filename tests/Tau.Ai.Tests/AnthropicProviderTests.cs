@@ -380,6 +380,41 @@ public sealed class AnthropicProviderTests
     }
 
     [Fact]
+    public async Task Stream_WithDisabledThinkingUnsupported_OmitsDisabledThinking()
+    {
+        using var handler = new OpenAiResponsesProviderTests.StubHandler(_ => new HttpResponseMessage(HttpStatusCode.BadRequest)
+        {
+            Content = new StringContent("stop after payload", Encoding.UTF8, "text/plain")
+        });
+        using var client = new HttpClient(handler);
+        var provider = new AnthropicProvider(client);
+        var model = BuildModel("claude-fable-5", reasoning: true) with
+        {
+            Compat = new ModelCompatibility
+            {
+                ForceAdaptiveThinking = true,
+                SupportsDisabledThinking = false
+            }
+        };
+
+        await OpenAiResponsesProviderTests.CollectAsync(provider.Stream(
+            model,
+            new LlmContext { Messages = [new UserMessage("no think")] },
+            new AnthropicOptions
+            {
+                ApiKey = "anthropic-key",
+                ThinkingEnabled = false,
+                Temperature = 0.8f
+            }));
+
+        using var doc = JsonDocument.Parse(handler.CapturedBody);
+        var root = doc.RootElement;
+        Assert.False(root.TryGetProperty("thinking", out _));
+        Assert.Equal(0.8f, root.GetProperty("temperature").GetSingle());
+        Assert.False(root.TryGetProperty("output_config", out _));
+    }
+
+    [Fact]
     public async Task StreamSimple_UsesConfiguredThinkingBudget()
     {
         using var handler = new OpenAiResponsesProviderTests.StubHandler(_ => new HttpResponseMessage(HttpStatusCode.BadRequest)

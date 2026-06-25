@@ -416,7 +416,15 @@ public sealed class ModelConfigurationStore
     {
         if (!element.TryGetProperty(propertyName, out var compat) || compat.ValueKind != JsonValueKind.Object)
         {
-            return null;
+            var reasoningEffortMap = ParseStringDictionary(element, "thinkingLevelMap");
+            var supportsDisabledThinking = ParseSupportsDisabledThinking(element);
+            return reasoningEffortMap is not null || supportsDisabledThinking.HasValue
+                ? new ModelCompatibility
+                {
+                    ReasoningEffortMap = reasoningEffortMap,
+                    SupportsDisabledThinking = supportsDisabledThinking
+                }
+                : null;
         }
 
         return new ModelCompatibility
@@ -424,7 +432,7 @@ public sealed class ModelConfigurationStore
             SupportsStore = GetBool(compat, "supportsStore"),
             SupportsDeveloperRole = GetBool(compat, "supportsDeveloperRole"),
             SupportsReasoningEffort = GetBool(compat, "supportsReasoningEffort"),
-            ReasoningEffortMap = ParseStringDictionary(compat, "reasoningEffortMap"),
+            ReasoningEffortMap = ParseStringDictionary(compat, "reasoningEffortMap") ?? ParseStringDictionary(element, "thinkingLevelMap"),
             SupportsUsageInStreaming = GetBool(compat, "supportsUsageInStreaming"),
             MaxTokensField = GetString(compat, "maxTokensField"),
             RequiresToolResultName = GetBool(compat, "requiresToolResultName"),
@@ -443,7 +451,8 @@ public sealed class ModelConfigurationStore
             ForceAdaptiveThinking = GetBool(compat, "forceAdaptiveThinking"),
             SupportsEagerToolInputStreaming = GetBool(compat, "supportsEagerToolInputStreaming"),
             SupportsCacheControlOnTools = GetBool(compat, "supportsCacheControlOnTools"),
-            AllowEmptySignature = GetBool(compat, "allowEmptySignature")
+            AllowEmptySignature = GetBool(compat, "allowEmptySignature"),
+            SupportsDisabledThinking = ParseSupportsDisabledThinking(element)
         };
     }
 
@@ -483,8 +492,21 @@ public sealed class ModelConfigurationStore
             ForceAdaptiveThinking = overrideCompat.ForceAdaptiveThinking ?? baseCompat.ForceAdaptiveThinking,
             SupportsEagerToolInputStreaming = overrideCompat.SupportsEagerToolInputStreaming ?? baseCompat.SupportsEagerToolInputStreaming,
             SupportsCacheControlOnTools = overrideCompat.SupportsCacheControlOnTools ?? baseCompat.SupportsCacheControlOnTools,
-            AllowEmptySignature = overrideCompat.AllowEmptySignature ?? baseCompat.AllowEmptySignature
+            AllowEmptySignature = overrideCompat.AllowEmptySignature ?? baseCompat.AllowEmptySignature,
+            SupportsDisabledThinking = overrideCompat.SupportsDisabledThinking ?? baseCompat.SupportsDisabledThinking
         };
+    }
+
+    private static bool? ParseSupportsDisabledThinking(JsonElement element)
+    {
+        if (!element.TryGetProperty("thinkingLevelMap", out var map) ||
+            map.ValueKind != JsonValueKind.Object ||
+            !map.TryGetProperty("off", out var off))
+        {
+            return null;
+        }
+
+        return off.ValueKind == JsonValueKind.Null ? false : true;
     }
 
     private static VercelGatewayRouting? ParseVercelGatewayRouting(JsonElement element, string propertyName)
