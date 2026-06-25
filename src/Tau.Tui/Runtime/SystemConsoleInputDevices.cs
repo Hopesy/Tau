@@ -9,12 +9,16 @@ public interface ITuiConsoleRawModeController
 
 public sealed class SystemConsoleKeyReader : IConsoleKeyReader, IDisposable
 {
+    private const string RawInputEnvironmentVariable = "TAU_TUI_RAW_INPUT";
+
     private readonly IConsoleKeyReader? _rawReader;
     private readonly IDisposable? _rawMode;
 
     public SystemConsoleKeyReader()
-        : this(CreateEnvironmentRawReader())
     {
+        var rawInput = CreateEnvironmentRawInput();
+        _rawReader = rawInput.RawReader;
+        _rawMode = rawInput.RawMode;
     }
 
     private SystemConsoleKeyReader(IConsoleKeyReader? rawReader, IDisposable? rawMode = null)
@@ -45,19 +49,74 @@ public sealed class SystemConsoleKeyReader : IConsoleKeyReader, IDisposable
             rawMode);
     }
 
-    private static IConsoleKeyReader? CreateEnvironmentRawReader()
+    internal static bool ShouldUseRawInput(
+        string? configuredValue,
+        bool isInputRedirected,
+        bool isOutputRedirected)
     {
-        if (!string.Equals(
-                Environment.GetEnvironmentVariable("TAU_TUI_RAW_INPUT"),
-                "1",
-                StringComparison.Ordinal))
+        var normalized = configuredValue?.Trim();
+        if (string.IsNullOrEmpty(normalized))
+            return !isInputRedirected && !isOutputRedirected;
+
+        if (IsEnabledRawInputValue(normalized))
+            return true;
+
+        if (IsDisabledRawInputValue(normalized))
+            return false;
+
+        return !isInputRedirected && !isOutputRedirected;
+    }
+
+    private static (IConsoleKeyReader? RawReader, IDisposable? RawMode) CreateEnvironmentRawInput()
+    {
+        if (!ShouldUseRawInput(
+                Environment.GetEnvironmentVariable(RawInputEnvironmentVariable),
+                SafeIsInputRedirected(),
+                SafeIsOutputRedirected()))
         {
-            return null;
+            return (null, null);
         }
 
-        return CreateRaw(
-            Console.OpenStandardInput(),
-            rawModeController: new SystemTuiConsoleRawModeController());
+        var rawMode = new SystemTuiConsoleRawModeController().EnterRawMode();
+        return (
+            new TuiDecodedKeyReader(new TuiStreamRawInputReader(Console.OpenStandardInput())),
+            rawMode);
+    }
+
+    private static bool IsEnabledRawInputValue(string value) =>
+        string.Equals(value, "1", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(value, "true", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(value, "on", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(value, "yes", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsDisabledRawInputValue(string value) =>
+        string.Equals(value, "0", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(value, "false", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(value, "off", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(value, "no", StringComparison.OrdinalIgnoreCase);
+
+    private static bool SafeIsInputRedirected()
+    {
+        try
+        {
+            return Console.IsInputRedirected;
+        }
+        catch
+        {
+            return true;
+        }
+    }
+
+    private static bool SafeIsOutputRedirected()
+    {
+        try
+        {
+            return Console.IsOutputRedirected;
+        }
+        catch
+        {
+            return true;
+        }
     }
 
     public void Dispose()

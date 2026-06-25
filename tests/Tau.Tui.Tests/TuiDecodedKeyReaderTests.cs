@@ -110,6 +110,39 @@ public sealed class TuiDecodedKeyReaderTests : IDisposable
         Assert.Equal(1, rawMode.Scope.DisposeCalls);
     }
 
+    [Fact]
+    public void SystemConsoleKeyReader_ShouldUseRawInputFollowsTerminalAndEnvironmentStrategy()
+    {
+        var cases = new (string? ConfiguredValue, bool IsInputRedirected, bool IsOutputRedirected, bool Expected)[]
+        {
+            (null, false, false, true),
+            ("", false, false, true),
+            (" ", false, false, true),
+            (null, true, false, false),
+            (null, false, true, false),
+            ("1", true, true, true),
+            ("true", true, true, true),
+            ("on", true, true, true),
+            ("yes", true, true, true),
+            ("0", false, false, false),
+            ("false", false, false, false),
+            ("off", false, false, false),
+            ("no", false, false, false),
+            ("unexpected", false, false, true),
+            ("unexpected", true, false, false)
+        };
+
+        foreach (var testCase in cases)
+        {
+            Assert.Equal(
+                testCase.Expected,
+                SystemConsoleKeyReader.ShouldUseRawInput(
+                    testCase.ConfiguredValue,
+                    testCase.IsInputRedirected,
+                    testCase.IsOutputRedirected));
+        }
+    }
+
     private sealed class FakeRawInputReader : ITuiRawInputReader
     {
         private readonly Queue<string> _inputs = new();
