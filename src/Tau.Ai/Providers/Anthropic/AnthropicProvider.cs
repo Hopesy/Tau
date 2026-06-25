@@ -189,6 +189,16 @@ public sealed class AnthropicProvider : IStreamProvider
         if (thinking is not null)
             body["thinking"] = thinking;
 
+        if (thinking is not null &&
+            IsAdaptiveThinking(thinking) &&
+            reasoning is { } simpleReasoning)
+        {
+            body["output_config"] = new Dictionary<string, object>
+            {
+                ["effort"] = MapAdaptiveThinkingEffort(model, simpleReasoning)
+            };
+        }
+
         if (options is AnthropicOptions anthropicOptions)
         {
             if (!string.IsNullOrWhiteSpace(anthropicOptions.Effort) &&
@@ -334,6 +344,26 @@ public sealed class AnthropicProvider : IStreamProvider
     private static bool IsAdaptiveThinking(Dictionary<string, object> thinking) =>
         thinking.TryGetValue("type", out var type) &&
         string.Equals(Convert.ToString(type), "adaptive", StringComparison.Ordinal);
+
+    private static string MapAdaptiveThinkingEffort(Model model, ThinkingLevel reasoning)
+    {
+        var key = StreamOptionHelpers.ToReasoningEffortName(reasoning, allowExtraHigh: true);
+        if (model.Compat?.ReasoningEffortMap is not null &&
+            model.Compat.ReasoningEffortMap.TryGetValue(key, out var mapped) &&
+            !string.IsNullOrWhiteSpace(mapped))
+        {
+            return mapped;
+        }
+
+        return reasoning switch
+        {
+            ThinkingLevel.Minimal or ThinkingLevel.Low => "low",
+            ThinkingLevel.Medium => "medium",
+            ThinkingLevel.High => "high",
+            ThinkingLevel.ExtraHigh => "high",
+            _ => "high"
+        };
+    }
 
     private static object MapToolChoice(AnthropicToolChoice choice)
     {

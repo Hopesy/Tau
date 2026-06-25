@@ -407,6 +407,69 @@ public sealed class AnthropicProviderTests
     }
 
     [Fact]
+    public async Task StreamSimple_WithForcedAdaptiveThinking_AddsReasoningEffortOutputConfig()
+    {
+        using var handler = new OpenAiResponsesProviderTests.StubHandler(_ => new HttpResponseMessage(HttpStatusCode.BadRequest)
+        {
+            Content = new StringContent("stop after payload", Encoding.UTF8, "text/plain")
+        });
+        using var client = new HttpClient(handler);
+        var provider = new AnthropicProvider(client);
+        var model = BuildModel("vendor--claude-opus-latest", reasoning: true) with
+        {
+            Compat = new ModelCompatibility { ForceAdaptiveThinking = true }
+        };
+
+        await OpenAiResponsesProviderTests.CollectAsync(provider.StreamSimple(
+            model,
+            new LlmContext { Messages = [new UserMessage("think")] },
+            new SimpleStreamOptions
+            {
+                ApiKey = "anthropic-key",
+                Reasoning = ThinkingLevel.Medium
+            }));
+
+        using var doc = JsonDocument.Parse(handler.CapturedBody);
+        var root = doc.RootElement;
+        Assert.Equal("adaptive", root.GetProperty("thinking").GetProperty("type").GetString());
+        Assert.Equal("summarized", root.GetProperty("thinking").GetProperty("display").GetString());
+        Assert.Equal("medium", root.GetProperty("output_config").GetProperty("effort").GetString());
+    }
+
+    [Fact]
+    public async Task StreamSimple_WithAdaptiveThinking_UsesReasoningEffortMap()
+    {
+        using var handler = new OpenAiResponsesProviderTests.StubHandler(_ => new HttpResponseMessage(HttpStatusCode.BadRequest)
+        {
+            Content = new StringContent("stop after payload", Encoding.UTF8, "text/plain")
+        });
+        using var client = new HttpClient(handler);
+        var provider = new AnthropicProvider(client);
+        var model = BuildModel("claude-fable-5", reasoning: true) with
+        {
+            Compat = new ModelCompatibility
+            {
+                ForceAdaptiveThinking = true,
+                ReasoningEffortMap = new Dictionary<string, string> { ["xhigh"] = "xhigh" }
+            }
+        };
+
+        await OpenAiResponsesProviderTests.CollectAsync(provider.StreamSimple(
+            model,
+            new LlmContext { Messages = [new UserMessage("think")] },
+            new SimpleStreamOptions
+            {
+                ApiKey = "anthropic-key",
+                Reasoning = ThinkingLevel.ExtraHigh
+            }));
+
+        using var doc = JsonDocument.Parse(handler.CapturedBody);
+        var root = doc.RootElement;
+        Assert.Equal("adaptive", root.GetProperty("thinking").GetProperty("type").GetString());
+        Assert.Equal("xhigh", root.GetProperty("output_config").GetProperty("effort").GetString());
+    }
+
+    [Fact]
     public async Task Stream_TranslatesAnthropicStreamEventsWithContentIndexUsageAndToolArguments()
     {
         using var handler = new OpenAiResponsesProviderTests.StubHandler(_ => OpenAiResponsesProviderTests.SseResponse(
