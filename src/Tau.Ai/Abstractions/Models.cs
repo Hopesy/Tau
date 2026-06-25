@@ -33,6 +33,7 @@ public record ModelCompatibility
     public VercelGatewayRouting? VercelGatewayRouting { get; init; }
     public bool? ZaiToolStream { get; init; }
     public bool? SupportsStrictMode { get; init; }
+    public string? CacheControlFormat { get; init; }
     public bool? SendSessionAffinityHeaders { get; init; }
     public bool? SupportsLongCacheRetention { get; init; }
     public bool? SupportsTemperature { get; init; }

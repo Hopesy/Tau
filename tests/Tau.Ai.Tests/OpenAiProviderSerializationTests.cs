@@ -291,6 +291,106 @@ public sealed class OpenAiProviderSerializationTests
     }
 
     [Fact]
+    public async Task StreamSimple_WithAnthropicCacheControlFormat_AddsCacheControl()
+    {
+        using var handler = new StubHandler();
+        using var client = new HttpClient(handler);
+        var provider = new OpenAiProvider(client);
+
+        var model = new Model
+        {
+            Id = "anthropic/claude-sonnet-4.6",
+            Name = "Claude Sonnet 4.6 via OpenRouter",
+            Api = "openai-chat-completions",
+            Provider = "openrouter",
+            BaseUrl = "https://openrouter.ai/api/v1",
+            InputModalities = ["text", "image"],
+            Compat = new ModelCompatibility
+            {
+                CacheControlFormat = "anthropic",
+                ThinkingFormat = "openrouter"
+            }
+        };
+
+        await DrainAsync(provider.StreamSimple(
+            model,
+            new LlmContext
+            {
+                SystemPrompt = "follow instructions",
+                Messages =
+                [
+                    new UserMessage(
+                    [
+                        new TextContent("hello"),
+                        new ImageContent("aGVsbG8=", "image/png")
+                    ])
+                ],
+                Tools =
+                [
+                    new Tool("read_file", "Read a file", JsonDocument.Parse("""{"type":"object"}""").RootElement.Clone())
+                ]
+            },
+            new SimpleStreamOptions
+            {
+                ApiKey = "test-key",
+                CacheRetention = CacheRetention.Long
+            }));
+
+        using var doc = JsonDocument.Parse(handler.CapturedBody!);
+        var root = doc.RootElement;
+
+        var systemText = root.GetProperty("messages")[0].GetProperty("content")[0];
+        Assert.Equal("text", systemText.GetProperty("type").GetString());
+        Assert.Equal("ephemeral", systemText.GetProperty("cache_control").GetProperty("type").GetString());
+        Assert.Equal("1h", systemText.GetProperty("cache_control").GetProperty("ttl").GetString());
+
+        var userText = root.GetProperty("messages")[1].GetProperty("content")[0];
+        Assert.Equal("text", userText.GetProperty("type").GetString());
+        Assert.Equal("1h", userText.GetProperty("cache_control").GetProperty("ttl").GetString());
+
+        var tool = root.GetProperty("tools")[0];
+        Assert.Equal("function", tool.GetProperty("type").GetString());
+        Assert.Equal("1h", tool.GetProperty("cache_control").GetProperty("ttl").GetString());
+    }
+
+    [Fact]
+    public async Task StreamSimple_WithCacheCompatibility_DisablesLongCacheTtl()
+    {
+        using var handler = new StubHandler();
+        using var client = new HttpClient(handler);
+        var provider = new OpenAiProvider(client);
+
+        var model = new Model
+        {
+            Id = "compat-model",
+            Name = "Compat Model",
+            Api = "openai-chat-completions",
+            Provider = "custom-openai",
+            BaseUrl = "https://example.invalid/v1",
+            Compat = new ModelCompatibility
+            {
+                CacheControlFormat = "anthropic",
+                SupportsLongCacheRetention = false
+            }
+        };
+
+        await DrainAsync(provider.StreamSimple(
+            model,
+            new LlmContext { Messages = [new UserMessage("hello")] },
+            new SimpleStreamOptions
+            {
+                ApiKey = "test-key",
+                CacheRetention = CacheRetention.Long
+            }));
+
+        using var doc = JsonDocument.Parse(handler.CapturedBody!);
+        var userText = doc.RootElement.GetProperty("messages")[0].GetProperty("content")[0];
+        var cacheControl = userText.GetProperty("cache_control");
+        Assert.Equal("ephemeral", cacheControl.GetProperty("type").GetString());
+        Assert.False(cacheControl.TryGetProperty("ttl", out _));
+    }
+
+    [Fact]
     public async Task StreamSimple_WithReasoningContentCompatibility_AddsAssistantReasoningContent()
     {
         using var handler = new StubHandler();

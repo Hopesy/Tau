@@ -126,6 +126,7 @@ public static class GeneratedBuiltInModels
             VercelGatewayRouting = ParseVercelGatewayRouting(compat, "vercelGatewayRouting"),
             ZaiToolStream = GetBool(compat, "zaiToolStream"),
             SupportsStrictMode = GetBool(compat, "supportsStrictMode"),
+            CacheControlFormat = GetString(compat, "cacheControlFormat"),
             SendSessionAffinityHeaders = GetBool(compat, "sendSessionAffinityHeaders"),
             SupportsLongCacheRetention = GetBool(compat, "supportsLongCacheRetention"),
             SupportsTemperature = GetBool(compat, "supportsTemperature"),

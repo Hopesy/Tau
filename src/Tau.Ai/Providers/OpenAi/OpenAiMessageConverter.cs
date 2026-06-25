@@ -15,6 +15,25 @@ internal static class OpenAiMessageConverter
         bool requiresToolResultName = false,
         bool requiresAssistantAfterToolResult = false,
         bool requiresReasoningContentOnAssistantMessages = false,
+        bool modelReasoning = false) =>
+        JsonSerializer.SerializeToElement(
+            ConvertMessageObjects(
+                messages,
+                supportsImages,
+                requiresThinkingAsText,
+                requiresToolResultName,
+                requiresAssistantAfterToolResult,
+                requiresReasoningContentOnAssistantMessages,
+                modelReasoning),
+            OpenAiJsonContext.Default.ListObject);
+
+    public static List<object> ConvertMessageObjects(
+        IReadOnlyList<ChatMessage> messages,
+        bool supportsImages = true,
+        bool requiresThinkingAsText = false,
+        bool requiresToolResultName = false,
+        bool requiresAssistantAfterToolResult = false,
+        bool requiresReasoningContentOnAssistantMessages = false,
         bool modelReasoning = false)
     {
         var array = new List<object>();
@@ -51,7 +70,7 @@ internal static class OpenAiMessageConverter
 
             lastRole = msg.Role;
         }
-        return JsonSerializer.SerializeToElement(array, OpenAiJsonContext.Default.ListObject);
+        return array;
     }
 
     private static object ConvertUserMessage(UserMessage msg, bool supportsImages)
@@ -158,7 +177,10 @@ internal static class OpenAiMessageConverter
     private static string SanitizeText(string text) =>
         Tau.Ai.UnicodeTextSanitizer.RemoveUnpairedSurrogates(text);
 
-    public static JsonElement ConvertTools(IReadOnlyList<Tool> tools, bool supportsStrictMode = false)
+    public static JsonElement ConvertTools(IReadOnlyList<Tool> tools, bool supportsStrictMode = false) =>
+        JsonSerializer.SerializeToElement(ConvertToolObjects(tools, supportsStrictMode), OpenAiJsonContext.Default.ListObject);
+
+    public static List<object> ConvertToolObjects(IReadOnlyList<Tool> tools, bool supportsStrictMode = false)
     {
         var array = new List<object>();
         foreach (var tool in tools)
@@ -181,7 +203,7 @@ internal static class OpenAiMessageConverter
             });
         }
 
-        return JsonSerializer.SerializeToElement(array, OpenAiJsonContext.Default.ListObject);
+        return array;
     }
 }
 

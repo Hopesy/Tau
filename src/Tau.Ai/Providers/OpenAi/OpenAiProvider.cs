@@ -132,6 +132,7 @@ public sealed class OpenAiProvider : IStreamProvider
     {
         context = MessageTransformer.DowngradeUnsupportedImages(context, model);
         var compatibility = ResolveCompatibility(model);
+        var cacheControl = BuildCacheControl(compatibility, options);
         var body = new Dictionary<string, object>
         {
             ["model"] = model.Id,
@@ -158,7 +159,7 @@ public sealed class OpenAiProvider : IStreamProvider
         }
 
         // Serialize existing messages
-        var converted = OpenAiMessageConverter.ConvertMessages(
+        var converted = OpenAiMessageConverter.ConvertMessageObjects(
             context.Messages,
                      supportsImages: model.InputModalities.Contains("image", StringComparer.OrdinalIgnoreCase),
                      requiresThinkingAsText: compatibility.RequiresThinkingAsText,
@@ -166,19 +167,28 @@ public sealed class OpenAiProvider : IStreamProvider
                      requiresAssistantAfterToolResult: compatibility.RequiresAssistantAfterToolResult,
                      requiresReasoningContentOnAssistantMessages: compatibility.RequiresReasoningContentOnAssistantMessages,
                      modelReasoning: model.Reasoning);
-        foreach (var msg in converted.EnumerateArray())
+        foreach (var msg in converted)
             messages.Add(msg);
 
-        body["messages"] = messages;
-
+        List<object>? tools = null;
         if (context.Tools is { Count: > 0 })
         {
-            var tools = OpenAiMessageConverter.ConvertTools(context.Tools, compatibility.SupportsStrictMode);
-            body["tools"] = tools;
+            tools = OpenAiMessageConverter.ConvertToolObjects(context.Tools, compatibility.SupportsStrictMode);
             if (compatibility.ZaiToolStream)
             {
                 body["tool_stream"] = true;
             }
+        }
+
+        if (cacheControl is not null)
+        {
+            ApplyAnthropicCacheControl(messages, tools, cacheControl);
+        }
+
+        body["messages"] = messages;
+        if (tools is not null)
+        {
+            body["tools"] = tools;
         }
 
         if (options.Temperature.HasValue && compatibility.SupportsTemperature)
@@ -193,6 +203,141 @@ public sealed class OpenAiProvider : IStreamProvider
         AddRouting(model, compatibility, body);
 
         return body;
+    }
+
+    private static IReadOnlyDictionary<string, object>? BuildCacheControl(
+        ResolvedOpenAiCompatibility compatibility,
+        StreamOptions options)
+    {
+        if (!string.Equals(compatibility.CacheControlFormat, "anthropic", StringComparison.OrdinalIgnoreCase) ||
+            options.CacheRetention == CacheRetention.None)
+        {
+            return null;
+        }
+
+        var cacheControl = new Dictionary<string, object>
+        {
+            ["type"] = "ephemeral"
+        };
+        if (options.CacheRetention == CacheRetention.Long && compatibility.SupportsLongCacheRetention)
+        {
+            cacheControl["ttl"] = "1h";
+        }
+
+        return cacheControl;
+    }
+
+    private static void ApplyAnthropicCacheControl(
+        List<object> messages,
+        List<object>? tools,
+        IReadOnlyDictionary<string, object> cacheControl)
+    {
+        AddCacheControlToSystemPrompt(messages, cacheControl);
+        AddCacheControlToLastTool(tools, cacheControl);
+        AddCacheControlToLastConversationMessage(messages, cacheControl);
+    }
+
+    private static void AddCacheControlToSystemPrompt(
+        List<object> messages,
+        IReadOnlyDictionary<string, object> cacheControl)
+    {
+        foreach (var message in messages.OfType<Dictionary<string, object>>())
+        {
+            if (!message.TryGetValue("role", out var role))
+            {
+                continue;
+            }
+
+            var roleText = Convert.ToString(role);
+            if (roleText is "system" or "developer")
+            {
+                AddCacheControlToTextContent(message, cacheControl);
+                return;
+            }
+        }
+    }
+
+    private static void AddCacheControlToLastConversationMessage(
+        List<object> messages,
+        IReadOnlyDictionary<string, object> cacheControl)
+    {
+        for (var i = messages.Count - 1; i >= 0; i--)
+        {
+            if (messages[i] is not Dictionary<string, object> message ||
+                !message.TryGetValue("role", out var role))
+            {
+                continue;
+            }
+
+            var roleText = Convert.ToString(role);
+            if (roleText is "user" or "assistant" &&
+                AddCacheControlToTextContent(message, cacheControl))
+            {
+                return;
+            }
+        }
+    }
+
+    private static void AddCacheControlToLastTool(
+        List<object>? tools,
+        IReadOnlyDictionary<string, object> cacheControl)
+    {
+        if (tools is not { Count: > 0 } ||
+            tools[^1] is not Dictionary<string, object> tool)
+        {
+            return;
+        }
+
+        tool["cache_control"] = cacheControl;
+    }
+
+    private static bool AddCacheControlToTextContent(
+        Dictionary<string, object> message,
+        IReadOnlyDictionary<string, object> cacheControl)
+    {
+        if (!message.TryGetValue("content", out var content))
+        {
+            return false;
+        }
+
+        if (content is string text)
+        {
+            if (text.Length == 0)
+            {
+                return false;
+            }
+
+            message["content"] = new List<object>
+            {
+                new Dictionary<string, object>
+                {
+                    ["type"] = "text",
+                    ["text"] = text,
+                    ["cache_control"] = cacheControl
+                }
+            };
+            return true;
+        }
+
+        if (content is not List<object> parts)
+        {
+            return false;
+        }
+
+        for (var i = parts.Count - 1; i >= 0; i--)
+        {
+            if (parts[i] is not Dictionary<string, object> part ||
+                !part.TryGetValue("type", out var type) ||
+                !string.Equals(Convert.ToString(type), "text", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            part["cache_control"] = cacheControl;
+            return true;
+        }
+
+        return false;
     }
 
     private static void AddToolChoice(StreamOptions options, Dictionary<string, object> body)
@@ -388,6 +533,8 @@ public sealed class OpenAiProvider : IStreamProvider
             VercelGatewayRouting = compat?.VercelGatewayRouting,
             ZaiToolStream = compat?.ZaiToolStream ?? false,
             SupportsStrictMode = compat?.SupportsStrictMode ?? false,
+            CacheControlFormat = compat?.CacheControlFormat,
+            SupportsLongCacheRetention = compat?.SupportsLongCacheRetention ?? true,
             SupportsTemperature = compat?.SupportsTemperature ?? true
         };
     }
@@ -423,6 +570,8 @@ public sealed class OpenAiProvider : IStreamProvider
         public VercelGatewayRouting? VercelGatewayRouting { get; init; }
         public bool ZaiToolStream { get; init; }
         public bool SupportsStrictMode { get; init; }
+        public string? CacheControlFormat { get; init; }
+        public bool SupportsLongCacheRetention { get; init; } = true;
         public bool SupportsTemperature { get; init; } = true;
     }
 

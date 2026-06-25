@@ -2481,6 +2481,7 @@ public sealed class ModelConfigurationStoreTests
                       "apiKind": "openai-compatible",
                       "apiKey": "dynamic-key",
                       "compat": {
+                        "cacheControlFormat": "anthropic",
                         "requiresToolResultName": true,
                         "requiresAssistantAfterToolResult": true
                       },
@@ -2510,6 +2511,7 @@ public sealed class ModelConfigurationStoreTests
             var catalog = new ModelCatalog(configurationStore: configurationStore);
             var model = catalog.GetModel("custom-proxy", "proxy-model");
             var registry = new ProviderRegistry();
+            Assert.Equal("anthropic", model.Compat!.CacheControlFormat);
 
             BuiltInProviders.RegisterAll(registry, configurationStore, client);
 

@@ -85,6 +85,7 @@ public sealed class ModelCatalogTests
         Assert.Equal("openai-chat-completions", openrouter.Api);
         Assert.Equal("https://openrouter.ai/api/v1", openrouter.BaseUrl);
         Assert.Equal("openrouter", openrouter.Compat!.ThinkingFormat);
+        Assert.Equal("anthropic", openrouter.Compat.CacheControlFormat);
         Assert.Equal("openai-chat-completions", together.Api);
         Assert.Equal("https://api.together.ai/v1", together.BaseUrl);
         Assert.Equal("together", together.Compat!.ThinkingFormat);
