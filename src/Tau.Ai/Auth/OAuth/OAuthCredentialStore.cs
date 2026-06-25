@@ -202,6 +202,7 @@ public sealed class OAuthCredentialStore
 
     private static StoredProviderAuth? ParseApiKeyEntry(JsonElement element)
     {
+        var env = ParseEnv(element);
         if (element.TryGetProperty("type", out var typeProp) &&
             typeProp.ValueKind == JsonValueKind.String)
         {
@@ -211,7 +212,7 @@ public sealed class OAuthCredentialStore
             {
                 if (TryGetString(element, "key", out var key) || TryGetString(element, "apiKey", out key))
                 {
-                    return new StoredProviderAuth { ApiKey = key };
+                    return new StoredProviderAuth { ApiKey = key, Env = env };
                 }
 
                 return null;
@@ -220,7 +221,7 @@ public sealed class OAuthCredentialStore
 
         if (TryGetString(element, "key", out var implicitKey) && !element.TryGetProperty("access", out _))
         {
-            return new StoredProviderAuth { ApiKey = implicitKey };
+            return new StoredProviderAuth { ApiKey = implicitKey, Env = env };
         }
 
         return null;
@@ -312,7 +313,33 @@ public sealed class OAuthCredentialStore
         propertyName.Equals("expires", StringComparison.OrdinalIgnoreCase) ||
         propertyName.Equals("expiresAt", StringComparison.OrdinalIgnoreCase) ||
         propertyName.Equals("key", StringComparison.OrdinalIgnoreCase) ||
-        propertyName.Equals("apiKey", StringComparison.OrdinalIgnoreCase);
+        propertyName.Equals("apiKey", StringComparison.OrdinalIgnoreCase) ||
+        propertyName.Equals("env", StringComparison.OrdinalIgnoreCase);
+
+    private static IReadOnlyDictionary<string, string>? ParseEnv(JsonElement element)
+    {
+        if (!element.TryGetProperty("env", out var env) || env.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var prop in env.EnumerateObject())
+        {
+            if (prop.Value.ValueKind != JsonValueKind.String)
+            {
+                continue;
+            }
+
+            var value = prop.Value.GetString();
+            if (!string.IsNullOrWhiteSpace(value))
+            {
+                result[prop.Name] = value!;
+            }
+        }
+
+        return result.Count == 0 ? null : result;
+    }
 
     private static void WriteAuthFile(string path, byte[] content)
     {

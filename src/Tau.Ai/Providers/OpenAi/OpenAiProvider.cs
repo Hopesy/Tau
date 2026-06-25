@@ -76,13 +76,8 @@ public sealed class OpenAiProvider : IStreamProvider
         if (!string.IsNullOrEmpty(apiKey))
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
 
-        if (model.Headers is not null)
-            foreach (var (key, value) in model.Headers)
-                request.Headers.TryAddWithoutValidation(key, value);
-
-        if (options.Headers is not null)
-            foreach (var (key, value) in options.Headers)
-                request.Headers.TryAddWithoutValidation(key, value);
+        ApplyHeaders(request, model.Headers);
+        ApplyHeaders(request, options.Headers);
 
         using var requestTimeout = StreamOptionHelpers.CreateRequestTimeout(options);
         try
@@ -270,6 +265,25 @@ public sealed class OpenAiProvider : IStreamProvider
         return options is SimpleStreamOptions { Reasoning: { } reasoning }
             ? MapReasoningEffort(reasoning, model, compatibility.ReasoningEffortMap)
             : null;
+    }
+
+    private static void ApplyHeaders(HttpRequestMessage request, IDictionary<string, string>? headers)
+    {
+        if (headers is null)
+        {
+            return;
+        }
+
+        foreach (var (key, value) in headers)
+        {
+            request.Headers.Remove(key);
+            if (string.IsNullOrEmpty(value))
+            {
+                continue;
+            }
+
+            request.Headers.TryAddWithoutValidation(key, value);
+        }
     }
 
     private static void AddRouting(

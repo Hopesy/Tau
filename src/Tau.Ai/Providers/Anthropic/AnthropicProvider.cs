@@ -99,13 +99,8 @@ public sealed class AnthropicProvider : IStreamProvider
         if (BuildAnthropicBetaHeader(model, options as AnthropicOptions) is { } betaHeader)
             request.Headers.TryAddWithoutValidation("anthropic-beta", betaHeader);
 
-        if (model.Headers is not null)
-            foreach (var (key, value) in model.Headers)
-                request.Headers.TryAddWithoutValidation(key, value);
-
-        if (options.Headers is not null)
-            foreach (var (key, value) in options.Headers)
-                request.Headers.TryAddWithoutValidation(key, value);
+        ApplyHeaders(request, model.Headers);
+        ApplyHeaders(request, options.Headers);
 
         using var requestTimeout = StreamOptionHelpers.CreateRequestTimeout(options);
         try
@@ -193,6 +188,25 @@ public sealed class AnthropicProvider : IStreamProvider
             body["metadata"] = new Dictionary<string, object> { ["user_id"] = userId! };
 
         return body;
+    }
+
+    private static void ApplyHeaders(HttpRequestMessage request, IDictionary<string, string>? headers)
+    {
+        if (headers is null)
+        {
+            return;
+        }
+
+        foreach (var (key, value) in headers)
+        {
+            request.Headers.Remove(key);
+            if (string.IsNullOrEmpty(value))
+            {
+                continue;
+            }
+
+            request.Headers.TryAddWithoutValidation(key, value);
+        }
     }
 
     private static Dictionary<string, object>? BuildThinking(

@@ -176,6 +176,12 @@ public sealed class ProviderAuthResolver
         return null;
     }
 
+    internal StoredProviderAuth? GetStoredAuthEntry(string provider)
+    {
+        var authEntries = _credentialStore.LoadEntries();
+        return authEntries.TryGetValue(provider, out var entry) ? entry : null;
+    }
+
     public Model ResolveModel(Model model)
     {
         var credentials = _credentialStore.LoadEntries();

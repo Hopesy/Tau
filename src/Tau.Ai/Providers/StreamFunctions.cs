@@ -2,6 +2,7 @@ using Tau.Ai.Streaming;
 using Tau.Ai.Auth;
 using Tau.Ai.Providers.Anthropic;
 using Tau.Ai.Providers.Bedrock;
+using Tau.Ai.Providers.Cloudflare;
 using Tau.Ai.Providers.Google;
 using Tau.Ai.Providers.Mistral;
 using Tau.Ai.Providers.OpenAi;
@@ -30,14 +31,15 @@ public static class StreamFunctions
         StreamOptions resolvedOptions;
         try
         {
-            resolvedModel = (authResolver ?? AuthResolver).ResolveModel(model);
+            var authResolvedModel = (authResolver ?? AuthResolver).ResolveModel(model);
             resolvedOptions = ResolveOptions(
-                resolvedModel,
+                authResolvedModel,
                 options,
                 configurationStore,
                 authResolver,
                 applyProviderSpecificOptions: true,
-                out _);
+                out _,
+                out resolvedModel);
         }
         catch (ProviderAuthException ex)
         {
@@ -61,14 +63,15 @@ public static class StreamFunctions
         ModelProviderSpecificOptionsConfiguration? providerSpecific;
         try
         {
-            resolvedModel = (authResolver ?? AuthResolver).ResolveModel(model);
+            var authResolvedModel = (authResolver ?? AuthResolver).ResolveModel(model);
             resolvedOptions = (SimpleStreamOptions)ResolveOptions(
-                resolvedModel,
+                authResolvedModel,
                 options,
                 configurationStore,
                 authResolver,
                 applyProviderSpecificOptions: false,
-                out providerSpecific);
+                out providerSpecific,
+                out resolvedModel);
         }
         catch (ProviderAuthException ex)
         {
@@ -132,10 +135,12 @@ public static class StreamFunctions
         ModelConfigurationStore? configurationStore,
         ProviderAuthResolver? authResolver,
         bool applyProviderSpecificOptions,
-        out ModelProviderSpecificOptionsConfiguration? providerSpecific)
+        out ModelProviderSpecificOptionsConfiguration? providerSpecific,
+        out Model requestModel)
     {
         var resolver = authResolver ?? AuthResolver;
         var store = configurationStore ?? new ModelConfigurationStore();
+        requestModel = model;
         var requestConfig = store.ResolveRequestConfiguration(model, options.Env);
         var env = ProviderEnvironment.Merge(requestConfig.Options.Env, options.Env);
         if (env is not null)
@@ -192,8 +197,17 @@ public static class StreamFunctions
             };
         }
 
+        resolved = CloudflareAuthResolver.Resolve(
+            model,
+            resolved,
+            resolver,
+            env,
+            options.ApiKey,
+            apiKey,
+            out requestModel);
+
         return applyProviderSpecificOptions
-            ? ApplyProviderSpecificOptions(model, resolved, requestConfig.Options.ProviderSpecific)
+            ? ApplyProviderSpecificOptions(requestModel, resolved, requestConfig.Options.ProviderSpecific)
             : resolved;
     }
 

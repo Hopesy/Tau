@@ -4,6 +4,7 @@ using Tau.Ai.Auth.OAuth;
 using Tau.Ai.Providers;
 using Tau.Ai.Providers.Anthropic;
 using Tau.Ai.Providers.Bedrock;
+using Tau.Ai.Providers.Cloudflare;
 using Tau.Ai.Providers.Google;
 using Tau.Ai.Providers.Mistral;
 using Tau.Ai.Providers.OpenAi;
@@ -93,6 +94,516 @@ public sealed class ModelConfigurationStoreTests
             var done = Assert.Single(events.OfType<DoneEvent>());
             Assert.Equal("ok", Assert.IsType<TextContent>(Assert.Single(done.Message.Content)).Text);
             Assert.Equal("custom-openai-api", done.Message.Api);
+        }
+        finally
+        {
+            DeleteDirectoryWithRetry(tempDir);
+        }
+    }
+
+    [Fact]
+    public async Task StreamFunctions_ResolvesCloudflareWorkersAiBaseUrlTemplate()
+    {
+        using var scope = EnvironmentVariableScope.Acquire();
+        var tempDir = Path.Combine(Path.GetTempPath(), $"tau-cloudflare-workers-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+
+        try
+        {
+            var modelsPath = Path.Combine(tempDir, "models.json");
+            var authPath = Path.Combine(tempDir, "auth.json");
+            File.WriteAllText(authPath, "{}");
+            File.WriteAllText(modelsPath, $$"""
+                {
+                  "providers": {
+                    "cloudflare-workers-ai": {
+                      "baseUrl": "{{CloudflareAuthResolver.WorkersAiBaseUrl}}",
+                      "api": "cloudflare-workers-ai-openai-api",
+                      "apiKind": "openai-compatible",
+                      "models": [
+                        {
+                          "id": "@cf/meta/llama-3.1-8b-instruct",
+                          "name": "Workers AI Llama"
+                        }
+                      ]
+                    }
+                  }
+                }
+                """);
+            scope.Set("TAU_MODELS_FILE", modelsPath);
+            scope.Set("TAU_AUTH_FILE", authPath);
+            scope.Set("CLOUDFLARE_API_KEY", "cf-key");
+            scope.Set("CLOUDFLARE_ACCOUNT_ID", "acct_123");
+
+            using var handler = new OpenAiResponsesProviderTests.StubHandler(_ => OpenAiResponsesProviderTests.SseResponse(
+                """
+                data: {"choices":[{"delta":{"content":"ok"},"finish_reason":null}]}
+
+                data: {"choices":[{"delta":{},"finish_reason":"stop"}]}
+
+                data: [DONE]
+
+                """));
+            using var client = new HttpClient(handler);
+            var configurationStore = new ModelConfigurationStore([modelsPath]);
+            var catalog = new ModelCatalog(configurationStore: configurationStore);
+            var model = catalog.GetModel("cloudflare-workers-ai", "@cf/meta/llama-3.1-8b-instruct");
+            var registry = new ProviderRegistry();
+
+            BuiltInProviders.RegisterAll(registry, configurationStore, client);
+
+            await OpenAiResponsesProviderTests.CollectAsync(StreamFunctions.Stream(
+                registry,
+                model,
+                new LlmContext { Messages = [new UserMessage("hi")] },
+                new StreamOptions()));
+
+            Assert.Equal("api.cloudflare.com", handler.RequestUri!.Host);
+            Assert.Equal("/client/v4/accounts/acct_123/ai/v1/chat/completions", handler.RequestUri.AbsolutePath);
+            Assert.DoesNotContain("{CLOUDFLARE_ACCOUNT_ID}", handler.RequestUri.ToString(), StringComparison.Ordinal);
+            var request = Assert.Single(handler.Requests);
+            Assert.Equal("Bearer", request.Headers.Authorization!.Scheme);
+            Assert.Equal("cf-key", request.Headers.Authorization.Parameter);
+        }
+        finally
+        {
+            DeleteDirectoryWithRetry(tempDir);
+        }
+    }
+
+    [Fact]
+    public async Task StreamFunctions_ResolvesCloudflareAiGatewayAuthHeadersAndBaseUrl()
+    {
+        using var scope = EnvironmentVariableScope.Acquire();
+        var tempDir = Path.Combine(Path.GetTempPath(), $"tau-cloudflare-gateway-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+
+        try
+        {
+            var modelsPath = Path.Combine(tempDir, "models.json");
+            var authPath = Path.Combine(tempDir, "auth.json");
+            File.WriteAllText(authPath, "{}");
+            File.WriteAllText(modelsPath, $$"""
+                {
+                  "providers": {
+                    "cloudflare-ai-gateway": {
+                      "baseUrl": "{{CloudflareAuthResolver.AiGatewayCompatBaseUrl}}",
+                      "api": "cloudflare-ai-gateway-openai-api",
+                      "apiKind": "openai-compatible",
+                      "authHeader": true,
+                      "headers": {
+                        "x-api-key": "configured-x-api-key"
+                      },
+                      "models": [
+                        {
+                          "id": "openai/gpt-4o-mini",
+                          "name": "Gateway OpenAI"
+                        }
+                      ]
+                    }
+                  }
+                }
+                """);
+            scope.Set("TAU_MODELS_FILE", modelsPath);
+            scope.Set("TAU_AUTH_FILE", authPath);
+            scope.Set("CLOUDFLARE_API_KEY", "cf-gateway-key");
+            scope.Set("CLOUDFLARE_ACCOUNT_ID", "acct_123");
+            scope.Set("CLOUDFLARE_GATEWAY_ID", "gw_456");
+
+            using var handler = new OpenAiResponsesProviderTests.StubHandler(_ => OpenAiResponsesProviderTests.SseResponse(
+                """
+                data: {"choices":[{"delta":{"content":"ok"},"finish_reason":null}]}
+
+                data: {"choices":[{"delta":{},"finish_reason":"stop"}]}
+
+                data: [DONE]
+
+                """));
+            using var client = new HttpClient(handler);
+            var configurationStore = new ModelConfigurationStore([modelsPath]);
+            var catalog = new ModelCatalog(configurationStore: configurationStore);
+            var model = catalog.GetModel("cloudflare-ai-gateway", "openai/gpt-4o-mini");
+            var registry = new ProviderRegistry();
+
+            BuiltInProviders.RegisterAll(registry, configurationStore, client);
+
+            await OpenAiResponsesProviderTests.CollectAsync(StreamFunctions.Stream(
+                registry,
+                model,
+                new LlmContext { Messages = [new UserMessage("hi")] },
+                new StreamOptions()));
+
+            Assert.Equal("gateway.ai.cloudflare.com", handler.RequestUri!.Host);
+            Assert.Equal("/v1/acct_123/gw_456/compat/chat/completions", handler.RequestUri.AbsolutePath);
+            Assert.DoesNotContain("{CLOUDFLARE_ACCOUNT_ID}", handler.RequestUri.ToString(), StringComparison.Ordinal);
+            Assert.DoesNotContain("{CLOUDFLARE_GATEWAY_ID}", handler.RequestUri.ToString(), StringComparison.Ordinal);
+            var request = Assert.Single(handler.Requests);
+            Assert.Null(request.Headers.Authorization);
+            Assert.False(request.Headers.Contains("Authorization"));
+            Assert.False(request.Headers.Contains("x-api-key"));
+            Assert.Equal("Bearer cf-gateway-key", Assert.Single(request.Headers.GetValues("cf-aig-authorization")));
+        }
+        finally
+        {
+            DeleteDirectoryWithRetry(tempDir);
+        }
+    }
+
+    [Fact]
+    public async Task StreamFunctions_ResolvesCloudflareAiGatewayOpenAiResponsesBaseUrlAndHeaders()
+    {
+        using var scope = EnvironmentVariableScope.Acquire();
+        var tempDir = Path.Combine(Path.GetTempPath(), $"tau-cloudflare-gateway-responses-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+
+        try
+        {
+            var modelsPath = Path.Combine(tempDir, "models.json");
+            var authPath = Path.Combine(tempDir, "auth.json");
+            File.WriteAllText(authPath, "{}");
+            File.WriteAllText(modelsPath, $$"""
+                {
+                  "providers": {
+                    "cloudflare-ai-gateway": {
+                      "baseUrl": "{{CloudflareAuthResolver.AiGatewayOpenAiBaseUrl}}",
+                      "api": "openai-responses",
+                      "authHeader": true,
+                      "headers": {
+                        "x-api-key": "configured-x-api-key"
+                      },
+                      "models": [
+                        {
+                          "id": "openai/gpt-4o-mini",
+                          "name": "Gateway Responses"
+                        }
+                      ]
+                    }
+                  }
+                }
+                """);
+            scope.Set("TAU_MODELS_FILE", modelsPath);
+            scope.Set("TAU_AUTH_FILE", authPath);
+            scope.Set("CLOUDFLARE_API_KEY", "cf-gateway-key");
+            scope.Set("CLOUDFLARE_ACCOUNT_ID", "acct_123");
+            scope.Set("CLOUDFLARE_GATEWAY_ID", "gw_456");
+
+            using var handler = new OpenAiResponsesProviderTests.StubHandler(_ => OpenAiResponsesProviderTests.SseResponse(
+                """
+                data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}
+
+                """));
+            using var client = new HttpClient(handler);
+            var configurationStore = new ModelConfigurationStore([modelsPath]);
+            var catalog = new ModelCatalog(configurationStore: configurationStore);
+            var model = catalog.GetModel("cloudflare-ai-gateway", "openai/gpt-4o-mini");
+            var registry = new ProviderRegistry();
+            registry.Register("openai-responses", () => new OpenAiResponsesProvider(client), sourceId: "test");
+
+            await OpenAiResponsesProviderTests.CollectAsync(StreamFunctions.Stream(
+                registry,
+                model,
+                new LlmContext { Messages = [new UserMessage("hi")] },
+                new StreamOptions()));
+
+            Assert.Equal("gateway.ai.cloudflare.com", handler.RequestUri!.Host);
+            Assert.Equal("/v1/acct_123/gw_456/openai/responses", handler.RequestUri.AbsolutePath);
+            Assert.DoesNotContain("{CLOUDFLARE_ACCOUNT_ID}", handler.RequestUri.ToString(), StringComparison.Ordinal);
+            Assert.DoesNotContain("{CLOUDFLARE_GATEWAY_ID}", handler.RequestUri.ToString(), StringComparison.Ordinal);
+            var request = Assert.Single(handler.Requests);
+            Assert.Null(request.Headers.Authorization);
+            Assert.False(request.Headers.Contains("Authorization"));
+            Assert.False(request.Headers.Contains("x-api-key"));
+            Assert.Equal("Bearer cf-gateway-key", Assert.Single(request.Headers.GetValues("cf-aig-authorization")));
+        }
+        finally
+        {
+            DeleteDirectoryWithRetry(tempDir);
+        }
+    }
+
+    [Fact]
+    public async Task StreamFunctions_ResolvesCloudflareAiGatewayAnthropicBaseUrlAndHeaders()
+    {
+        using var scope = EnvironmentVariableScope.Acquire();
+        var tempDir = Path.Combine(Path.GetTempPath(), $"tau-cloudflare-gateway-anthropic-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+
+        try
+        {
+            var modelsPath = Path.Combine(tempDir, "models.json");
+            var authPath = Path.Combine(tempDir, "auth.json");
+            File.WriteAllText(authPath, "{}");
+            File.WriteAllText(modelsPath, $$"""
+                {
+                  "providers": {
+                    "cloudflare-ai-gateway": {
+                      "baseUrl": "{{CloudflareAuthResolver.AiGatewayAnthropicBaseUrl}}",
+                      "api": "anthropic-messages",
+                      "authHeader": true,
+                      "headers": {
+                        "x-api-key": "configured-x-api-key"
+                      },
+                      "models": [
+                        {
+                          "id": "anthropic/claude-3-5-sonnet",
+                          "name": "Gateway Anthropic"
+                        }
+                      ]
+                    }
+                  }
+                }
+                """);
+            scope.Set("TAU_MODELS_FILE", modelsPath);
+            scope.Set("TAU_AUTH_FILE", authPath);
+            scope.Set("CLOUDFLARE_API_KEY", "cf-gateway-key");
+            scope.Set("CLOUDFLARE_ACCOUNT_ID", "acct_123");
+            scope.Set("CLOUDFLARE_GATEWAY_ID", "gw_456");
+
+            using var handler = new OpenAiResponsesProviderTests.StubHandler(_ => OpenAiResponsesProviderTests.SseResponse(
+                """
+                data: {"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":1,"output_tokens":0}}}
+
+                data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+                data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}
+
+                data: {"type":"content_block_stop","index":0}
+
+                data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}
+
+                data: {"type":"message_stop"}
+
+                """));
+            using var client = new HttpClient(handler);
+            var configurationStore = new ModelConfigurationStore([modelsPath]);
+            var catalog = new ModelCatalog(configurationStore: configurationStore);
+            var model = catalog.GetModel("cloudflare-ai-gateway", "anthropic/claude-3-5-sonnet");
+            var registry = new ProviderRegistry();
+            registry.Register("anthropic-messages", () => new AnthropicProvider(client), sourceId: "test");
+
+            await OpenAiResponsesProviderTests.CollectAsync(StreamFunctions.Stream(
+                registry,
+                model,
+                new LlmContext { Messages = [new UserMessage("hi")] },
+                new StreamOptions()));
+
+            Assert.Equal("gateway.ai.cloudflare.com", handler.RequestUri!.Host);
+            Assert.Equal("/v1/acct_123/gw_456/anthropic/v1/messages", handler.RequestUri.AbsolutePath);
+            Assert.DoesNotContain("{CLOUDFLARE_ACCOUNT_ID}", handler.RequestUri.ToString(), StringComparison.Ordinal);
+            Assert.DoesNotContain("{CLOUDFLARE_GATEWAY_ID}", handler.RequestUri.ToString(), StringComparison.Ordinal);
+            var request = Assert.Single(handler.Requests);
+            Assert.Null(request.Headers.Authorization);
+            Assert.False(request.Headers.Contains("Authorization"));
+            Assert.False(request.Headers.Contains("x-api-key"));
+            Assert.Equal("Bearer cf-gateway-key", Assert.Single(request.Headers.GetValues("cf-aig-authorization")));
+            Assert.Equal("2023-06-01", Assert.Single(request.Headers.GetValues("anthropic-version")));
+        }
+        finally
+        {
+            DeleteDirectoryWithRetry(tempDir);
+        }
+    }
+
+    [Fact]
+    public async Task StreamFunctions_ResolvesCloudflareStoredCredentialEnv()
+    {
+        using var scope = EnvironmentVariableScope.Acquire();
+        var tempDir = Path.Combine(Path.GetTempPath(), $"tau-cloudflare-auth-json-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+
+        try
+        {
+            var modelsPath = Path.Combine(tempDir, "models.json");
+            var authPath = Path.Combine(tempDir, "auth.json");
+            File.WriteAllText(authPath, """
+                {
+                  "cloudflare-ai-gateway": {
+                    "type": "api_key",
+                    "key": "stored-cf-key",
+                    "env": {
+                      "CLOUDFLARE_ACCOUNT_ID": "stored_acct",
+                      "CLOUDFLARE_GATEWAY_ID": "stored_gateway"
+                    }
+                  }
+                }
+                """);
+            File.WriteAllText(modelsPath, $$"""
+                {
+                  "providers": {
+                    "cloudflare-ai-gateway": {
+                      "baseUrl": "{{CloudflareAuthResolver.AiGatewayCompatBaseUrl}}",
+                      "api": "cloudflare-ai-gateway-openai-api",
+                      "apiKind": "openai-compatible",
+                      "models": [
+                        {
+                          "id": "openai/gpt-4o-mini"
+                        }
+                      ]
+                    }
+                  }
+                }
+                """);
+            scope.Set("TAU_MODELS_FILE", modelsPath);
+            scope.Set("TAU_AUTH_FILE", authPath);
+            scope.Set("CLOUDFLARE_API_KEY", "ambient-cf-key");
+            scope.Set("CLOUDFLARE_ACCOUNT_ID", "ambient_acct");
+            scope.Set("CLOUDFLARE_GATEWAY_ID", "ambient_gateway");
+
+            using var handler = new OpenAiResponsesProviderTests.StubHandler(_ => OpenAiResponsesProviderTests.SseResponse(
+                """
+                data: {"choices":[{"delta":{"content":"ok"},"finish_reason":null}]}
+
+                data: {"choices":[{"delta":{},"finish_reason":"stop"}]}
+
+                data: [DONE]
+
+                """));
+            using var client = new HttpClient(handler);
+            var configurationStore = new ModelConfigurationStore([modelsPath]);
+            var catalog = new ModelCatalog(configurationStore: configurationStore);
+            var model = catalog.GetModel("cloudflare-ai-gateway", "openai/gpt-4o-mini");
+            var registry = new ProviderRegistry();
+            var authResolver = new ProviderAuthResolver(credentialStore: new OAuthCredentialStore([authPath]));
+
+            BuiltInProviders.RegisterAll(registry, configurationStore, client);
+
+            await OpenAiResponsesProviderTests.CollectAsync(StreamFunctions.Stream(
+                registry,
+                model,
+                new LlmContext { Messages = [new UserMessage("hi")] },
+                new StreamOptions(),
+                configurationStore,
+                authResolver));
+
+            Assert.Equal("/v1/stored_acct/stored_gateway/compat/chat/completions", handler.RequestUri!.AbsolutePath);
+            var request = Assert.Single(handler.Requests);
+            Assert.Equal("Bearer stored-cf-key", Assert.Single(request.Headers.GetValues("cf-aig-authorization")));
+        }
+        finally
+        {
+            DeleteDirectoryWithRetry(tempDir);
+        }
+    }
+
+    [Fact]
+    public async Task StreamFunctions_CloudflareStoredCredentialDoesNotFallBackToAmbientEnv()
+    {
+        using var scope = EnvironmentVariableScope.Acquire();
+        var tempDir = Path.Combine(Path.GetTempPath(), $"tau-cloudflare-stored-no-env-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+
+        try
+        {
+            var modelsPath = Path.Combine(tempDir, "models.json");
+            var authPath = Path.Combine(tempDir, "auth.json");
+            File.WriteAllText(authPath, """
+                {
+                  "cloudflare-ai-gateway": {
+                    "type": "api_key",
+                    "key": "stored-cf-key"
+                  }
+                }
+                """);
+            File.WriteAllText(modelsPath, $$"""
+                {
+                  "providers": {
+                    "cloudflare-ai-gateway": {
+                      "baseUrl": "{{CloudflareAuthResolver.AiGatewayCompatBaseUrl}}",
+                      "api": "cloudflare-ai-gateway-openai-api",
+                      "apiKind": "openai-compatible",
+                      "models": [
+                        {
+                          "id": "openai/gpt-4o-mini"
+                        }
+                      ]
+                    }
+                  }
+                }
+                """);
+            scope.Set("TAU_MODELS_FILE", modelsPath);
+            scope.Set("TAU_AUTH_FILE", authPath);
+            scope.Set("CLOUDFLARE_ACCOUNT_ID", "ambient_acct");
+            scope.Set("CLOUDFLARE_GATEWAY_ID", "ambient_gateway");
+
+            using var handler = new OpenAiResponsesProviderTests.StubHandler(_ => throw new InvalidOperationException("request should not be sent"));
+            using var client = new HttpClient(handler);
+            var configurationStore = new ModelConfigurationStore([modelsPath]);
+            var catalog = new ModelCatalog(configurationStore: configurationStore);
+            var model = catalog.GetModel("cloudflare-ai-gateway", "openai/gpt-4o-mini");
+            var registry = new ProviderRegistry();
+            var authResolver = new ProviderAuthResolver(credentialStore: new OAuthCredentialStore([authPath]));
+
+            BuiltInProviders.RegisterAll(registry, configurationStore, client);
+
+            var events = await OpenAiResponsesProviderTests.CollectAsync(StreamFunctions.Stream(
+                registry,
+                model,
+                new LlmContext { Messages = [new UserMessage("hi")] },
+                new StreamOptions(),
+                configurationStore,
+                authResolver));
+
+            var error = Assert.Single(events.OfType<ErrorEvent>());
+            Assert.Contains("Cloudflare account ID is required", error.Error, StringComparison.Ordinal);
+            Assert.Empty(handler.Requests);
+        }
+        finally
+        {
+            DeleteDirectoryWithRetry(tempDir);
+        }
+    }
+
+    [Fact]
+    public async Task StreamFunctions_CloudflareAiGatewayMissingGatewayIdReturnsAuthError()
+    {
+        using var scope = EnvironmentVariableScope.Acquire();
+        var tempDir = Path.Combine(Path.GetTempPath(), $"tau-cloudflare-missing-gateway-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+
+        try
+        {
+            var modelsPath = Path.Combine(tempDir, "models.json");
+            var authPath = Path.Combine(tempDir, "auth.json");
+            File.WriteAllText(authPath, "{}");
+            File.WriteAllText(modelsPath, $$"""
+                {
+                  "providers": {
+                    "cloudflare-ai-gateway": {
+                      "baseUrl": "{{CloudflareAuthResolver.AiGatewayCompatBaseUrl}}",
+                      "api": "cloudflare-ai-gateway-openai-api",
+                      "apiKind": "openai-compatible",
+                      "models": [
+                        {
+                          "id": "openai/gpt-4o-mini"
+                        }
+                      ]
+                    }
+                  }
+                }
+                """);
+            scope.Set("TAU_MODELS_FILE", modelsPath);
+            scope.Set("TAU_AUTH_FILE", authPath);
+            scope.Set("CLOUDFLARE_API_KEY", "cf-gateway-key");
+            scope.Set("CLOUDFLARE_ACCOUNT_ID", "acct_123");
+
+            using var handler = new OpenAiResponsesProviderTests.StubHandler(_ => throw new InvalidOperationException("request should not be sent"));
+            using var client = new HttpClient(handler);
+            var configurationStore = new ModelConfigurationStore([modelsPath]);
+            var catalog = new ModelCatalog(configurationStore: configurationStore);
+            var model = catalog.GetModel("cloudflare-ai-gateway", "openai/gpt-4o-mini");
+            var registry = new ProviderRegistry();
+
+            BuiltInProviders.RegisterAll(registry, configurationStore, client);
+
+            var events = await OpenAiResponsesProviderTests.CollectAsync(StreamFunctions.Stream(
+                registry,
+                model,
+                new LlmContext { Messages = [new UserMessage("hi")] },
+                new StreamOptions()));
+
+            var error = Assert.Single(events.OfType<ErrorEvent>());
+            Assert.Contains("Cloudflare AI Gateway ID is required", error.Error, StringComparison.Ordinal);
+            Assert.Empty(handler.Requests);
         }
         finally
         {

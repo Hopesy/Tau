@@ -42,6 +42,42 @@ public sealed class OAuthCredentialStoreTests
     }
 
     [Fact]
+    public void LoadEntries_ParsesApiKeyEntryEnvironment()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), $"tau-auth-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+
+        try
+        {
+            var authPath = Path.Combine(tempDir, "auth.json");
+            File.WriteAllText(authPath, """
+                {
+                  "cloudflare-ai-gateway": {
+                    "type": "api_key",
+                    "key": "cf-key",
+                    "env": {
+                      "CLOUDFLARE_ACCOUNT_ID": "acct_123",
+                      "CLOUDFLARE_GATEWAY_ID": "gw_456"
+                    }
+                  }
+                }
+                """);
+
+            var store = new OAuthCredentialStore([authPath]);
+
+            var entry = store.LoadEntries()["cloudflare-ai-gateway"];
+
+            Assert.Equal("cf-key", entry.ApiKey);
+            Assert.Equal("acct_123", entry.Env!["CLOUDFLARE_ACCOUNT_ID"]);
+            Assert.Equal("gw_456", entry.Env["CLOUDFLARE_GATEWAY_ID"]);
+        }
+        finally
+        {
+            Directory.Delete(tempDir, recursive: true);
+        }
+    }
+
+    [Fact]
     public void LoadEntries_WhenAuthFileIsInvalid_ReturnsEmptyEntries()
     {
         var tempDir = Path.Combine(Path.GetTempPath(), $"tau-auth-{Guid.NewGuid():N}");

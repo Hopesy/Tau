@@ -204,6 +204,11 @@ public sealed class OpenAiResponsesProvider : IStreamProvider
         foreach (var (key, value) in headers)
         {
             request.Headers.Remove(key);
+            if (string.IsNullOrEmpty(value))
+            {
+                continue;
+            }
+
             request.Headers.TryAddWithoutValidation(key, value);
         }
     }
