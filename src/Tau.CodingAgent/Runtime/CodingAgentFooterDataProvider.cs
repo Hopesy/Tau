@@ -255,36 +255,14 @@ public sealed class CodingAgentFooterDataProvider : IDisposable
 
         try
         {
-            var headDirectory = Path.GetDirectoryName(_gitPaths.HeadPath);
-            if (string.IsNullOrEmpty(headDirectory) || !Directory.Exists(headDirectory))
-            {
-                return;
-            }
-
-            _headWatcher = new FileSystemWatcher(headDirectory)
-            {
-                IncludeSubdirectories = false,
-                NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.CreationTime,
-                EnableRaisingEvents = true
-            };
-            _headWatcher.Changed += OnGitHeadChanged;
-            _headWatcher.Created += OnGitHeadChanged;
-            _headWatcher.Deleted += OnGitHeadChanged;
-            _headWatcher.Renamed += OnGitHeadChanged;
-            _headWatcher.Error += (_, _) => ScheduleRefresh();
+            _headWatcher = CodingAgentFsWatch.WatchWithErrorHandler(
+                _gitPaths.HeadPath,
+                (_, _) => ScheduleRefresh(),
+                ScheduleRefresh);
         }
         catch
         {
             ClearGitWatcherCore();
-        }
-    }
-
-    private void OnGitHeadChanged(object sender, FileSystemEventArgs args)
-    {
-        if (string.IsNullOrEmpty(args.Name) ||
-            string.Equals(args.Name, "HEAD", StringComparison.OrdinalIgnoreCase))
-        {
-            ScheduleRefresh();
         }
     }
 
@@ -306,15 +284,8 @@ public sealed class CodingAgentFooterDataProvider : IDisposable
     {
         _refreshTimer?.Dispose();
         _refreshTimer = null;
-        if (_headWatcher is not null)
-        {
-            _headWatcher.Changed -= OnGitHeadChanged;
-            _headWatcher.Created -= OnGitHeadChanged;
-            _headWatcher.Deleted -= OnGitHeadChanged;
-            _headWatcher.Renamed -= OnGitHeadChanged;
-            _headWatcher.Dispose();
-            _headWatcher = null;
-        }
+        CodingAgentFsWatch.CloseWatcher(_headWatcher);
+        _headWatcher = null;
     }
 
     private string? ResolveGitBranch()
