@@ -103,7 +103,7 @@ public static class CodingAgentSettingsSelector
                 "Show images",
                 FormatBooleanValue(settings.TerminalShowImages ?? true),
                 "Render images inline in terminal when the terminal supports images.",
-                ["true", "false"]),
+                submenu: CodingAgentShowImagesSelector.CreateSubmenu),
             new TuiSettingItem(
                 ImagesAutoResizeAction,
                 "Auto-resize images",

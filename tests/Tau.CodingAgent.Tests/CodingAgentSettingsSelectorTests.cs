@@ -124,6 +124,8 @@ public class CodingAgentSettingsSelectorTests
                 Assert.Equal(CodingAgentSettingsSelector.TerminalShowImagesAction, item.Id);
                 Assert.Equal("Show images", item.Label);
                 Assert.Equal("false", item.CurrentValue);
+                Assert.Empty(item.Values);
+                Assert.NotNull(item.Submenu);
             },
             item =>
             {
@@ -231,6 +233,40 @@ public class CodingAgentSettingsSelectorTests
             CodingAgentSettingsSelector.FormatSelection(CodingAgentSettingsSelector.AutoCompactionAction, "true"),
             selected);
         Assert.NotEmpty(surface.Diffs);
+    }
+
+    [Fact]
+    public async Task SelectSettingsListAsync_ShowImagesUsesDedicatedSubmenu()
+    {
+        var state = new CodingAgentSettingsSelectorState(
+            "settings.json",
+            new CodingAgentSettingsSnapshot(null, null, TerminalShowImages: true),
+            new Model
+            {
+                Provider = "openai",
+                Id = "gpt-5.4",
+                Name = "GPT-5.4",
+                Api = "openai-responses",
+                Reasoning = true
+            },
+            null,
+            AutoCompactionEnabled: false,
+            CurrentTheme: "dark");
+        var keyReader = new ScriptedKeyReader(
+            Key(ConsoleKey.DownArrow),
+            Key(ConsoleKey.Enter),
+            Key(ConsoleKey.DownArrow),
+            Key(ConsoleKey.Enter));
+        var surface = new CapturingRenderSurface(width: 80, height: 20);
+
+        var selected = await CodingAgentSettingsSelector.SelectSettingsListAsync(state, keyReader, surface);
+
+        Assert.Equal(
+            CodingAgentSettingsSelector.FormatSelection(CodingAgentSettingsSelector.TerminalShowImagesAction, "false"),
+            selected);
+        Assert.Contains(
+            surface.Diffs.SelectMany(static diff => diff.Operations.Select(static operation => operation.Text)),
+            static line => line.Contains("Show text placeholder instead", StringComparison.Ordinal));
     }
 
     private static ConsoleKeyInfo Key(ConsoleKey key) =>
