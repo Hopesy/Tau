@@ -92,6 +92,24 @@ public sealed class TuiDecodedKeyReaderTests : IDisposable
         Assert.Equal('\x03', key.KeyChar);
     }
 
+    [Fact]
+    public void SystemConsoleKeyReader_CreateRawRestoresRawModeOnDispose()
+    {
+        using var stream = new MemoryStream(Encoding.UTF8.GetBytes("x"));
+        var rawMode = new FakeRawModeController();
+
+        using (SystemConsoleKeyReader.CreateRaw(
+                   stream,
+                   sequenceTimeout: TimeSpan.FromMilliseconds(1),
+                   rawModeController: rawMode))
+        {
+            Assert.Equal(1, rawMode.EnterCalls);
+            Assert.Equal(0, rawMode.Scope.DisposeCalls);
+        }
+
+        Assert.Equal(1, rawMode.Scope.DisposeCalls);
+    }
+
     private sealed class FakeRawInputReader : ITuiRawInputReader
     {
         private readonly Queue<string> _inputs = new();
@@ -107,6 +125,25 @@ public sealed class TuiDecodedKeyReaderTests : IDisposable
 
             return ValueTask.FromResult(_inputs.Dequeue());
         }
+    }
+
+    private sealed class FakeRawModeController : ITuiConsoleRawModeController
+    {
+        public int EnterCalls { get; private set; }
+        public FakeRawModeScope Scope { get; } = new();
+
+        public IDisposable EnterRawMode()
+        {
+            EnterCalls++;
+            return Scope;
+        }
+    }
+
+    private sealed class FakeRawModeScope : IDisposable
+    {
+        public int DisposeCalls { get; private set; }
+
+        public void Dispose() => DisposeCalls++;
     }
 
     private sealed class FakeRenderer : IInteractiveRenderer

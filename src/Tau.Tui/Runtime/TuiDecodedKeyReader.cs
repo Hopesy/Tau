@@ -89,6 +89,7 @@ public sealed class TuiStreamRawInputReader : ITuiRawInputReader, IDisposable
 
         _disposed.Cancel();
         _sequenceBuffer.Dispose();
+        _available.Release();
     }
 
     private async Task PumpAsync(int bufferSize)

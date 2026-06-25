@@ -2,18 +2,25 @@ using Tau.Tui.Abstractions;
 
 namespace Tau.Tui.Runtime;
 
+public interface ITuiConsoleRawModeController
+{
+    IDisposable EnterRawMode();
+}
+
 public sealed class SystemConsoleKeyReader : IConsoleKeyReader, IDisposable
 {
     private readonly IConsoleKeyReader? _rawReader;
+    private readonly IDisposable? _rawMode;
 
     public SystemConsoleKeyReader()
         : this(CreateEnvironmentRawReader())
     {
     }
 
-    private SystemConsoleKeyReader(IConsoleKeyReader? rawReader)
+    private SystemConsoleKeyReader(IConsoleKeyReader? rawReader, IDisposable? rawMode = null)
     {
         _rawReader = rawReader;
+        _rawMode = rawMode;
     }
 
     public ValueTask<ConsoleKeyInfo> ReadKeyAsync(CancellationToken cancellationToken = default)
@@ -29,8 +36,14 @@ public sealed class SystemConsoleKeyReader : IConsoleKeyReader, IDisposable
 
     public static SystemConsoleKeyReader CreateRaw(
         Stream input,
-        TimeSpan? sequenceTimeout = null) =>
-        new(new TuiDecodedKeyReader(new TuiStreamRawInputReader(input, sequenceTimeout)));
+        TimeSpan? sequenceTimeout = null,
+        ITuiConsoleRawModeController? rawModeController = null)
+    {
+        var rawMode = rawModeController?.EnterRawMode();
+        return new SystemConsoleKeyReader(
+            new TuiDecodedKeyReader(new TuiStreamRawInputReader(input, sequenceTimeout)),
+            rawMode);
+    }
 
     private static IConsoleKeyReader? CreateEnvironmentRawReader()
     {
@@ -42,7 +55,9 @@ public sealed class SystemConsoleKeyReader : IConsoleKeyReader, IDisposable
             return null;
         }
 
-        return new TuiDecodedKeyReader(new TuiStreamRawInputReader(Console.OpenStandardInput()));
+        return CreateRaw(
+            Console.OpenStandardInput(),
+            rawModeController: new SystemTuiConsoleRawModeController());
     }
 
     public void Dispose()
@@ -51,7 +66,14 @@ public sealed class SystemConsoleKeyReader : IConsoleKeyReader, IDisposable
         {
             disposable.Dispose();
         }
+
+        _rawMode?.Dispose();
     }
+}
+
+public sealed class SystemTuiConsoleRawModeController : ITuiConsoleRawModeController
+{
+    public IDisposable EnterRawMode() => TuiConsoleRawMode.Enter();
 }
 
 public sealed class SystemConsoleInteractiveRenderer : IInteractiveRenderer

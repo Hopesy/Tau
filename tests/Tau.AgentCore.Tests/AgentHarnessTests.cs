@@ -465,7 +465,7 @@ public sealed class AgentHarnessTests
     [Fact]
     public async Task PromptAsync_AppliesProviderHooksWhenProviderSpecificOptionsUseStreamPath()
     {
-        using var scope = EnvironmentVariableScope.Acquire();
+        var scope = EnvironmentVariableScope.Acquire();
         var tempDir = Path.Combine(Path.GetTempPath(), $"tau-agent-harness-stream-hooks-{Guid.NewGuid():N}");
         Directory.CreateDirectory(tempDir);
 
@@ -549,7 +549,29 @@ public sealed class AgentHarnessTests
         }
         finally
         {
-            Directory.Delete(tempDir, recursive: true);
+            scope.Dispose();
+            DeleteDirectoryWithRetry(tempDir);
+        }
+    }
+
+    private static void DeleteDirectoryWithRetry(string path)
+    {
+        for (var attempt = 0; attempt < 5; attempt++)
+        {
+            try
+            {
+                if (Directory.Exists(path))
+                    Directory.Delete(path, recursive: true);
+                return;
+            }
+            catch (IOException) when (attempt < 4)
+            {
+                Thread.Sleep(50);
+            }
+            catch (UnauthorizedAccessException) when (attempt < 4)
+            {
+                Thread.Sleep(50);
+            }
         }
     }
 
