@@ -63,6 +63,9 @@ if (cli.Version)
     return 0;
 }
 
+var migrationResult = CodingAgentMigrations.Run();
+CodingAgentMigrations.PrintDeprecationWarnings(migrationResult.DeprecationWarnings, Console.Error);
+
 if (!string.IsNullOrWhiteSpace(cli.Export))
 {
     return ExportSessionFile(cli.Export, cli.Messages.Count > 0 ? cli.Messages[0] : null);
