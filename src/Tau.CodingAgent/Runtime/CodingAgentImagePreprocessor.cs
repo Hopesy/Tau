@@ -74,8 +74,8 @@ internal static class CodingAgentImagePreprocessor
 
         while (true)
         {
-            var resizedPixels = ResizeNearest(png.Rgba, png.Width, png.Height, currentWidth, currentHeight);
-            var encodedBytes = EncodePngRgba(resizedPixels, currentWidth, currentHeight);
+            var resizedPixels = ResizeBilinear(png.Rgba, png.Width, png.Height, currentWidth, currentHeight);
+            var encodedBytes = EncodePngOptimized(resizedPixels, currentWidth, currentHeight);
             var resizedBase64 = Convert.ToBase64String(encodedBytes);
             if (resizedBase64.Length < maxBase64Bytes)
             {
@@ -572,39 +572,97 @@ internal static class CodingAgentImagePreprocessor
         }
     }
 
-    private static byte[] ResizeNearest(byte[] source, int sourceWidth, int sourceHeight, int width, int height)
+    private static byte[] ResizeBilinear(byte[] source, int sourceWidth, int sourceHeight, int width, int height)
     {
         var destination = new byte[checked(width * height * 4)];
         for (var y = 0; y < height; y++)
         {
-            var sourceY = (int)((long)y * sourceHeight / height);
+            var sourceY = height == 1 ? 0 : (double)y * (sourceHeight - 1) / (height - 1);
+            var y0 = (int)Math.Floor(sourceY);
+            var y1 = Math.Min(sourceHeight - 1, y0 + 1);
+            var yWeight = sourceY - y0;
+
             for (var x = 0; x < width; x++)
             {
-                var sourceX = (int)((long)x * sourceWidth / width);
-                var sourceIndex = (sourceY * sourceWidth + sourceX) * 4;
+                var sourceX = width == 1 ? 0 : (double)x * (sourceWidth - 1) / (width - 1);
+                var x0 = (int)Math.Floor(sourceX);
+                var x1 = Math.Min(sourceWidth - 1, x0 + 1);
+                var xWeight = sourceX - x0;
+
+                var topLeft = (y0 * sourceWidth + x0) * 4;
+                var topRight = (y0 * sourceWidth + x1) * 4;
+                var bottomLeft = (y1 * sourceWidth + x0) * 4;
+                var bottomRight = (y1 * sourceWidth + x1) * 4;
                 var destinationIndex = (y * width + x) * 4;
-                destination[destinationIndex] = source[sourceIndex];
-                destination[destinationIndex + 1] = source[sourceIndex + 1];
-                destination[destinationIndex + 2] = source[sourceIndex + 2];
-                destination[destinationIndex + 3] = source[sourceIndex + 3];
+                for (var channel = 0; channel < 4; channel++)
+                {
+                    destination[destinationIndex + channel] = InterpolateChannel(
+                        source[topLeft + channel],
+                        source[topRight + channel],
+                        source[bottomLeft + channel],
+                        source[bottomRight + channel],
+                        xWeight,
+                        yWeight);
+                }
             }
         }
 
         return destination;
     }
 
-    private static byte[] EncodePngRgba(byte[] rgba, int width, int height)
+    private static byte InterpolateChannel(
+        byte topLeft,
+        byte topRight,
+        byte bottomLeft,
+        byte bottomRight,
+        double xWeight,
+        double yWeight)
     {
-        var stride = checked(width * 4);
+        var top = topLeft + (topRight - topLeft) * xWeight;
+        var bottom = bottomLeft + (bottomRight - bottomLeft) * xWeight;
+        var value = top + (bottom - top) * yWeight;
+        return (byte)Math.Clamp((int)Math.Round(value), 0, 255);
+    }
+
+    private static byte[] EncodePngOptimized(byte[] rgba, int width, int height)
+    {
+        var colorType = SelectPngColorType(rgba);
+        var bytesPerPixel = colorType switch
+        {
+            0 => 1,
+            2 => 3,
+            6 => 4,
+            _ => throw new InvalidOperationException("Unsupported PNG color type.")
+        };
+        var stride = checked(width * bytesPerPixel);
         var raw = new byte[checked(height * (stride + 1))];
         var sourceOffset = 0;
         var destinationOffset = 0;
         for (var y = 0; y < height; y++)
         {
             raw[destinationOffset++] = 0;
-            rgba.AsSpan(sourceOffset, stride).CopyTo(raw.AsSpan(destinationOffset, stride));
-            sourceOffset += stride;
-            destinationOffset += stride;
+            for (var x = 0; x < width; x++)
+            {
+                switch (colorType)
+                {
+                    case 0:
+                        raw[destinationOffset++] = rgba[sourceOffset];
+                        sourceOffset += 4;
+                        break;
+                    case 2:
+                        raw[destinationOffset++] = rgba[sourceOffset++];
+                        raw[destinationOffset++] = rgba[sourceOffset++];
+                        raw[destinationOffset++] = rgba[sourceOffset++];
+                        sourceOffset++;
+                        break;
+                    case 6:
+                        raw[destinationOffset++] = rgba[sourceOffset++];
+                        raw[destinationOffset++] = rgba[sourceOffset++];
+                        raw[destinationOffset++] = rgba[sourceOffset++];
+                        raw[destinationOffset++] = rgba[sourceOffset++];
+                        break;
+                }
+            }
         }
 
         byte[] compressed;
@@ -620,19 +678,49 @@ internal static class CodingAgentImagePreprocessor
 
         using var png = new MemoryStream();
         png.Write([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-        WriteChunk(png, "IHDR", CreateIhdr(width, height));
+        WriteChunk(png, "IHDR", CreateIhdr(width, height, colorType));
         WriteChunk(png, "IDAT", compressed);
         WriteChunk(png, "IEND", []);
         return png.ToArray();
     }
 
-    private static byte[] CreateIhdr(int width, int height)
+    private static int SelectPngColorType(byte[] rgba)
+    {
+        var opaque = true;
+        var grayscale = true;
+        for (var i = 0; i < rgba.Length; i += 4)
+        {
+            if (rgba[i + 3] != 255)
+            {
+                opaque = false;
+            }
+
+            if (rgba[i] != rgba[i + 1] || rgba[i] != rgba[i + 2])
+            {
+                grayscale = false;
+            }
+
+            if (!opaque && !grayscale)
+            {
+                break;
+            }
+        }
+
+        if (!opaque)
+        {
+            return 6;
+        }
+
+        return grayscale ? 0 : 2;
+    }
+
+    private static byte[] CreateIhdr(int width, int height, int colorType)
     {
         var ihdr = new byte[13];
         BinaryPrimitives.WriteUInt32BigEndian(ihdr.AsSpan(0, 4), checked((uint)width));
         BinaryPrimitives.WriteUInt32BigEndian(ihdr.AsSpan(4, 4), checked((uint)height));
         ihdr[8] = 8;
-        ihdr[9] = 6;
+        ihdr[9] = checked((byte)colorType);
         return ihdr;
     }
 
