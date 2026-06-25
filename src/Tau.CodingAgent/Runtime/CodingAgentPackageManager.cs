@@ -1163,6 +1163,7 @@ public sealed class CodingAgentPackageManager
         switch (parsed)
         {
             case NpmPackageSource npm when !npm.Pinned:
+                PrepareWindowsNpmSelfUpdate(npm, scope);
                 InstallNpm(npm with { Spec = $"{npm.Name}@latest" }, scope, temporary: false);
                 break;
             case GitPackageSource git when !git.Pinned:
@@ -1199,6 +1200,18 @@ public sealed class CodingAgentPackageManager
         }
 
         RunNpmCommand(["uninstall", source.Name, "--prefix", installRoot]);
+    }
+
+    private void PrepareWindowsNpmSelfUpdate(NpmPackageSource source, string scope)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var packageDirectory = Path.Combine(GetNpmInstallRoot(scope), "node_modules", Path.Combine(source.Name.Split('/')));
+        CodingAgentWindowsSelfUpdate.CleanupQuarantine(packageDirectory);
+        CodingAgentWindowsSelfUpdate.QuarantineNativeDependencies(packageDirectory);
     }
 
     private void InstallGit(GitPackageSource source, string scope)
