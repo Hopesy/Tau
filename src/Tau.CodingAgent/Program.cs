@@ -6,6 +6,11 @@ using Tau.Tui.Abstractions;
 using Tau.Tui.Rendering;
 using Tau.Tui.Runtime;
 
+if (await CodingAgentAuthCli.TryHandleAsync(args, Console.In, Console.Out, Console.Error).ConfigureAwait(false) is { } authCommandExitCode)
+{
+    return authCommandExitCode;
+}
+
 var packageManager = new CodingAgentPackageManager();
 if (CodingAgentPackageCli.TryHandle(args, Console.Out, Console.Error, packageManager, out var packageCommandExitCode))
 {
