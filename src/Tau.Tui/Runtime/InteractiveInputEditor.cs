@@ -297,7 +297,7 @@ public sealed class InteractiveInputEditor
                     var deletePrevCharUndoState = CaptureUndoState(chars, cursor);
                     if (cursor > 0)
                     {
-                        var previousStart = FindPreviousTextElementStart(chars, cursor);
+                        var previousStart = FindPreviousInputSegmentStart(chars, cursor);
                         chars.RemoveRange(previousStart, cursor - previousStart);
                         cursor = previousStart;
                     }
@@ -309,7 +309,7 @@ public sealed class InteractiveInputEditor
                     var undoState = CaptureUndoState(chars, cursor);
                     var newCursor = cursor > 0 && chars[cursor - 1] == '\n'
                         ? cursor - 1
-                        : FindPreviousWordBoundary(chars, cursor);
+                        : FindPreviousWordBoundary(chars, cursor, ValidPasteMarkerSpans(chars));
                     var changed = false;
                     if (newCursor < cursor)
                     {
@@ -332,7 +332,7 @@ public sealed class InteractiveInputEditor
                     var deleteNextCharUndoState = CaptureUndoState(chars, cursor);
                     if (cursor < chars.Count)
                     {
-                        var nextEnd = FindNextTextElementEnd(chars, cursor);
+                        var nextEnd = FindNextInputSegmentEnd(chars, cursor);
                         chars.RemoveRange(cursor, nextEnd - cursor);
                     }
                     PushUndoIfChanged(undoStack, deleteNextCharUndoState, chars, cursor);
@@ -343,7 +343,7 @@ public sealed class InteractiveInputEditor
                     var undoState = CaptureUndoState(chars, cursor);
                     var nextBoundary = cursor < chars.Count && chars[cursor] == '\n'
                         ? cursor + 1
-                        : FindNextWordBoundary(chars, cursor);
+                        : FindNextWordBoundary(chars, cursor, ValidPasteMarkerSpans(chars));
                     var changed = false;
                     if (nextBoundary > cursor)
                     {
@@ -362,26 +362,26 @@ public sealed class InteractiveInputEditor
                 case EditorAction.CursorLeft:
                     preferredVerticalColumn = null;
                     ResetTransientEditAction();
-                    if (cursor > 0) cursor = FindPreviousTextElementStart(chars, cursor);
+                    if (cursor > 0) cursor = FindPreviousInputSegmentStart(chars, cursor);
                     break;
                 case EditorAction.CursorRight:
                     preferredVerticalColumn = null;
                     ResetTransientEditAction();
-                    if (cursor < chars.Count) cursor = FindNextTextElementEnd(chars, cursor);
+                    if (cursor < chars.Count) cursor = FindNextInputSegmentEnd(chars, cursor);
                     break;
                 case EditorAction.CursorPrevWord:
                     preferredVerticalColumn = null;
                     ResetTransientEditAction();
                     cursor = cursor > 0 && chars[cursor - 1] == '\n'
                         ? cursor - 1
-                        : FindPreviousWordBoundary(chars, cursor);
+                        : FindPreviousWordBoundary(chars, cursor, ValidPasteMarkerSpans(chars));
                     break;
                 case EditorAction.CursorNextWord:
                     preferredVerticalColumn = null;
                     ResetTransientEditAction();
                     cursor = cursor < chars.Count && chars[cursor] == '\n'
                         ? cursor + 1
-                        : FindNextWordBoundary(chars, cursor);
+                        : FindNextWordBoundary(chars, cursor, ValidPasteMarkerSpans(chars));
                     break;
                 case EditorAction.CursorLineStart:
                     preferredVerticalColumn = null;
@@ -884,6 +884,136 @@ public sealed class InteractiveInputEditor
     private static string SliceChars(List<char> chars, int start, int length) =>
         length <= 0 ? string.Empty : new string(chars.GetRange(start, length).ToArray());
 
+    private int FindPreviousInputSegmentStart(IReadOnlyList<char> chars, int cursor)
+    {
+        if (TryFindPasteMarkerSpanBeforeOrAtCursor(chars, cursor, out var span))
+        {
+            return span.Start;
+        }
+
+        return FindPreviousTextElementStart(chars, cursor);
+    }
+
+    private int FindNextInputSegmentEnd(IReadOnlyList<char> chars, int cursor)
+    {
+        if (TryFindPasteMarkerSpanAtOrAfterCursor(chars, cursor, out var span))
+        {
+            return span.End;
+        }
+
+        return FindNextTextElementEnd(chars, cursor);
+    }
+
+    private bool TryFindPasteMarkerSpanBeforeOrAtCursor(
+        IReadOnlyList<char> chars,
+        int cursor,
+        out PasteMarkerSpan span)
+    {
+        cursor = Math.Clamp(cursor, 0, chars.Count);
+        foreach (var candidate in ValidPasteMarkerSpans(chars))
+        {
+            if (candidate.Start < cursor && cursor <= candidate.End)
+            {
+                span = candidate;
+                return true;
+            }
+        }
+
+        span = default;
+        return false;
+    }
+
+    private bool TryFindPasteMarkerSpanAtOrAfterCursor(
+        IReadOnlyList<char> chars,
+        int cursor,
+        out PasteMarkerSpan span)
+    {
+        cursor = Math.Clamp(cursor, 0, chars.Count);
+        foreach (var candidate in ValidPasteMarkerSpans(chars))
+        {
+            if (candidate.Start <= cursor && cursor < candidate.End)
+            {
+                span = candidate;
+                return true;
+            }
+        }
+
+        span = default;
+        return false;
+    }
+
+    private List<PasteMarkerSpan> ValidPasteMarkerSpans(IReadOnlyList<char> chars)
+    {
+        if (_pastes.Count == 0 || chars.Count == 0)
+        {
+            return [];
+        }
+
+        var text = new string(chars.ToArray());
+        if (!text.Contains("[paste #", StringComparison.Ordinal))
+        {
+            return [];
+        }
+
+        var spans = new List<PasteMarkerSpan>();
+        foreach (var pasteId in _pastes.Keys)
+        {
+            var index = 0;
+            var prefix = $"[paste #{pasteId} ";
+            while (index < text.Length)
+            {
+                var start = text.IndexOf(prefix, index, StringComparison.Ordinal);
+                if (start < 0)
+                {
+                    break;
+                }
+
+                var end = text.IndexOf(']', start);
+                if (end < 0)
+                {
+                    break;
+                }
+
+                var marker = text[start..(end + 1)];
+                if (IsPasteMarkerText(marker, pasteId))
+                {
+                    spans.Add(new PasteMarkerSpan(start, end + 1));
+                }
+
+                index = end + 1;
+            }
+        }
+
+        spans.Sort(static (left, right) => left.Start.CompareTo(right.Start));
+        return spans;
+    }
+
+    private static bool IsPasteMarkerText(string marker, int pasteId)
+    {
+        var prefix = $"[paste #{pasteId} ";
+        if (!marker.StartsWith(prefix, StringComparison.Ordinal) ||
+            !marker.EndsWith(']'))
+        {
+            return false;
+        }
+
+        var payload = marker[prefix.Length..^1];
+        if (payload.StartsWith('+') &&
+            payload.EndsWith(" lines", StringComparison.Ordinal) &&
+            int.TryParse(payload[1..^" lines".Length], CultureInfo.InvariantCulture, out var lineCount))
+        {
+            return lineCount > 0;
+        }
+
+        if (payload.EndsWith(" chars", StringComparison.Ordinal) &&
+            int.TryParse(payload[..^" chars".Length], CultureInfo.InvariantCulture, out var charCount))
+        {
+            return charCount > 0;
+        }
+
+        return false;
+    }
+
     private static int FindPreviousTextElementStart(IReadOnlyList<char> chars, int cursor)
     {
         cursor = Math.Clamp(cursor, 0, chars.Count);
@@ -1200,13 +1330,21 @@ public sealed class InteractiveInputEditor
 
     internal static int FindPreviousWordBoundary(IReadOnlyList<char> chars, int cursor)
     {
+        return FindPreviousWordBoundary(chars, cursor, pasteMarkers: []);
+    }
+
+    private static int FindPreviousWordBoundary(
+        IReadOnlyList<char> chars,
+        int cursor,
+        IReadOnlyList<PasteMarkerSpan> pasteMarkers)
+    {
         cursor = Math.Clamp(cursor, 0, chars.Count);
         if (cursor <= 0)
         {
             return 0;
         }
 
-        var segments = SegmentWords(chars, endExclusive: cursor);
+        var segments = SegmentWords(chars, endExclusive: cursor, pasteMarkers: pasteMarkers);
         var index = segments.Count - 1;
         while (index >= 0 && segments[index].Kind == WordSegmentKind.Whitespace)
         {
@@ -1219,7 +1357,7 @@ public sealed class InteractiveInputEditor
         }
 
         var segment = segments[index];
-        if (segment.Kind is WordSegmentKind.WordLike or WordSegmentKind.Cjk)
+        if (segment.Kind is WordSegmentKind.WordLike or WordSegmentKind.Cjk or WordSegmentKind.Atomic)
         {
             return segment.Start;
         }
@@ -1238,13 +1376,21 @@ public sealed class InteractiveInputEditor
 
     internal static int FindNextWordBoundary(IReadOnlyList<char> chars, int cursor)
     {
+        return FindNextWordBoundary(chars, cursor, pasteMarkers: []);
+    }
+
+    private static int FindNextWordBoundary(
+        IReadOnlyList<char> chars,
+        int cursor,
+        IReadOnlyList<PasteMarkerSpan> pasteMarkers)
+    {
         cursor = Math.Clamp(cursor, 0, chars.Count);
         if (cursor >= chars.Count)
         {
             return chars.Count;
         }
 
-        var segments = SegmentWords(chars, startInclusive: cursor);
+        var segments = SegmentWords(chars, startInclusive: cursor, pasteMarkers: pasteMarkers);
         var index = 0;
         while (index < segments.Count && segments[index].Kind == WordSegmentKind.Whitespace)
         {
@@ -1257,7 +1403,7 @@ public sealed class InteractiveInputEditor
         }
 
         var segment = segments[index];
-        if (segment.Kind is WordSegmentKind.WordLike or WordSegmentKind.Cjk)
+        if (segment.Kind is WordSegmentKind.WordLike or WordSegmentKind.Cjk or WordSegmentKind.Atomic)
         {
             return segment.End;
         }
@@ -1277,13 +1423,16 @@ public sealed class InteractiveInputEditor
     private static List<WordSegment> SegmentWords(
         IReadOnlyList<char> chars,
         int startInclusive = 0,
-        int? endExclusive = null)
+        int? endExclusive = null,
+        IReadOnlyList<PasteMarkerSpan>? pasteMarkers = null)
     {
         var start = Math.Clamp(startInclusive, 0, chars.Count);
         var end = Math.Clamp(endExclusive ?? chars.Count, start, chars.Count);
         var text = new string(chars.ToArray());
         var segments = new List<WordSegment>();
         var enumerator = StringInfo.GetTextElementEnumerator(text);
+        var markerIndex = 0;
+        pasteMarkers ??= [];
 
         while (enumerator.MoveNext())
         {
@@ -1300,6 +1449,26 @@ public sealed class InteractiveInputEditor
                 break;
             }
 
+            while (markerIndex < pasteMarkers.Count && pasteMarkers[markerIndex].End <= elementStart)
+            {
+                markerIndex++;
+            }
+
+            if (markerIndex < pasteMarkers.Count)
+            {
+                var marker = pasteMarkers[markerIndex];
+                if (elementStart == marker.Start)
+                {
+                    AddWordSegment(segments, new WordSegment(marker.Start, marker.End, WordSegmentKind.Atomic));
+                    continue;
+                }
+
+                if (elementStart > marker.Start && elementStart < marker.End)
+                {
+                    continue;
+                }
+            }
+
             var segment = new WordSegment(elementStart, elementEnd, ClassifyWordElement(element));
             AddWordSegment(segments, segment);
         }
@@ -1309,14 +1478,14 @@ public sealed class InteractiveInputEditor
 
     private static void AddWordSegment(List<WordSegment> segments, WordSegment segment)
     {
-        if (segments.Count == 0 || segment.Kind == WordSegmentKind.Cjk)
+        if (segments.Count == 0 || segment.Kind is WordSegmentKind.Cjk or WordSegmentKind.Atomic)
         {
             segments.Add(segment);
             return;
         }
 
         var previous = segments[^1];
-        if (previous.Kind != segment.Kind || previous.Kind == WordSegmentKind.Cjk)
+        if (previous.Kind != segment.Kind || previous.Kind is WordSegmentKind.Cjk or WordSegmentKind.Atomic)
         {
             segments.Add(segment);
             return;
@@ -1434,11 +1603,14 @@ public sealed class InteractiveInputEditor
 
     private readonly record struct WordSegment(int Start, int End, WordSegmentKind Kind);
 
+    private readonly record struct PasteMarkerSpan(int Start, int End);
+
     private enum WordSegmentKind
     {
         Whitespace,
         WordLike,
         Cjk,
+        Atomic,
         Punctuation,
         Other,
     }

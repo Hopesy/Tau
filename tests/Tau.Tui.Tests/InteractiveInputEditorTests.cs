@@ -79,6 +79,92 @@ public sealed class InteractiveInputEditorTests
     }
 
     [Fact]
+    public async Task ReadLineAsync_LeftArrowTreatsPasteMarkerAsAtomicSegment()
+    {
+        var paste = CreateLargePaste();
+        var reader = new FakeInputEventReader();
+        reader.EnqueuePaste(paste);
+        reader.EnqueueKey(ConsoleKey.LeftArrow);
+        reader.Enqueue('X');
+        reader.EnqueueKey(ConsoleKey.Enter);
+
+        var renderer = new FakeRenderer();
+        var editor = new InteractiveInputEditor(reader, renderer);
+
+        var result = await editor.ReadLineAsync("> ");
+
+        Assert.Equal("X" + paste, result.Text);
+        Assert.Contains(("[paste #1 +11 lines]", 0), renderer.RenderCalls);
+    }
+
+    [Fact]
+    public async Task ReadLineAsync_RightArrowTreatsPasteMarkerAsAtomicSegment()
+    {
+        var paste = CreateLargePaste();
+        var reader = new FakeInputEventReader();
+        reader.EnqueuePaste(paste);
+        reader.EnqueueKey(ConsoleKey.Home);
+        reader.EnqueueKey(ConsoleKey.RightArrow);
+        reader.Enqueue('X');
+        reader.EnqueueKey(ConsoleKey.Enter);
+
+        var renderer = new FakeRenderer();
+        var editor = new InteractiveInputEditor(reader, renderer);
+
+        var result = await editor.ReadLineAsync("> ");
+
+        Assert.Equal(paste + "X", result.Text);
+    }
+
+    [Theory]
+    [InlineData(ConsoleKey.Backspace, false)]
+    [InlineData(ConsoleKey.Delete, true)]
+    public async Task ReadLineAsync_DeleteCharTreatsPasteMarkerAsAtomicSegment(ConsoleKey key, bool moveHomeFirst)
+    {
+        var paste = CreateLargePaste();
+        var reader = new FakeInputEventReader();
+        reader.EnqueuePaste(paste);
+        if (moveHomeFirst)
+        {
+            reader.EnqueueKey(ConsoleKey.Home);
+        }
+
+        reader.EnqueueKey(key);
+        reader.EnqueueKey(ConsoleKey.Enter);
+
+        var renderer = new FakeRenderer();
+        var editor = new InteractiveInputEditor(reader, renderer);
+
+        var result = await editor.ReadLineAsync("> ");
+
+        Assert.Equal(string.Empty, result.Text);
+    }
+
+    [Theory]
+    [InlineData(ConsoleKey.Backspace, false)]
+    [InlineData(ConsoleKey.Delete, true)]
+    public async Task ReadLineAsync_DeleteWordTreatsPasteMarkerAsAtomicSegment(ConsoleKey key, bool moveHomeFirst)
+    {
+        var paste = CreateLargePaste();
+        var reader = new FakeInputEventReader();
+        reader.EnqueuePaste(paste);
+        if (moveHomeFirst)
+        {
+            reader.EnqueueKey(ConsoleKey.Home);
+        }
+
+        reader.EnqueueRaw(new ConsoleKeyInfo('\0', key, shift: false, alt: false, control: true));
+        reader.EnqueueKey(ConsoleKey.Enter);
+
+        var renderer = new FakeRenderer();
+        var editor = new InteractiveInputEditor(reader, renderer);
+
+        var result = await editor.ReadLineAsync("> ");
+
+        Assert.Equal(string.Empty, result.Text);
+    }
+
+    [Fact]
     public async Task ReadLineAsync_SmallPasteInsertsSanitizedTextDirectly()
     {
         var reader = new FakeInputEventReader();
@@ -93,6 +179,9 @@ public sealed class InteractiveInputEditorTests
 
         Assert.Equal("a    path\nnext", result.Text);
     }
+
+    private static string CreateLargePaste() =>
+        string.Join("\n", Enumerable.Range(1, 11).Select(static index => $"line {index}"));
 
     [Fact]
     public async Task ReadLineAsync_DeleteRemovesCharAtCursor()
@@ -1464,6 +1553,11 @@ public sealed class InteractiveInputEditorTests
         {
             var keyInfo = new ConsoleKeyInfo('\0', key, shift: false, alt: false, control: false);
             _events.Enqueue(ConsoleInputEvent.KeyPress(keyInfo));
+        }
+
+        public void EnqueueRaw(ConsoleKeyInfo key)
+        {
+            _events.Enqueue(ConsoleInputEvent.KeyPress(key));
         }
 
         public void EnqueuePaste(string text)
