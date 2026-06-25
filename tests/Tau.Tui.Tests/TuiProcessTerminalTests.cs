@@ -67,6 +67,107 @@ public sealed class TuiProcessTerminalTests
     }
 
     [Fact]
+    public async Task ProcessTerminal_QueryBackgroundColorWritesOsc11AndConsumesReply()
+    {
+        var transport = new FakeProcessTerminalTransport();
+        var terminal = new TuiProcessTerminal(transport, new ManualTerminalTimer());
+        var input = new List<string>();
+
+        terminal.Start(input.Add, () => { });
+        var query = terminal.QueryTerminalBackgroundColorAsync(TimeSpan.FromSeconds(5));
+        transport.EmitInput("\u001b]11;#112233\u0007");
+
+        Assert.Contains(TuiProcessTerminal.QueryBackgroundColorSequence, transport.Writes);
+        Assert.Equal(new TuiRgbColor(17, 34, 51), await query);
+        Assert.Empty(input);
+    }
+
+    [Fact]
+    public async Task ProcessTerminal_QueryBackgroundColorConsumesUnparseableStrictReply()
+    {
+        var transport = new FakeProcessTerminalTransport();
+        var terminal = new TuiProcessTerminal(transport, new ManualTerminalTimer());
+        var input = new List<string>();
+
+        terminal.Start(input.Add, () => { });
+        var query = terminal.QueryTerminalBackgroundColorAsync(TimeSpan.FromSeconds(5));
+        transport.EmitInput("\u001b]11;not-a-color\u0007");
+
+        Assert.Null(await query);
+        Assert.Empty(input);
+    }
+
+    [Fact]
+    public async Task ProcessTerminal_QueryBackgroundColorPassesNonMatchingInputWhilePending()
+    {
+        var transport = new FakeProcessTerminalTransport();
+        var terminal = new TuiProcessTerminal(transport, new ManualTerminalTimer());
+        var input = new List<string>();
+
+        terminal.Start(input.Add, () => { });
+        var query = terminal.QueryTerminalBackgroundColorAsync(TimeSpan.FromSeconds(5));
+        transport.EmitInput("x");
+        transport.EmitInput("\u001b]11;#ffffff\u0007");
+
+        Assert.Equal(["x"], input);
+        Assert.Equal(new TuiRgbColor(255, 255, 255), await query);
+    }
+
+    [Fact]
+    public async Task ProcessTerminal_QueryBackgroundColorConsumesLateReplyAfterTimeout()
+    {
+        var transport = new FakeProcessTerminalTransport();
+        var timer = new ManualTerminalTimer();
+        var terminal = new TuiProcessTerminal(transport, timer);
+        var input = new List<string>();
+
+        terminal.Start(input.Add, () => { });
+        var query = terminal.QueryTerminalBackgroundColorAsync(TimeSpan.FromMilliseconds(1));
+        timer.FireAll();
+
+        Assert.Null(await query);
+
+        transport.EmitInput("\u001b]11;#ffffff\u0007");
+
+        Assert.Empty(input);
+    }
+
+    [Fact]
+    public async Task ProcessTerminal_QueryColorSchemeWritesDsrConsumesReportAndNotifiesListeners()
+    {
+        var transport = new FakeProcessTerminalTransport();
+        var terminal = new TuiProcessTerminal(transport, new ManualTerminalTimer());
+        var input = new List<string>();
+        var reported = new List<TuiTerminalColorScheme>();
+        terminal.TerminalColorSchemeChanged += reported.Add;
+
+        terminal.Start(input.Add, () => { });
+        var query = terminal.QueryTerminalColorSchemeAsync(TimeSpan.FromSeconds(5));
+        transport.EmitInput("\u001b[?997;2n");
+
+        Assert.Contains(TuiProcessTerminal.QueryColorSchemeSequence, transport.Writes);
+        Assert.Equal(TuiTerminalColorScheme.Light, await query);
+        Assert.Equal([TuiTerminalColorScheme.Light], reported);
+        Assert.Empty(input);
+    }
+
+    [Fact]
+    public void ProcessTerminal_ColorSchemeReportWithoutQueryStillNotifiesAndIsConsumed()
+    {
+        var transport = new FakeProcessTerminalTransport();
+        var terminal = new TuiProcessTerminal(transport, new ManualTerminalTimer());
+        var input = new List<string>();
+        var reported = new List<TuiTerminalColorScheme>();
+        terminal.TerminalColorSchemeChanged += reported.Add;
+
+        terminal.Start(input.Add, () => { });
+        transport.EmitInput("\u001b[?997;1n");
+
+        Assert.Equal([TuiTerminalColorScheme.Dark], reported);
+        Assert.Empty(input);
+    }
+
+    [Fact]
     public void ProcessTerminal_ConsumesKittyProtocolResponseAndSkipsModifyOtherKeysFallback()
     {
         var transport = new FakeProcessTerminalTransport();

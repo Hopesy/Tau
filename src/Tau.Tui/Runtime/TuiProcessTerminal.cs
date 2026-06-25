@@ -133,6 +133,8 @@ public sealed class TuiProcessTerminal
     public const string ClearLineSequence = "\u001b[K";
     public const string ClearFromCursorSequence = "\u001b[J";
     public const string ClearScreenSequence = "\u001b[2J\u001b[H";
+    public const string QueryBackgroundColorSequence = "\u001b]11;?\u0007";
+    public const string QueryColorSchemeSequence = "\u001b[?996n";
 
     private static readonly Regex KittyProtocolResponsePattern =
         new("^\u001b\\[\\?(\\d+)u$", RegexOptions.CultureInvariant);
@@ -148,10 +150,15 @@ public sealed class TuiProcessTerminal
     private bool _started;
     private bool _kittyProtocolActive;
     private bool _modifyOtherKeysActive;
+    private int _pendingBackgroundColorReplies;
+    private readonly Queue<PendingBackgroundColorQuery> _pendingBackgroundColorQueries = [];
+    private readonly List<PendingColorSchemeQuery> _pendingColorSchemeQueries = [];
     private TuiInputSequenceBuffer? _inputSequenceBuffer;
     private IDisposable? _inputSubscription;
     private IDisposable? _resizeSubscription;
     private IDisposable? _modifyOtherKeysTimer;
+
+    public event Action<TuiTerminalColorScheme>? TerminalColorSchemeChanged;
 
     public TuiProcessTerminal(
         ITuiProcessTerminalTransport transport,
@@ -287,6 +294,9 @@ public sealed class TuiProcessTerminal
 
     public void Stop()
     {
+        IReadOnlyList<TaskCompletionSource<TuiRgbColor?>> backgroundCompletions = [];
+        IReadOnlyList<TaskCompletionSource<TuiTerminalColorScheme?>> colorSchemeCompletions = [];
+
         lock (_sync)
         {
             if (!_started)
@@ -309,6 +319,17 @@ public sealed class TuiProcessTerminal
             _transport.PauseInput();
             _transport.SetRawMode(_wasRaw);
             _started = false;
+            (backgroundCompletions, colorSchemeCompletions) = ClearPendingTerminalQueriesCore();
+        }
+
+        foreach (var completion in backgroundCompletions)
+        {
+            completion.TrySetResult(null);
+        }
+
+        foreach (var completion in colorSchemeCompletions)
+        {
+            completion.TrySetResult(null);
         }
     }
 
@@ -343,6 +364,37 @@ public sealed class TuiProcessTerminal
 
     public void SetTitle(string title) => _transport.Write($"\u001b]0;{title ?? string.Empty}\u0007");
 
+    public Task<TuiRgbColor?> QueryTerminalBackgroundColorAsync(
+        TimeSpan? timeout = null,
+        CancellationToken cancellationToken = default)
+    {
+        var query = new PendingBackgroundColorQuery();
+        lock (_sync)
+        {
+            query.Timer = _timer.Schedule(timeout ?? TimeSpan.FromSeconds(1), () => TimeoutBackgroundColorQuery(query));
+            _pendingBackgroundColorQueries.Enqueue(query);
+            _pendingBackgroundColorReplies++;
+            _transport.Write(QueryBackgroundColorSequence);
+        }
+
+        return query.Completion.Task.WaitAsync(cancellationToken);
+    }
+
+    public Task<TuiTerminalColorScheme?> QueryTerminalColorSchemeAsync(
+        TimeSpan? timeout = null,
+        CancellationToken cancellationToken = default)
+    {
+        var query = new PendingColorSchemeQuery();
+        lock (_sync)
+        {
+            query.Timer = _timer.Schedule(timeout ?? TimeSpan.FromSeconds(1), () => TimeoutColorSchemeQuery(query));
+            _pendingColorSchemeQueries.Add(query);
+            _transport.Write(QueryColorSchemeSequence);
+        }
+
+        return query.Completion.Task.WaitAsync(cancellationToken);
+    }
+
     private void SetupInputSequenceBufferCore()
     {
         _inputSequenceBuffer = new TuiInputSequenceBuffer();
@@ -355,6 +407,12 @@ public sealed class TuiProcessTerminal
                     _kittyProtocolActive = true;
                     TuiKeyDecoder.SetKittyProtocolActive(true);
                     _transport.Write(EnableKittyKeyboardProtocol);
+                    return;
+                }
+
+                if (ConsumeBackgroundColorResponseCore(sequence) ||
+                    ConsumeColorSchemeReportCore(sequence))
+                {
                     return;
                 }
 
@@ -392,6 +450,122 @@ public sealed class TuiProcessTerminal
         }
     }
 
+    private bool ConsumeBackgroundColorResponseCore(string sequence)
+    {
+        if (_pendingBackgroundColorReplies <= 0 ||
+            !TuiTerminalColors.IsOsc11BackgroundColorResponse(sequence))
+        {
+            return false;
+        }
+
+        var color = TuiTerminalColors.ParseOsc11BackgroundColor(sequence);
+        _pendingBackgroundColorReplies--;
+        var query = _pendingBackgroundColorQueries.Count > 0
+            ? _pendingBackgroundColorQueries.Dequeue()
+            : null;
+
+        if (query is null || query.Settled)
+        {
+            return true;
+        }
+
+        query.Settled = true;
+        query.Timer?.Dispose();
+        query.Timer = null;
+        query.Completion.TrySetResult(color);
+        return true;
+    }
+
+    private bool ConsumeColorSchemeReportCore(string sequence)
+    {
+        var scheme = TuiTerminalColors.ParseTerminalColorSchemeReport(sequence);
+        if (scheme is null)
+        {
+            return false;
+        }
+
+        foreach (var query in _pendingColorSchemeQueries.ToArray())
+        {
+            if (query.Settled)
+            {
+                continue;
+            }
+
+            query.Settled = true;
+            query.Timer?.Dispose();
+            query.Timer = null;
+            query.Completion.TrySetResult(scheme);
+        }
+
+        _pendingColorSchemeQueries.RemoveAll(static query => query.Settled);
+        TerminalColorSchemeChanged?.Invoke(scheme.Value);
+        return true;
+    }
+
+    private void TimeoutBackgroundColorQuery(PendingBackgroundColorQuery query)
+    {
+        lock (_sync)
+        {
+            if (query.Settled)
+            {
+                return;
+            }
+
+            query.Settled = true;
+            query.Timer = null;
+            query.Completion.TrySetResult(null);
+        }
+    }
+
+    private void TimeoutColorSchemeQuery(PendingColorSchemeQuery query)
+    {
+        lock (_sync)
+        {
+            if (query.Settled)
+            {
+                return;
+            }
+
+            query.Settled = true;
+            query.Timer = null;
+            _pendingColorSchemeQueries.Remove(query);
+            query.Completion.TrySetResult(null);
+        }
+    }
+
+    private (IReadOnlyList<TaskCompletionSource<TuiRgbColor?>>,
+        IReadOnlyList<TaskCompletionSource<TuiTerminalColorScheme?>>) ClearPendingTerminalQueriesCore()
+    {
+        var backgroundCompletions = new List<TaskCompletionSource<TuiRgbColor?>>();
+        while (_pendingBackgroundColorQueries.Count > 0)
+        {
+            var query = _pendingBackgroundColorQueries.Dequeue();
+            query.Timer?.Dispose();
+            query.Timer = null;
+            if (!query.Settled)
+            {
+                query.Settled = true;
+                backgroundCompletions.Add(query.Completion);
+            }
+        }
+        _pendingBackgroundColorReplies = 0;
+
+        var colorSchemeCompletions = new List<TaskCompletionSource<TuiTerminalColorScheme?>>();
+        foreach (var query in _pendingColorSchemeQueries)
+        {
+            query.Timer?.Dispose();
+            query.Timer = null;
+            if (!query.Settled)
+            {
+                query.Settled = true;
+                colorSchemeCompletions.Add(query.Completion);
+            }
+        }
+        _pendingColorSchemeQueries.Clear();
+
+        return (backgroundCompletions, colorSchemeCompletions);
+    }
+
     private void DisableKeyboardProtocolsCore()
     {
         _modifyOtherKeysTimer?.Dispose();
@@ -409,5 +583,25 @@ public sealed class TuiProcessTerminal
             _transport.Write(DisableModifyOtherKeys);
             _modifyOtherKeysActive = false;
         }
+    }
+
+    private sealed class PendingBackgroundColorQuery
+    {
+        public TaskCompletionSource<TuiRgbColor?> Completion { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public bool Settled { get; set; }
+
+        public IDisposable? Timer { get; set; }
+    }
+
+    private sealed class PendingColorSchemeQuery
+    {
+        public TaskCompletionSource<TuiTerminalColorScheme?> Completion { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public bool Settled { get; set; }
+
+        public IDisposable? Timer { get; set; }
     }
 }
