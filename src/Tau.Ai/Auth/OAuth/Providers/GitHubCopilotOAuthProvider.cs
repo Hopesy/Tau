@@ -103,7 +103,7 @@ public sealed partial class GitHubCopilotOAuthProvider : IOAuthProvider
 
     private static async Task<DeviceCodeResponse> StartDeviceFlowAsync(string domain, CancellationToken cancellationToken)
     {
-        using var client = new HttpClient();
+        using var client = TauHttpClientFactory.Create();
         var url = $"https://{domain}/login/device/code";
         var content = new FormUrlEncodedContent(new Dictionary<string, string>
         {
@@ -137,7 +137,7 @@ public sealed partial class GitHubCopilotOAuthProvider : IOAuthProvider
         var deadline = DateTimeOffset.UtcNow.AddSeconds(expiresIn);
         var intervalMs = Math.Max(1000, intervalSeconds * 1000);
 
-        using var client = new HttpClient();
+        using var client = TauHttpClientFactory.Create();
 
         while (DateTimeOffset.UtcNow < deadline)
         {
@@ -191,7 +191,7 @@ public sealed partial class GitHubCopilotOAuthProvider : IOAuthProvider
         var domain = enterpriseDomain ?? "github.com";
         var url = $"https://api.{domain}/copilot_internal/v2/token";
 
-        using var client = new HttpClient();
+        using var client = TauHttpClientFactory.Create();
         using var request = new HttpRequestMessage(HttpMethod.Get, url);
         request.Headers.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
         request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);

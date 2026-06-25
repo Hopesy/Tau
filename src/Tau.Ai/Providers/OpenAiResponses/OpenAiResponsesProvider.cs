@@ -13,7 +13,7 @@ public sealed class OpenAiResponsesProvider : IStreamProvider
 
     public OpenAiResponsesProvider(HttpClient? httpClient = null)
     {
-        _httpClient = httpClient ?? new HttpClient();
+        _httpClient = httpClient ?? TauHttpClientFactory.Create();
     }
 
     public string Api => "openai-responses";

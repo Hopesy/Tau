@@ -30,7 +30,7 @@ public sealed class GoogleGeminiCliProvider : IStreamProvider
 
     public GoogleGeminiCliProvider(HttpClient? httpClient = null)
     {
-        _httpClient = httpClient ?? new HttpClient();
+        _httpClient = httpClient ?? TauHttpClientFactory.Create();
     }
 
     public string Api => "google-gemini-cli";

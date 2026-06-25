@@ -12,7 +12,7 @@ public sealed class OpenRouterImagesProvider : IImagesProvider
 
     public OpenRouterImagesProvider(HttpClient? httpClient = null)
     {
-        _httpClient = httpClient ?? new HttpClient();
+        _httpClient = httpClient ?? TauHttpClientFactory.Create();
     }
 
     public string Api => "openrouter-images";

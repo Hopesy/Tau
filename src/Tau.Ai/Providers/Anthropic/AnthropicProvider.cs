@@ -16,7 +16,7 @@ public sealed class AnthropicProvider : IStreamProvider
 
     public AnthropicProvider(HttpClient? httpClient = null)
     {
-        _httpClient = httpClient ?? new HttpClient();
+        _httpClient = httpClient ?? TauHttpClientFactory.Create();
     }
 
     public string Api => "anthropic-messages";

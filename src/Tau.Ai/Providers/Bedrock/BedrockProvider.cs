@@ -23,7 +23,7 @@ public sealed class BedrockProvider : IStreamProvider
         Func<DateTimeOffset>? clock,
         IBedrockProcessRunner? processRunner)
     {
-        _httpClient = httpClient ?? new HttpClient();
+        _httpClient = httpClient ?? TauHttpClientFactory.Create();
         _clock = clock ?? (() => DateTimeOffset.UtcNow);
         _processRunner = processRunner ?? DefaultBedrockProcessRunner.Instance;
     }

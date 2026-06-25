@@ -13,7 +13,7 @@ public sealed class GoogleVertexProvider : IStreamProvider
 
     public GoogleVertexProvider(HttpClient? httpClient = null)
     {
-        _httpClient = httpClient ?? new HttpClient();
+        _httpClient = httpClient ?? TauHttpClientFactory.Create();
         _accessTokenResolver = new GoogleVertexAccessTokenResolver(_httpClient);
     }
 

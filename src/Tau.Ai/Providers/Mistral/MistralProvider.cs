@@ -15,7 +15,7 @@ public sealed class MistralProvider : IStreamProvider
 
     public MistralProvider(HttpClient? httpClient = null)
     {
-        _httpClient = httpClient ?? new HttpClient();
+        _httpClient = httpClient ?? TauHttpClientFactory.Create();
     }
 
     public string Api => "mistral-conversations";

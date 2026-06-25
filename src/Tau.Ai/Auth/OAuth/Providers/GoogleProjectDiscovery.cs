@@ -13,7 +13,7 @@ internal static class GoogleProjectDiscovery
         var envProjectId = Environment.GetEnvironmentVariable("GOOGLE_CLOUD_PROJECT")
             ?? Environment.GetEnvironmentVariable("GOOGLE_CLOUD_PROJECT_ID");
 
-        using var client = new HttpClient();
+        using var client = TauHttpClientFactory.Create();
         var headers = new Dictionary<string, string>
         {
             ["Authorization"] = $"Bearer {accessToken}",
@@ -61,7 +61,7 @@ internal static class GoogleProjectDiscovery
     {
         try
         {
-            using var client = new HttpClient();
+            using var client = TauHttpClientFactory.Create();
             using var request = new HttpRequestMessage(HttpMethod.Get, "https://www.googleapis.com/oauth2/v1/userinfo?alt=json");
             request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
 

@@ -14,7 +14,7 @@ public sealed class GoogleProvider : IStreamProvider
 
     public GoogleProvider(HttpClient? httpClient = null)
     {
-        _httpClient = httpClient ?? new HttpClient();
+        _httpClient = httpClient ?? TauHttpClientFactory.Create();
     }
 
     public string Api => "google-generative-language";

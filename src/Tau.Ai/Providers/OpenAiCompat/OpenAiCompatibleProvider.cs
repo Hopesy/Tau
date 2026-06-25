@@ -27,7 +27,7 @@ internal sealed class OpenAiCompatibleProvider : IStreamProvider
         _requestPath = requestPath;
         _authHeaderName = authHeaderName;
         _authHeaderPrefix = authHeaderPrefix;
-        _httpClient = httpClient ?? new HttpClient();
+        _httpClient = httpClient ?? TauHttpClientFactory.Create();
     }
 
     public string Api => _api;

@@ -101,7 +101,7 @@ public sealed class OpenAICodexOAuthProvider : IOAuthProvider
 
     public async Task<OAuthCredentials> RefreshTokenAsync(OAuthCredentials credentials, CancellationToken cancellationToken = default)
     {
-        using var client = new HttpClient();
+        using var client = TauHttpClientFactory.Create();
         var content = new FormUrlEncodedContent(new Dictionary<string, string>
         {
             ["grant_type"] = "refresh_token",
@@ -124,7 +124,7 @@ public sealed class OpenAICodexOAuthProvider : IOAuthProvider
 
     private static async Task<OAuthCredentials> ExchangeCodeAsync(string code, string verifier, CancellationToken cancellationToken)
     {
-        using var client = new HttpClient();
+        using var client = TauHttpClientFactory.Create();
         var content = new FormUrlEncodedContent(new Dictionary<string, string>
         {
             ["grant_type"] = "authorization_code",

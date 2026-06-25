@@ -39,7 +39,7 @@ public sealed class OpenAiCodexResponsesProvider : IStreamProvider, IDisposable
             throw new ArgumentOutOfRangeException(nameof(sseHeaderTimeout), sseHeaderTimeout, "SSE header timeout must be positive.");
         }
 
-        _httpClient = httpClient ?? new HttpClient();
+        _httpClient = httpClient ?? TauHttpClientFactory.Create();
         _webSocketTransport = webSocketTransport ?? new ClientCodexWebSocketTransport();
         _sessionCleanupRegistration = SessionResources.RegisterSessionResourceCleanup(CloseOpenAiCodexWebSocketSessions);
         _sseHeaderTimeout = sseHeaderTimeout;

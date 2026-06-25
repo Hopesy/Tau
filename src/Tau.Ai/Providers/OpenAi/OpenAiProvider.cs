@@ -16,7 +16,7 @@ public sealed class OpenAiProvider : IStreamProvider
 
     public OpenAiProvider(HttpClient? httpClient = null)
     {
-        _httpClient = httpClient ?? new HttpClient();
+        _httpClient = httpClient ?? TauHttpClientFactory.Create();
     }
 
     public string Api => "openai-chat-completions";

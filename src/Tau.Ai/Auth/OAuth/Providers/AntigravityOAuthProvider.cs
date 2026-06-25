@@ -132,7 +132,7 @@ public sealed class AntigravityOAuthProvider : IOAuthProvider
             throw new InvalidOperationException("Google credentials missing projectId.");
         }
 
-        using var client = new HttpClient();
+        using var client = TauHttpClientFactory.Create();
         var content = new FormUrlEncodedContent(new Dictionary<string, string>
         {
             ["client_id"] = ClientId,
@@ -179,7 +179,7 @@ public sealed class AntigravityOAuthProvider : IOAuthProvider
 
     private static async Task<TokenExchangeResult> ExchangeCodeAsync(string code, string verifier, CancellationToken cancellationToken)
     {
-        using var client = new HttpClient();
+        using var client = TauHttpClientFactory.Create();
         var content = new FormUrlEncodedContent(new Dictionary<string, string>
         {
             ["client_id"] = ClientId,
