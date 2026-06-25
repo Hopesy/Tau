@@ -1,5 +1,6 @@
 using Tau.Tui.Abstractions;
 using Tau.Tui.Runtime;
+using System.Text;
 
 namespace Tau.Tui.Tests;
 
@@ -63,6 +64,32 @@ public sealed class TuiDecodedKeyReaderTests : IDisposable
 
         Assert.Equal(InputResultKind.Submitted, result.Kind);
         Assert.Equal("A!b", result.Text);
+    }
+
+    [Fact]
+    public async Task StreamRawInputReader_SplitsByteStreamIntoCompleteTerminalSequences()
+    {
+        await using var stream = new MemoryStream(Encoding.UTF8.GetBytes("x\u001b[A\u001b[97:65;2u"));
+        using var reader = new TuiStreamRawInputReader(stream, sequenceTimeout: TimeSpan.FromMilliseconds(1));
+
+        Assert.Equal("x", await reader.ReadInputAsync());
+        Assert.Equal("\u001b[A", await reader.ReadInputAsync());
+        Assert.Equal("\u001b[97:65;2u", await reader.ReadInputAsync());
+
+        await Assert.ThrowsAsync<EndOfStreamException>(async () => await reader.ReadInputAsync());
+    }
+
+    [Fact]
+    public async Task SystemConsoleKeyReader_CreateRawUsesDecodedInputPath()
+    {
+        await using var stream = new MemoryStream(Encoding.UTF8.GetBytes("\u001b[99;5u"));
+        using var reader = SystemConsoleKeyReader.CreateRaw(stream, sequenceTimeout: TimeSpan.FromMilliseconds(1));
+
+        var key = await reader.ReadKeyAsync();
+
+        Assert.Equal(ConsoleKey.C, key.Key);
+        Assert.Equal(ConsoleModifiers.Control, key.Modifiers);
+        Assert.Equal('\x03', key.KeyChar);
     }
 
     private sealed class FakeRawInputReader : ITuiRawInputReader

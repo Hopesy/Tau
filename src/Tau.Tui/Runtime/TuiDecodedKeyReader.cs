@@ -7,7 +7,7 @@ public interface ITuiRawInputReader
     ValueTask<string> ReadInputAsync(CancellationToken cancellationToken = default);
 }
 
-public sealed class TuiDecodedKeyReader(ITuiRawInputReader reader) : IConsoleKeyReader
+public sealed class TuiDecodedKeyReader(ITuiRawInputReader reader) : IConsoleKeyReader, IDisposable
 {
     private readonly ITuiRawInputReader _reader = reader ?? throw new ArgumentNullException(nameof(reader));
 
@@ -21,6 +21,130 @@ public sealed class TuiDecodedKeyReader(ITuiRawInputReader reader) : IConsoleKey
                 return key;
             }
         }
+    }
+
+    public void Dispose()
+    {
+        if (_reader is IDisposable disposable)
+        {
+            disposable.Dispose();
+        }
+    }
+}
+
+public sealed class TuiStreamRawInputReader : ITuiRawInputReader, IDisposable
+{
+    private readonly Stream _input;
+    private readonly TuiInputSequenceBuffer _sequenceBuffer;
+    private readonly CancellationTokenSource _disposed = new();
+    private readonly SemaphoreSlim _available = new(0);
+    private readonly Queue<string> _queue = new();
+    private readonly object _sync = new();
+    private readonly Task _pumpTask;
+    private bool _completed;
+    private Exception? _error;
+
+    public TuiStreamRawInputReader(
+        Stream input,
+        TimeSpan? sequenceTimeout = null,
+        int bufferSize = 256)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+        if (!input.CanRead)
+            throw new ArgumentException("Input stream must be readable.", nameof(input));
+        if (bufferSize <= 0)
+            throw new ArgumentOutOfRangeException(nameof(bufferSize));
+
+        _input = input;
+        _sequenceBuffer = new TuiInputSequenceBuffer(sequenceTimeout);
+        _sequenceBuffer.Data += Enqueue;
+        _sequenceBuffer.Paste += content => Enqueue($"\u001b[200~{content}\u001b[201~");
+        _pumpTask = Task.Run(() => PumpAsync(bufferSize));
+    }
+
+    public async ValueTask<string> ReadInputAsync(CancellationToken cancellationToken = default)
+    {
+        while (true)
+        {
+            lock (_sync)
+            {
+                if (_queue.Count > 0)
+                    return _queue.Dequeue();
+
+                if (_error is not null)
+                    throw new IOException("Raw TUI input reader failed.", _error);
+
+                if (_completed)
+                    throw new EndOfStreamException("Raw TUI input stream has ended.");
+            }
+
+            await _available.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    public void Dispose()
+    {
+        if (_disposed.IsCancellationRequested)
+            return;
+
+        _disposed.Cancel();
+        _sequenceBuffer.Dispose();
+    }
+
+    private async Task PumpAsync(int bufferSize)
+    {
+        var buffer = new byte[bufferSize];
+        try
+        {
+            while (!_disposed.IsCancellationRequested)
+            {
+                var read = await _input.ReadAsync(buffer, _disposed.Token).ConfigureAwait(false);
+                if (read == 0)
+                    break;
+
+                _sequenceBuffer.Process(buffer.AsSpan(0, read));
+            }
+
+            foreach (var pending in _sequenceBuffer.Flush())
+            {
+                Enqueue(pending);
+            }
+
+            Complete(null);
+        }
+        catch (OperationCanceledException) when (_disposed.IsCancellationRequested)
+        {
+            Complete(null);
+        }
+        catch (ObjectDisposedException) when (_disposed.IsCancellationRequested)
+        {
+            Complete(null);
+        }
+        catch (Exception ex)
+        {
+            Complete(ex);
+        }
+    }
+
+    private void Enqueue(string input)
+    {
+        lock (_sync)
+        {
+            _queue.Enqueue(input);
+        }
+
+        _available.Release();
+    }
+
+    private void Complete(Exception? error)
+    {
+        lock (_sync)
+        {
+            _error = error;
+            _completed = true;
+        }
+
+        _available.Release();
     }
 }
 

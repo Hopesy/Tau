@@ -2,12 +2,55 @@ using Tau.Tui.Abstractions;
 
 namespace Tau.Tui.Runtime;
 
-public sealed class SystemConsoleKeyReader : IConsoleKeyReader
+public sealed class SystemConsoleKeyReader : IConsoleKeyReader, IDisposable
 {
+    private readonly IConsoleKeyReader? _rawReader;
+
+    public SystemConsoleKeyReader()
+        : this(CreateEnvironmentRawReader())
+    {
+    }
+
+    private SystemConsoleKeyReader(IConsoleKeyReader? rawReader)
+    {
+        _rawReader = rawReader;
+    }
+
     public ValueTask<ConsoleKeyInfo> ReadKeyAsync(CancellationToken cancellationToken = default)
     {
+        if (_rawReader is not null)
+        {
+            return _rawReader.ReadKeyAsync(cancellationToken);
+        }
+
         cancellationToken.ThrowIfCancellationRequested();
         return ValueTask.FromResult(Console.ReadKey(intercept: true));
+    }
+
+    public static SystemConsoleKeyReader CreateRaw(
+        Stream input,
+        TimeSpan? sequenceTimeout = null) =>
+        new(new TuiDecodedKeyReader(new TuiStreamRawInputReader(input, sequenceTimeout)));
+
+    private static IConsoleKeyReader? CreateEnvironmentRawReader()
+    {
+        if (!string.Equals(
+                Environment.GetEnvironmentVariable("TAU_TUI_RAW_INPUT"),
+                "1",
+                StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        return new TuiDecodedKeyReader(new TuiStreamRawInputReader(Console.OpenStandardInput()));
+    }
+
+    public void Dispose()
+    {
+        if (_rawReader is IDisposable disposable)
+        {
+            disposable.Dispose();
+        }
     }
 }
 
