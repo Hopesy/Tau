@@ -244,7 +244,7 @@ public static class StreamFunctions
         new()
         {
             Temperature = resolvedOptions.Temperature,
-            MaxTokens = resolvedOptions.MaxTokens ?? model.MaxOutputTokens,
+            MaxTokens = resolvedOptions.MaxTokens,
             TopP = resolvedOptions.TopP,
             ApiKey = resolvedOptions.ApiKey,
             Signal = resolvedOptions.Signal,

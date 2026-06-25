@@ -1382,6 +1382,73 @@ public sealed class ModelConfigurationStoreTests
     }
 
     [Fact]
+    public async Task StreamFunctions_OpenAiProviderSpecificOptionsDoNotInjectModelDefaultMaxTokens()
+    {
+        using var scope = EnvironmentVariableScope.Acquire();
+        var tempDir = Path.Combine(Path.GetTempPath(), $"tau-models-openai-no-default-max-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+
+        try
+        {
+            var modelsPath = Path.Combine(tempDir, "models.json");
+            var authPath = Path.Combine(tempDir, "auth.json");
+            File.WriteAllText(authPath, "{}");
+            File.WriteAllText(modelsPath, """
+                {
+                  "providers": {
+                    "openai": {
+                      "apiKey": "openai-key",
+                      "models": [
+                        {
+                          "id": "gpt-5.4",
+                          "options": {
+                            "reasoningEffort": "low"
+                          }
+                        }
+                      ]
+                    }
+                  }
+                }
+                """);
+            scope.Set("TAU_MODELS_FILE", modelsPath);
+            scope.Set("TAU_AUTH_FILE", authPath);
+
+            var provider = new OpenAiOptionsCapturingProvider();
+            var registry = new ProviderRegistry();
+            registry.Register("openai-chat-completions", () => provider, sourceId: "test");
+            var configurationStore = new ModelConfigurationStore([modelsPath]);
+            var authResolver = new ProviderAuthResolver(
+                credentialStore: new OAuthCredentialStore([authPath]),
+                configurationStore: configurationStore);
+
+            await OpenAiResponsesProviderTests.CollectAsync(StreamFunctions.StreamSimple(
+                registry,
+                new Model
+                {
+                    Id = "gpt-5.4",
+                    Name = "GPT-5.4",
+                    Api = "openai-chat-completions",
+                    Provider = "openai",
+                    Reasoning = true,
+                    MaxOutputTokens = 1024
+                },
+                new LlmContext { Messages = [new UserMessage("hi")] },
+                new SimpleStreamOptions(),
+                configurationStore,
+                authResolver));
+
+            var options = provider.CapturedOptions!;
+            Assert.Equal("openai-key", options.ApiKey);
+            Assert.Null(options.MaxTokens);
+            Assert.Equal("low", options.ReasoningEffort);
+        }
+        finally
+        {
+            DeleteDirectoryWithRetry(tempDir);
+        }
+    }
+
+    [Fact]
     public async Task StreamFunctions_AppliesResponsesProviderSpecificOptionsFromModelsJson()
     {
         using var scope = EnvironmentVariableScope.Acquire();
