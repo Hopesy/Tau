@@ -671,7 +671,9 @@ public sealed class CodingAgentRpcHostTests
     public async Task ExtensionUiBridge_FireAndForgetRequestsUseUpstreamRpcShape()
     {
         var output = new JsonLineWriter();
+        using var footerDataProvider = new CodingAgentFooterDataProvider(Environment.CurrentDirectory);
         var bridge = new CodingAgentRpcExtensionUiBridge();
+        bridge.SetFooterDataProvider(footerDataProvider);
         _ = new CodingAgentRpcHost(
             new FakeCodingAgentRunner((_, _) => EmptyRun()),
             new StringReader(string.Empty),
@@ -710,6 +712,9 @@ public sealed class CodingAgentRpcHostTests
             line.GetProperty("method").GetString() == "setStatus" &&
             line.GetProperty("statusKey").GetString() == "idle");
         Assert.False(idleStatus.TryGetProperty("statusText", out _));
+        var extensionStatuses = footerDataProvider.GetExtensionStatuses();
+        Assert.Equal("running", extensionStatuses["build"]);
+        Assert.False(extensionStatuses.ContainsKey("idle"));
 
         var widget = lines.Single(line =>
             line.GetProperty("method").GetString() == "setWidget" &&

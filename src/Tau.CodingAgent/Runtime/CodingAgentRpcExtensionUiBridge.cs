@@ -7,6 +7,7 @@ public sealed class CodingAgentRpcExtensionUiBridge
     private readonly object _gate = new();
     private readonly Dictionary<string, IPendingExtensionUiRequest> _pending = new(StringComparer.Ordinal);
     private Func<object, CancellationToken, Task>? _writeRequestAsync;
+    private CodingAgentFooterDataProvider? _footerDataProvider;
 
     internal void Attach(Func<object, CancellationToken, Task> writeRequestAsync)
     {
@@ -15,6 +16,14 @@ public sealed class CodingAgentRpcExtensionUiBridge
         lock (_gate)
         {
             _writeRequestAsync = writeRequestAsync;
+        }
+    }
+
+    public void SetFooterDataProvider(CodingAgentFooterDataProvider? footerDataProvider)
+    {
+        lock (_gate)
+        {
+            _footerDataProvider = footerDataProvider;
         }
     }
 
@@ -131,6 +140,7 @@ public sealed class CodingAgentRpcExtensionUiBridge
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(statusKey);
+        GetFooterDataProvider()?.SetExtensionStatus(statusKey, statusText);
 
         return SendFireAndForgetAsync(
             new Dictionary<string, object?>
@@ -140,6 +150,14 @@ public sealed class CodingAgentRpcExtensionUiBridge
                 ["statusText"] = statusText
             },
             cancellationToken);
+    }
+
+    private CodingAgentFooterDataProvider? GetFooterDataProvider()
+    {
+        lock (_gate)
+        {
+            return _footerDataProvider;
+        }
     }
 
     public Task SetWidgetAsync(

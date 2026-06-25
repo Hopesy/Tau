@@ -21,6 +21,9 @@ public sealed class CodingAgentHost
     private readonly CodingAgentPromptTemplateStore? _promptTemplateStore;
     private readonly CodingAgentSkillStore? _skillStore;
     private readonly CodingAgentExtensionCommandStore? _extensionCommandStore;
+    private readonly CodingAgentFooterDataProvider? _footerDataProvider;
+    private readonly bool _ownsFooterDataProvider;
+    private readonly CodingAgentRpcExtensionUiBridge? _extensionUiBridge;
     private readonly CodingAgentAutoCompactionOptions _autoCompactionBase;
     private CodingAgentAutoCompactionOptions _autoCompaction;
     private readonly CodingAgentCommandRouter _commandRouter;
@@ -71,7 +74,8 @@ public sealed class CodingAgentHost
         CodingAgentInitialPrompt? initialPrompt = null,
         IReadOnlyList<string>? initialMessages = null,
         CodingAgentStartupNoticeService? startupNoticeService = null,
-        IReadOnlyList<string>? scopedModelsOverride = null)
+        IReadOnlyList<string>? scopedModelsOverride = null,
+        CodingAgentFooterDataProvider? footerDataProvider = null)
     {
         _ui = ui;
         _runner = runner;
@@ -89,6 +93,17 @@ public sealed class CodingAgentHost
         _initialMessages = initialMessages ?? [];
         _startupNoticeService = startupNoticeService;
         _compositionBinding = compositionSession?.BindTranscript(ui);
+        _footerDataProvider = footerDataProvider ?? new CodingAgentFooterDataProvider(Environment.CurrentDirectory);
+        _ownsFooterDataProvider = footerDataProvider is null;
+        _footerDataProvider.SetAvailableProviderCount(CountAvailableProviders(runner, scopedModelsOverride));
+        if (extensionCommandStore is not null)
+        {
+            _extensionUiBridge = new CodingAgentRpcExtensionUiBridge();
+            _extensionUiBridge.SetFooterDataProvider(_footerDataProvider);
+            _extensionUiBridge.Attach(static (_, _) => Task.CompletedTask);
+            extensionCommandStore.SetExtensionUiBridge(_extensionUiBridge);
+        }
+
         RefreshCompositionStatus();
         _commandRouter = new CodingAgentCommandRouter(
             runner,
@@ -134,80 +149,92 @@ public sealed class CodingAgentHost
 
     public async Task<int> RunAsync(CancellationToken cancellationToken = default)
     {
-        _compositionSession?.Start();
-        _ui.ShowWelcome("Tau — Coding Agent", "Type your message, or 'exit' to quit.");
-        ShowStartupNoticeIfNeeded();
-        await RunInitialInputsAsync(cancellationToken).ConfigureAwait(false);
-
-        while (!cancellationToken.IsCancellationRequested)
+        try
         {
-            var inputResult = await _ui.ReadInputResultAsync(cancellationToken).ConfigureAwait(false);
-            if (inputResult.Kind == InputResultKind.Action)
+            _compositionSession?.Start();
+            _ui.ShowWelcome("Tau — Coding Agent", "Type your message, or 'exit' to quit.");
+            ShowStartupNoticeIfNeeded();
+            await RunInitialInputsAsync(cancellationToken).ConfigureAwait(false);
+
+            while (!cancellationToken.IsCancellationRequested)
             {
-                if (await TryHandleEditorActionAsync(inputResult.Action, cancellationToken).ConfigureAwait(false))
+                var inputResult = await _ui.ReadInputResultAsync(cancellationToken).ConfigureAwait(false);
+                if (inputResult.Kind == InputResultKind.Action)
                 {
-                    PersistSession();
-                }
-
-                continue;
-            }
-
-            var input = inputResult.Text;
-            if (input is null || input.Equals("exit", StringComparison.OrdinalIgnoreCase))
-            {
-                break;
-            }
-
-            if (string.IsNullOrWhiteSpace(input))
-            {
-                continue;
-            }
-
-            var slashPreparation = TryPrepareSlashInvocation(input, out var preparedInput, out var handledSlashResult);
-            if (handledSlashResult is not null)
-            {
-                RenderCommandResult(handledSlashResult);
-                PersistSession();
-                continue;
-            }
-
-            if (slashPreparation == SlashInvocationPreparation.Expanded)
-            {
-                input = preparedInput;
-            }
-
-            try
-            {
-                if (slashPreparation != SlashInvocationPreparation.Expanded
-                    && await TryHandleCommandAsync(input, cancellationToken).ConfigureAwait(false))
-                {
-                    PersistSession();
-                    if (_shutdownRendered)
+                    if (await TryHandleEditorActionAsync(inputResult.Action, cancellationToken).ConfigureAwait(false))
                     {
-                        break;
+                        PersistSession();
                     }
 
                     continue;
                 }
+
+                var input = inputResult.Text;
+                if (input is null || input.Equals("exit", StringComparison.OrdinalIgnoreCase))
+                {
+                    break;
+                }
+
+                if (string.IsNullOrWhiteSpace(input))
+                {
+                    continue;
+                }
+
+                var slashPreparation = TryPrepareSlashInvocation(input, out var preparedInput, out var handledSlashResult);
+                if (handledSlashResult is not null)
+                {
+                    RenderCommandResult(handledSlashResult);
+                    PersistSession();
+                    continue;
+                }
+
+                if (slashPreparation == SlashInvocationPreparation.Expanded)
+                {
+                    input = preparedInput;
+                }
+
+                try
+                {
+                    if (slashPreparation != SlashInvocationPreparation.Expanded
+                        && await TryHandleCommandAsync(input, cancellationToken).ConfigureAwait(false))
+                    {
+                        PersistSession();
+                        if (_shutdownRendered)
+                        {
+                            break;
+                        }
+
+                        continue;
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    WriteCancelled();
+                    continue;
+                }
+
+                await TryAutoCompactAsync(input, cancellationToken).ConfigureAwait(false);
+                await RunTurnWithRetryAsync(input, cancellationToken).ConfigureAwait(false);
+                PersistSession();
             }
-            catch (OperationCanceledException)
+
+            if (!_shutdownRendered)
             {
-                WriteCancelled();
-                continue;
+                WriteShutdown("Goodbye!");
             }
 
-            await TryAutoCompactAsync(input, cancellationToken).ConfigureAwait(false);
-            await RunTurnWithRetryAsync(input, cancellationToken).ConfigureAwait(false);
-            PersistSession();
+            return 0;
         }
-
-        if (!_shutdownRendered)
+        finally
         {
-            WriteShutdown("Goodbye!");
+            _extensionCommandStore?.SetExtensionUiBridge(null);
+            _extensionUiBridge?.SetFooterDataProvider(null);
+            _compositionSession?.Stop();
+            if (_ownsFooterDataProvider)
+            {
+                _footerDataProvider?.Dispose();
+            }
         }
-
-        _compositionSession?.Stop();
-        return 0;
     }
 
     private void ShowStartupNoticeIfNeeded()
@@ -341,6 +368,27 @@ public sealed class CodingAgentHost
             .ToDictionary(
                 static resolved => resolved.KeyBinding,
                 static resolved => resolved.Shortcut);
+    }
+
+    private static int CountAvailableProviders(ICodingAgentRunner runner, IReadOnlyList<string>? scopedModelsOverride)
+    {
+        try
+        {
+            if (scopedModelsOverride is { Count: > 0 })
+            {
+                return scopedModelsOverride
+                    .Select(static value => value.Split('/', 2)[0])
+                    .Where(static provider => !string.IsNullOrWhiteSpace(provider))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .Count();
+            }
+
+            return runner.GetProviders().Count;
+        }
+        catch
+        {
+            return 0;
+        }
     }
 
     private static bool IsReloadCommand(string input)
