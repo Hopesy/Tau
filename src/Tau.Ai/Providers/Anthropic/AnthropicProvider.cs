@@ -13,6 +13,7 @@ public sealed class AnthropicProvider : IStreamProvider
 {
     private const string DefaultAnthropicVersion = "2023-06-01";
     private const string InterleavedThinkingBeta = "interleaved-thinking-2025-05-14";
+    private const string FineGrainedToolStreamingBeta = "fine-grained-tool-streaming-2025-05-14";
     private readonly HttpClient _httpClient;
 
     public AnthropicProvider(HttpClient? httpClient = null)
@@ -97,7 +98,7 @@ public sealed class AnthropicProvider : IStreamProvider
             request.Headers.TryAddWithoutValidation("x-api-key", apiKey);
 
         request.Headers.TryAddWithoutValidation("anthropic-version", DefaultAnthropicVersion);
-        if (BuildAnthropicBetaHeader(model, options as AnthropicOptions) is { } betaHeader)
+        if (BuildAnthropicBetaHeader(model, context, options as AnthropicOptions) is { } betaHeader)
             request.Headers.TryAddWithoutValidation("anthropic-beta", betaHeader);
 
         ApplySessionAffinityHeader(request, model, options);
@@ -351,12 +352,22 @@ public sealed class AnthropicProvider : IStreamProvider
         };
     }
 
-    private static string? BuildAnthropicBetaHeader(Model model, AnthropicOptions? options)
+    private static string? BuildAnthropicBetaHeader(Model model, LlmContext context, AnthropicOptions? options)
     {
-        if (options?.InterleavedThinking != true || UsesAdaptiveThinking(model))
-            return null;
+        var betaFeatures = new List<string>();
 
-        return InterleavedThinkingBeta;
+        if (context.Tools is { Count: > 0 } &&
+            model.Compat?.SupportsEagerToolInputStreaming == false)
+        {
+            betaFeatures.Add(FineGrainedToolStreamingBeta);
+        }
+
+        if (options?.InterleavedThinking == true && !UsesAdaptiveThinking(model))
+        {
+            betaFeatures.Add(InterleavedThinkingBeta);
+        }
+
+        return betaFeatures.Count == 0 ? null : string.Join(",", betaFeatures);
     }
 
     private static bool UsesAdaptiveThinking(Model model) =>

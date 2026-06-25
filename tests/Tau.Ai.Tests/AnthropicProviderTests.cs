@@ -216,10 +216,35 @@ public sealed class AnthropicProviderTests
         var tool = root.GetProperty("tools")[0];
         Assert.False(tool.TryGetProperty("eager_input_streaming", out _));
         Assert.False(tool.TryGetProperty("cache_control", out _));
+        Assert.Equal(
+            "fine-grained-tool-streaming-2025-05-14",
+            handler.Requests[0].Headers.GetValues("anthropic-beta").Single());
 
         var userMessage = root.GetProperty("messages")[0].GetProperty("content")[0];
         Assert.Equal("ephemeral", userMessage.GetProperty("cache_control").GetProperty("type").GetString());
         Assert.False(userMessage.GetProperty("cache_control").TryGetProperty("ttl", out _));
+    }
+
+    [Fact]
+    public async Task Stream_WithLegacyToolStreamingCompatibilityAndNoTools_DoesNotSendBetaHeader()
+    {
+        using var handler = new OpenAiResponsesProviderTests.StubHandler(_ => new HttpResponseMessage(HttpStatusCode.BadRequest)
+        {
+            Content = new StringContent("stop after payload", Encoding.UTF8, "text/plain")
+        });
+        using var client = new HttpClient(handler);
+        var provider = new AnthropicProvider(client);
+        var model = BuildModel(reasoning: true) with
+        {
+            Compat = new ModelCompatibility { SupportsEagerToolInputStreaming = false }
+        };
+
+        await OpenAiResponsesProviderTests.CollectAsync(provider.Stream(
+            model,
+            new LlmContext { Messages = [new UserMessage("hello")] },
+            new StreamOptions { ApiKey = "anthropic-key" }));
+
+        Assert.False(handler.Requests[0].Headers.Contains("anthropic-beta"));
     }
 
     [Fact]
