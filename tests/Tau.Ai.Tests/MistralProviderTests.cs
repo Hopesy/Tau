@@ -187,6 +187,33 @@ public sealed class MistralProviderTests
     }
 
     [Fact]
+    public async Task Stream_DowngradesToolResultImagesForNonVisionModels()
+    {
+        using var handler = new OpenAiResponsesProviderTests.StubHandler(_ => new HttpResponseMessage(HttpStatusCode.BadRequest)
+        {
+            Content = new StringContent("stop after payload", Encoding.UTF8, "text/plain")
+        });
+        using var client = new HttpClient(handler);
+        var provider = new MistralProvider(client);
+        var context = new LlmContext
+        {
+            Messages =
+            [
+                new AssistantMessage([new ToolCallContent("call_image", "inspect_image", """{"path":"image.png"}""")]),
+                new ToolResultMessage("call_image", [new ImageContent("dGVzdA==", "image/png")])
+            ]
+        };
+
+        await OpenAiResponsesProviderTests.CollectAsync(provider.Stream(BuildModel(), context, new StreamOptions { ApiKey = "mistral-key" }));
+
+        using var doc = JsonDocument.Parse(handler.CapturedBody);
+        var messages = doc.RootElement.GetProperty("messages").EnumerateArray().ToArray();
+        Assert.Equal(
+            "(tool image omitted: model does not support images)",
+            messages[1].GetProperty("content").GetString());
+    }
+
+    [Fact]
     public async Task StreamSimple_AddsMistralReasoningEffortForSmallModels()
     {
         using var handler = new OpenAiResponsesProviderTests.StubHandler(_ => new HttpResponseMessage(HttpStatusCode.BadRequest)

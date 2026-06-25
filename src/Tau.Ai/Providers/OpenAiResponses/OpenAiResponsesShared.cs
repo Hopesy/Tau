@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Tau.Ai.Streaming;
+using Tau.Ai.Utilities;
 
 namespace Tau.Ai.Providers.OpenAiResponses;
 
@@ -21,6 +22,7 @@ public static class OpenAiResponsesShared
 
     public static List<object> ConvertResponsesMessages(Model model, LlmContext context)
     {
+        context = MessageTransformer.DowngradeUnsupportedImages(context, model);
         var messages = new List<object>();
         var normalizedToolCallIds = new Dictionary<string, string>(StringComparer.Ordinal);
         var pendingToolCalls = new List<ToolCallContent>();

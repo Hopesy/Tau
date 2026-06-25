@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Tau.Ai.Streaming;
+using Tau.Ai.Utilities;
 
 namespace Tau.Ai.Providers.Google;
 
@@ -424,6 +425,7 @@ public sealed class GoogleGeminiCliProvider : IStreamProvider
         ThinkingLevel? reasoning,
         bool isAntigravity)
     {
+        context = MessageTransformer.DowngradeUnsupportedImages(context, model);
         var request = new Dictionary<string, object>
         {
             ["contents"] = GoogleMessageConverter.ConvertMessages(context.Messages)

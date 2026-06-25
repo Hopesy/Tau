@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using Tau.Ai.Streaming;
+using Tau.Ai.Utilities;
 
 namespace Tau.Ai.Providers.Anthropic;
 
@@ -148,6 +149,7 @@ public sealed class AnthropicProvider : IStreamProvider
         StreamOptions options,
         ThinkingLevel? reasoning)
     {
+        context = MessageTransformer.DowngradeUnsupportedImages(context, model);
         var body = new Dictionary<string, object>
         {
             ["model"] = model.Id,

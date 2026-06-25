@@ -155,8 +155,9 @@ public sealed class OpenAiProviderSerializationTests
         Assert.True(root.GetProperty("enable_thinking").GetBoolean());
         Assert.True(root.GetProperty("tool_stream").GetBoolean());
         Assert.Equal("system", root.GetProperty("messages")[0].GetProperty("role").GetString());
-        Assert.Equal("text", root.GetProperty("messages")[1].GetProperty("content")[0].GetProperty("type").GetString());
-        Assert.Equal(1, root.GetProperty("messages")[1].GetProperty("content").GetArrayLength());
+        Assert.Equal(
+            "hello(image omitted: model does not support images)",
+            root.GetProperty("messages")[1].GetProperty("content").GetString());
         Assert.False(root.GetProperty("tools")[0].GetProperty("function").GetProperty("strict").GetBoolean());
     }
 

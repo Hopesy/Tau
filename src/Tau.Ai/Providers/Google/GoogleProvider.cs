@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using Tau.Ai.Streaming;
+using Tau.Ai.Utilities;
 
 namespace Tau.Ai.Providers.Google;
 
@@ -153,6 +154,7 @@ public sealed class GoogleProvider : IStreamProvider
         Model model,
         ThinkingLevel? reasoning)
     {
+        context = MessageTransformer.DowngradeUnsupportedImages(context, model);
         var body = new Dictionary<string, object>
         {
             ["contents"] = GoogleMessageConverter.ConvertMessages(context.Messages)

@@ -5,6 +5,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using Tau.Ai.Providers.OpenAi;
 using Tau.Ai.Streaming;
+using Tau.Ai.Utilities;
 
 namespace Tau.Ai.Providers.Mistral;
 
@@ -175,6 +176,7 @@ public sealed class MistralProvider : IStreamProvider
 
     private static Dictionary<string, object> BuildRequestBody(Model model, LlmContext context, StreamOptions options)
     {
+        context = MessageTransformer.DowngradeUnsupportedImages(context, model);
         var normalizer = new MistralToolCallIdNormalizer();
         var body = new Dictionary<string, object>
         {

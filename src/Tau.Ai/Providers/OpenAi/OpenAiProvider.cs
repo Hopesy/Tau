@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using Tau.Ai.Registry;
 using Tau.Ai.Streaming;
+using Tau.Ai.Utilities;
 
 namespace Tau.Ai.Providers.OpenAi;
 
@@ -128,6 +129,7 @@ public sealed class OpenAiProvider : IStreamProvider
     private static Dictionary<string, object> BuildRequestBody(
         Model model, LlmContext context, StreamOptions options)
     {
+        context = MessageTransformer.DowngradeUnsupportedImages(context, model);
         var compatibility = ResolveCompatibility(model);
         var body = new Dictionary<string, object>
         {

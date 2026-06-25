@@ -223,6 +223,35 @@ public sealed class OpenAiResponsesProviderTests
     }
 
     [Fact]
+    public async Task Stream_DowngradesToolResultImagesForNonVisionModels()
+    {
+        using var handler = new StubHandler(_ => SseResponse(
+            """
+            data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}
+
+            """));
+        using var client = new HttpClient(handler);
+        var provider = new OpenAiResponsesProvider(client);
+        var context = new LlmContext
+        {
+            Messages =
+            [
+                new AssistantMessage([new ToolCallContent("call_img", "inspect_image", "{\"path\":\"image.png\"}")]),
+                new ToolResultMessage("call_img", [new ImageContent("dGVzdA==", "image/png")])
+            ]
+        };
+
+        _ = await CollectAsync(provider.Stream(BuildResponsesModel(), context, new StreamOptions { ApiKey = "test-key" }));
+
+        using var body = JsonDocument.Parse(handler.CapturedBody);
+        var toolResult = body.RootElement.GetProperty("input").EnumerateArray().Single(item =>
+            item.GetProperty("type").GetString() == "function_call_output");
+        Assert.Equal(
+            "(tool image omitted: model does not support images)",
+            toolResult.GetProperty("output").GetString());
+    }
+
+    [Fact]
     public async Task Stream_WhenSignalAlreadyCancelledTerminatesWithAbortedAssistant()
     {
         using var handler = new StubHandler(_ =>

@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Tau.Ai.Utilities;
 
 namespace Tau.Ai.Providers.Bedrock;
 
@@ -8,6 +9,7 @@ internal static class BedrockMessageConverter
 
     public static Dictionary<string, object> BuildRequestBody(Model model, LlmContext context, BedrockOptions options)
     {
+        context = MessageTransformer.DowngradeUnsupportedImages(context, model);
         var body = new Dictionary<string, object>
         {
             ["messages"] = ConvertMessages(context.Messages, model, options.CacheRetention)
