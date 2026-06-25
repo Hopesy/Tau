@@ -587,7 +587,13 @@ public sealed class CodingAgentHost
                 {
                     try
                     {
-                        await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+                        await DelayBeforeRetryAsync(
+                                delay,
+                                retryAttempt,
+                                _retryOptions.MaxAttempts,
+                                result.ErrorMessage ?? string.Empty,
+                                cancellationToken)
+                            .ConfigureAwait(false);
                     }
                     catch (OperationCanceledException)
                     {
@@ -709,6 +715,25 @@ public sealed class CodingAgentHost
             WriteRuntimeError($"context overflow recovery failed: {ex.Message}");
             return CodingAgentOverflowRecoveryResult.Failed();
         }
+    }
+
+    private async Task DelayBeforeRetryAsync(
+        TimeSpan delay,
+        int retryAttempt,
+        int maxAttempts,
+        string errorMessage,
+        CancellationToken cancellationToken)
+    {
+        if (delay <= TimeSpan.Zero)
+        {
+            return;
+        }
+
+        using var countdown = new CodingAgentCountdownTimer(
+            delay,
+            seconds => WriteStatus($"auto-retry {retryAttempt}/{maxAttempts} in {Math.Max(0, seconds)}s: {errorMessage}"),
+            () => { });
+        await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
     }
 
     private async Task<CodingAgentTurnAttemptResult> RunSingleTurnAttemptAsync(

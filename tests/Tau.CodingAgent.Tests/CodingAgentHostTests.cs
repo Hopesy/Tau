@@ -549,6 +549,7 @@ public class CodingAgentHostTests
 
             var output = terminal.FlattenedText();
             Assert.Contains("status> auto-retry 1/2 after 10000ms: timeout\n", output);
+            Assert.Contains("status> auto-retry 1/2 in 10s: timeout\n", output);
             Assert.Contains("[Cancelled]\n", output);
             Assert.Contains("status> auto-retry cancelled during delay\n", output);
             Assert.Contains("status> rolled back cancelled turn\n", output);
