@@ -108,15 +108,14 @@ public sealed class CodingAgentStartupNoticeService
 
     private bool IsTelemetryEnabled(CodingAgentSettingsSnapshot settings)
     {
-        if (IsTruthyEnvFlag(_environment("PI_OFFLINE")))
+        if (CodingAgentTelemetry.IsTruthyEnvFlag(_environment("PI_OFFLINE")))
         {
             return false;
         }
 
-        var overrideValue = _environment("PI_TELEMETRY");
-        return overrideValue is not null
-            ? IsTruthyEnvFlag(overrideValue)
-            : settings.EnableInstallTelemetry ?? true;
+        return CodingAgentTelemetry.IsInstallTelemetryEnabled(
+            settings,
+            _environment("PI_TELEMETRY"));
     }
 
     private static string FormatFullNotice(IReadOnlyList<CodingAgentChangelogEntry> entries, string version)
@@ -146,12 +145,6 @@ public sealed class CodingAgentStartupNoticeService
 
         return builder.ToString().TrimEnd();
     }
-
-    private static bool IsTruthyEnvFlag(string? value) =>
-        !string.IsNullOrWhiteSpace(value) &&
-        (value.Equals("1", StringComparison.OrdinalIgnoreCase) ||
-            value.Equals("true", StringComparison.OrdinalIgnoreCase) ||
-            value.Equals("yes", StringComparison.OrdinalIgnoreCase));
 
     private static string GetAssemblyVersion()
     {
