@@ -27,7 +27,9 @@ public sealed class TuiProcessTerminalTests
         Assert.Equal(
             [
                 TuiProcessTerminal.EnableBracketedPaste,
+                TuiProcessTerminal.EnableKittyKeyboardProtocol,
                 TuiProcessTerminal.QueryKittyKeyboardProtocol,
+                TuiProcessTerminal.QueryDeviceAttributes,
             ],
             transport.Writes);
     }
@@ -192,6 +194,45 @@ public sealed class TuiProcessTerminalTests
     }
 
     [Fact]
+    public void ProcessTerminal_KittyZeroFlagsEnableModifyOtherKeysFallback()
+    {
+        var transport = new FakeProcessTerminalTransport();
+        var timer = new ManualTerminalTimer();
+        var terminal = new TuiProcessTerminal(transport, timer);
+        var input = new List<string>();
+
+        terminal.Start(input.Add, () => { });
+        transport.EmitInput("\u001b[?0u");
+        timer.FireAll();
+        transport.EmitInput("x");
+
+        Assert.False(terminal.KittyProtocolActive);
+        Assert.False(TuiKeyDecoder.IsKittyProtocolActive());
+        Assert.True(terminal.ModifyOtherKeysActive);
+        Assert.Equal(["x"], input);
+        Assert.Contains(TuiProcessTerminal.EnableModifyOtherKeys, transport.Writes);
+    }
+
+    [Fact]
+    public void ProcessTerminal_DeviceAttributesResponseTriggersModifyOtherKeysFallbackWithoutInputLeak()
+    {
+        var transport = new FakeProcessTerminalTransport();
+        var timer = new ManualTerminalTimer();
+        var terminal = new TuiProcessTerminal(transport, timer);
+        var input = new List<string>();
+
+        terminal.Start(input.Add, () => { });
+        transport.EmitInput("\u001b[?1;2c");
+        timer.FireAll();
+        transport.EmitInput("x");
+
+        Assert.False(terminal.KittyProtocolActive);
+        Assert.True(terminal.ModifyOtherKeysActive);
+        Assert.Equal(["x"], input);
+        Assert.Contains(TuiProcessTerminal.EnableModifyOtherKeys, transport.Writes);
+    }
+
+    [Fact]
     public void ProcessTerminal_ModifyOtherKeysFallbackIsDisabledOnStop()
     {
         var transport = new FakeProcessTerminalTransport();
@@ -214,6 +255,7 @@ public sealed class TuiProcessTerminalTests
         Assert.Equal(0, resizeCount);
         Assert.Contains(TuiProcessTerminal.EnableModifyOtherKeys, transport.Writes);
         Assert.Contains(TuiProcessTerminal.DisableBracketedPaste, transport.Writes);
+        Assert.Contains(TuiProcessTerminal.DisableKittyKeyboardProtocol, transport.Writes);
         Assert.Contains(TuiProcessTerminal.DisableModifyOtherKeys, transport.Writes);
     }
 

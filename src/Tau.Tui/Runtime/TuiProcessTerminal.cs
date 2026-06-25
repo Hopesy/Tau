@@ -126,6 +126,7 @@ public sealed class TuiProcessTerminal
     public const string QueryKittyKeyboardProtocol = "\u001b[?u";
     public const string EnableKittyKeyboardProtocol = "\u001b[>7u";
     public const string DisableKittyKeyboardProtocol = "\u001b[<u";
+    public const string QueryDeviceAttributes = "\u001b[c";
     public const string EnableModifyOtherKeys = "\u001b[>4;2m";
     public const string DisableModifyOtherKeys = "\u001b[>4;0m";
     public const string HideCursorSequence = "\u001b[?25l";
@@ -139,6 +140,9 @@ public sealed class TuiProcessTerminal
     private static readonly Regex KittyProtocolResponsePattern =
         new("^\u001b\\[\\?(\\d+)u$", RegexOptions.CultureInvariant);
 
+    private static readonly Regex DeviceAttributesResponsePattern =
+        new("^\u001b\\[\\?[\\d;]*c$", RegexOptions.CultureInvariant);
+
     private readonly ITuiProcessTerminalTransport _transport;
     private readonly ITuiTerminalTimer _timer;
     private readonly TimeSpan _modifyOtherKeysDelay;
@@ -148,6 +152,7 @@ public sealed class TuiProcessTerminal
     private Action? _resizeHandler;
     private bool _wasRaw;
     private bool _started;
+    private bool _keyboardProtocolPushed;
     private bool _kittyProtocolActive;
     private bool _modifyOtherKeysActive;
     private int _pendingBackgroundColorReplies;
@@ -213,6 +218,7 @@ public sealed class TuiProcessTerminal
             _inputHandler = onInput;
             _resizeHandler = onResize;
             _wasRaw = _transport.IsRawMode;
+            _keyboardProtocolPushed = false;
             _kittyProtocolActive = false;
             _modifyOtherKeysActive = false;
             TuiKeyDecoder.SetKittyProtocolActive(false);
@@ -234,7 +240,10 @@ public sealed class TuiProcessTerminal
 
             SetupInputSequenceBufferCore();
             _inputSubscription = _transport.SubscribeInput(ProcessInput);
+            _transport.Write(EnableKittyKeyboardProtocol);
             _transport.Write(QueryKittyKeyboardProtocol);
+            _transport.Write(QueryDeviceAttributes);
+            _keyboardProtocolPushed = true;
             _modifyOtherKeysTimer = _timer.Schedule(_modifyOtherKeysDelay, EnableModifyOtherKeysIfNeeded);
             _started = true;
         }
@@ -404,9 +413,23 @@ public sealed class TuiProcessTerminal
             {
                 if (!_kittyProtocolActive && KittyProtocolResponsePattern.IsMatch(sequence))
                 {
-                    _kittyProtocolActive = true;
-                    TuiKeyDecoder.SetKittyProtocolActive(true);
-                    _transport.Write(EnableKittyKeyboardProtocol);
+                    var flags = ParseKittyProtocolFlags(sequence);
+                    if (flags != 0)
+                    {
+                        _kittyProtocolActive = true;
+                        TuiKeyDecoder.SetKittyProtocolActive(true);
+                    }
+                    else
+                    {
+                        EnableModifyOtherKeysIfNeededCore();
+                    }
+
+                    return;
+                }
+
+                if (!_kittyProtocolActive && DeviceAttributesResponsePattern.IsMatch(sequence))
+                {
+                    EnableModifyOtherKeysIfNeededCore();
                     return;
                 }
 
@@ -440,13 +463,18 @@ public sealed class TuiProcessTerminal
     {
         lock (_sync)
         {
-            _modifyOtherKeysTimer?.Dispose();
-            _modifyOtherKeysTimer = null;
-            if (_started && !_kittyProtocolActive && !_modifyOtherKeysActive)
-            {
-                _transport.Write(EnableModifyOtherKeys);
-                _modifyOtherKeysActive = true;
-            }
+            EnableModifyOtherKeysIfNeededCore();
+        }
+    }
+
+    private void EnableModifyOtherKeysIfNeededCore()
+    {
+        _modifyOtherKeysTimer?.Dispose();
+        _modifyOtherKeysTimer = null;
+        if (_started && !_kittyProtocolActive && !_modifyOtherKeysActive)
+        {
+            _transport.Write(EnableModifyOtherKeys);
+            _modifyOtherKeysActive = true;
         }
     }
 
@@ -571,9 +599,10 @@ public sealed class TuiProcessTerminal
         _modifyOtherKeysTimer?.Dispose();
         _modifyOtherKeysTimer = null;
 
-        if (_kittyProtocolActive)
+        if (_keyboardProtocolPushed || _kittyProtocolActive)
         {
             _transport.Write(DisableKittyKeyboardProtocol);
+            _keyboardProtocolPushed = false;
             _kittyProtocolActive = false;
         }
         TuiKeyDecoder.SetKittyProtocolActive(false);
@@ -583,6 +612,12 @@ public sealed class TuiProcessTerminal
             _transport.Write(DisableModifyOtherKeys);
             _modifyOtherKeysActive = false;
         }
+    }
+
+    private static int ParseKittyProtocolFlags(string sequence)
+    {
+        var match = KittyProtocolResponsePattern.Match(sequence);
+        return match.Success && int.TryParse(match.Groups[1].Value, out var flags) ? flags : 0;
     }
 
     private sealed class PendingBackgroundColorQuery
