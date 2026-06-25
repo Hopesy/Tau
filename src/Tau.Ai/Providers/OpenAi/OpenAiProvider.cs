@@ -1,6 +1,7 @@
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
+using Tau.Ai.Providers.OpenAiResponses;
 using Tau.Ai.Registry;
 using Tau.Ai.Streaming;
 using Tau.Ai.Utilities;
@@ -146,6 +147,7 @@ public sealed class OpenAiProvider : IStreamProvider
         {
             body["store"] = false;
         }
+        AddPromptCacheParameters(model, compatibility, options, body);
 
         var messages = new List<object>();
 
@@ -203,6 +205,39 @@ public sealed class OpenAiProvider : IStreamProvider
         AddRouting(model, compatibility, body);
 
         return body;
+    }
+
+    private static void AddPromptCacheParameters(
+        Model model,
+        ResolvedOpenAiCompatibility compatibility,
+        StreamOptions options,
+        Dictionary<string, object> body)
+    {
+        if (ShouldSendPromptCacheKey(model, compatibility, options) &&
+            !string.IsNullOrWhiteSpace(options.SessionId))
+        {
+            body["prompt_cache_key"] = OpenAiResponsesShared.ClampOpenAiPromptCacheKey(options.SessionId)!;
+        }
+
+        if (options.CacheRetention == CacheRetention.Long && compatibility.SupportsLongCacheRetention)
+        {
+            body["prompt_cache_retention"] = "24h";
+        }
+    }
+
+    private static bool ShouldSendPromptCacheKey(
+        Model model,
+        ResolvedOpenAiCompatibility compatibility,
+        StreamOptions options)
+    {
+        if (options.CacheRetention == CacheRetention.None)
+        {
+            return false;
+        }
+
+        var baseUrl = model.BaseUrl ?? string.Empty;
+        return baseUrl.Contains("api.openai.com", StringComparison.OrdinalIgnoreCase) ||
+            (options.CacheRetention == CacheRetention.Long && compatibility.SupportsLongCacheRetention);
     }
 
     private static IReadOnlyDictionary<string, object>? BuildCacheControl(

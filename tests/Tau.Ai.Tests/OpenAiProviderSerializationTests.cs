@@ -291,6 +291,36 @@ public sealed class OpenAiProviderSerializationTests
     }
 
     [Fact]
+    public async Task StreamSimple_WithOpenAiBaseUrlAndShortCacheRetention_AddsPromptCacheKey()
+    {
+        using var handler = new StubHandler();
+        using var client = new HttpClient(handler);
+        var provider = new OpenAiProvider(client);
+
+        await DrainAsync(provider.StreamSimple(
+            new Model
+            {
+                Id = "gpt-5.4",
+                Name = "GPT-5.4",
+                Api = "openai-chat-completions",
+                Provider = "openai",
+                BaseUrl = "https://api.openai.com/v1"
+            },
+            new LlmContext { Messages = [new UserMessage("hello")] },
+            new SimpleStreamOptions
+            {
+                ApiKey = "test-key",
+                CacheRetention = CacheRetention.Short,
+                SessionId = $"{new string('a', 63)}😀extra"
+            }));
+
+        using var doc = JsonDocument.Parse(handler.CapturedBody!);
+        var root = doc.RootElement;
+        Assert.Equal($"{new string('a', 63)}😀", root.GetProperty("prompt_cache_key").GetString());
+        Assert.False(root.TryGetProperty("prompt_cache_retention", out _));
+    }
+
+    [Fact]
     public async Task StreamSimple_WithAnthropicCacheControlFormat_AddsCacheControl()
     {
         using var handler = new StubHandler();
@@ -333,11 +363,14 @@ public sealed class OpenAiProviderSerializationTests
             new SimpleStreamOptions
             {
                 ApiKey = "test-key",
-                CacheRetention = CacheRetention.Long
+                CacheRetention = CacheRetention.Long,
+                SessionId = "openrouter-cache-session"
             }));
 
         using var doc = JsonDocument.Parse(handler.CapturedBody!);
         var root = doc.RootElement;
+        Assert.Equal("openrouter-cache-session", root.GetProperty("prompt_cache_key").GetString());
+        Assert.Equal("24h", root.GetProperty("prompt_cache_retention").GetString());
 
         var systemText = root.GetProperty("messages")[0].GetProperty("content")[0];
         Assert.Equal("text", systemText.GetProperty("type").GetString());
@@ -380,10 +413,15 @@ public sealed class OpenAiProviderSerializationTests
             new SimpleStreamOptions
             {
                 ApiKey = "test-key",
-                CacheRetention = CacheRetention.Long
+                CacheRetention = CacheRetention.Long,
+                SessionId = "unsupported-cache-session"
             }));
 
         using var doc = JsonDocument.Parse(handler.CapturedBody!);
+        var root = doc.RootElement;
+        Assert.False(root.TryGetProperty("prompt_cache_key", out _));
+        Assert.False(root.TryGetProperty("prompt_cache_retention", out _));
+
         var userText = doc.RootElement.GetProperty("messages")[0].GetProperty("content")[0];
         var cacheControl = userText.GetProperty("cache_control");
         Assert.Equal("ephemeral", cacheControl.GetProperty("type").GetString());
