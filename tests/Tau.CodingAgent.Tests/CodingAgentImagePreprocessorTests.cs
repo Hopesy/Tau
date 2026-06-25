@@ -6,6 +6,78 @@ namespace Tau.CodingAgent.Tests;
 public sealed class CodingAgentImagePreprocessorTests
 {
     [Fact]
+    public async Task ResizeWorker_ProcessAsync_ResizesWithoutChangingImageSemantics()
+    {
+        var bytes = ImageTestData.CreatePng(2501, 10);
+
+        var result = await CodingAgentImageResizeWorker.Default.ProcessAsync(bytes, "image/png", autoResizeImages: true);
+
+        Assert.NotNull(result);
+        Assert.True(result!.WasResized);
+        Assert.Equal("image/png", result.MimeType);
+        Assert.Equal(2501, result.OriginalWidth);
+        Assert.Equal(10, result.OriginalHeight);
+        Assert.Equal(2000, result.Width);
+        Assert.Equal(8, result.Height);
+        Assert.Equal(new TuiImageDimensions(2000, 8), TuiTerminalImage.GetPngDimensions(result.Data));
+    }
+
+    [Fact]
+    public async Task ResizeWorker_ProcessAsync_CopiesInputBytesBeforeWorkerRuns()
+    {
+        using var started = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        var worker = new CodingAgentImageResizeWorker((bytes, _, _, _, _, _) =>
+        {
+            started.Set();
+            if (!release.Wait(TimeSpan.FromSeconds(5)))
+            {
+                throw new TimeoutException("Test worker was not released.");
+            }
+
+            Assert.Equal([1, 2, 3], bytes);
+            return new CodingAgentImagePreprocessResult(
+                "copy",
+                "image/png",
+                OriginalWidth: 1,
+                OriginalHeight: 1,
+                Width: 1,
+                Height: 1,
+                WasResized: false,
+                OriginalBytes: 3,
+                EstimatedBase64Bytes: 4);
+        });
+        var input = new byte[] { 1, 2, 3 };
+
+        var task = worker.ProcessAsync(input, "image/png", autoResizeImages: false);
+        Assert.True(started.Wait(TimeSpan.FromSeconds(5)));
+        input[0] = 9;
+        release.Set();
+        var result = await task;
+
+        Assert.NotNull(result);
+        Assert.Equal("copy", result!.Data);
+    }
+
+    [Fact]
+    public async Task ResizeWorker_ProcessAsync_WhenCanceledBeforeStartDoesNotRunWorker()
+    {
+        var called = false;
+        var worker = new CodingAgentImageResizeWorker((_, _, _, _, _, _) =>
+        {
+            called = true;
+            return null;
+        });
+        using var cts = new CancellationTokenSource();
+        await cts.CancelAsync();
+
+        await Assert.ThrowsAsync<OperationCanceledException>(
+            () => worker.ProcessAsync([1, 2, 3], "image/png", autoResizeImages: true, cancellationToken: cts.Token));
+
+        Assert.False(called);
+    }
+
+    [Fact]
     public void Process_ResizesPngPastMaxDimensions()
     {
         var bytes = ImageTestData.CreatePng(2501, 10);

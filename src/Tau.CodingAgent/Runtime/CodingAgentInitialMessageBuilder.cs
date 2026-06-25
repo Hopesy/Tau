@@ -789,7 +789,9 @@ internal static class CodingAgentInitialMessageBuilder
             }
 
             var bytes = await File.ReadAllBytesAsync(path, cancellationToken).ConfigureAwait(false);
-            var processed = CodingAgentImagePreprocessor.Process(bytes, mimeType, options.AutoResizeImages);
+            var processed = await CodingAgentImageResizeWorker.Default
+                .ProcessAsync(bytes, mimeType, options.AutoResizeImages, cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
             if (processed is null)
             {
                 var message = options.AutoResizeImages

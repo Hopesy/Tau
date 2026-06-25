@@ -50,7 +50,9 @@ public sealed class ReadFileTool : IAgentTool
         if (imageMimeType is not null)
         {
             var bytes = await File.ReadAllBytesAsync(path, ct).ConfigureAwait(false);
-            var processed = CodingAgentImagePreprocessor.Process(bytes, imageMimeType, _autoResizeImages);
+            var processed = await CodingAgentImageResizeWorker.Default
+                .ProcessAsync(bytes, imageMimeType, _autoResizeImages, cancellationToken: ct)
+                .ConfigureAwait(false);
             var originalEncodedSize = EstimateBase64ByteCount(bytes.Length);
             if (processed is null)
             {
