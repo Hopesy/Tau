@@ -11,4 +11,8 @@
     <InternalsVisibleTo Include="Tau.Ai.Tests" />
   </ItemGroup>
 
+  <ItemGroup>
+    <EmbeddedResource Include="Registry\generated-models.seed.json" />
+  </ItemGroup>
+
 </Project>

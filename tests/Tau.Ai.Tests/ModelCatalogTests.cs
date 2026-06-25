@@ -22,6 +22,16 @@ public sealed class ModelCatalogTests
         Assert.Contains("deepseek", providers);
         Assert.Contains("groq", providers);
         Assert.Contains("cerebras", providers);
+        Assert.Contains("openrouter", providers);
+        Assert.Contains("together", providers);
+        Assert.Contains("xai", providers);
+        Assert.Contains("zai", providers);
+        Assert.Contains("xiaomi", providers);
+        Assert.Contains("moonshotai", providers);
+        Assert.Contains("nvidia", providers);
+        Assert.Contains("huggingface", providers);
+        Assert.Contains("cloudflare-workers-ai", providers);
+        Assert.Contains("ant-ling", providers);
     }
 
     [Fact]
@@ -37,6 +47,10 @@ public sealed class ModelCatalogTests
         var deepseek = catalog.GetModel("deepseek", "deepseek-v4-pro");
         var groq = catalog.GetModel("groq", "meta-llama/llama-4-scout-17b-16e-instruct");
         var cerebras = catalog.GetModel("cerebras", "gpt-oss-120b");
+        var openrouter = catalog.GetModel("openrouter", "anthropic/claude-sonnet-4.6");
+        var together = catalog.GetModel("together", "moonshotai/Kimi-K2.6");
+        var xai = catalog.GetModel("xai", "grok-4.3");
+        var zai = catalog.GetModel("zai", "glm-4.7");
 
         Assert.Equal("azure-openai-responses", azure.Api);
         Assert.Equal(128_000, azure.MaxOutputTokens);
@@ -62,6 +76,18 @@ public sealed class ModelCatalogTests
         Assert.Equal("openai-chat-completions", cerebras.Api);
         Assert.Equal("https://api.cerebras.ai/v1", cerebras.BaseUrl);
         Assert.False(cerebras.Compat!.SupportsStore);
+        Assert.Equal("openai-chat-completions", openrouter.Api);
+        Assert.Equal("https://openrouter.ai/api/v1", openrouter.BaseUrl);
+        Assert.Equal("openrouter", openrouter.Compat!.ThinkingFormat);
+        Assert.Equal("openai-chat-completions", together.Api);
+        Assert.Equal("https://api.together.ai/v1", together.BaseUrl);
+        Assert.Equal("together", together.Compat!.ThinkingFormat);
+        Assert.Equal("openai-chat-completions", xai.Api);
+        Assert.Equal("https://api.x.ai/v1", xai.BaseUrl);
+        Assert.False(xai.Compat!.SupportsStore);
+        Assert.Equal("openai-chat-completions", zai.Api);
+        Assert.Equal("https://api.z.ai/api/coding/paas/v4", zai.BaseUrl);
+        Assert.True(zai.Compat!.ZaiToolStream);
     }
 
     [Fact]
@@ -77,6 +103,9 @@ public sealed class ModelCatalogTests
         var deepseekIds = catalog.GetModels("deepseek").Select(model => model.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var groqIds = catalog.GetModels("groq").Select(model => model.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var cerebrasIds = catalog.GetModels("cerebras").Select(model => model.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var openrouterIds = catalog.GetModels("openrouter").Select(model => model.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var xaiIds = catalog.GetModels("xai").Select(model => model.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var xiaomiIds = catalog.GetModels("xiaomi").Select(model => model.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
 
         Assert.Contains("gpt-4.1", azureIds);
         Assert.Contains("gpt-4-turbo", azureIds);
@@ -97,6 +126,11 @@ public sealed class ModelCatalogTests
         Assert.Contains("qwen/qwen3-32b", groqIds);
         Assert.Contains("gpt-oss-120b", cerebrasIds);
         Assert.Contains("zai-glm-4.7", cerebrasIds);
+        Assert.True(openrouterIds.Count >= 250);
+        Assert.Contains("anthropic/claude-sonnet-4.6", openrouterIds);
+        Assert.Contains("openai/gpt-oss-120b", openrouterIds);
+        Assert.Contains("grok-4.3", xaiIds);
+        Assert.Contains("mimo-v2.5-pro", xiaomiIds);
     }
 
     [Fact]
@@ -110,6 +144,8 @@ public sealed class ModelCatalogTests
         var exactId = catalog.ResolveSelection(modelHint: "claude-opus-4-6-thinking");
         var deepseekDefault = catalog.ResolveSelection(providerHint: "deepseek");
         var groqReference = catalog.ResolveSelection(modelHint: "groq/openai/gpt-oss-120b");
+        var openrouterDefault = catalog.ResolveSelection(providerHint: "openrouter");
+        var xaiDefault = catalog.ResolveSelection(providerHint: "xai");
 
         Assert.Equal("openai", implicitDefault.Provider);
         Assert.Equal("gpt-5.4", implicitDefault.ModelId);
@@ -121,6 +157,10 @@ public sealed class ModelCatalogTests
         Assert.Equal("deepseek-v4-pro", deepseekDefault.ModelId);
         Assert.Equal("groq", groqReference.Provider);
         Assert.Equal("openai/gpt-oss-120b", groqReference.ModelId);
+        Assert.Equal("openrouter", openrouterDefault.Provider);
+        Assert.Equal("anthropic/claude-sonnet-4.6", openrouterDefault.ModelId);
+        Assert.Equal("xai", xaiDefault.Provider);
+        Assert.Equal("grok-4.3", xaiDefault.ModelId);
     }
 
     [Fact]
@@ -160,6 +200,7 @@ public sealed class ModelCatalogTests
                         "maxTokensField": "max_completion_tokens",
                         "requiresToolResultName": true,
                         "requiresAssistantAfterToolResult": true,
+                        "requiresReasoningContentOnAssistantMessages": true,
                         "thinkingFormat": "openrouter"
                       },
                       "models": [
@@ -211,6 +252,7 @@ public sealed class ModelCatalogTests
             Assert.Equal("max_completion_tokens", model.Compat.MaxTokensField);
             Assert.True(model.Compat.RequiresToolResultName);
             Assert.True(model.Compat.RequiresAssistantAfterToolResult);
+            Assert.True(model.Compat.RequiresReasoningContentOnAssistantMessages);
             Assert.Equal("openrouter", model.Compat.ThinkingFormat);
             Assert.Equal("anthropic", ((JsonElement)model.Compat.OpenRouterRouting!["only"])[0].GetString());
             Assert.False(((JsonElement)model.Compat.OpenRouterRouting["allow_fallbacks"]).GetBoolean());

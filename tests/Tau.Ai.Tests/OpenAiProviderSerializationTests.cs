@@ -250,6 +250,50 @@ public sealed class OpenAiProviderSerializationTests
     }
 
     [Fact]
+    public async Task StreamSimple_WithReasoningContentCompatibility_AddsAssistantReasoningContent()
+    {
+        using var handler = new StubHandler();
+        using var client = new HttpClient(handler);
+        var provider = new OpenAiProvider(client);
+
+        var model = new Model
+        {
+            Id = "deepseek-v4-pro",
+            Name = "DeepSeek V4 Pro",
+            Api = "openai-chat-completions",
+            Provider = "deepseek",
+            BaseUrl = "https://api.deepseek.com",
+            Reasoning = true,
+            Compat = new ModelCompatibility
+            {
+                RequiresReasoningContentOnAssistantMessages = true,
+                ThinkingFormat = "deepseek"
+            }
+        };
+
+        await DrainAsync(provider.StreamSimple(
+            model,
+            new LlmContext
+            {
+                Messages =
+                [
+                    new AssistantMessage([new ToolCallContent("call_1", "lookup", "{}")])
+                ]
+            },
+            new SimpleStreamOptions
+            {
+                ApiKey = "test-key",
+                Reasoning = ThinkingLevel.High
+            }));
+
+        using var doc = JsonDocument.Parse(handler.CapturedBody!);
+        var assistant = doc.RootElement.GetProperty("messages")[0];
+        Assert.Equal("assistant", assistant.GetProperty("role").GetString());
+        Assert.Equal(string.Empty, assistant.GetProperty("reasoning_content").GetString());
+        Assert.Equal("lookup", assistant.GetProperty("tool_calls")[0].GetProperty("function").GetProperty("name").GetString());
+    }
+
+    [Fact]
     public async Task Stream_WithOpenAiOptions_WritesToolChoiceAndReasoningEffort()
     {
         using var handler = new StubHandler();

@@ -27,6 +27,7 @@ public record ModelCompatibility
     public bool? RequiresToolResultName { get; init; }
     public bool? RequiresAssistantAfterToolResult { get; init; }
     public bool? RequiresThinkingAsText { get; init; }
+    public bool? RequiresReasoningContentOnAssistantMessages { get; init; }
     public string? ThinkingFormat { get; init; }
     public IDictionary<string, object>? OpenRouterRouting { get; init; }
     public VercelGatewayRouting? VercelGatewayRouting { get; init; }

@@ -159,10 +159,12 @@ public sealed class OpenAiProvider : IStreamProvider
         // Serialize existing messages
         var converted = OpenAiMessageConverter.ConvertMessages(
             context.Messages,
-            supportsImages: model.InputModalities.Contains("image", StringComparer.OrdinalIgnoreCase),
-            requiresThinkingAsText: compatibility.RequiresThinkingAsText,
-            requiresToolResultName: compatibility.RequiresToolResultName,
-            requiresAssistantAfterToolResult: compatibility.RequiresAssistantAfterToolResult);
+                     supportsImages: model.InputModalities.Contains("image", StringComparer.OrdinalIgnoreCase),
+                     requiresThinkingAsText: compatibility.RequiresThinkingAsText,
+                     requiresToolResultName: compatibility.RequiresToolResultName,
+                     requiresAssistantAfterToolResult: compatibility.RequiresAssistantAfterToolResult,
+                     requiresReasoningContentOnAssistantMessages: compatibility.RequiresReasoningContentOnAssistantMessages,
+                     modelReasoning: model.Reasoning);
         foreach (var msg in converted.EnumerateArray())
             messages.Add(msg);
 
@@ -379,6 +381,7 @@ public sealed class OpenAiProvider : IStreamProvider
             RequiresToolResultName = compat?.RequiresToolResultName ?? false,
             RequiresAssistantAfterToolResult = compat?.RequiresAssistantAfterToolResult ?? false,
             RequiresThinkingAsText = compat?.RequiresThinkingAsText ?? false,
+            RequiresReasoningContentOnAssistantMessages = compat?.RequiresReasoningContentOnAssistantMessages ?? false,
             ThinkingFormat = NormalizeThinkingFormat(compat?.ThinkingFormat),
             OpenRouterRouting = compat?.OpenRouterRouting,
             VercelGatewayRouting = compat?.VercelGatewayRouting,
@@ -412,6 +415,7 @@ public sealed class OpenAiProvider : IStreamProvider
         public bool RequiresToolResultName { get; init; }
         public bool RequiresAssistantAfterToolResult { get; init; }
         public bool RequiresThinkingAsText { get; init; }
+        public bool RequiresReasoningContentOnAssistantMessages { get; init; }
         public string ThinkingFormat { get; init; } = "openai";
         public IDictionary<string, object>? OpenRouterRouting { get; init; }
         public VercelGatewayRouting? VercelGatewayRouting { get; init; }

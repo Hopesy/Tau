@@ -13,7 +13,9 @@ internal static class OpenAiMessageConverter
         bool supportsImages = true,
         bool requiresThinkingAsText = false,
         bool requiresToolResultName = false,
-        bool requiresAssistantAfterToolResult = false)
+        bool requiresAssistantAfterToolResult = false,
+        bool requiresReasoningContentOnAssistantMessages = false,
+        bool modelReasoning = false)
     {
         var array = new List<object>();
         var lastRole = string.Empty;
@@ -36,7 +38,11 @@ internal static class OpenAiMessageConverter
                     array.Add(ConvertUserMessage(user, supportsImages));
                     break;
                 case AssistantMessage assistant:
-                    array.Add(ConvertAssistantMessage(assistant, requiresThinkingAsText));
+                    array.Add(ConvertAssistantMessage(
+                        assistant,
+                        requiresThinkingAsText,
+                        requiresReasoningContentOnAssistantMessages,
+                        modelReasoning));
                     break;
                 case ToolResultMessage toolResult:
                     array.Add(ConvertToolResultMessage(toolResult, requiresToolResultName));
@@ -85,7 +91,11 @@ internal static class OpenAiMessageConverter
         };
     }
 
-    private static object ConvertAssistantMessage(AssistantMessage msg, bool requiresThinkingAsText)
+    private static object ConvertAssistantMessage(
+        AssistantMessage msg,
+        bool requiresThinkingAsText,
+        bool requiresReasoningContentOnAssistantMessages,
+        bool modelReasoning)
     {
         var result = new Dictionary<string, object> { ["role"] = "assistant" };
 
@@ -117,6 +127,11 @@ internal static class OpenAiMessageConverter
             }
 
             result["tool_calls"] = serializedToolCalls;
+        }
+
+        if (requiresReasoningContentOnAssistantMessages && modelReasoning)
+        {
+            result["reasoning_content"] = string.Empty;
         }
 
         return result;
