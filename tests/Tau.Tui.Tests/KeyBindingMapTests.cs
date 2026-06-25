@@ -45,6 +45,14 @@ public class KeyBindingMapTests
     }
 
     [Fact]
+    public void Default_MapsPasteImageKey()
+    {
+        var pasteImage = new ConsoleKeyInfo('\x16', ConsoleKey.V, shift: false, alt: false, control: true);
+
+        Assert.Equal(EditorAction.PasteImage, KeyBindingMap.Default.Resolve(pasteImage));
+    }
+
+    [Fact]
     public void Default_MapsTabToComplete()
     {
         var complete = new ConsoleKeyInfo('\t', ConsoleKey.Tab, shift: false, alt: false, control: false);

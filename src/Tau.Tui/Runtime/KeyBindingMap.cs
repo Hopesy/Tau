@@ -68,6 +68,7 @@ public sealed class KeyBindingMap : IKeyBindingMap
         yield return Pair(ConsoleKey.P, ConsoleModifiers.Control, EditorAction.CycleModelForward);
         yield return Pair(ConsoleKey.P, ConsoleModifiers.Control | ConsoleModifiers.Shift, EditorAction.CycleModelBackward);
         yield return Pair(ConsoleKey.L, ConsoleModifiers.Control, EditorAction.SelectModel);
+        yield return Pair(ConsoleKey.V, ConsoleModifiers.Control, EditorAction.PasteImage);
     }
 
     private static KeyValuePair<KeyBinding, EditorAction> Pair(ConsoleKey key, ConsoleModifiers mods, EditorAction action) =>

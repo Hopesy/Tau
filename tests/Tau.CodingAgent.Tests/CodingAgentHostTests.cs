@@ -1655,6 +1655,37 @@ public class CodingAgentHostTests
     }
 
     [Fact]
+    public async Task RunAsync_PasteImageAction_SendsClipboardImageToRunner()
+    {
+        var terminal = new FakeTerminal();
+        var keyReader = new ScriptedKeyReader();
+        keyReader.EnqueueRaw(new ConsoleKeyInfo('\x16', ConsoleKey.V, shift: false, alt: false, control: true));
+        foreach (var ch in "exit")
+        {
+            keyReader.EnqueueRaw(new ConsoleKeyInfo(ch, ConsoleKey.NoName, shift: false, alt: false, control: false));
+        }
+
+        keyReader.EnqueueRaw(new ConsoleKeyInfo('\r', ConsoleKey.Enter, shift: false, alt: false, control: false));
+        var editor = new InteractiveInputEditor(keyReader, new CapturingRenderer());
+        var clipboard = new FakeCodingAgentClipboard
+        {
+            Image = new CodingAgentClipboardImage(ImageTestData.CreatePng(3, 5), "image/png")
+        };
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var host = new CodingAgentHost(new InteractiveConsoleSession(terminal, editor), runner, clipboard: clipboard);
+
+        await host.RunAsync();
+
+        Assert.Empty(runner.Inputs);
+        var content = Assert.Single(runner.ContentInputs);
+        Assert.Equal("[Clipboard image]", Assert.IsType<TextContent>(content[0]).Text);
+        var image = Assert.IsType<ImageContent>(content[1]);
+        Assert.Equal("image/png", image.MimeType);
+        Assert.Equal(Convert.ToBase64String(clipboard.Image.Bytes), image.Data);
+        Assert.Contains("status> pasted clipboard image", terminal.FlattenedText());
+    }
+
+    [Fact]
     public async Task RunAsync_ExportCommand_RendersStatusAndWritesSnapshot()
     {
         var path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"tau-coding-agent-host-export-{Guid.NewGuid():N}.json");

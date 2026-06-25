@@ -27,7 +27,8 @@ internal static class CodingAgentHotkeysFormatter
             [EditorAction.ReverseSearch] = "Reverse search input history",
             [EditorAction.CycleModelForward] = "Cycle to next model",
             [EditorAction.CycleModelBackward] = "Cycle to previous model",
-            [EditorAction.SelectModel] = "Open model selector"
+            [EditorAction.SelectModel] = "Open model selector",
+            [EditorAction.PasteImage] = "Paste image from clipboard"
         };
 
     public static string Format(IKeyBindingMap bindings)
@@ -76,6 +77,7 @@ internal static class CodingAgentHotkeysFormatter
         EditorAction.CycleModelForward => "cycle-model-forward",
         EditorAction.CycleModelBackward => "cycle-model-backward",
         EditorAction.SelectModel => "select-model",
+        EditorAction.PasteImage => "paste-image",
         _ => action.ToString().ToLowerInvariant()
     };
 

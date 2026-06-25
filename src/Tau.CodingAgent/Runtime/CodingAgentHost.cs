@@ -27,6 +27,7 @@ public sealed class CodingAgentHost
     private readonly CodingAgentAutoCompactionOptions _autoCompactionBase;
     private CodingAgentAutoCompactionOptions _autoCompaction;
     private readonly CodingAgentCommandRouter _commandRouter;
+    private readonly ICodingAgentClipboard _clipboard;
     private readonly ICodingAgentTurnInputSource? _turnInputSource;
     private readonly CodingAgentInitialPrompt? _initialPrompt;
     private readonly IReadOnlyList<string> _initialMessages;
@@ -108,11 +109,12 @@ public sealed class CodingAgentHost
         }
 
         RefreshCompositionStatus();
+        _clipboard = clipboard ?? new SystemCodingAgentClipboard();
         _commandRouter = new CodingAgentCommandRouter(
             runner,
             settingsStore: settingsStore,
             sessionFile: sessionStore?.Path,
-            clipboard: clipboard,
+            clipboard: _clipboard,
             treeSessionController: treeSessionController,
             promptTemplateStore: promptTemplateStore,
             skillStore: skillStore,
@@ -333,6 +335,7 @@ public sealed class CodingAgentHost
             EditorAction.CycleModelForward => _commandRouter.CycleModel("forward"),
             EditorAction.CycleModelBackward => _commandRouter.CycleModel("backward"),
             EditorAction.SelectModel => await _commandRouter.SelectModelAsync(cancellationToken: cancellationToken).ConfigureAwait(false),
+            EditorAction.PasteImage => await PasteClipboardImageAsync(cancellationToken).ConfigureAwait(false),
             _ => CodingAgentCommandResult.NotCommand
         };
 
@@ -343,6 +346,22 @@ public sealed class CodingAgentHost
 
         RenderCommandResult(result);
         return true;
+    }
+
+    private async Task<CodingAgentCommandResult> PasteClipboardImageAsync(CancellationToken cancellationToken)
+    {
+        var image = await _clipboard.ReadImageAsync(cancellationToken).ConfigureAwait(false);
+        if (image is null)
+        {
+            return CodingAgentCommandResult.NotCommand;
+        }
+
+        var prompt = new CodingAgentInitialPrompt(
+            "[Clipboard image]",
+            [new ImageContent(Convert.ToBase64String(image.Bytes), image.MimeType)]);
+        await TryAutoCompactAsync(prompt.Text, cancellationToken).ConfigureAwait(false);
+        await RunTurnWithRetryAsync(prompt, cancellationToken).ConfigureAwait(false);
+        return CodingAgentCommandResult.Status("pasted clipboard image");
     }
 
     private async Task<bool> TryHandleCommandAsync(string input, CancellationToken cancellationToken)

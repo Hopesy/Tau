@@ -232,6 +232,7 @@ public sealed class InteractiveInputEditor
                 case EditorAction.CycleModelForward:
                 case EditorAction.CycleModelBackward:
                 case EditorAction.SelectModel:
+                case EditorAction.PasteImage:
                 {
                     var draft = new string(chars.ToArray());
                     _renderer.Commit();

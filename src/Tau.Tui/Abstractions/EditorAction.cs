@@ -25,6 +25,7 @@ public enum EditorAction
     CycleModelForward,
     CycleModelBackward,
     SelectModel,
+    PasteImage,
 }
 
 public readonly record struct KeyBinding(ConsoleKey Key, ConsoleModifiers Modifiers)
