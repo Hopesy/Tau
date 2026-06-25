@@ -3,6 +3,7 @@ using Tau.AgentCore.Runtime;
 using Tau.Ai;
 using Tau.CodingAgent.Runtime;
 using Tau.Tui.Abstractions;
+using Tau.Tui.Rendering;
 using Tau.Tui.Runtime;
 
 namespace Tau.CodingAgent.Tests;
@@ -1124,6 +1125,50 @@ public class CodingAgentHostTests
     }
 
     [Fact]
+    public async Task RunAsync_CompositionStatusRendersFooterData()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-footer-status-{Guid.NewGuid():N}");
+        var gitDirectory = Path.Combine(directory, ".git");
+        Directory.CreateDirectory(gitDirectory);
+        await File.WriteAllTextAsync(Path.Combine(gitDirectory, "HEAD"), "ref: refs/heads/feature/footer");
+
+        var terminal = new FakeTerminal();
+        terminal.QueueInput("exit");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var footerDataProvider = new CodingAgentFooterDataProvider(directory);
+        footerDataProvider.SetExtensionStatus("build", "done\tok");
+        var surface = new CapturingRenderSurface(width: 120, height: 4);
+        var compositionSession = new TuiCompositionSession(surface);
+        var host = new CodingAgentHost(
+            new InteractiveConsoleSession(terminal),
+            runner,
+            compositionSession: compositionSession,
+            footerDataProvider: footerDataProvider);
+
+        try
+        {
+            await host.RunAsync();
+
+            var renderedLines = surface.Diffs
+                .SelectMany(static diff => diff.Operations)
+                .Where(static operation => operation.Kind == TuiRenderOperationKind.ReplaceLine)
+                .Select(static operation => operation.Text)
+                .ToArray();
+            Assert.Contains(
+                renderedLines,
+                static line => line.Contains("ready (feature/footer) | done ok", StringComparison.Ordinal));
+            Assert.Contains(
+                renderedLines,
+                static line => line.Contains("(openai) gpt-5.4 (thinking off)", StringComparison.Ordinal));
+        }
+        finally
+        {
+            footerDataProvider.Dispose();
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task RunAsync_BuiltInCommandWinsOverExtensionCommand()
     {
         var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-host-help-" + Guid.NewGuid().ToString("N"));
@@ -2223,6 +2268,17 @@ public class CodingAgentHostTests
         public void Commit() { }
 
         public void Cancel() { }
+    }
+
+    private sealed class CapturingRenderSurface(int width, int height) : ITuiRenderSurface
+    {
+        public int Width { get; set; } = width;
+
+        public int Height { get; set; } = height;
+
+        public List<TuiRenderDiff> Diffs { get; } = [];
+
+        public void Apply(TuiRenderDiff diff) => Diffs.Add(diff);
     }
 
     private sealed class ScriptedTurnInputSource(params CodingAgentTurnInput[] inputs) : ICodingAgentTurnInputSource

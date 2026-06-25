@@ -1131,10 +1131,11 @@ public sealed class CodingAgentHost
             return;
         }
 
-        var left = string.IsNullOrWhiteSpace(statusLeftOverride)
+        var baseLeft = string.IsNullOrWhiteSpace(statusLeftOverride)
             ? FormatCompositionStatusLeft()
             : statusLeftOverride;
-        var right = $"{_runner.Model.Provider}/{_runner.Model.Id}";
+        var left = CodingAgentFooterFormatter.FormatLeft(baseLeft, _footerDataProvider);
+        var right = CodingAgentFooterFormatter.FormatRight(_runner.Model, _runner.ThinkingLevel, _footerDataProvider);
         _compositionSession.SetStatus(left, right);
     }
 
