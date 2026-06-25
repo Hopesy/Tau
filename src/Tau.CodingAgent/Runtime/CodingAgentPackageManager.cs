@@ -1440,9 +1440,15 @@ public sealed class CodingAgentPackageManager
             return new LocalPackageSource(normalized, localSource);
         }
 
-        if (TryParseGitSource(normalized, out var git))
+        if (CodingAgentGitUrlParser.TryParse(normalized, out var git))
         {
-            return git;
+            return new GitPackageSource(
+                normalized,
+                git.Repo,
+                git.Host,
+                git.Path,
+                git.Ref,
+                git.Pinned);
         }
 
         return new LocalPackageSource(normalized, localSource);
@@ -1472,145 +1478,6 @@ public sealed class CodingAgentPackageManager
         return versionSeparator > 0
             ? (spec[..versionSeparator], spec[(versionSeparator + 1)..])
             : (spec, null);
-    }
-
-    private static bool TryParseGitSource(string source, out GitPackageSource parsed)
-    {
-        parsed = default!;
-        var trimmed = source.Trim();
-        var hasGitPrefix = trimmed.StartsWith("git:", StringComparison.OrdinalIgnoreCase);
-        var raw = hasGitPrefix ? trimmed["git:".Length..].Trim() : trimmed;
-        if (!hasGitPrefix &&
-            !raw.StartsWith("http://", StringComparison.OrdinalIgnoreCase) &&
-            !raw.StartsWith("https://", StringComparison.OrdinalIgnoreCase) &&
-            !raw.StartsWith("ssh://", StringComparison.OrdinalIgnoreCase) &&
-            !raw.StartsWith("git://", StringComparison.OrdinalIgnoreCase))
-        {
-            return false;
-        }
-
-        var split = SplitGitRef(raw);
-        var repo = split.Repo;
-        var host = string.Empty;
-        var path = string.Empty;
-
-        if (repo.StartsWith("git@", StringComparison.OrdinalIgnoreCase))
-        {
-            var colon = repo.IndexOf(':', StringComparison.Ordinal);
-            if (colon <= "git@".Length)
-            {
-                return false;
-            }
-
-            host = repo["git@".Length..colon];
-            path = repo[(colon + 1)..];
-        }
-        else if (repo.Contains("://", StringComparison.Ordinal))
-        {
-            if (!Uri.TryCreate(repo, UriKind.Absolute, out var uri))
-            {
-                return false;
-            }
-
-            host = uri.Host;
-            path = uri.AbsolutePath.TrimStart('/');
-        }
-        else
-        {
-            var slash = repo.IndexOf('/', StringComparison.Ordinal);
-            if (slash <= 0)
-            {
-                return false;
-            }
-
-            host = repo[..slash];
-            path = repo[(slash + 1)..];
-            if (!host.Contains('.', StringComparison.Ordinal) && !host.Equals("localhost", StringComparison.OrdinalIgnoreCase))
-            {
-                return false;
-            }
-
-            repo = $"https://{repo}";
-        }
-
-        var normalizedPath = path.Trim('/').Trim();
-        if (normalizedPath.EndsWith(".git", StringComparison.OrdinalIgnoreCase))
-        {
-            normalizedPath = normalizedPath[..^".git".Length];
-        }
-
-        if (string.IsNullOrWhiteSpace(host) ||
-            string.IsNullOrWhiteSpace(normalizedPath) ||
-            normalizedPath.Split('/', StringSplitOptions.RemoveEmptyEntries).Length < 2)
-        {
-            return false;
-        }
-
-        parsed = new GitPackageSource(
-            source,
-            repo.TrimEnd('/'),
-            host,
-            normalizedPath,
-            split.Ref,
-            !string.IsNullOrWhiteSpace(split.Ref));
-        return true;
-    }
-
-    private static (string Repo, string? Ref) SplitGitRef(string source)
-    {
-        var hash = source.LastIndexOf('#');
-        if (hash > 0 && hash < source.Length - 1)
-        {
-            return (source[..hash], source[(hash + 1)..]);
-        }
-
-        if (source.StartsWith("git@", StringComparison.OrdinalIgnoreCase))
-        {
-            var colon = source.IndexOf(':', StringComparison.Ordinal);
-            if (colon < 0)
-            {
-                return (source, null);
-            }
-
-            var path = source[(colon + 1)..];
-            var separator = path.IndexOf('@', StringComparison.Ordinal);
-            if (separator < 0 || separator == path.Length - 1)
-            {
-                return (source, null);
-            }
-
-            return ($"{source[..(colon + 1)]}{path[..separator]}", path[(separator + 1)..]);
-        }
-
-        if (source.Contains("://", StringComparison.Ordinal) && Uri.TryCreate(source, UriKind.Absolute, out var uri))
-        {
-            var path = uri.AbsolutePath.TrimStart('/');
-            var separator = path.IndexOf('@', StringComparison.Ordinal);
-            if (separator < 0 || separator == path.Length - 1)
-            {
-                return (source, null);
-            }
-
-            var repoPath = path[..separator];
-            var builder = new UriBuilder(uri) { Path = $"/{repoPath}", Fragment = string.Empty };
-            return (builder.Uri.ToString().TrimEnd('/'), path[(separator + 1)..]);
-        }
-
-        var slash = source.IndexOf('/', StringComparison.Ordinal);
-        if (slash < 0)
-        {
-            return (source, null);
-        }
-
-        var host = source[..slash];
-        var pathWithMaybeRef = source[(slash + 1)..];
-        var refSeparator = pathWithMaybeRef.IndexOf('@', StringComparison.Ordinal);
-        if (refSeparator < 0 || refSeparator == pathWithMaybeRef.Length - 1)
-        {
-            return (source, null);
-        }
-
-        return ($"{host}/{pathWithMaybeRef[..refSeparator]}", pathWithMaybeRef[(refSeparator + 1)..]);
     }
 
     private bool SourcesMatch(string configuredSource, string inputSource, string scope) =>

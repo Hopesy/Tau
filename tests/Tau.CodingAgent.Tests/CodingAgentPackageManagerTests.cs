@@ -420,6 +420,36 @@ public sealed class CodingAgentPackageManagerTests
     }
 
     [Fact]
+    public void GitPackageInstall_UsesSharedHostedShortcutParser()
+    {
+        using var temp = TempDirectory.Create();
+        var runner = new FakePackageCommandRunner();
+        var manager = new CodingAgentPackageManager(
+            cwd: temp.Path,
+            userSettingsPath: Path.Combine(temp.Path, "user-settings.json"),
+            projectSettingsPath: Path.Combine(temp.Path, ".tau", "coding-agent-settings.json"),
+            commandRunner: runner);
+
+        manager.InstallAndPersist("git:github:user/repo#v1.2.3", local: true);
+
+        var targetDir = Path.Combine(temp.Path, ".tau", "git", "github.com", "user", "repo");
+        Assert.Collection(
+            runner.Commands,
+            command =>
+            {
+                Assert.Equal("git", command.FileName);
+                Assert.Equal(["clone", "https://github.com/user/repo", targetDir], command.Arguments);
+                Assert.Null(command.WorkingDirectory);
+            },
+            command =>
+            {
+                Assert.Equal("git", command.FileName);
+                Assert.Equal(["checkout", "v1.2.3"], command.Arguments);
+                Assert.Equal(targetDir, command.WorkingDirectory);
+            });
+    }
+
+    [Fact]
     public void Update_SkipsConfiguredPackagesWhenPiOfflineIsEnabled()
     {
         using var temp = TempDirectory.Create();
