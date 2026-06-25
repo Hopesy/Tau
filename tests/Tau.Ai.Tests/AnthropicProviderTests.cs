@@ -223,6 +223,75 @@ public sealed class AnthropicProviderTests
     }
 
     [Fact]
+    public async Task Stream_WithEmptyThinkingSignature_ConvertsThinkingToTextByDefault()
+    {
+        using var handler = new OpenAiResponsesProviderTests.StubHandler(_ => new HttpResponseMessage(HttpStatusCode.BadRequest)
+        {
+            Content = new StringContent("stop after payload", Encoding.UTF8, "text/plain")
+        });
+        using var client = new HttpClient(handler);
+        var provider = new AnthropicProvider(client);
+
+        await OpenAiResponsesProviderTests.CollectAsync(provider.Stream(
+            BuildModel(reasoning: true),
+            new LlmContext
+            {
+                Messages =
+                [
+                    new UserMessage("first"),
+                    new AssistantMessage([new ThinkingContent("internal reasoning") { ThinkingSignature = "" }]),
+                    new UserMessage("second")
+                ]
+            },
+            new StreamOptions { ApiKey = "anthropic-key" }));
+
+        using var doc = JsonDocument.Parse(handler.CapturedBody);
+        var assistant = doc.RootElement.GetProperty("messages")[1];
+        var content = assistant.GetProperty("content")[0];
+        Assert.Equal("assistant", assistant.GetProperty("role").GetString());
+        Assert.Equal("text", content.GetProperty("type").GetString());
+        Assert.Equal("internal reasoning", content.GetProperty("text").GetString());
+        Assert.False(content.TryGetProperty("signature", out _));
+    }
+
+    [Fact]
+    public async Task Stream_WithAllowEmptySignature_PreservesEmptyThinkingSignature()
+    {
+        using var handler = new OpenAiResponsesProviderTests.StubHandler(_ => new HttpResponseMessage(HttpStatusCode.BadRequest)
+        {
+            Content = new StringContent("stop after payload", Encoding.UTF8, "text/plain")
+        });
+        using var client = new HttpClient(handler);
+        var provider = new AnthropicProvider(client);
+        var model = BuildModel(reasoning: true) with
+        {
+            Provider = "xiaomi-token-plan-ams",
+            Compat = new ModelCompatibility { AllowEmptySignature = true }
+        };
+
+        await OpenAiResponsesProviderTests.CollectAsync(provider.Stream(
+            model,
+            new LlmContext
+            {
+                Messages =
+                [
+                    new UserMessage("first"),
+                    new AssistantMessage([new ThinkingContent("internal reasoning") { ThinkingSignature = " " }]),
+                    new UserMessage("second")
+                ]
+            },
+            new StreamOptions { ApiKey = "anthropic-key" }));
+
+        using var doc = JsonDocument.Parse(handler.CapturedBody);
+        var assistant = doc.RootElement.GetProperty("messages")[1];
+        var content = assistant.GetProperty("content")[0];
+        Assert.Equal("assistant", assistant.GetProperty("role").GetString());
+        Assert.Equal("thinking", content.GetProperty("type").GetString());
+        Assert.Equal("internal reasoning", content.GetProperty("thinking").GetString());
+        Assert.Equal(string.Empty, content.GetProperty("signature").GetString());
+    }
+
+    [Fact]
     public async Task Stream_AddsDisabledThinkingAndAllowsTemperature()
     {
         using var handler = new OpenAiResponsesProviderTests.StubHandler(_ => new HttpResponseMessage(HttpStatusCode.BadRequest)

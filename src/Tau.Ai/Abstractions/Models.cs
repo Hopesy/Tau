@@ -40,6 +40,7 @@ public record ModelCompatibility
     public bool? ForceAdaptiveThinking { get; init; }
     public bool? SupportsEagerToolInputStreaming { get; init; }
     public bool? SupportsCacheControlOnTools { get; init; }
+    public bool? AllowEmptySignature { get; init; }
 }
 
 public record VercelGatewayRouting

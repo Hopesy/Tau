@@ -132,7 +132,8 @@ public static class GeneratedBuiltInModels
             SupportsTemperature = GetBool(compat, "supportsTemperature"),
             ForceAdaptiveThinking = GetBool(compat, "forceAdaptiveThinking"),
             SupportsEagerToolInputStreaming = GetBool(compat, "supportsEagerToolInputStreaming"),
-            SupportsCacheControlOnTools = GetBool(compat, "supportsCacheControlOnTools")
+            SupportsCacheControlOnTools = GetBool(compat, "supportsCacheControlOnTools"),
+            AllowEmptySignature = GetBool(compat, "allowEmptySignature")
         };
 
         return parsed;

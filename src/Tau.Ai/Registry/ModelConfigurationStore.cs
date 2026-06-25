@@ -442,7 +442,8 @@ public sealed class ModelConfigurationStore
             SupportsTemperature = GetBool(compat, "supportsTemperature"),
             ForceAdaptiveThinking = GetBool(compat, "forceAdaptiveThinking"),
             SupportsEagerToolInputStreaming = GetBool(compat, "supportsEagerToolInputStreaming"),
-            SupportsCacheControlOnTools = GetBool(compat, "supportsCacheControlOnTools")
+            SupportsCacheControlOnTools = GetBool(compat, "supportsCacheControlOnTools"),
+            AllowEmptySignature = GetBool(compat, "allowEmptySignature")
         };
     }
 
@@ -481,7 +482,8 @@ public sealed class ModelConfigurationStore
             SupportsTemperature = overrideCompat.SupportsTemperature ?? baseCompat.SupportsTemperature,
             ForceAdaptiveThinking = overrideCompat.ForceAdaptiveThinking ?? baseCompat.ForceAdaptiveThinking,
             SupportsEagerToolInputStreaming = overrideCompat.SupportsEagerToolInputStreaming ?? baseCompat.SupportsEagerToolInputStreaming,
-            SupportsCacheControlOnTools = overrideCompat.SupportsCacheControlOnTools ?? baseCompat.SupportsCacheControlOnTools
+            SupportsCacheControlOnTools = overrideCompat.SupportsCacheControlOnTools ?? baseCompat.SupportsCacheControlOnTools,
+            AllowEmptySignature = overrideCompat.AllowEmptySignature ?? baseCompat.AllowEmptySignature
         };
     }
 

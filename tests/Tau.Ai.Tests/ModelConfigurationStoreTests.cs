@@ -102,6 +102,50 @@ public sealed class ModelConfigurationStoreTests
     }
 
     [Fact]
+    public void LoadModels_ParsesAllowEmptySignatureCompatFromModelsJson()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), $"tau-allow-empty-signature-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+
+        try
+        {
+            var modelsPath = Path.Combine(tempDir, "models.json");
+            File.WriteAllText(modelsPath, """
+                {
+                  "providers": {
+                    "xiaomi-token-plan-ams": {
+                      "baseUrl": "https://example.test/anthropic",
+                      "api": "anthropic-messages",
+                      "apiKind": "anthropic",
+                      "compat": {
+                        "allowEmptySignature": false
+                      },
+                      "models": [
+                        {
+                          "id": "mimo-v2.5-pro",
+                          "name": "MiMo-V2.5-Pro",
+                          "compat": {
+                            "allowEmptySignature": true
+                          }
+                        }
+                      ]
+                    }
+                  }
+                }
+                """);
+
+            var catalog = new ModelCatalog(configurationStore: new ModelConfigurationStore([modelsPath]));
+            var model = catalog.GetModel("xiaomi-token-plan-ams", "mimo-v2.5-pro");
+
+            Assert.True(model.Compat!.AllowEmptySignature);
+        }
+        finally
+        {
+            DeleteDirectoryWithRetry(tempDir);
+        }
+    }
+
+    [Fact]
     public async Task StreamFunctions_ResolvesCloudflareWorkersAiBaseUrlTemplate()
     {
         using var scope = EnvironmentVariableScope.Acquire();

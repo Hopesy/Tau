@@ -164,7 +164,10 @@ public sealed class AnthropicProvider : IStreamProvider
             body["system"] = BuildSystemPrompt(context.SystemPrompt!, cacheControl);
         }
 
-        body["messages"] = AnthropicMessageConverter.ConvertMessages(context.Messages, cacheControl);
+        body["messages"] = AnthropicMessageConverter.ConvertMessages(
+            context.Messages,
+            cacheControl,
+            allowEmptySignature: model.Compat?.AllowEmptySignature == true);
 
         if (context.Tools is { Count: > 0 })
         {

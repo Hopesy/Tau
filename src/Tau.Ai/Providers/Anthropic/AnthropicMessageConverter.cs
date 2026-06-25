@@ -11,7 +11,8 @@ internal static class AnthropicMessageConverter
 {
     public static List<object> ConvertMessages(
         IReadOnlyList<ChatMessage> messages,
-        IReadOnlyDictionary<string, object>? cacheControl = null)
+        IReadOnlyDictionary<string, object>? cacheControl = null,
+        bool allowEmptySignature = false)
     {
         var result = new List<object>();
         var i = 0;
@@ -28,7 +29,7 @@ internal static class AnthropicMessageConverter
                     break;
 
                 case AssistantMessage assistant:
-                    result.Add(ConvertAssistantMessage(assistant));
+                    result.Add(ConvertAssistantMessage(assistant, allowEmptySignature));
                     i++;
                     break;
 
@@ -93,7 +94,7 @@ internal static class AnthropicMessageConverter
         };
     }
 
-    private static object ConvertAssistantMessage(AssistantMessage msg)
+    private static object ConvertAssistantMessage(AssistantMessage msg, bool allowEmptySignature)
     {
         var parts = new List<object>();
         foreach (var block in msg.Content)
@@ -108,14 +109,30 @@ internal static class AnthropicMessageConverter
                     });
                     break;
                 case ThinkingContent thinking when !thinking.Redacted:
-                    var thinkingBlock = new Dictionary<string, object>
+                    if (string.IsNullOrWhiteSpace(thinking.ThinkingSignature))
                     {
-                        ["type"] = "thinking",
-                        ["thinking"] = SanitizeText(thinking.Thinking)
-                    };
-                    if (thinking.ThinkingSignature is not null)
-                        thinkingBlock["signature"] = thinking.ThinkingSignature;
-                    parts.Add(thinkingBlock);
+                        parts.Add(allowEmptySignature
+                            ? new Dictionary<string, object>
+                            {
+                                ["type"] = "thinking",
+                                ["thinking"] = SanitizeText(thinking.Thinking),
+                                ["signature"] = string.Empty
+                            }
+                            : new Dictionary<string, object>
+                            {
+                                ["type"] = "text",
+                                ["text"] = SanitizeText(thinking.Thinking)
+                            });
+                    }
+                    else
+                    {
+                        parts.Add(new Dictionary<string, object>
+                        {
+                            ["type"] = "thinking",
+                            ["thinking"] = SanitizeText(thinking.Thinking),
+                            ["signature"] = thinking.ThinkingSignature
+                        });
+                    }
                     break;
                 case ToolCallContent toolCall:
                     parts.Add(new Dictionary<string, object>
