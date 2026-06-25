@@ -29,7 +29,7 @@ public sealed class TuiMarkdownTheme
     public Func<string, string> Italic { get; init; } = static value => value;
     public Func<string, string> Strikethrough { get; init; } = static value => value;
     public Func<string, string> Underline { get; init; } = static value => value;
-    public Func<string, string?, IReadOnlyList<string>>? HighlightCode { get; init; }
+    public Func<string, string?, IReadOnlyList<string>>? HighlightCode { get; init; } = TuiSyntaxHighlighter.HighlightLines;
     public string CodeBlockIndent { get; init; } = "  ";
 }
 

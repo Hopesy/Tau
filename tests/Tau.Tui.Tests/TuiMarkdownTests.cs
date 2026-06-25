@@ -68,6 +68,18 @@ public sealed class TuiMarkdownTests
     }
 
     [Fact]
+    public void Markdown_RendersFencedCodeWithDefaultSyntaxHighlighting()
+    {
+        var markdown = new TuiMarkdown("```json\n{\"ok\": true}\n```");
+
+        var lines = markdown.Render(80);
+
+        Assert.Contains("\u001b[38;2;156;220;254m\"ok\"\u001b[39m", lines[1], StringComparison.Ordinal);
+        Assert.Contains("\u001b[38;2;86;156;214mtrue\u001b[39m", lines[1], StringComparison.Ordinal);
+        Assert.Equal(80, TuiText.VisibleWidth(lines[1]));
+    }
+
+    [Fact]
     public void Markdown_RendersUnorderedOrderedAndNestedLists()
     {
         var markdown = new TuiMarkdown("- one\n  - two\n3. three");
