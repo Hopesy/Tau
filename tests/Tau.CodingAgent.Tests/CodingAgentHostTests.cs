@@ -2086,6 +2086,27 @@ public class CodingAgentHostTests
         }
     }
 
+    [Fact]
+    public async Task RunAsync_VersionUpdateChecker_RendersUpdateNotification()
+    {
+        var terminal = new FakeTerminal();
+        terminal.QueueInput("exit");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var host = new CodingAgentHost(
+            new InteractiveConsoleSession(terminal),
+            runner,
+            versionUpdateChecker: _ => Task.FromResult<CodingAgentLatestRelease?>(
+                new CodingAgentLatestRelease("1.2.4", Note: "Important fixes")));
+
+        await host.RunAsync();
+
+        var output = terminal.FlattenedText();
+        Assert.Contains("status> Update Available", output, StringComparison.Ordinal);
+        Assert.Contains("New version 1.2.4 is available. Run pi update", output, StringComparison.Ordinal);
+        Assert.Contains("Important fixes", output, StringComparison.Ordinal);
+        Assert.Contains("Changelog: https://pi.dev/changelog", output, StringComparison.Ordinal);
+    }
+
     private sealed class NoopInstallTelemetryReporter : ICodingAgentInstallTelemetryReporter
     {
         public void ReportInstall(string version)

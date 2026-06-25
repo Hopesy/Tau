@@ -736,6 +736,9 @@ var host = new CodingAgentHost(
     compositionSession: compositionSession,
     startupNoticeService: new CodingAgentStartupNoticeService(settingsStore, changelogStore),
     scopedModelsOverride: scopedModelsOverride,
+    versionUpdateChecker: cancellationToken => CodingAgentVersionCheck.CheckForNewVersionAsync(
+        CodingAgentCliHelp.ResolveVersion(),
+        cancellationToken: cancellationToken),
     reloadKeyBindings: editor is null
         ? null
         : () =>

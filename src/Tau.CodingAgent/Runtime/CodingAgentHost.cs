@@ -31,6 +31,7 @@ public sealed class CodingAgentHost
     private readonly CodingAgentInitialPrompt? _initialPrompt;
     private readonly IReadOnlyList<string> _initialMessages;
     private readonly CodingAgentStartupNoticeService? _startupNoticeService;
+    private readonly Func<CancellationToken, Task<CodingAgentLatestRelease?>>? _versionUpdateChecker;
     private readonly IDisposable? _compositionBinding;
     private IReadOnlyDictionary<KeyBinding, CodingAgentExtensionShortcut> _extensionShortcuts =
         new Dictionary<KeyBinding, CodingAgentExtensionShortcut>();
@@ -75,7 +76,8 @@ public sealed class CodingAgentHost
         IReadOnlyList<string>? initialMessages = null,
         CodingAgentStartupNoticeService? startupNoticeService = null,
         IReadOnlyList<string>? scopedModelsOverride = null,
-        CodingAgentFooterDataProvider? footerDataProvider = null)
+        CodingAgentFooterDataProvider? footerDataProvider = null,
+        Func<CancellationToken, Task<CodingAgentLatestRelease?>>? versionUpdateChecker = null)
     {
         _ui = ui;
         _runner = runner;
@@ -92,6 +94,7 @@ public sealed class CodingAgentHost
         _initialPrompt = initialPrompt;
         _initialMessages = initialMessages ?? [];
         _startupNoticeService = startupNoticeService;
+        _versionUpdateChecker = versionUpdateChecker;
         _compositionBinding = compositionSession?.BindTranscript(ui);
         _footerDataProvider = footerDataProvider ?? new CodingAgentFooterDataProvider(Environment.CurrentDirectory);
         _ownsFooterDataProvider = footerDataProvider is null;
@@ -154,6 +157,7 @@ public sealed class CodingAgentHost
             _compositionSession?.Start();
             _ui.ShowWelcome("Tau — Coding Agent", "Type your message, or 'exit' to quit.");
             ShowStartupNoticeIfNeeded();
+            StartVersionUpdateCheck(cancellationToken);
             await RunInitialInputsAsync(cancellationToken).ConfigureAwait(false);
 
             while (!cancellationToken.IsCancellationRequested)
@@ -246,6 +250,42 @@ public sealed class CodingAgentHost
         }
 
         _ui.WriteStatus(notice.Text);
+    }
+
+    private void StartVersionUpdateCheck(CancellationToken cancellationToken)
+    {
+        var checker = _versionUpdateChecker;
+        if (checker is null)
+        {
+            return;
+        }
+
+        _ = ShowVersionUpdateIfAvailableAsync(checker, cancellationToken);
+    }
+
+    private async Task ShowVersionUpdateIfAvailableAsync(
+        Func<CancellationToken, Task<CodingAgentLatestRelease?>> checker,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var release = await checker(cancellationToken).ConfigureAwait(false);
+            if (release is null || cancellationToken.IsCancellationRequested)
+            {
+                return;
+            }
+
+            WriteStatus(CodingAgentVersionNotificationFormatter.Format(
+                release,
+                CodingAgentCliHelp.ResolveCommandName()));
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch
+        {
+            // Version checks are startup polish only; provider/session work must not fail on them.
+        }
     }
 
     private async Task RunInitialInputsAsync(CancellationToken cancellationToken)
