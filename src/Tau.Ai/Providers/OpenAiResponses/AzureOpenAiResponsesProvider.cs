@@ -162,7 +162,7 @@ public sealed class AzureOpenAiResponsesProvider : IStreamProvider
 
         if (!string.IsNullOrWhiteSpace(options.SessionId))
         {
-            body["prompt_cache_key"] = options.SessionId!;
+            body["prompt_cache_key"] = OpenAiResponsesShared.ClampOpenAiPromptCacheKey(options.SessionId)!;
         }
 
         var tools = OpenAiResponsesShared.ConvertResponsesTools(context.Tools);

@@ -112,6 +112,21 @@ public sealed class OpenAiResponsesSharedTests
     }
 
     [Fact]
+    public void ClampOpenAiPromptCacheKey_TruncatesToSixtyFourCodePoints()
+    {
+        var emoji = char.ConvertFromUtf32(0x1f642);
+        var key = string.Concat(Enumerable.Repeat(emoji, 70));
+
+        var clamped = OpenAiResponsesShared.ClampOpenAiPromptCacheKey(key);
+
+        Assert.Equal(OpenAiResponsesShared.OpenAiPromptCacheKeyMaxLength, clamped!.EnumerateRunes().Count());
+        Assert.Equal(string.Concat(Enumerable.Repeat(emoji, 64)), clamped);
+        var shortKey = string.Concat(Enumerable.Repeat("a", 64));
+        Assert.Same(shortKey, OpenAiResponsesShared.ClampOpenAiPromptCacheKey(shortKey));
+        Assert.Null(OpenAiResponsesShared.ClampOpenAiPromptCacheKey(null));
+    }
+
+    [Fact]
     public void ExtractAccountIdFromJwt_ReadsBase64UrlPayload()
     {
         var payload = """{"https://api.openai.com/auth":{"chatgpt_account_id":"acc_123"}}""";

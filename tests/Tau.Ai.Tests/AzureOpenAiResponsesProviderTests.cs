@@ -100,6 +100,34 @@ public sealed class AzureOpenAiResponsesProviderTests
     }
 
     [Fact]
+    public async Task Stream_ClampsPromptCacheKeyToOpenAiLimit()
+    {
+        var emoji = char.ConvertFromUtf32(0x1f642);
+        var sessionId = string.Concat(Enumerable.Repeat(emoji, 70));
+        using var handler = new OpenAiResponsesProviderTests.StubHandler(_ => OpenAiResponsesProviderTests.SseResponse(
+            """
+            data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}
+
+            """));
+        using var client = new HttpClient(handler);
+        var provider = new AzureOpenAiResponsesProvider(client);
+
+        _ = await OpenAiResponsesProviderTests.CollectAsync(provider.Stream(
+            BuildAzureModel(),
+            new LlmContext { Messages = [new UserMessage("hi")] },
+            new AzureOpenAiResponsesOptions
+            {
+                ApiKey = "azure-key",
+                SessionId = sessionId
+            }));
+
+        using var body = JsonDocument.Parse(handler.CapturedBody);
+        Assert.Equal(
+            string.Concat(Enumerable.Repeat(emoji, 64)),
+            body.RootElement.GetProperty("prompt_cache_key").GetString());
+    }
+
+    [Fact]
     public async Task StreamSimple_AddsReasoningEffortAndEncryptedReasoningInclude()
     {
         using var handler = new OpenAiResponsesProviderTests.StubHandler(_ => OpenAiResponsesProviderTests.SseResponse(

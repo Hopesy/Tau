@@ -269,7 +269,7 @@ public sealed class OpenAiCodexResponsesProvider : IStreamProvider, IDisposable
 
         if (!string.IsNullOrWhiteSpace(options.SessionId))
         {
-            body["prompt_cache_key"] = options.SessionId!;
+            body["prompt_cache_key"] = OpenAiResponsesShared.ClampOpenAiPromptCacheKey(options.SessionId)!;
         }
 
         if (options is OpenAiCodexResponsesOptions codexOptions)

@@ -9,6 +9,8 @@ namespace Tau.Ai.Providers.OpenAiResponses;
 
 public static class OpenAiResponsesShared
 {
+    public const int OpenAiPromptCacheKeyMaxLength = 64;
+
     private static readonly HashSet<string> DefaultToolCallProviders = new(StringComparer.OrdinalIgnoreCase)
     {
         "openai",
@@ -293,7 +295,7 @@ public static class OpenAiResponsesShared
 
         if (options.CacheRetention != CacheRetention.None && !string.IsNullOrWhiteSpace(options.SessionId))
         {
-            body["prompt_cache_key"] = options.SessionId!;
+            body["prompt_cache_key"] = ClampOpenAiPromptCacheKey(options.SessionId)!;
         }
 
         if (options.CacheRetention == CacheRetention.Long &&
@@ -302,6 +304,29 @@ public static class OpenAiResponsesShared
         {
             body["prompt_cache_retention"] = "24h";
         }
+    }
+
+    public static string? ClampOpenAiPromptCacheKey(string? key)
+    {
+        if (key is null)
+        {
+            return null;
+        }
+
+        var runeCount = 0;
+        var endIndex = 0;
+        foreach (var rune in key.EnumerateRunes())
+        {
+            if (runeCount == OpenAiPromptCacheKeyMaxLength)
+            {
+                return key[..endIndex];
+            }
+
+            endIndex += rune.Utf16SequenceLength;
+            runeCount++;
+        }
+
+        return key;
     }
 
     public static string? MapReasoningEffort(ThinkingLevel? level, Model model)
