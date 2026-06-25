@@ -151,6 +151,7 @@ public sealed class AnthropicProvider : IStreamProvider
         ThinkingLevel? reasoning)
     {
         context = MessageTransformer.DowngradeUnsupportedImages(context, model);
+        var cacheControl = BuildCacheControl(model, options);
         var body = new Dictionary<string, object>
         {
             ["model"] = model.Id,
@@ -159,12 +160,20 @@ public sealed class AnthropicProvider : IStreamProvider
         };
 
         if (!string.IsNullOrEmpty(context.SystemPrompt))
-            body["system"] = UnicodeTextSanitizer.RemoveUnpairedSurrogates(context.SystemPrompt!);
+        {
+            body["system"] = BuildSystemPrompt(context.SystemPrompt!, cacheControl);
+        }
 
-        body["messages"] = AnthropicMessageConverter.ConvertMessages(context.Messages);
+        body["messages"] = AnthropicMessageConverter.ConvertMessages(context.Messages, cacheControl);
 
         if (context.Tools is { Count: > 0 })
-            body["tools"] = AnthropicMessageConverter.ConvertTools(context.Tools);
+        {
+            var toolCacheControl = model.Compat?.SupportsCacheControlOnTools == false ? null : cacheControl;
+            body["tools"] = AnthropicMessageConverter.ConvertTools(
+                context.Tools,
+                supportsEagerToolInputStreaming: model.Compat?.SupportsEagerToolInputStreaming ?? true,
+                cacheControl: toolCacheControl);
+        }
 
         var thinking = BuildThinking(model, options, reasoning);
 
@@ -191,6 +200,47 @@ public sealed class AnthropicProvider : IStreamProvider
             body["metadata"] = new Dictionary<string, object> { ["user_id"] = userId! };
 
         return body;
+    }
+
+    private static object BuildSystemPrompt(
+        string systemPrompt,
+        IReadOnlyDictionary<string, object>? cacheControl)
+    {
+        var text = UnicodeTextSanitizer.RemoveUnpairedSurrogates(systemPrompt);
+        if (cacheControl is null)
+        {
+            return text;
+        }
+
+        return new List<object>
+        {
+            new Dictionary<string, object>
+            {
+                ["type"] = "text",
+                ["text"] = text,
+                ["cache_control"] = cacheControl
+            }
+        };
+    }
+
+    private static IReadOnlyDictionary<string, object>? BuildCacheControl(Model model, StreamOptions options)
+    {
+        if (options.CacheRetention == CacheRetention.None)
+        {
+            return null;
+        }
+
+        var cacheControl = new Dictionary<string, object>
+        {
+            ["type"] = "ephemeral"
+        };
+        if (options.CacheRetention == CacheRetention.Long &&
+            model.Compat?.SupportsLongCacheRetention != false)
+        {
+            cacheControl["ttl"] = "1h";
+        }
+
+        return cacheControl;
     }
 
     private static void ApplyHeaders(HttpRequestMessage request, IDictionary<string, string>? headers)

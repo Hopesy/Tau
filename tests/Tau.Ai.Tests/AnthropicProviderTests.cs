@@ -129,6 +129,100 @@ public sealed class AnthropicProviderTests
     }
 
     [Fact]
+    public async Task Stream_WithLongCacheRetention_AddsAnthropicCacheControl()
+    {
+        using var handler = new OpenAiResponsesProviderTests.StubHandler(_ => new HttpResponseMessage(HttpStatusCode.BadRequest)
+        {
+            Content = new StringContent("stop after payload", Encoding.UTF8, "text/plain")
+        });
+        using var client = new HttpClient(handler);
+        var provider = new AnthropicProvider(client);
+
+        await OpenAiResponsesProviderTests.CollectAsync(provider.Stream(
+            BuildModel(reasoning: true),
+            new LlmContext
+            {
+                SystemPrompt = "system rules",
+                Messages =
+                [
+                    new AssistantMessage([new ToolCallContent("toolu_1", "read_file", """{"path":"README.md"}""")]),
+                    new ToolResultMessage("toolu_1", [new TextContent("file body")])
+                ],
+                Tools = [BuildTool()]
+            },
+            new StreamOptions
+            {
+                ApiKey = "anthropic-key",
+                CacheRetention = CacheRetention.Long
+            }));
+
+        using var doc = JsonDocument.Parse(handler.CapturedBody);
+        var root = doc.RootElement;
+        var systemCache = root.GetProperty("system")[0].GetProperty("cache_control");
+        Assert.Equal("ephemeral", systemCache.GetProperty("type").GetString());
+        Assert.Equal("1h", systemCache.GetProperty("ttl").GetString());
+
+        var tool = root.GetProperty("tools")[0];
+        Assert.True(tool.GetProperty("eager_input_streaming").GetBoolean());
+        Assert.Equal("1h", tool.GetProperty("cache_control").GetProperty("ttl").GetString());
+
+        var toolResult = root.GetProperty("messages").EnumerateArray().Last().GetProperty("content")[0];
+        Assert.Equal("tool_result", toolResult.GetProperty("type").GetString());
+        Assert.Equal("1h", toolResult.GetProperty("cache_control").GetProperty("ttl").GetString());
+    }
+
+    [Fact]
+    public async Task Stream_WithCacheCompatibility_DisablesLongTtlToolCacheAndEagerStreaming()
+    {
+        using var handler = new OpenAiResponsesProviderTests.StubHandler(_ => new HttpResponseMessage(HttpStatusCode.BadRequest)
+        {
+            Content = new StringContent("stop after payload", Encoding.UTF8, "text/plain")
+        });
+        using var client = new HttpClient(handler);
+        var provider = new AnthropicProvider(client);
+
+        var model = BuildModel("accounts/fireworks/models/kimi-k2p6", reasoning: true) with
+        {
+            Provider = "fireworks",
+            BaseUrl = "https://api.fireworks.ai/inference",
+            Compat = new ModelCompatibility
+            {
+                SupportsLongCacheRetention = false,
+                SupportsCacheControlOnTools = false,
+                SupportsEagerToolInputStreaming = false
+            }
+        };
+
+        await OpenAiResponsesProviderTests.CollectAsync(provider.Stream(
+            model,
+            new LlmContext
+            {
+                SystemPrompt = "system rules",
+                Messages = [new UserMessage("hello")],
+                Tools = [BuildTool()]
+            },
+            new StreamOptions
+            {
+                ApiKey = "fireworks-key",
+                CacheRetention = CacheRetention.Long
+            }));
+
+        using var doc = JsonDocument.Parse(handler.CapturedBody);
+        var root = doc.RootElement;
+        var systemCache = root.GetProperty("system")[0].GetProperty("cache_control");
+        Assert.Equal("ephemeral", systemCache.GetProperty("type").GetString());
+        Assert.False(systemCache.TryGetProperty("ttl", out _));
+
+        var tool = root.GetProperty("tools")[0];
+        Assert.False(tool.TryGetProperty("eager_input_streaming", out _));
+        Assert.False(tool.TryGetProperty("cache_control", out _));
+
+        var userMessage = root.GetProperty("messages")[0].GetProperty("content")[0];
+        Assert.Equal("ephemeral", userMessage.GetProperty("cache_control").GetProperty("type").GetString());
+        Assert.False(userMessage.GetProperty("cache_control").TryGetProperty("ttl", out _));
+    }
+
+    [Fact]
     public async Task Stream_AddsDisabledThinkingAndAllowsTemperature()
     {
         using var handler = new OpenAiResponsesProviderTests.StubHandler(_ => new HttpResponseMessage(HttpStatusCode.BadRequest)

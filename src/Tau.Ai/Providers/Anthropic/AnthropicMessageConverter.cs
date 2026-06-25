@@ -9,7 +9,9 @@ namespace Tau.Ai.Providers.Anthropic;
 /// </summary>
 internal static class AnthropicMessageConverter
 {
-    public static List<object> ConvertMessages(IReadOnlyList<ChatMessage> messages)
+    public static List<object> ConvertMessages(
+        IReadOnlyList<ChatMessage> messages,
+        IReadOnlyDictionary<string, object>? cacheControl = null)
     {
         var result = new List<object>();
         var i = 0;
@@ -51,6 +53,7 @@ internal static class AnthropicMessageConverter
             }
         }
 
+        ApplyCacheControlToLastUserMessage(result, cacheControl);
         return result;
     }
 
@@ -164,14 +167,81 @@ internal static class AnthropicMessageConverter
         }
     }
 
-    public static List<object> ConvertTools(IReadOnlyList<Tool> tools)
+    public static List<object> ConvertTools(
+        IReadOnlyList<Tool> tools,
+        bool supportsEagerToolInputStreaming = true,
+        IReadOnlyDictionary<string, object>? cacheControl = null)
     {
-        return tools.Select(t => (object)new Dictionary<string, object>
+        var converted = tools.Select(t =>
         {
-            ["name"] = t.Name,
-            ["description"] = t.Description,
-            ["input_schema"] = t.ParameterSchema
+            var tool = new Dictionary<string, object>
+            {
+                ["name"] = t.Name,
+                ["description"] = t.Description,
+                ["input_schema"] = t.ParameterSchema
+            };
+            if (supportsEagerToolInputStreaming)
+            {
+                tool["eager_input_streaming"] = true;
+            }
+
+            return tool;
         }).ToList();
+
+        if (cacheControl is not null && converted.Count > 0)
+        {
+            converted[^1]["cache_control"] = cacheControl;
+        }
+
+        return converted.Select(static tool => (object)tool).ToList();
+    }
+
+    private static void ApplyCacheControlToLastUserMessage(
+        List<object> messages,
+        IReadOnlyDictionary<string, object>? cacheControl)
+    {
+        if (cacheControl is null)
+        {
+            return;
+        }
+
+        for (var i = messages.Count - 1; i >= 0; i--)
+        {
+            if (messages[i] is not Dictionary<string, object> message ||
+                !message.TryGetValue("role", out var role) ||
+                !string.Equals(Convert.ToString(role), "user", StringComparison.Ordinal) ||
+                !message.TryGetValue("content", out var content))
+            {
+                continue;
+            }
+
+            if (content is List<object> blocks)
+            {
+                ApplyCacheControlToLastContentBlock(blocks, cacheControl);
+                return;
+            }
+        }
+    }
+
+    private static void ApplyCacheControlToLastContentBlock(
+        List<object> blocks,
+        IReadOnlyDictionary<string, object> cacheControl)
+    {
+        for (var i = blocks.Count - 1; i >= 0; i--)
+        {
+            if (blocks[i] is not Dictionary<string, object> block ||
+                !block.TryGetValue("type", out var type))
+            {
+                continue;
+            }
+
+            var blockType = Convert.ToString(type);
+            if (blockType is "text" or "image" or "tool_result")
+            {
+                block["cache_control"] = cacheControl;
+                return;
+            }
+        }
     }
 
     private static string SanitizeText(string text) =>
