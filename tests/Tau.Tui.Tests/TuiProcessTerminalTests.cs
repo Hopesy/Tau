@@ -3,6 +3,7 @@ using Tau.Tui.Runtime;
 
 namespace Tau.Tui.Tests;
 
+[Collection(TuiTestCollections.TuiKeyDecoderState)]
 public sealed class TuiProcessTerminalTests
 {
     [Fact]
@@ -79,10 +80,14 @@ public sealed class TuiProcessTerminalTests
         transport.EmitInput("x");
 
         Assert.True(terminal.KittyProtocolActive);
+        Assert.True(TuiKeyDecoder.IsKittyProtocolActive());
         Assert.False(terminal.ModifyOtherKeysActive);
         Assert.Equal(["x"], input);
         Assert.Contains(TuiProcessTerminal.EnableKittyKeyboardProtocol, transport.Writes);
         Assert.DoesNotContain(TuiProcessTerminal.EnableModifyOtherKeys, transport.Writes);
+
+        terminal.Stop();
+        Assert.False(TuiKeyDecoder.IsKittyProtocolActive());
     }
 
     [Fact]
@@ -127,6 +132,7 @@ public sealed class TuiProcessTerminalTests
         transport.EmitInput("z");
 
         Assert.False(terminal.KittyProtocolActive);
+        Assert.False(TuiKeyDecoder.IsKittyProtocolActive());
         Assert.Equal(["z"], input);
         Assert.Contains(TuiProcessTerminal.DisableKittyKeyboardProtocol, transport.Writes);
     }

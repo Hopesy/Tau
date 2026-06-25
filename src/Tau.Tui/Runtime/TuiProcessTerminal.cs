@@ -206,6 +206,9 @@ public sealed class TuiProcessTerminal
             _inputHandler = onInput;
             _resizeHandler = onResize;
             _wasRaw = _transport.IsRawMode;
+            _kittyProtocolActive = false;
+            _modifyOtherKeysActive = false;
+            TuiKeyDecoder.SetKittyProtocolActive(false);
 
             _transport.SetRawMode(enabled: true);
             _transport.SetInputEncoding(Encoding.UTF8);
@@ -350,6 +353,7 @@ public sealed class TuiProcessTerminal
                 if (!_kittyProtocolActive && KittyProtocolResponsePattern.IsMatch(sequence))
                 {
                     _kittyProtocolActive = true;
+                    TuiKeyDecoder.SetKittyProtocolActive(true);
                     _transport.Write(EnableKittyKeyboardProtocol);
                     return;
                 }
@@ -398,6 +402,7 @@ public sealed class TuiProcessTerminal
             _transport.Write(DisableKittyKeyboardProtocol);
             _kittyProtocolActive = false;
         }
+        TuiKeyDecoder.SetKittyProtocolActive(false);
 
         if (_modifyOtherKeysActive)
         {
