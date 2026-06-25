@@ -45,6 +45,56 @@ public sealed class InteractiveInputEditorTests
     }
 
     [Fact]
+    public async Task ReadLineAsync_LargePasteRendersMarkerAndSubmitsExpandedText()
+    {
+        var paste = string.Join("\n", Enumerable.Range(1, 11).Select(static index => $"line {index}"));
+        var reader = new FakeInputEventReader();
+        reader.EnqueuePaste(paste);
+        reader.EnqueueKey(ConsoleKey.Enter);
+
+        var renderer = new FakeRenderer();
+        var editor = new InteractiveInputEditor(reader, renderer);
+
+        var result = await editor.ReadLineAsync("> ");
+
+        Assert.Equal(paste, result.Text);
+        Assert.Contains(("[paste #1 +11 lines]", "[paste #1 +11 lines]".Length), renderer.RenderCalls);
+    }
+
+    [Fact]
+    public async Task ReadLineAsync_LargeSingleLinePasteRendersCharMarkerAndSubmitsExpandedText()
+    {
+        var paste = new string('x', 1001);
+        var reader = new FakeInputEventReader();
+        reader.EnqueuePaste(paste);
+        reader.EnqueueKey(ConsoleKey.Enter);
+
+        var renderer = new FakeRenderer();
+        var editor = new InteractiveInputEditor(reader, renderer);
+
+        var result = await editor.ReadLineAsync("> ");
+
+        Assert.Equal(paste, result.Text);
+        Assert.Contains(("[paste #1 1001 chars]", "[paste #1 1001 chars]".Length), renderer.RenderCalls);
+    }
+
+    [Fact]
+    public async Task ReadLineAsync_SmallPasteInsertsSanitizedTextDirectly()
+    {
+        var reader = new FakeInputEventReader();
+        reader.Enqueue('a');
+        reader.EnqueuePaste("\tpath\r\nnext\u0001");
+        reader.EnqueueKey(ConsoleKey.Enter);
+
+        var renderer = new FakeRenderer();
+        var editor = new InteractiveInputEditor(reader, renderer);
+
+        var result = await editor.ReadLineAsync("> ");
+
+        Assert.Equal("a    path\nnext", result.Text);
+    }
+
+    [Fact]
     public async Task ReadLineAsync_DeleteRemovesCharAtCursor()
     {
         var reader = new FakeKeyReader();
@@ -1397,6 +1447,52 @@ public sealed class InteractiveInputEditorTests
             }
 
             return ValueTask.FromResult(_keys.Dequeue());
+        }
+    }
+
+    private sealed class FakeInputEventReader : IConsoleInputEventReader
+    {
+        private readonly Queue<ConsoleInputEvent> _events = new();
+
+        public void Enqueue(char ch)
+        {
+            var key = new ConsoleKeyInfo(ch, ConsoleKey.NoName, shift: false, alt: false, control: false);
+            _events.Enqueue(ConsoleInputEvent.KeyPress(key));
+        }
+
+        public void EnqueueKey(ConsoleKey key)
+        {
+            var keyInfo = new ConsoleKeyInfo('\0', key, shift: false, alt: false, control: false);
+            _events.Enqueue(ConsoleInputEvent.KeyPress(keyInfo));
+        }
+
+        public void EnqueuePaste(string text)
+        {
+            _events.Enqueue(ConsoleInputEvent.Paste(text));
+        }
+
+        public ValueTask<ConsoleKeyInfo> ReadKeyAsync(CancellationToken cancellationToken = default)
+        {
+            var inputEvent = ReadEvent();
+            if (inputEvent.Kind != ConsoleInputEventKind.KeyPress)
+            {
+                throw new InvalidOperationException("Expected a key event.");
+            }
+
+            return ValueTask.FromResult(inputEvent.Key);
+        }
+
+        public ValueTask<ConsoleInputEvent> ReadInputEventAsync(CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(ReadEvent());
+
+        private ConsoleInputEvent ReadEvent()
+        {
+            if (_events.Count == 0)
+            {
+                throw new InvalidOperationException("No more queued input.");
+            }
+
+            return _events.Dequeue();
         }
     }
 

@@ -17,6 +17,8 @@ public sealed class InteractiveInputEditor
     private LastEditAction _lastEditAction = LastEditAction.None;
     private int _lastYankStart = -1;
     private string _lastYankedText = string.Empty;
+    private readonly Dictionary<int, string> _pastes = new();
+    private int _pasteCounter;
 
     public InteractiveInputEditor(
         IConsoleKeyReader reader,
@@ -65,13 +67,31 @@ public sealed class InteractiveInputEditor
         var historyOffset = -1;
         int? preferredVerticalColumn = null;
         var undoStack = new UndoStack();
+        _pastes.Clear();
+        _pasteCounter = 0;
         ResetTransientEditAction();
         _renderer.Render(new string(chars.ToArray()), cursor);
 
         while (true)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var key = await _reader.ReadKeyAsync(cancellationToken).ConfigureAwait(false);
+            var inputEvent = await ReadInputEventAsync(cancellationToken).ConfigureAwait(false);
+            if (inputEvent.Kind == ConsoleInputEventKind.Paste)
+            {
+                var undoState = CaptureUndoState(chars, cursor);
+                if (TryInsertPastedText(chars, ref cursor, inputEvent.PasteText ?? string.Empty))
+                {
+                    PushUndoIfChanged(undoStack, undoState, chars, cursor);
+                    historyOffset = -1;
+                    preferredVerticalColumn = null;
+                    ResetTransientEditAction();
+                    _renderer.Render(new string(chars.ToArray()), cursor);
+                }
+
+                continue;
+            }
+
+            var key = inputEvent.Key;
             if (_shortcutHandler is not null &&
                 await _shortcutHandler(key, cancellationToken).ConfigureAwait(false))
             {
@@ -119,7 +139,9 @@ public sealed class InteractiveInputEditor
             {
                 case EditorAction.Cancel:
                     _renderer.Cancel();
-                    _buffer.SetDraft(new string(chars.ToArray()));
+                    _buffer.SetDraft(ExpandPasteMarkers(new string(chars.ToArray())));
+                    _pastes.Clear();
+                    _pasteCounter = 0;
                     ResetTransientEditAction();
                     return InputResult.Cancelled;
                 case EditorAction.Submit:
@@ -138,10 +160,12 @@ public sealed class InteractiveInputEditor
                         }
                     }
 
-                    var committed = new string(chars.ToArray());
+                    var committed = ExpandPasteMarkers(new string(chars.ToArray()));
                     _renderer.Commit();
                     _buffer.SetDraft(committed);
                     _buffer.Commit();
+                    _pastes.Clear();
+                    _pasteCounter = 0;
                     ResetTransientEditAction();
                     if (!string.IsNullOrWhiteSpace(committed))
                     {
@@ -563,6 +587,158 @@ public sealed class InteractiveInputEditor
         int cursor)
     {
         undoStack.PushIfChanged(previous, new string(chars.ToArray()), Math.Clamp(cursor, 0, chars.Count));
+    }
+
+    private async ValueTask<ConsoleInputEvent> ReadInputEventAsync(CancellationToken cancellationToken)
+    {
+        if (_reader is IConsoleInputEventReader eventReader)
+        {
+            return await eventReader.ReadInputEventAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        var key = await _reader.ReadKeyAsync(cancellationToken).ConfigureAwait(false);
+        return ConsoleInputEvent.KeyPress(key);
+    }
+
+    private bool TryInsertPastedText(List<char> chars, ref int cursor, string text)
+    {
+        var filteredText = NormalizePastedText(text);
+        if (filteredText.Length == 0)
+        {
+            return false;
+        }
+
+        if (filteredText.Length > 0 && filteredText[0] is '/' or '~' or '.')
+        {
+            var previous = cursor > 0 ? chars[cursor - 1] : '\0';
+            if (previous != '\0' && (char.IsLetterOrDigit(previous) || previous == '_'))
+            {
+                filteredText = " " + filteredText;
+            }
+        }
+
+        var pastedLines = filteredText.Split('\n');
+        var textToInsert = filteredText;
+        if (pastedLines.Length > 10 || filteredText.Length > 1000)
+        {
+            _pasteCounter++;
+            var pasteId = _pasteCounter;
+            _pastes[pasteId] = filteredText;
+            textToInsert = pastedLines.Length > 10
+                ? $"[paste #{pasteId} +{pastedLines.Length} lines]"
+                : $"[paste #{pasteId} {filteredText.Length} chars]";
+        }
+
+        chars.InsertRange(cursor, textToInsert);
+        cursor += textToInsert.Length;
+        ClearAutocompleteSession();
+        return true;
+    }
+
+    private static string NormalizePastedText(string text)
+    {
+        if (string.IsNullOrEmpty(text))
+        {
+            return string.Empty;
+        }
+
+        var decoded = DecodePastedControlSequences(text)
+            .Replace("\r\n", "\n", StringComparison.Ordinal)
+            .Replace('\r', '\n')
+            .Replace("\t", "    ", StringComparison.Ordinal);
+        var builder = new System.Text.StringBuilder(decoded.Length);
+        foreach (var ch in decoded)
+        {
+            if (ch == '\n' || ch >= 32)
+            {
+                builder.Append(ch);
+            }
+        }
+
+        return builder.ToString();
+    }
+
+    private static string DecodePastedControlSequences(string text)
+    {
+        const string prefix = "\u001b[";
+        const string suffix = ";5u";
+        var builder = new System.Text.StringBuilder(text.Length);
+        var index = 0;
+        while (index < text.Length)
+        {
+            var start = text.IndexOf(prefix, index, StringComparison.Ordinal);
+            if (start < 0)
+            {
+                builder.Append(text, index, text.Length - index);
+                break;
+            }
+
+            builder.Append(text, index, start - index);
+            var end = text.IndexOf(suffix, start + prefix.Length, StringComparison.Ordinal);
+            if (end < 0)
+            {
+                builder.Append(text, start, text.Length - start);
+                break;
+            }
+
+            var codeText = text[(start + prefix.Length)..end];
+            if (int.TryParse(codeText, CultureInfo.InvariantCulture, out var code) &&
+                ((code is >= 97 and <= 122) || (code is >= 65 and <= 90)))
+            {
+                builder.Append((char)(char.ToLowerInvariant((char)code) - 96));
+                index = end + suffix.Length;
+                continue;
+            }
+
+            builder.Append(text, start, end + suffix.Length - start);
+            index = end + suffix.Length;
+        }
+
+        return builder.ToString();
+    }
+
+    private string ExpandPasteMarkers(string text)
+    {
+        if (_pastes.Count == 0 || string.IsNullOrEmpty(text) || !text.Contains("[paste #", StringComparison.Ordinal))
+        {
+            return text;
+        }
+
+        foreach (var (pasteId, pasteText) in _pastes)
+        {
+            var lineMarker = $"[paste #{pasteId} +";
+            var charMarker = $"[paste #{pasteId} ";
+            var index = 0;
+            while (index < text.Length)
+            {
+                var markerStart = text.IndexOf($"[paste #{pasteId} ", index, StringComparison.Ordinal);
+                if (markerStart < 0)
+                {
+                    break;
+                }
+
+                var markerEnd = text.IndexOf(']', markerStart);
+                if (markerEnd < 0)
+                {
+                    break;
+                }
+
+                var marker = text[markerStart..(markerEnd + 1)];
+                if ((marker.StartsWith(lineMarker, StringComparison.Ordinal) &&
+                     marker.EndsWith(" lines]", StringComparison.Ordinal)) ||
+                    (marker.StartsWith(charMarker, StringComparison.Ordinal) &&
+                     marker.EndsWith(" chars]", StringComparison.Ordinal)))
+                {
+                    text = text[..markerStart] + pasteText + text[(markerEnd + 1)..];
+                    index = markerStart + pasteText.Length;
+                    continue;
+                }
+
+                index = markerEnd + 1;
+            }
+        }
+
+        return text;
     }
 
     private bool TryHandleYankShortcut(ConsoleKeyInfo key, List<char> chars, ref int cursor)

@@ -7,7 +7,7 @@ public interface ITuiRawInputReader
     ValueTask<string> ReadInputAsync(CancellationToken cancellationToken = default);
 }
 
-public sealed class TuiDecodedKeyReader(ITuiRawInputReader reader) : IConsoleKeyReader, IDisposable
+public sealed class TuiDecodedKeyReader(ITuiRawInputReader reader) : IConsoleInputEventReader, IDisposable
 {
     private readonly ITuiRawInputReader _reader = reader ?? throw new ArgumentNullException(nameof(reader));
 
@@ -15,12 +15,45 @@ public sealed class TuiDecodedKeyReader(ITuiRawInputReader reader) : IConsoleKey
     {
         while (true)
         {
-            var input = await _reader.ReadInputAsync(cancellationToken).ConfigureAwait(false);
-            if (TuiConsoleKeyInfoMapper.TryMapInput(input, out var key))
+            var inputEvent = await ReadInputEventAsync(cancellationToken).ConfigureAwait(false);
+            if (inputEvent.Kind == ConsoleInputEventKind.KeyPress)
             {
-                return key;
+                return inputEvent.Key;
             }
         }
+    }
+
+    public async ValueTask<ConsoleInputEvent> ReadInputEventAsync(CancellationToken cancellationToken = default)
+    {
+        while (true)
+        {
+            var input = await _reader.ReadInputAsync(cancellationToken).ConfigureAwait(false);
+            if (TryParseBracketedPaste(input, out var pasteText))
+            {
+                return ConsoleInputEvent.Paste(pasteText);
+            }
+
+            if (TuiConsoleKeyInfoMapper.TryMapInput(input, out var key))
+            {
+                return ConsoleInputEvent.KeyPress(key);
+            }
+        }
+    }
+
+    internal static bool TryParseBracketedPaste(string input, out string text)
+    {
+        const string start = "\u001b[200~";
+        const string end = "\u001b[201~";
+        text = string.Empty;
+        if (string.IsNullOrEmpty(input) ||
+            !input.StartsWith(start, StringComparison.Ordinal) ||
+            !input.EndsWith(end, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        text = input[start.Length..^end.Length];
+        return true;
     }
 
     public void Dispose()

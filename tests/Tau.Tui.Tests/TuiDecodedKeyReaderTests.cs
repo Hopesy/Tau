@@ -80,6 +80,19 @@ public sealed class TuiDecodedKeyReaderTests : IDisposable
     }
 
     [Fact]
+    public async Task DecodedKeyReader_ReturnsBracketedPasteAsInputEvent()
+    {
+        var rawReader = new FakeRawInputReader();
+        rawReader.Enqueue("\u001b[200~hello\nworld\u001b[201~");
+        using var reader = new TuiDecodedKeyReader(rawReader);
+
+        var inputEvent = await reader.ReadInputEventAsync();
+
+        Assert.Equal(ConsoleInputEventKind.Paste, inputEvent.Kind);
+        Assert.Equal("hello\nworld", inputEvent.PasteText);
+    }
+
+    [Fact]
     public async Task SystemConsoleKeyReader_CreateRawUsesDecodedInputPath()
     {
         await using var stream = new MemoryStream(Encoding.UTF8.GetBytes("\u001b[99;5u"));
