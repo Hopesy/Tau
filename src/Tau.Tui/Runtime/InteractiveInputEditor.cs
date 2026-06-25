@@ -40,6 +40,10 @@ public sealed class InteractiveInputEditor
     public InputHistory History => _history;
     public IKeyBindingMap KeyBindings => _bindings;
 
+    public string GetCollapsedDraft() => _buffer.Draft;
+
+    public string GetExpandedDraft() => ExpandPasteMarkers(_buffer.Draft);
+
     public void SetKeyBindings(IKeyBindingMap bindings)
     {
         _bindings = bindings;
@@ -70,7 +74,7 @@ public sealed class InteractiveInputEditor
         _pastes.Clear();
         _pasteCounter = 0;
         ResetTransientEditAction();
-        _renderer.Render(new string(chars.ToArray()), cursor);
+        RenderDraft(chars, cursor);
 
         while (true)
         {
@@ -85,7 +89,7 @@ public sealed class InteractiveInputEditor
                     historyOffset = -1;
                     preferredVerticalColumn = null;
                     ResetTransientEditAction();
-                    _renderer.Render(new string(chars.ToArray()), cursor);
+                    RenderDraft(chars, cursor);
                 }
 
                 continue;
@@ -95,7 +99,7 @@ public sealed class InteractiveInputEditor
             if (_shortcutHandler is not null &&
                 await _shortcutHandler(key, cancellationToken).ConfigureAwait(false))
             {
-                _renderer.Render(new string(chars.ToArray()), cursor);
+                RenderDraft(chars, cursor);
                 continue;
             }
 
@@ -109,7 +113,7 @@ public sealed class InteractiveInputEditor
                 historyOffset = -1;
                 preferredVerticalColumn = null;
                 ResetTransientEditAction();
-                _renderer.Render(new string(chars.ToArray()), cursor);
+                RenderDraft(chars, cursor);
                 continue;
             }
 
@@ -118,7 +122,7 @@ public sealed class InteractiveInputEditor
                 historyOffset = -1;
                 preferredVerticalColumn = null;
                 ResetTransientEditAction();
-                _renderer.Render(new string(chars.ToArray()), cursor);
+                RenderDraft(chars, cursor);
                 continue;
             }
 
@@ -130,7 +134,7 @@ public sealed class InteractiveInputEditor
                     PushUndoIfChanged(undoStack, undoState, chars, cursor);
                     historyOffset = -1;
                     preferredVerticalColumn = null;
-                    _renderer.Render(new string(chars.ToArray()), cursor);
+                    RenderDraft(chars, cursor);
                     continue;
                 }
             }
@@ -196,7 +200,7 @@ public sealed class InteractiveInputEditor
                     }
 
                     _renderer.WritePrompt(prompt, promptColor);
-                    _renderer.Render(new string(chars.ToArray()), cursor);
+                    RenderDraft(chars, cursor);
                     continue;
                 }
                 case EditorAction.Complete:
@@ -469,8 +473,15 @@ public sealed class InteractiveInputEditor
                     break;
             }
 
-            _renderer.Render(new string(chars.ToArray()), cursor);
+            RenderDraft(chars, cursor);
         }
+    }
+
+    private void RenderDraft(IReadOnlyList<char> chars, int cursor)
+    {
+        var collapsed = new string(chars.ToArray());
+        _buffer.SetDraft(collapsed);
+        _renderer.Render(collapsed, Math.Clamp(cursor, 0, chars.Count));
     }
 
     private static bool TryHandleUndoShortcut(

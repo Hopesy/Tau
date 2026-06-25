@@ -116,6 +116,39 @@ public sealed class InteractiveInputEditorTests
         Assert.Equal(paste + "X", result.Text);
     }
 
+    [Fact]
+    public async Task GetExpandedDraft_ExpandsPasteMarkersBeforeSubmit()
+    {
+        var paste = CreateLargePaste();
+        var reader = new FakeInputEventReader();
+        reader.EnqueuePaste(paste);
+        reader.EnqueueRaw(new ConsoleKeyInfo('\x18', ConsoleKey.X, shift: false, alt: false, control: true));
+        reader.EnqueueKey(ConsoleKey.Enter);
+
+        var renderer = new FakeRenderer();
+        InteractiveInputEditor? editor = null;
+        string? collapsedDraft = null;
+        string? expandedDraft = null;
+        editor = new InteractiveInputEditor(reader, renderer);
+        editor.SetShortcutHandler((key, _) =>
+        {
+            if (key.Key != ConsoleKey.X || (key.Modifiers & ConsoleModifiers.Control) == 0)
+            {
+                return Task.FromResult(false);
+            }
+
+            collapsedDraft = editor.GetCollapsedDraft();
+            expandedDraft = editor.GetExpandedDraft();
+            return Task.FromResult(true);
+        });
+
+        var result = await editor.ReadLineAsync("> ");
+
+        Assert.Equal(paste, result.Text);
+        Assert.Equal("[paste #1 +11 lines]", collapsedDraft);
+        Assert.Equal(paste, expandedDraft);
+    }
+
     [Theory]
     [InlineData(ConsoleKey.Backspace, false)]
     [InlineData(ConsoleKey.Delete, true)]
