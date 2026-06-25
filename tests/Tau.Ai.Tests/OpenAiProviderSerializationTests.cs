@@ -742,6 +742,37 @@ public sealed class OpenAiProviderSerializationTests
     }
 
     [Fact]
+    public async Task Stream_WithToolHistoryAndNoCurrentTools_EmitsEmptyToolsArray()
+    {
+        using var handler = new StubHandler();
+        using var client = new HttpClient(handler);
+        var provider = new OpenAiProvider(client);
+        var model = new Model
+        {
+            Id = "gpt-5.4",
+            Name = "GPT-5.4",
+            Api = "openai-chat-completions",
+            Provider = "openai",
+            BaseUrl = "https://example.invalid/v1"
+        };
+        var context = new LlmContext(
+            null,
+            [
+                new UserMessage("use the tool"),
+                new AssistantMessage([new ToolCallContent("call_1", "noop", "{}")]),
+                new ToolResultMessage("call_1", [new TextContent("done")]) { ToolName = "noop" }
+            ],
+            []);
+
+        await DrainAsync(provider.StreamSimple(model, context, new SimpleStreamOptions { ApiKey = "test-key" }));
+
+        using var doc = JsonDocument.Parse(handler.CapturedBody!);
+        var tools = doc.RootElement.GetProperty("tools");
+        Assert.Equal(JsonValueKind.Array, tools.ValueKind);
+        Assert.Equal(0, tools.GetArrayLength());
+    }
+
+    [Fact]
     public async Task Stream_ParsesToolArgumentDeltasUsageAndContentIndexes()
     {
         using var handler = new StubHandler

@@ -204,6 +204,10 @@ internal sealed class OpenAiCompatibleProvider : IStreamProvider
         {
             body["tools"] = OpenAi.OpenAiMessageConverter.ConvertTools(context.Tools);
         }
+        else if (OpenAi.OpenAiMessageConverter.HasToolHistory(context.Messages))
+        {
+            body["tools"] = new List<object>();
+        }
 
         if (options.Temperature.HasValue)
         {

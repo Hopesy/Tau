@@ -181,6 +181,10 @@ public sealed class OpenAiProvider : IStreamProvider
                 body["tool_stream"] = true;
             }
         }
+        else if (OpenAiMessageConverter.HasToolHistory(context.Messages))
+        {
+            tools = [];
+        }
 
         if (cacheControl is not null)
         {

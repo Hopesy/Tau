@@ -8,6 +8,12 @@ namespace Tau.Ai.Providers.OpenAi;
 /// </summary>
 internal static class OpenAiMessageConverter
 {
+    public static bool HasToolHistory(IReadOnlyList<ChatMessage> messages) =>
+        messages.Any(static message =>
+            message is ToolResultMessage ||
+            message is AssistantMessage assistant &&
+            assistant.Content.Any(static block => block is ToolCallContent));
+
     public static JsonElement ConvertMessages(
         IReadOnlyList<ChatMessage> messages,
         bool supportsImages = true,
