@@ -125,7 +125,13 @@ public static class GeneratedBuiltInModels
             OpenRouterRouting = ParseObjectDictionary(compat, "openRouterRouting"),
             VercelGatewayRouting = ParseVercelGatewayRouting(compat, "vercelGatewayRouting"),
             ZaiToolStream = GetBool(compat, "zaiToolStream"),
-            SupportsStrictMode = GetBool(compat, "supportsStrictMode")
+            SupportsStrictMode = GetBool(compat, "supportsStrictMode"),
+            SendSessionAffinityHeaders = GetBool(compat, "sendSessionAffinityHeaders"),
+            SupportsLongCacheRetention = GetBool(compat, "supportsLongCacheRetention"),
+            SupportsTemperature = GetBool(compat, "supportsTemperature"),
+            ForceAdaptiveThinking = GetBool(compat, "forceAdaptiveThinking"),
+            SupportsEagerToolInputStreaming = GetBool(compat, "supportsEagerToolInputStreaming"),
+            SupportsCacheControlOnTools = GetBool(compat, "supportsCacheControlOnTools")
         };
 
         return parsed;

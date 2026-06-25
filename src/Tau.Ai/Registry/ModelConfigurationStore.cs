@@ -435,7 +435,13 @@ public sealed class ModelConfigurationStore
             OpenRouterRouting = ParseObjectDictionary(compat, "openRouterRouting"),
             VercelGatewayRouting = ParseVercelGatewayRouting(compat, "vercelGatewayRouting"),
             ZaiToolStream = GetBool(compat, "zaiToolStream"),
-            SupportsStrictMode = GetBool(compat, "supportsStrictMode")
+            SupportsStrictMode = GetBool(compat, "supportsStrictMode"),
+            SendSessionAffinityHeaders = GetBool(compat, "sendSessionAffinityHeaders"),
+            SupportsLongCacheRetention = GetBool(compat, "supportsLongCacheRetention"),
+            SupportsTemperature = GetBool(compat, "supportsTemperature"),
+            ForceAdaptiveThinking = GetBool(compat, "forceAdaptiveThinking"),
+            SupportsEagerToolInputStreaming = GetBool(compat, "supportsEagerToolInputStreaming"),
+            SupportsCacheControlOnTools = GetBool(compat, "supportsCacheControlOnTools")
         };
     }
 
@@ -467,7 +473,13 @@ public sealed class ModelConfigurationStore
             OpenRouterRouting = MergeObjectDictionaries(baseCompat.OpenRouterRouting, overrideCompat.OpenRouterRouting),
             VercelGatewayRouting = MergeVercelGatewayRouting(baseCompat.VercelGatewayRouting, overrideCompat.VercelGatewayRouting),
             ZaiToolStream = overrideCompat.ZaiToolStream ?? baseCompat.ZaiToolStream,
-            SupportsStrictMode = overrideCompat.SupportsStrictMode ?? baseCompat.SupportsStrictMode
+            SupportsStrictMode = overrideCompat.SupportsStrictMode ?? baseCompat.SupportsStrictMode,
+            SendSessionAffinityHeaders = overrideCompat.SendSessionAffinityHeaders ?? baseCompat.SendSessionAffinityHeaders,
+            SupportsLongCacheRetention = overrideCompat.SupportsLongCacheRetention ?? baseCompat.SupportsLongCacheRetention,
+            SupportsTemperature = overrideCompat.SupportsTemperature ?? baseCompat.SupportsTemperature,
+            ForceAdaptiveThinking = overrideCompat.ForceAdaptiveThinking ?? baseCompat.ForceAdaptiveThinking,
+            SupportsEagerToolInputStreaming = overrideCompat.SupportsEagerToolInputStreaming ?? baseCompat.SupportsEagerToolInputStreaming,
+            SupportsCacheControlOnTools = overrideCompat.SupportsCacheControlOnTools ?? baseCompat.SupportsCacheControlOnTools
         };
     }
 

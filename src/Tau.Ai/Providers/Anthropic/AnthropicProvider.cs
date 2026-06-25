@@ -100,6 +100,7 @@ public sealed class AnthropicProvider : IStreamProvider
         if (BuildAnthropicBetaHeader(model, options as AnthropicOptions) is { } betaHeader)
             request.Headers.TryAddWithoutValidation("anthropic-beta", betaHeader);
 
+        ApplySessionAffinityHeader(request, model, options);
         ApplyHeaders(request, model.Headers);
         ApplyHeaders(request, options.Headers);
 
@@ -167,7 +168,7 @@ public sealed class AnthropicProvider : IStreamProvider
 
         var thinking = BuildThinking(model, options, reasoning);
 
-        if (options.Temperature.HasValue && !ThinkingIsEnabled(thinking))
+        if (options.Temperature.HasValue && !ThinkingIsEnabled(thinking) && model.Compat?.SupportsTemperature != false)
             body["temperature"] = options.Temperature.Value;
         if (options.TopP.HasValue)
             body["top_p"] = options.TopP.Value;
@@ -230,7 +231,7 @@ public sealed class AnthropicProvider : IStreamProvider
                     ? "summarized"
                     : anthropicOptions.ThinkingDisplay!;
 
-                if (SupportsAdaptiveThinking(model.Id))
+                if (UsesAdaptiveThinking(model))
                     return new Dictionary<string, object>
                     {
                         ["type"] = "adaptive",
@@ -249,7 +250,7 @@ public sealed class AnthropicProvider : IStreamProvider
         if (!reasoning.HasValue)
             return null;
 
-        if (SupportsAdaptiveThinking(model.Id))
+        if (UsesAdaptiveThinking(model))
             return new Dictionary<string, object>
             {
                 ["type"] = "adaptive",
@@ -299,11 +300,14 @@ public sealed class AnthropicProvider : IStreamProvider
 
     private static string? BuildAnthropicBetaHeader(Model model, AnthropicOptions? options)
     {
-        if (options?.InterleavedThinking != true || SupportsAdaptiveThinking(model.Id))
+        if (options?.InterleavedThinking != true || UsesAdaptiveThinking(model))
             return null;
 
         return InterleavedThinkingBeta;
     }
+
+    private static bool UsesAdaptiveThinking(Model model) =>
+        model.Compat?.ForceAdaptiveThinking == true || SupportsAdaptiveThinking(model.Id);
 
     private static bool SupportsAdaptiveThinking(string modelId) =>
         modelId.Contains("opus-4-6", StringComparison.OrdinalIgnoreCase) ||
@@ -330,6 +334,16 @@ public sealed class AnthropicProvider : IStreamProvider
         };
 
         return value is not null;
+    }
+
+    private static void ApplySessionAffinityHeader(HttpRequestMessage request, Model model, StreamOptions options)
+    {
+        if (model.Compat?.SendSessionAffinityHeaders == true &&
+            !string.IsNullOrWhiteSpace(options.SessionId))
+        {
+            request.Headers.Remove("x-session-affinity");
+            request.Headers.TryAddWithoutValidation("x-session-affinity", options.SessionId);
+        }
     }
 }
 

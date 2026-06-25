@@ -77,6 +77,7 @@ public sealed class OpenAiProvider : IStreamProvider
         if (!string.IsNullOrEmpty(apiKey))
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
 
+        ApplySessionAffinityHeader(request, model, options);
         ApplyHeaders(request, model.Headers);
         ApplyHeaders(request, options.Headers);
 
@@ -180,7 +181,7 @@ public sealed class OpenAiProvider : IStreamProvider
             }
         }
 
-        if (options.Temperature.HasValue)
+        if (options.Temperature.HasValue && compatibility.SupportsTemperature)
             body["temperature"] = options.Temperature.Value;
         if (options.MaxTokens.HasValue)
             body[compatibility.MaxTokensField] = options.MaxTokens.Value;
@@ -386,7 +387,8 @@ public sealed class OpenAiProvider : IStreamProvider
             OpenRouterRouting = compat?.OpenRouterRouting,
             VercelGatewayRouting = compat?.VercelGatewayRouting,
             ZaiToolStream = compat?.ZaiToolStream ?? false,
-            SupportsStrictMode = compat?.SupportsStrictMode ?? false
+            SupportsStrictMode = compat?.SupportsStrictMode ?? false,
+            SupportsTemperature = compat?.SupportsTemperature ?? true
         };
     }
 
@@ -421,6 +423,17 @@ public sealed class OpenAiProvider : IStreamProvider
         public VercelGatewayRouting? VercelGatewayRouting { get; init; }
         public bool ZaiToolStream { get; init; }
         public bool SupportsStrictMode { get; init; }
+        public bool SupportsTemperature { get; init; } = true;
+    }
+
+    private static void ApplySessionAffinityHeader(HttpRequestMessage request, Model model, StreamOptions options)
+    {
+        if (model.Compat?.SendSessionAffinityHeaders == true &&
+            !string.IsNullOrWhiteSpace(options.SessionId))
+        {
+            request.Headers.Remove("x-session-affinity");
+            request.Headers.TryAddWithoutValidation("x-session-affinity", options.SessionId);
+        }
     }
 }
 

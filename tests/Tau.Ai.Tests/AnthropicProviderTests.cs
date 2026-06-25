@@ -85,6 +85,50 @@ public sealed class AnthropicProviderTests
     }
 
     [Fact]
+    public async Task Stream_WithMixedProviderCompatibility_AddsSessionAffinityAndForcesAdaptiveThinking()
+    {
+        using var handler = new OpenAiResponsesProviderTests.StubHandler(_ => new HttpResponseMessage(HttpStatusCode.BadRequest)
+        {
+            Content = new StringContent("stop after payload", Encoding.UTF8, "text/plain")
+        });
+        using var client = new HttpClient(handler);
+        var provider = new AnthropicProvider(client);
+
+        var model = BuildModel("accounts/fireworks/models/kimi-k2p6", reasoning: true) with
+        {
+            Provider = "fireworks",
+            BaseUrl = "https://api.fireworks.ai/inference",
+            Compat = new ModelCompatibility
+            {
+                SendSessionAffinityHeaders = true,
+                ForceAdaptiveThinking = true,
+                SupportsTemperature = false
+            }
+        };
+
+        await OpenAiResponsesProviderTests.CollectAsync(provider.Stream(
+            model,
+            new LlmContext { Messages = [new UserMessage("think")] },
+            new AnthropicOptions
+            {
+                ApiKey = "fireworks-key",
+                SessionId = "session-123",
+                ThinkingEnabled = true,
+                Effort = "high",
+                Temperature = 0.8f,
+                InterleavedThinking = true
+            }));
+
+        using var doc = JsonDocument.Parse(handler.CapturedBody);
+        var root = doc.RootElement;
+        Assert.Equal("adaptive", root.GetProperty("thinking").GetProperty("type").GetString());
+        Assert.Equal("high", root.GetProperty("output_config").GetProperty("effort").GetString());
+        Assert.False(root.TryGetProperty("temperature", out _));
+        Assert.False(handler.Requests[0].Headers.Contains("anthropic-beta"));
+        Assert.Equal("session-123", handler.Requests[0].Headers.GetValues("x-session-affinity").Single());
+    }
+
+    [Fact]
     public async Task Stream_AddsDisabledThinkingAndAllowsTemperature()
     {
         using var handler = new OpenAiResponsesProviderTests.StubHandler(_ => new HttpResponseMessage(HttpStatusCode.BadRequest)

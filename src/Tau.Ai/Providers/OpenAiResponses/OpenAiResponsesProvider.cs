@@ -89,6 +89,7 @@ public sealed class OpenAiResponsesProvider : IStreamProvider
             Content = new StringContent(json, Encoding.UTF8, "application/json")
         };
         ApplyAuthHeader(request, options.ApiKey);
+        ApplySessionAffinityHeader(request, model, options);
         ApplyHeaders(request, model.Headers);
         ApplyHeaders(request, ResolveDynamicHeaders(model, context));
         ApplyHeaders(request, options.Headers);
@@ -192,6 +193,16 @@ public sealed class OpenAiResponsesProvider : IStreamProvider
         }
 
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
+    }
+
+    private static void ApplySessionAffinityHeader(HttpRequestMessage request, Model model, StreamOptions options)
+    {
+        if (model.Compat?.SendSessionAffinityHeaders == true &&
+            !string.IsNullOrWhiteSpace(options.SessionId))
+        {
+            request.Headers.Remove("x-session-affinity");
+            request.Headers.TryAddWithoutValidation("x-session-affinity", options.SessionId);
+        }
     }
 
     private static void ApplyHeaders(HttpRequestMessage request, IDictionary<string, string>? headers)

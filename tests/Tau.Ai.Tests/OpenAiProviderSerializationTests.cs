@@ -250,6 +250,47 @@ public sealed class OpenAiProviderSerializationTests
     }
 
     [Fact]
+    public async Task StreamSimple_WithOpenAiCompatProviderCompatibility_AddsSessionAffinityAndSkipsTemperature()
+    {
+        using var handler = new StubHandler();
+        using var client = new HttpClient(handler);
+        var provider = new OpenAiProvider(client);
+
+        var model = new Model
+        {
+            Id = "workers-ai/@cf/moonshotai/kimi-k2.6",
+            Name = "Kimi K2.6",
+            Api = "openai-chat-completions",
+            Provider = "cloudflare-ai-gateway",
+            BaseUrl = "https://gateway.ai.cloudflare.com/v1/account/gateway/compat",
+            Reasoning = true,
+            Compat = new ModelCompatibility
+            {
+                SendSessionAffinityHeaders = true,
+                SupportsTemperature = false,
+                MaxTokensField = "max_tokens"
+            }
+        };
+
+        await DrainAsync(provider.StreamSimple(
+            model,
+            new LlmContext { Messages = [new UserMessage("hello")] },
+            new SimpleStreamOptions
+            {
+                ApiKey = "test-key",
+                SessionId = "session-456",
+                Temperature = 0.7f,
+                MaxTokens = 42
+            }));
+
+        using var doc = JsonDocument.Parse(handler.CapturedBody!);
+        var root = doc.RootElement;
+        Assert.Equal(42, root.GetProperty("max_tokens").GetInt32());
+        Assert.False(root.TryGetProperty("temperature", out _));
+        Assert.Equal("session-456", handler.SawRequests[0].Headers.GetValues("x-session-affinity").Single());
+    }
+
+    [Fact]
     public async Task StreamSimple_WithReasoningContentCompatibility_AddsAssistantReasoningContent()
     {
         using var handler = new StubHandler();

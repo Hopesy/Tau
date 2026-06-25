@@ -301,6 +301,7 @@ public static class OpenAiResponsesShared
         }
 
         if (options.CacheRetention == CacheRetention.Long &&
+            model.Compat?.SupportsLongCacheRetention != false &&
             (string.IsNullOrWhiteSpace(model.BaseUrl) ||
              model.BaseUrl.Contains("api.openai.com", StringComparison.OrdinalIgnoreCase)))
         {

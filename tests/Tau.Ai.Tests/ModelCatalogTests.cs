@@ -31,6 +31,9 @@ public sealed class ModelCatalogTests
         Assert.Contains("nvidia", providers);
         Assert.Contains("huggingface", providers);
         Assert.Contains("cloudflare-workers-ai", providers);
+        Assert.Contains("cloudflare-ai-gateway", providers);
+        Assert.Contains("fireworks", providers);
+        Assert.Contains("opencode", providers);
         Assert.Contains("ant-ling", providers);
     }
 
@@ -51,6 +54,9 @@ public sealed class ModelCatalogTests
         var together = catalog.GetModel("together", "moonshotai/Kimi-K2.6");
         var xai = catalog.GetModel("xai", "grok-4.3");
         var zai = catalog.GetModel("zai", "glm-4.7");
+        var opencode = catalog.GetModel("opencode", "claude-sonnet-4-6");
+        var fireworks = catalog.GetModel("fireworks", "accounts/fireworks/models/kimi-k2p6");
+        var cloudflareAiGateway = catalog.GetModel("cloudflare-ai-gateway", "claude-sonnet-4-6");
 
         Assert.Equal("azure-openai-responses", azure.Api);
         Assert.Equal(128_000, azure.MaxOutputTokens);
@@ -88,6 +94,19 @@ public sealed class ModelCatalogTests
         Assert.Equal("openai-chat-completions", zai.Api);
         Assert.Equal("https://api.z.ai/api/coding/paas/v4", zai.BaseUrl);
         Assert.True(zai.Compat!.ZaiToolStream);
+        Assert.Equal("anthropic-messages", opencode.Api);
+        Assert.Equal("https://opencode.ai/zen", opencode.BaseUrl);
+        Assert.True(opencode.Compat!.ForceAdaptiveThinking);
+        Assert.Equal("anthropic-messages", fireworks.Api);
+        Assert.Equal("https://api.fireworks.ai/inference", fireworks.BaseUrl);
+        Assert.True(fireworks.Compat!.SendSessionAffinityHeaders);
+        Assert.False(fireworks.Compat.SupportsLongCacheRetention);
+        Assert.False(fireworks.Compat.SupportsEagerToolInputStreaming);
+        Assert.False(fireworks.Compat.SupportsCacheControlOnTools);
+        Assert.Equal("anthropic-messages", cloudflareAiGateway.Api);
+        Assert.Contains("{CLOUDFLARE_ACCOUNT_ID}", cloudflareAiGateway.BaseUrl);
+        Assert.True(cloudflareAiGateway.Compat!.SendSessionAffinityHeaders);
+        Assert.True(cloudflareAiGateway.Compat.ForceAdaptiveThinking);
     }
 
     [Fact]
@@ -106,6 +125,9 @@ public sealed class ModelCatalogTests
         var openrouterIds = catalog.GetModels("openrouter").Select(model => model.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var xaiIds = catalog.GetModels("xai").Select(model => model.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var xiaomiIds = catalog.GetModels("xiaomi").Select(model => model.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var opencodeIds = catalog.GetModels("opencode").Select(model => model.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var fireworksIds = catalog.GetModels("fireworks").Select(model => model.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var cloudflareAiGatewayIds = catalog.GetModels("cloudflare-ai-gateway").Select(model => model.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
 
         Assert.Contains("gpt-4.1", azureIds);
         Assert.Contains("gpt-4-turbo", azureIds);
@@ -131,6 +153,12 @@ public sealed class ModelCatalogTests
         Assert.Contains("openai/gpt-oss-120b", openrouterIds);
         Assert.Contains("grok-4.3", xaiIds);
         Assert.Contains("mimo-v2.5-pro", xiaomiIds);
+        Assert.Contains("claude-sonnet-4-6", opencodeIds);
+        Assert.Contains("gpt-5.4", opencodeIds);
+        Assert.Contains("accounts/fireworks/models/kimi-k2p6", fireworksIds);
+        Assert.Contains("accounts/fireworks/models/glm-5p2", fireworksIds);
+        Assert.Contains("claude-sonnet-4-6", cloudflareAiGatewayIds);
+        Assert.Contains("workers-ai/@cf/moonshotai/kimi-k2.6", cloudflareAiGatewayIds);
     }
 
     [Fact]
@@ -146,6 +174,9 @@ public sealed class ModelCatalogTests
         var groqReference = catalog.ResolveSelection(modelHint: "groq/openai/gpt-oss-120b");
         var openrouterDefault = catalog.ResolveSelection(providerHint: "openrouter");
         var xaiDefault = catalog.ResolveSelection(providerHint: "xai");
+        var opencodeDefault = catalog.ResolveSelection(providerHint: "opencode");
+        var fireworksDefault = catalog.ResolveSelection(providerHint: "fireworks");
+        var cloudflareAiGatewayDefault = catalog.ResolveSelection(providerHint: "cloudflare-ai-gateway");
 
         Assert.Equal("openai", implicitDefault.Provider);
         Assert.Equal("gpt-5.4", implicitDefault.ModelId);
@@ -161,6 +192,12 @@ public sealed class ModelCatalogTests
         Assert.Equal("anthropic/claude-sonnet-4.6", openrouterDefault.ModelId);
         Assert.Equal("xai", xaiDefault.Provider);
         Assert.Equal("grok-4.3", xaiDefault.ModelId);
+        Assert.Equal("opencode", opencodeDefault.Provider);
+        Assert.Equal("claude-sonnet-4-6", opencodeDefault.ModelId);
+        Assert.Equal("fireworks", fireworksDefault.Provider);
+        Assert.Equal("accounts/fireworks/models/kimi-k2p6", fireworksDefault.ModelId);
+        Assert.Equal("cloudflare-ai-gateway", cloudflareAiGatewayDefault.Provider);
+        Assert.Equal("claude-sonnet-4-6", cloudflareAiGatewayDefault.ModelId);
     }
 
     [Fact]

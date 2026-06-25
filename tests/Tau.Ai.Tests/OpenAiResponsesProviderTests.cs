@@ -121,6 +121,44 @@ public sealed class OpenAiResponsesProviderTests
     }
 
     [Fact]
+    public async Task Stream_WithCompatibility_AddsSessionAffinityAndSkipsLongCacheRetention()
+    {
+        var sessionId = "response-session";
+        using var handler = new StubHandler(_ => SseResponse(
+            """
+            data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}
+
+            """));
+        using var client = new HttpClient(handler);
+        var provider = new OpenAiResponsesProvider(client);
+        var model = BuildResponsesModel() with
+        {
+            Provider = "cloudflare-ai-gateway",
+            BaseUrl = "https://gateway.ai.cloudflare.com/v1/account/gateway/openai",
+            Compat = new ModelCompatibility
+            {
+                SendSessionAffinityHeaders = true,
+                SupportsLongCacheRetention = false
+            }
+        };
+
+        _ = await CollectAsync(provider.Stream(
+            model,
+            new LlmContext { Messages = [new UserMessage("hi")] },
+            new OpenAiResponsesOptions
+            {
+                ApiKey = "test-key",
+                CacheRetention = CacheRetention.Long,
+                SessionId = sessionId
+            }));
+
+        using var body = JsonDocument.Parse(handler.CapturedBody);
+        Assert.Equal(sessionId, body.RootElement.GetProperty("prompt_cache_key").GetString());
+        Assert.False(body.RootElement.TryGetProperty("prompt_cache_retention", out _));
+        Assert.Equal(sessionId, handler.Requests[0].Headers.GetValues("x-session-affinity").Single());
+    }
+
+    [Fact]
     public async Task Stream_AppliesServiceTierFromRequestAndResponseToUsageCost()
     {
         using var handler = new StubHandler(_ => SseResponse(
