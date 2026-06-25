@@ -53,4 +53,39 @@ public sealed class TuiTextTests
         Assert.Equal(string.Empty, strict.Text);
         Assert.Equal(0, strict.Width);
     }
+
+    [Fact]
+    public void NormalizeTerminalOutput_DecomposesThaiAndLaoAmVowels()
+    {
+        Assert.Equal("ก\u0e4d\u0e32 ລ\u0ecd\u0eb2", TuiText.NormalizeTerminalOutput("กำ ລຳ"));
+    }
+
+    [Fact]
+    public void ExtractSegments_PreservesBeforeAndInheritedAfterStyles()
+    {
+        var segments = TuiText.ExtractSegments(
+            "\u001b[31mabcdef\u001b[0m",
+            beforeEnd: 2,
+            afterStart: 3,
+            afterLength: 2);
+
+        Assert.Equal("\u001b[31mab", segments.Before);
+        Assert.Equal(2, segments.BeforeWidth);
+        Assert.Equal("\u001b[31mde", segments.After);
+        Assert.Equal(2, segments.AfterWidth);
+    }
+
+    [Fact]
+    public void ExtractSegments_HandlesWideCharacterAfterBoundary()
+    {
+        var loose = TuiText.ExtractSegments("a表bc", beforeEnd: 1, afterStart: 1, afterLength: 1);
+        var strict = TuiText.ExtractSegments("a表bc", beforeEnd: 1, afterStart: 1, afterLength: 1, strictAfter: true);
+
+        Assert.Equal("a", loose.Before);
+        Assert.Equal(1, loose.BeforeWidth);
+        Assert.Equal("表", loose.After);
+        Assert.Equal(2, loose.AfterWidth);
+        Assert.Equal(string.Empty, strict.After);
+        Assert.Equal(0, strict.AfterWidth);
+    }
 }

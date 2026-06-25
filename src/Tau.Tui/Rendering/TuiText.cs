@@ -95,6 +95,17 @@ public static class TuiText
     public static string NormalizeSingleLine(string? text) =>
         string.Join(' ', (text ?? string.Empty).Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)).Trim();
 
+    public static string NormalizeTerminalOutput(string? text)
+    {
+        if (string.IsNullOrEmpty(text))
+        {
+            return string.Empty;
+        }
+
+        return text.Replace("\u0e33", "\u0e4d\u0e32", StringComparison.Ordinal)
+            .Replace("\u0eb3", "\u0ecd\u0eb2", StringComparison.Ordinal);
+    }
+
     public static IReadOnlyList<string> Wrap(string? text, int width)
     {
         return WrapTextWithAnsi(text, width);
@@ -192,6 +203,93 @@ public static class TuiText
         }
 
         return (result.ToString(), resultWidth);
+    }
+
+    public static (string Before, int BeforeWidth, string After, int AfterWidth) ExtractSegments(
+        string? line,
+        int beforeEnd,
+        int afterStart,
+        int afterLength,
+        bool strictAfter = false)
+    {
+        line ??= string.Empty;
+        beforeEnd = Math.Max(0, beforeEnd);
+        afterStart = Math.Max(0, afterStart);
+        afterLength = Math.Max(0, afterLength);
+
+        var before = new StringBuilder();
+        var after = new StringBuilder();
+        var pendingAnsiBefore = new StringBuilder();
+        var tracker = new AnsiStyleTracker();
+        var beforeWidth = 0;
+        var afterWidth = 0;
+        var currentColumn = 0;
+        var index = 0;
+        var afterStarted = false;
+        var afterEnd = afterStart + afterLength;
+
+        while (index < line.Length)
+        {
+            if (TryReadEscape(line, index, out var escapeLength))
+            {
+                var escape = line.Substring(index, escapeLength);
+                tracker.Process(escape);
+                if (currentColumn < beforeEnd)
+                {
+                    pendingAnsiBefore.Append(escape);
+                }
+                else if (afterStarted && currentColumn >= afterStart && currentColumn < afterEnd)
+                {
+                    after.Append(escape);
+                }
+
+                index += escapeLength;
+                continue;
+            }
+
+            var nextEscape = FindNextEscape(line, index);
+            foreach (var textElement in EnumerateTextElements(line[index..nextEscape]))
+            {
+                var elementWidth = TextElementWidth(textElement);
+
+                if (currentColumn < beforeEnd && currentColumn + elementWidth <= beforeEnd)
+                {
+                    if (pendingAnsiBefore.Length > 0)
+                    {
+                        before.Append(pendingAnsiBefore);
+                        pendingAnsiBefore.Clear();
+                    }
+
+                    before.Append(textElement);
+                    beforeWidth += elementWidth;
+                }
+                else if (afterLength > 0 && currentColumn >= afterStart && currentColumn < afterEnd)
+                {
+                    var fits = !strictAfter || currentColumn + elementWidth <= afterEnd;
+                    if (fits)
+                    {
+                        if (!afterStarted)
+                        {
+                            after.Append(tracker.GetActiveCodes());
+                            afterStarted = true;
+                        }
+
+                        after.Append(textElement);
+                        afterWidth += elementWidth;
+                    }
+                }
+
+                currentColumn += elementWidth;
+                if (afterLength <= 0 ? currentColumn >= beforeEnd : currentColumn >= afterEnd)
+                {
+                    return (before.ToString(), beforeWidth, after.ToString(), afterWidth);
+                }
+            }
+
+            index = nextEscape;
+        }
+
+        return (before.ToString(), beforeWidth, after.ToString(), afterWidth);
     }
 
     private static void WrapLine(string line, int width, List<string> output)
