@@ -1,6 +1,11 @@
 using System.Buffers.Binary;
 using System.IO.Compression;
 using System.Text;
+using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.Formats;
+using SixLabors.ImageSharp.Formats.Jpeg;
+using SixLabors.ImageSharp.PixelFormats;
+using SixLabors.ImageSharp.Processing;
 using Tau.Tui.Rendering;
 
 namespace Tau.CodingAgent.Runtime;
@@ -23,6 +28,7 @@ internal static class CodingAgentImagePreprocessor
     public const int DefaultMaxBase64Bytes = 4_718_592;
 
     private const int MaxDecodedPixels = 50_000_000;
+    private static readonly int[] JpegQualitySteps = [80, 85, 70, 55, 40];
     private static readonly uint[] CrcTable = CreateCrcTable();
 
     public static CodingAgentImagePreprocessResult? Process(
@@ -59,6 +65,17 @@ internal static class CodingAgentImagePreprocessor
                 wasResized: false,
                 originalBytes: bytes.Length,
                 encodedLength);
+        }
+
+        if (TryResizeWithImageSharp(
+            bytes,
+            mimeType,
+            maxWidth,
+            maxHeight,
+            maxBase64Bytes,
+            out var resized))
+        {
+            return resized;
         }
 
         if (!mimeType.Equals("image/png", StringComparison.OrdinalIgnoreCase) ||
@@ -167,6 +184,106 @@ internal static class CodingAgentImagePreprocessor
         }
 
         return new TuiImageDimensions(width, height);
+    }
+
+    private static bool TryResizeWithImageSharp(
+        byte[] bytes,
+        string mimeType,
+        int maxWidth,
+        int maxHeight,
+        long maxBase64Bytes,
+        out CodingAgentImagePreprocessResult? result)
+    {
+        result = null;
+        if (!IsImageSharpResizableMimeType(mimeType))
+        {
+            return false;
+        }
+
+        try
+        {
+            using var image = Image.Load<Rgba32>(bytes);
+            image.Mutate(static context => context.AutoOrient());
+
+            var original = new TuiImageDimensions(image.Width, image.Height);
+            var target = CalculateTargetDimensions(original, maxWidth, maxHeight);
+            var currentWidth = target.WidthPx;
+            var currentHeight = target.HeightPx;
+
+            while (true)
+            {
+                using var resized = image.Clone(context =>
+                    context.Resize(currentWidth, currentHeight, KnownResamplers.Lanczos3));
+                foreach (var candidate in EncodeCandidates(resized))
+                {
+                    if (candidate.Data.Length < maxBase64Bytes)
+                    {
+                        result = CreateResult(
+                            candidate.Data,
+                            candidate.MimeType,
+                            original,
+                            new TuiImageDimensions(currentWidth, currentHeight),
+                            wasResized: true,
+                            originalBytes: bytes.Length,
+                            candidate.Data.Length);
+                        return true;
+                    }
+                }
+
+                if (currentWidth == 1 && currentHeight == 1)
+                {
+                    return false;
+                }
+
+                var nextWidth = currentWidth == 1 ? 1 : Math.Max(1, (int)Math.Floor(currentWidth * 0.75));
+                var nextHeight = currentHeight == 1 ? 1 : Math.Max(1, (int)Math.Floor(currentHeight * 0.75));
+                if (nextWidth == currentWidth && nextHeight == currentHeight)
+                {
+                    return false;
+                }
+
+                currentWidth = nextWidth;
+                currentHeight = nextHeight;
+            }
+        }
+        catch (Exception ex) when (
+            ex is UnknownImageFormatException or
+                InvalidImageContentException or
+                NotSupportedException or
+                InvalidOperationException or
+                ArgumentException)
+        {
+            return false;
+        }
+    }
+
+    private static bool IsImageSharpResizableMimeType(string mimeType) =>
+        mimeType.Equals("image/png", StringComparison.OrdinalIgnoreCase) ||
+        mimeType.Equals("image/jpeg", StringComparison.OrdinalIgnoreCase) ||
+        mimeType.Equals("image/webp", StringComparison.OrdinalIgnoreCase);
+
+    private static IEnumerable<EncodedImageCandidate> EncodeCandidates(Image<Rgba32> image)
+    {
+        yield return EncodePngCandidate(image);
+        foreach (var quality in JpegQualitySteps)
+        {
+            yield return EncodeJpegCandidate(image, quality);
+        }
+    }
+
+    private static EncodedImageCandidate EncodePngCandidate(Image<Rgba32> image)
+    {
+        var rgba = new byte[checked(image.Width * image.Height * 4)];
+        image.CopyPixelDataTo(rgba);
+        var bytes = EncodePngOptimized(rgba, image.Width, image.Height);
+        return new EncodedImageCandidate(Convert.ToBase64String(bytes), "image/png");
+    }
+
+    private static EncodedImageCandidate EncodeJpegCandidate(Image<Rgba32> image, int quality)
+    {
+        using var output = new MemoryStream();
+        image.SaveAsJpeg(output, new JpegEncoder { Quality = quality });
+        return new EncodedImageCandidate(Convert.ToBase64String(output.ToArray()), "image/jpeg");
     }
 
     private static TuiImageDimensions? GetOrientedDimensions(byte[] bytes, string base64, string mimeType)
@@ -771,4 +888,6 @@ internal static class CodingAgentImagePreprocessor
     }
 
     private readonly record struct PngImage(int Width, int Height, byte[] Rgba);
+
+    private readonly record struct EncodedImageCandidate(string Data, string MimeType);
 }

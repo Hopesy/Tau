@@ -1,6 +1,10 @@
 using System.Buffers.Binary;
 using System.IO.Compression;
 using System.Text;
+using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.Formats.Jpeg;
+using SixLabors.ImageSharp.Formats.Webp;
+using SixLabors.ImageSharp.PixelFormats;
 
 namespace Tau.CodingAgent.Tests;
 
@@ -8,7 +12,14 @@ internal static class ImageTestData
 {
     private static readonly uint[] CrcTable = CreateCrcTable();
 
-    public static byte[] CreatePng(int width, int height, byte red = 0x20, byte green = 0x80, byte blue = 0xc0, byte alpha = 0xff)
+    public static byte[] CreatePng(
+        int width,
+        int height,
+        byte red = 0x20,
+        byte green = 0x80,
+        byte blue = 0xc0,
+        byte alpha = 0xff,
+        bool noisy = false)
     {
         var stride = checked(width * 4);
         var raw = new byte[checked(height * (stride + 1))];
@@ -18,9 +29,20 @@ internal static class ImageTestData
             raw[offset++] = 0;
             for (var x = 0; x < width; x++)
             {
-                raw[offset++] = red;
-                raw[offset++] = green;
-                raw[offset++] = blue;
+                if (noisy)
+                {
+                    var noise = Noise(x, y);
+                    raw[offset++] = (byte)noise;
+                    raw[offset++] = (byte)(noise >> 8);
+                    raw[offset++] = (byte)(noise >> 16);
+                }
+                else
+                {
+                    raw[offset++] = red;
+                    raw[offset++] = green;
+                    raw[offset++] = blue;
+                }
+
                 raw[offset++] = alpha;
             }
         }
@@ -44,6 +66,22 @@ internal static class ImageTestData
         return png.ToArray();
     }
 
+    public static byte[] CreateJpeg(int width, int height, bool noisy = false)
+    {
+        using var image = CreateImage(width, height, noisy);
+        using var jpeg = new MemoryStream();
+        image.SaveAsJpeg(jpeg, new JpegEncoder { Quality = 90 });
+        return jpeg.ToArray();
+    }
+
+    public static byte[] CreateWebp(int width, int height, bool noisy = false)
+    {
+        using var image = CreateImage(width, height, noisy);
+        using var webp = new MemoryStream();
+        image.SaveAsWebp(webp, new WebpEncoder { Quality = 90 });
+        return webp.ToArray();
+    }
+
     public static byte[] CreateJpegWithExifOrientation(int width, int height, ushort orientation)
     {
         using var jpeg = new MemoryStream();
@@ -62,6 +100,36 @@ internal static class ImageTestData
         ihdr[8] = 8;
         ihdr[9] = 6;
         return ihdr;
+    }
+
+    private static Image<Rgba32> CreateImage(int width, int height, bool noisy)
+    {
+        var image = new Image<Rgba32>(width, height);
+        for (var y = 0; y < height; y++)
+        {
+            for (var x = 0; x < width; x++)
+            {
+                if (noisy)
+                {
+                    var noise = Noise(x, y);
+                    image[x, y] = new Rgba32((byte)noise, (byte)(noise >> 8), (byte)(noise >> 16));
+                }
+                else
+                {
+                    image[x, y] = new Rgba32(0x80, 0x40, 0x7f);
+                }
+            }
+        }
+
+        return image;
+    }
+
+    private static uint Noise(int x, int y)
+    {
+        var value = unchecked((uint)x * 747796405u + (uint)y * 2891336453u + 0x9e3779b9u);
+        value = unchecked((value ^ (value >> 16)) * 2246822519u);
+        value = unchecked((value ^ (value >> 13)) * 3266489917u);
+        return value ^ (value >> 16);
     }
 
     private static byte[] CreateExifOrientationData(ushort orientation)

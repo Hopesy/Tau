@@ -52,6 +52,72 @@ public sealed class CodingAgentImagePreprocessorTests
     }
 
     [Fact]
+    public void Process_ResizesLargeJpegImages()
+    {
+        var bytes = ImageTestData.CreateJpeg(2501, 10);
+
+        var result = CodingAgentImagePreprocessor.Process(
+            bytes,
+            "image/jpeg",
+            autoResizeImages: true,
+            maxWidth: 100,
+            maxHeight: 100);
+
+        Assert.NotNull(result);
+        Assert.True(result!.WasResized);
+        Assert.Equal(2501, result.OriginalWidth);
+        Assert.Equal(10, result.OriginalHeight);
+        Assert.Equal(100, result.Width);
+        Assert.Equal(1, result.Height);
+        Assert.Contains(result.MimeType, new[] { "image/png", "image/jpeg" });
+        Assert.Equal(new TuiImageDimensions(100, 1), TuiTerminalImage.GetImageDimensions(result.Data, result.MimeType));
+    }
+
+    [Fact]
+    public void Process_ResizesLargeWebpImages()
+    {
+        var bytes = ImageTestData.CreateWebp(400, 300);
+
+        var result = CodingAgentImagePreprocessor.Process(
+            bytes,
+            "image/webp",
+            autoResizeImages: true,
+            maxWidth: 100,
+            maxHeight: 100);
+
+        Assert.NotNull(result);
+        Assert.True(result!.WasResized);
+        Assert.Equal(400, result.OriginalWidth);
+        Assert.Equal(300, result.OriginalHeight);
+        Assert.Equal(100, result.Width);
+        Assert.Equal(75, result.Height);
+        Assert.Contains(result.MimeType, new[] { "image/png", "image/jpeg" });
+        Assert.Equal(new TuiImageDimensions(100, 75), TuiTerminalImage.GetImageDimensions(result.Data, result.MimeType));
+    }
+
+    [Fact]
+    public void Process_UsesJpegFallbackWhenPngCandidateExceedsLimit()
+    {
+        var bytes = ImageTestData.CreatePng(512, 512, noisy: true);
+
+        var result = CodingAgentImagePreprocessor.Process(
+            bytes,
+            "image/png",
+            autoResizeImages: true,
+            maxWidth: 128,
+            maxHeight: 128,
+            maxBase64Bytes: 20_000);
+
+        Assert.NotNull(result);
+        Assert.True(result!.WasResized);
+        Assert.Equal("image/jpeg", result.MimeType);
+        Assert.Equal(128, result.Width);
+        Assert.Equal(128, result.Height);
+        Assert.True(result.EstimatedBase64Bytes < 20_000);
+        Assert.Equal(new TuiImageDimensions(128, 128), TuiTerminalImage.GetJpegDimensions(result.Data));
+    }
+
+    [Fact]
     public void Process_WhenAutoResizeDisabledKeepsOriginalPngDimensions()
     {
         var bytes = ImageTestData.CreatePng(2501, 10);
