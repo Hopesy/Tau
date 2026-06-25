@@ -450,6 +450,49 @@ public sealed class CodingAgentPackageManagerTests
     }
 
     [Fact]
+    public void AddSource_DeduplicatesSupportedGitUrlFormats()
+    {
+        using var temp = TempDirectory.Create();
+        var settingsPath = Path.Combine(temp.Path, ".tau", "coding-agent-settings.json");
+        var manager = new CodingAgentPackageManager(
+            cwd: temp.Path,
+            userSettingsPath: Path.Combine(temp.Path, "user-settings.json"),
+            projectSettingsPath: settingsPath,
+            commandRunner: new FakePackageCommandRunner());
+
+        Assert.True(manager.AddSource("https://github.com/user/repo", local: true));
+        Assert.False(manager.AddSource("git:github.com/user/repo", local: true));
+        Assert.False(manager.AddSource("https://github.com/user/repo.git", local: true));
+        Assert.False(manager.AddSource("ssh://git@github.com/user/repo", local: true));
+        Assert.False(manager.AddSource("git:git@github.com:user/repo@v1", local: true));
+
+        var package = Assert.Single(new CodingAgentSettingsStore(settingsPath).Load().Packages!);
+        Assert.Equal("https://github.com/user/repo", package.Source);
+    }
+
+    [Fact]
+    public void Update_SuggestsGitPrefixForConfiguredGitPackage()
+    {
+        using var temp = TempDirectory.Create();
+        var projectSettingsPath = Path.Combine(temp.Path, ".tau", "coding-agent-settings.json");
+        new CodingAgentSettingsStore(projectSettingsPath).Save(new CodingAgentSettingsSnapshot(
+            null,
+            null,
+            Packages: [new CodingAgentPackageSource("git:github.com/example/repo")]));
+        var manager = new CodingAgentPackageManager(
+            cwd: temp.Path,
+            userSettingsPath: Path.Combine(temp.Path, "user-settings.json"),
+            projectSettingsPath: projectSettingsPath,
+            commandRunner: new FakePackageCommandRunner());
+
+        var ex = Assert.Throws<InvalidOperationException>(() => manager.Update("github.com/example/repo"));
+
+        Assert.Equal(
+            "No matching package found for github.com/example/repo. Did you mean git:github.com/example/repo?",
+            ex.Message);
+    }
+
+    [Fact]
     public void Update_SkipsConfiguredPackagesWhenPiOfflineIsEnabled()
     {
         using var temp = TempDirectory.Create();

@@ -1500,12 +1500,51 @@ public sealed class CodingAgentPackageManager
         string source,
         IReadOnlyList<(CodingAgentPackageSource Source, string Scope)> configured)
     {
-        var suggestion = configured
-            .Select(package => package.Source.Source)
-            .FirstOrDefault(configuredSource => SourcesMatch(configuredSource, source, "project"));
+        var suggestion = FindMatchingSourceSuggestion(source, configured);
         return suggestion is null
             ? $"No matching package found for {source}"
             : $"No matching package found for {source}. Did you mean {suggestion}?";
+    }
+
+    private string? FindMatchingSourceSuggestion(
+        string source,
+        IReadOnlyList<(CodingAgentPackageSource Source, string Scope)> configured)
+    {
+        foreach (var candidate in GetSuggestionCandidates(source))
+        {
+            var suggestion = configured
+                .FirstOrDefault(configuredSource => SourcesMatch(
+                    configuredSource.Source.Source,
+                    candidate,
+                    configuredSource.Scope))
+                .Source?.Source;
+            if (!string.IsNullOrWhiteSpace(suggestion))
+            {
+                return suggestion;
+            }
+        }
+
+        return null;
+    }
+
+    private static IEnumerable<string> GetSuggestionCandidates(string source)
+    {
+        yield return source;
+        if (!source.Contains(':', StringComparison.Ordinal))
+        {
+            yield return $"npm:{source}";
+            yield return $"git:{source}";
+        }
+        else if (!source.StartsWith("git:", StringComparison.OrdinalIgnoreCase) &&
+                 !source.StartsWith("npm:", StringComparison.OrdinalIgnoreCase) &&
+                 !source.StartsWith("file:", StringComparison.OrdinalIgnoreCase) &&
+                 !source.StartsWith("http://", StringComparison.OrdinalIgnoreCase) &&
+                 !source.StartsWith("https://", StringComparison.OrdinalIgnoreCase) &&
+                 !source.StartsWith("ssh://", StringComparison.OrdinalIgnoreCase) &&
+                 !source.StartsWith("git://", StringComparison.OrdinalIgnoreCase))
+        {
+            yield return $"git:{source}";
+        }
     }
 
     private static bool IsPathUnder(string path, string root)
