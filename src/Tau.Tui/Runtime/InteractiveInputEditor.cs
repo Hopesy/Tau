@@ -1,3 +1,4 @@
+using System.Globalization;
 using Tau.Tui.Abstractions;
 
 namespace Tau.Tui.Runtime;
@@ -272,8 +273,9 @@ public sealed class InteractiveInputEditor
                     var deletePrevCharUndoState = CaptureUndoState(chars, cursor);
                     if (cursor > 0)
                     {
-                        chars.RemoveAt(cursor - 1);
-                        cursor--;
+                        var previousStart = FindPreviousTextElementStart(chars, cursor);
+                        chars.RemoveRange(previousStart, cursor - previousStart);
+                        cursor = previousStart;
                     }
                     PushUndoIfChanged(undoStack, deletePrevCharUndoState, chars, cursor);
                     break;
@@ -306,7 +308,8 @@ public sealed class InteractiveInputEditor
                     var deleteNextCharUndoState = CaptureUndoState(chars, cursor);
                     if (cursor < chars.Count)
                     {
-                        chars.RemoveAt(cursor);
+                        var nextEnd = FindNextTextElementEnd(chars, cursor);
+                        chars.RemoveRange(cursor, nextEnd - cursor);
                     }
                     PushUndoIfChanged(undoStack, deleteNextCharUndoState, chars, cursor);
                     break;
@@ -335,12 +338,12 @@ public sealed class InteractiveInputEditor
                 case EditorAction.CursorLeft:
                     preferredVerticalColumn = null;
                     ResetTransientEditAction();
-                    if (cursor > 0) cursor--;
+                    if (cursor > 0) cursor = FindPreviousTextElementStart(chars, cursor);
                     break;
                 case EditorAction.CursorRight:
                     preferredVerticalColumn = null;
                     ResetTransientEditAction();
-                    if (cursor < chars.Count) cursor++;
+                    if (cursor < chars.Count) cursor = FindNextTextElementEnd(chars, cursor);
                     break;
                 case EditorAction.CursorPrevWord:
                     preferredVerticalColumn = null;
@@ -704,6 +707,55 @@ public sealed class InteractiveInputEditor
 
     private static string SliceChars(List<char> chars, int start, int length) =>
         length <= 0 ? string.Empty : new string(chars.GetRange(start, length).ToArray());
+
+    private static int FindPreviousTextElementStart(IReadOnlyList<char> chars, int cursor)
+    {
+        cursor = Math.Clamp(cursor, 0, chars.Count);
+        if (cursor <= 0)
+        {
+            return 0;
+        }
+
+        var text = new string(chars.ToArray());
+        var previousStart = 0;
+        var enumerator = StringInfo.GetTextElementEnumerator(text);
+        while (enumerator.MoveNext())
+        {
+            var elementStart = enumerator.ElementIndex;
+            if (elementStart >= cursor)
+            {
+                break;
+            }
+
+            previousStart = elementStart;
+        }
+
+        return previousStart;
+    }
+
+    private static int FindNextTextElementEnd(IReadOnlyList<char> chars, int cursor)
+    {
+        cursor = Math.Clamp(cursor, 0, chars.Count);
+        if (cursor >= chars.Count)
+        {
+            return chars.Count;
+        }
+
+        var text = new string(chars.ToArray());
+        var enumerator = StringInfo.GetTextElementEnumerator(text);
+        while (enumerator.MoveNext())
+        {
+            var elementStart = enumerator.ElementIndex;
+            var element = enumerator.GetTextElement();
+            var elementEnd = elementStart + element.Length;
+            if (cursor <= elementStart || cursor < elementEnd)
+            {
+                return Math.Min(chars.Count, elementEnd);
+            }
+        }
+
+        return chars.Count;
+    }
 
     private async Task<ReverseSearchOutcome> RunReverseSearchAsync(
         List<char> startingBuffer,

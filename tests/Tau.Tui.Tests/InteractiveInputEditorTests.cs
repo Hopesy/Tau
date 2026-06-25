@@ -65,6 +65,79 @@ public sealed class InteractiveInputEditorTests
     }
 
     [Fact]
+    public async Task ReadLineAsync_BackspaceRemovesPreviousGraphemeCluster()
+    {
+        var reader = new FakeKeyReader();
+        reader.EnqueueKey(ConsoleKey.Backspace);
+        reader.EnqueueKey(ConsoleKey.Enter);
+
+        var buffer = new InputBuffer();
+        buffer.SetDraft("e\u0301");
+        var renderer = new FakeRenderer();
+        var editor = new InteractiveInputEditor(reader, renderer, buffer);
+
+        var result = await editor.ReadLineAsync("> ");
+
+        Assert.Equal(string.Empty, result.Text);
+    }
+
+    [Fact]
+    public async Task ReadLineAsync_DeleteRemovesNextTextElement()
+    {
+        var reader = new FakeKeyReader();
+        reader.EnqueueKey(ConsoleKey.Home);
+        reader.EnqueueKey(ConsoleKey.Delete);
+        reader.EnqueueKey(ConsoleKey.Enter);
+
+        var buffer = new InputBuffer();
+        buffer.SetDraft("😀a");
+        var renderer = new FakeRenderer();
+        var editor = new InteractiveInputEditor(reader, renderer, buffer);
+
+        var result = await editor.ReadLineAsync("> ");
+
+        Assert.Equal("a", result.Text);
+    }
+
+    [Fact]
+    public async Task ReadLineAsync_LeftArrowSkipsPreviousGraphemeCluster()
+    {
+        var reader = new FakeKeyReader();
+        reader.EnqueueKey(ConsoleKey.LeftArrow);
+        reader.EnqueueKey(ConsoleKey.LeftArrow);
+        reader.Enqueue('X');
+        reader.EnqueueKey(ConsoleKey.Enter);
+
+        var buffer = new InputBuffer();
+        buffer.SetDraft("e\u0301b");
+        var renderer = new FakeRenderer();
+        var editor = new InteractiveInputEditor(reader, renderer, buffer);
+
+        var result = await editor.ReadLineAsync("> ");
+
+        Assert.Equal("Xe\u0301b", result.Text);
+    }
+
+    [Fact]
+    public async Task ReadLineAsync_RightArrowSkipsNextGraphemeCluster()
+    {
+        var reader = new FakeKeyReader();
+        reader.EnqueueKey(ConsoleKey.Home);
+        reader.EnqueueKey(ConsoleKey.RightArrow);
+        reader.Enqueue('X');
+        reader.EnqueueKey(ConsoleKey.Enter);
+
+        var buffer = new InputBuffer();
+        buffer.SetDraft("e\u0301b");
+        var renderer = new FakeRenderer();
+        var editor = new InteractiveInputEditor(reader, renderer, buffer);
+
+        var result = await editor.ReadLineAsync("> ");
+
+        Assert.Equal("e\u0301Xb", result.Text);
+    }
+
+    [Fact]
     public async Task ReadLineAsync_CursorMovesWithArrowsAndHomeEnd()
     {
         var reader = new FakeKeyReader();
