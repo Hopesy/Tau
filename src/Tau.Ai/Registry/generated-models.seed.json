@@ -1083,6 +1083,240 @@
                                                  "maxOutputTokens":  128000
                                              }
                                          ],
+                      "deepseek":  [
+                                       {
+                                           "id":  "deepseek-v4-flash",
+                                           "name":  "DeepSeek V4 Flash",
+                                           "api":  "openai-chat-completions",
+                                           "provider":  "deepseek",
+                                           "baseUrl":  "https://api.deepseek.com",
+                                           "compat":  {
+                                                          "supportsStore":  false,
+                                                          "supportsDeveloperRole":  false,
+                                                          "thinkingFormat":  "deepseek"
+                                                      },
+                                           "reasoning":  true,
+                                           "inputModalities":  [
+                                                                   "text"
+                                                               ],
+                                           "cost":  {
+                                                        "input":  0.14,
+                                                        "output":  0.28,
+                                                        "cacheRead":  0.0028,
+                                                        "cacheWrite":  0
+                                                    },
+                                           "contextWindow":  1000000,
+                                           "maxOutputTokens":  384000
+                                       },
+                                       {
+                                           "id":  "deepseek-v4-pro",
+                                           "name":  "DeepSeek V4 Pro",
+                                           "api":  "openai-chat-completions",
+                                           "provider":  "deepseek",
+                                           "baseUrl":  "https://api.deepseek.com",
+                                           "compat":  {
+                                                          "supportsStore":  false,
+                                                          "supportsDeveloperRole":  false,
+                                                          "thinkingFormat":  "deepseek"
+                                                      },
+                                           "reasoning":  true,
+                                           "inputModalities":  [
+                                                                   "text"
+                                                               ],
+                                           "cost":  {
+                                                        "input":  0.435,
+                                                        "output":  0.87,
+                                                        "cacheRead":  0.003625,
+                                                        "cacheWrite":  0
+                                                    },
+                                           "contextWindow":  1000000,
+                                           "maxOutputTokens":  384000
+                                       }
+                                   ],
+                      "groq":  [
+                                   {
+                                       "id":  "llama-3.1-8b-instant",
+                                       "name":  "Llama 3.1 8B",
+                                       "api":  "openai-chat-completions",
+                                       "provider":  "groq",
+                                       "baseUrl":  "https://api.groq.com/openai/v1",
+                                       "reasoning":  false,
+                                       "inputModalities":  [
+                                                               "text"
+                                                           ],
+                                       "cost":  {
+                                                    "input":  0.05,
+                                                    "output":  0.08,
+                                                    "cacheRead":  0,
+                                                    "cacheWrite":  0
+                                                },
+                                       "contextWindow":  131072,
+                                       "maxOutputTokens":  131072
+                                   },
+                                   {
+                                       "id":  "llama-3.3-70b-versatile",
+                                       "name":  "Llama 3.3 70B",
+                                       "api":  "openai-chat-completions",
+                                       "provider":  "groq",
+                                       "baseUrl":  "https://api.groq.com/openai/v1",
+                                       "reasoning":  false,
+                                       "inputModalities":  [
+                                                               "text"
+                                                           ],
+                                       "cost":  {
+                                                    "input":  0.59,
+                                                    "output":  0.79,
+                                                    "cacheRead":  0,
+                                                    "cacheWrite":  0
+                                                },
+                                       "contextWindow":  131072,
+                                       "maxOutputTokens":  32768
+                                   },
+                                   {
+                                       "id":  "meta-llama/llama-4-scout-17b-16e-instruct",
+                                       "name":  "Llama 4 Scout 17B 16E",
+                                       "api":  "openai-chat-completions",
+                                       "provider":  "groq",
+                                       "baseUrl":  "https://api.groq.com/openai/v1",
+                                       "reasoning":  false,
+                                       "inputModalities":  [
+                                                               "text",
+                                                               "image"
+                                                           ],
+                                       "cost":  {
+                                                    "input":  0.11,
+                                                    "output":  0.34,
+                                                    "cacheRead":  0,
+                                                    "cacheWrite":  0
+                                                },
+                                       "contextWindow":  131072,
+                                       "maxOutputTokens":  8192
+                                   },
+                                   {
+                                       "id":  "openai/gpt-oss-120b",
+                                       "name":  "GPT OSS 120B",
+                                       "api":  "openai-chat-completions",
+                                       "provider":  "groq",
+                                       "baseUrl":  "https://api.groq.com/openai/v1",
+                                       "reasoning":  true,
+                                       "inputModalities":  [
+                                                               "text"
+                                                           ],
+                                       "cost":  {
+                                                    "input":  0.15,
+                                                    "output":  0.6,
+                                                    "cacheRead":  0.075,
+                                                    "cacheWrite":  0
+                                                },
+                                       "contextWindow":  131072,
+                                       "maxOutputTokens":  65536
+                                   },
+                                   {
+                                       "id":  "openai/gpt-oss-20b",
+                                       "name":  "GPT OSS 20B",
+                                       "api":  "openai-chat-completions",
+                                       "provider":  "groq",
+                                       "baseUrl":  "https://api.groq.com/openai/v1",
+                                       "reasoning":  true,
+                                       "inputModalities":  [
+                                                               "text"
+                                                           ],
+                                       "cost":  {
+                                                    "input":  0.075,
+                                                    "output":  0.3,
+                                                    "cacheRead":  0.0375,
+                                                    "cacheWrite":  0
+                                                },
+                                       "contextWindow":  131072,
+                                       "maxOutputTokens":  65536
+                                   },
+                                   {
+                                       "id":  "openai/gpt-oss-safeguard-20b",
+                                       "name":  "Safety GPT OSS 20B",
+                                       "api":  "openai-chat-completions",
+                                       "provider":  "groq",
+                                       "baseUrl":  "https://api.groq.com/openai/v1",
+                                       "reasoning":  true,
+                                       "inputModalities":  [
+                                                               "text"
+                                                           ],
+                                       "cost":  {
+                                                    "input":  0.075,
+                                                    "output":  0.3,
+                                                    "cacheRead":  0.037,
+                                                    "cacheWrite":  0
+                                                },
+                                       "contextWindow":  131072,
+                                       "maxOutputTokens":  65536
+                                   },
+                                   {
+                                       "id":  "qwen/qwen3-32b",
+                                       "name":  "Qwen3-32B",
+                                       "api":  "openai-chat-completions",
+                                       "provider":  "groq",
+                                       "baseUrl":  "https://api.groq.com/openai/v1",
+                                       "reasoning":  true,
+                                       "inputModalities":  [
+                                                               "text"
+                                                           ],
+                                       "cost":  {
+                                                    "input":  0.29,
+                                                    "output":  0.59,
+                                                    "cacheRead":  0,
+                                                    "cacheWrite":  0
+                                                },
+                                       "contextWindow":  131072,
+                                       "maxOutputTokens":  40960
+                                   }
+                               ],
+                      "cerebras":  [
+                                       {
+                                           "id":  "gpt-oss-120b",
+                                           "name":  "GPT OSS 120B",
+                                           "api":  "openai-chat-completions",
+                                           "provider":  "cerebras",
+                                           "baseUrl":  "https://api.cerebras.ai/v1",
+                                           "compat":  {
+                                                          "supportsStore":  false,
+                                                          "supportsDeveloperRole":  false
+                                                      },
+                                           "reasoning":  true,
+                                           "inputModalities":  [
+                                                                   "text"
+                                                               ],
+                                           "cost":  {
+                                                        "input":  0.35,
+                                                        "output":  0.75,
+                                                        "cacheRead":  0,
+                                                        "cacheWrite":  0
+                                                    },
+                                           "contextWindow":  131072,
+                                           "maxOutputTokens":  40960
+                                       },
+                                       {
+                                           "id":  "zai-glm-4.7",
+                                           "name":  "Z.AI GLM-4.7",
+                                           "api":  "openai-chat-completions",
+                                           "provider":  "cerebras",
+                                           "baseUrl":  "https://api.cerebras.ai/v1",
+                                           "compat":  {
+                                                          "supportsStore":  false,
+                                                          "supportsDeveloperRole":  false
+                                                      },
+                                           "reasoning":  true,
+                                           "inputModalities":  [
+                                                                   "text"
+                                                               ],
+                                           "cost":  {
+                                                        "input":  2.25,
+                                                        "output":  2.75,
+                                                        "cacheRead":  0,
+                                                        "cacheWrite":  0
+                                                    },
+                                           "contextWindow":  131072,
+                                           "maxOutputTokens":  40960
+                                       }
+                                   ],
                       "google-gemini-cli":  [
                                                 {
                                                     "id":  "gemini-2.0-flash",

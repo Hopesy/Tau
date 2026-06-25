@@ -19,6 +19,9 @@ public sealed class ModelCatalogTests
         Assert.Contains("google-vertex", providers);
         Assert.Contains("google-gemini-cli", providers);
         Assert.Contains("amazon-bedrock", providers);
+        Assert.Contains("deepseek", providers);
+        Assert.Contains("groq", providers);
+        Assert.Contains("cerebras", providers);
     }
 
     [Fact]
@@ -31,6 +34,9 @@ public sealed class ModelCatalogTests
         var copilot = catalog.GetModel("github-copilot", "gpt-5.4-mini");
         var geminiCli = catalog.GetModel("google-gemini-cli", "gemini-3.1-pro-preview");
         var antigravity = catalog.GetModel("google-antigravity", "claude-opus-4-6-thinking");
+        var deepseek = catalog.GetModel("deepseek", "deepseek-v4-pro");
+        var groq = catalog.GetModel("groq", "meta-llama/llama-4-scout-17b-16e-instruct");
+        var cerebras = catalog.GetModel("cerebras", "gpt-oss-120b");
 
         Assert.Equal("azure-openai-responses", azure.Api);
         Assert.Equal(128_000, azure.MaxOutputTokens);
@@ -44,6 +50,18 @@ public sealed class ModelCatalogTests
         Assert.Equal(65_535, geminiCli.MaxOutputTokens);
         Assert.Equal("google-gemini-cli", antigravity.Api);
         Assert.Equal(128_000, antigravity.MaxOutputTokens);
+        Assert.Equal("openai-chat-completions", deepseek.Api);
+        Assert.Equal("https://api.deepseek.com", deepseek.BaseUrl);
+        Assert.Equal(1_000_000, deepseek.ContextWindow);
+        Assert.Equal("deepseek", deepseek.Compat!.ThinkingFormat);
+        Assert.False(deepseek.Compat.SupportsDeveloperRole);
+        Assert.Equal("openai-chat-completions", groq.Api);
+        Assert.Contains("image", groq.InputModalities);
+        Assert.Equal(8_192, groq.MaxOutputTokens);
+        Assert.Equal(0.11m, groq.Cost!.Value.InputPerMillion);
+        Assert.Equal("openai-chat-completions", cerebras.Api);
+        Assert.Equal("https://api.cerebras.ai/v1", cerebras.BaseUrl);
+        Assert.False(cerebras.Compat!.SupportsStore);
     }
 
     [Fact]
@@ -56,6 +74,9 @@ public sealed class ModelCatalogTests
         var copilotIds = catalog.GetModels("github-copilot").Select(model => model.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var geminiCliIds = catalog.GetModels("google-gemini-cli").Select(model => model.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var antigravityIds = catalog.GetModels("google-antigravity").Select(model => model.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var deepseekIds = catalog.GetModels("deepseek").Select(model => model.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var groqIds = catalog.GetModels("groq").Select(model => model.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var cerebrasIds = catalog.GetModels("cerebras").Select(model => model.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
 
         Assert.Contains("gpt-4.1", azureIds);
         Assert.Contains("gpt-4-turbo", azureIds);
@@ -70,6 +91,12 @@ public sealed class ModelCatalogTests
         Assert.Contains("gemini-3.1-pro-preview", geminiCliIds);
         Assert.Contains("gemini-3.1-pro-high", antigravityIds);
         Assert.Contains("claude-opus-4-6-thinking", antigravityIds);
+        Assert.Contains("deepseek-v4-flash", deepseekIds);
+        Assert.Contains("deepseek-v4-pro", deepseekIds);
+        Assert.Contains("openai/gpt-oss-120b", groqIds);
+        Assert.Contains("qwen/qwen3-32b", groqIds);
+        Assert.Contains("gpt-oss-120b", cerebrasIds);
+        Assert.Contains("zai-glm-4.7", cerebrasIds);
     }
 
     [Fact]
@@ -81,6 +108,8 @@ public sealed class ModelCatalogTests
         var explicitDefault = catalog.ResolveSelection("default", "default");
         var canonicalReference = catalog.ResolveSelection(modelHint: "google-antigravity/claude-opus-4-6-thinking");
         var exactId = catalog.ResolveSelection(modelHint: "claude-opus-4-6-thinking");
+        var deepseekDefault = catalog.ResolveSelection(providerHint: "deepseek");
+        var groqReference = catalog.ResolveSelection(modelHint: "groq/openai/gpt-oss-120b");
 
         Assert.Equal("openai", implicitDefault.Provider);
         Assert.Equal("gpt-5.4", implicitDefault.ModelId);
@@ -88,6 +117,10 @@ public sealed class ModelCatalogTests
         Assert.Equal("google-antigravity", canonicalReference.Provider);
         Assert.Equal("claude-opus-4-6-thinking", canonicalReference.ModelId);
         Assert.Equal(canonicalReference, exactId);
+        Assert.Equal("deepseek", deepseekDefault.Provider);
+        Assert.Equal("deepseek-v4-pro", deepseekDefault.ModelId);
+        Assert.Equal("groq", groqReference.Provider);
+        Assert.Equal("openai/gpt-oss-120b", groqReference.ModelId);
     }
 
     [Fact]

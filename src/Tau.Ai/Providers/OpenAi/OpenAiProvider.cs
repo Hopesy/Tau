@@ -244,6 +244,9 @@ public sealed class OpenAiProvider : IStreamProvider
             case "openrouter":
                 body["reasoning"] = new Dictionary<string, object> { ["effort"] = effort };
                 break;
+            case "deepseek":
+                body["thinking"] = new Dictionary<string, object> { ["type"] = "enabled" };
+                break;
             default:
                 if (compatibility.SupportsReasoningEffort)
                 {
@@ -388,6 +391,7 @@ public sealed class OpenAiProvider : IStreamProvider
         value?.Trim().ToLowerInvariant() switch
         {
             "openrouter" => "openrouter",
+            "deepseek" => "deepseek",
             "zai" => "zai",
             "qwen" => "qwen",
             "qwen-chat-template" => "qwen-chat-template",

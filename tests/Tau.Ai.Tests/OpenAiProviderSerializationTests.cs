@@ -211,6 +211,45 @@ public sealed class OpenAiProviderSerializationTests
     }
 
     [Fact]
+    public async Task StreamSimple_WithDeepSeekThinkingFormat_AddsThinkingObject()
+    {
+        using var handler = new StubHandler();
+        using var client = new HttpClient(handler);
+        var provider = new OpenAiProvider(client);
+
+        var model = new Model
+        {
+            Id = "deepseek-v4-pro",
+            Name = "DeepSeek V4 Pro",
+            Api = "openai-chat-completions",
+            Provider = "deepseek",
+            BaseUrl = "https://api.deepseek.com",
+            Reasoning = true,
+            Compat = new ModelCompatibility
+            {
+                SupportsStore = false,
+                SupportsDeveloperRole = false,
+                ThinkingFormat = "deepseek"
+            }
+        };
+
+        await DrainAsync(provider.StreamSimple(
+            model,
+            new LlmContext { SystemPrompt = "be concise", Messages = [new UserMessage("think")] },
+            new SimpleStreamOptions
+            {
+                ApiKey = "test-key",
+                Reasoning = ThinkingLevel.High
+            }));
+
+        using var doc = JsonDocument.Parse(handler.CapturedBody!);
+        var root = doc.RootElement;
+        Assert.Equal("enabled", root.GetProperty("thinking").GetProperty("type").GetString());
+        Assert.Equal("system", root.GetProperty("messages")[0].GetProperty("role").GetString());
+        Assert.False(root.TryGetProperty("reasoning_effort", out _));
+    }
+
+    [Fact]
     public async Task Stream_WithOpenAiOptions_WritesToolChoiceAndReasoningEffort()
     {
         using var handler = new StubHandler();

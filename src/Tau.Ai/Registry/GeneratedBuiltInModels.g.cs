@@ -244,6 +244,81 @@ public static class GeneratedBuiltInModels
                     Headers = GitHubCopilotHeaders.CreateStaticHeaders()
                 },
             },
+            ["deepseek"] = new Dictionary<string, Model>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["deepseek-v4-flash"] = Create("deepseek-v4-flash", "DeepSeek V4 Flash", "openai-chat-completions", "deepseek", "https://api.deepseek.com", true, 1000000, 384000, 0.14m, 0.28m, 0.0028m, 0m) with
+                {
+                    InputModalities = ["text"],
+                    Compat = new ModelCompatibility
+                    {
+                        SupportsStore = false,
+                        SupportsDeveloperRole = false,
+                        ThinkingFormat = "deepseek"
+                    }
+                },
+                ["deepseek-v4-pro"] = Create("deepseek-v4-pro", "DeepSeek V4 Pro", "openai-chat-completions", "deepseek", "https://api.deepseek.com", true, 1000000, 384000, 0.435m, 0.87m, 0.003625m, 0m) with
+                {
+                    InputModalities = ["text"],
+                    Compat = new ModelCompatibility
+                    {
+                        SupportsStore = false,
+                        SupportsDeveloperRole = false,
+                        ThinkingFormat = "deepseek"
+                    }
+                },
+            },
+            ["groq"] = new Dictionary<string, Model>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["llama-3.1-8b-instant"] = Create("llama-3.1-8b-instant", "Llama 3.1 8B", "openai-chat-completions", "groq", "https://api.groq.com/openai/v1", false, 131072, 131072, 0.05m, 0.08m, 0m, 0m) with
+                {
+                    InputModalities = ["text"]
+                },
+                ["llama-3.3-70b-versatile"] = Create("llama-3.3-70b-versatile", "Llama 3.3 70B", "openai-chat-completions", "groq", "https://api.groq.com/openai/v1", false, 131072, 32768, 0.59m, 0.79m, 0m, 0m) with
+                {
+                    InputModalities = ["text"]
+                },
+                ["meta-llama/llama-4-scout-17b-16e-instruct"] = Create("meta-llama/llama-4-scout-17b-16e-instruct", "Llama 4 Scout 17B 16E", "openai-chat-completions", "groq", "https://api.groq.com/openai/v1", false, 131072, 8192, 0.11m, 0.34m, 0m, 0m) with
+                {
+                    InputModalities = ["text", "image"]
+                },
+                ["openai/gpt-oss-120b"] = Create("openai/gpt-oss-120b", "GPT OSS 120B", "openai-chat-completions", "groq", "https://api.groq.com/openai/v1", true, 131072, 65536, 0.15m, 0.6m, 0.075m, 0m) with
+                {
+                    InputModalities = ["text"]
+                },
+                ["openai/gpt-oss-20b"] = Create("openai/gpt-oss-20b", "GPT OSS 20B", "openai-chat-completions", "groq", "https://api.groq.com/openai/v1", true, 131072, 65536, 0.075m, 0.3m, 0.0375m, 0m) with
+                {
+                    InputModalities = ["text"]
+                },
+                ["openai/gpt-oss-safeguard-20b"] = Create("openai/gpt-oss-safeguard-20b", "Safety GPT OSS 20B", "openai-chat-completions", "groq", "https://api.groq.com/openai/v1", true, 131072, 65536, 0.075m, 0.3m, 0.037m, 0m) with
+                {
+                    InputModalities = ["text"]
+                },
+                ["qwen/qwen3-32b"] = Create("qwen/qwen3-32b", "Qwen3-32B", "openai-chat-completions", "groq", "https://api.groq.com/openai/v1", true, 131072, 40960, 0.29m, 0.59m, 0m, 0m) with
+                {
+                    InputModalities = ["text"]
+                },
+            },
+            ["cerebras"] = new Dictionary<string, Model>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["gpt-oss-120b"] = Create("gpt-oss-120b", "GPT OSS 120B", "openai-chat-completions", "cerebras", "https://api.cerebras.ai/v1", true, 131072, 40960, 0.35m, 0.75m, 0m, 0m) with
+                {
+                    InputModalities = ["text"],
+                    Compat = new ModelCompatibility
+                    {
+                        SupportsStore = false,
+                        SupportsDeveloperRole = false
+                    }
+                },
+                ["zai-glm-4.7"] = Create("zai-glm-4.7", "Z.AI GLM-4.7", "openai-chat-completions", "cerebras", "https://api.cerebras.ai/v1", true, 131072, 40960, 2.25m, 2.75m, 0m, 0m) with
+                {
+                    InputModalities = ["text"],
+                    Compat = new ModelCompatibility
+                    {
+                        SupportsStore = false,
+                        SupportsDeveloperRole = false
+                    }
+                },
+            },
             ["google-gemini-cli"] = new Dictionary<string, Model>(StringComparer.OrdinalIgnoreCase)
             {
                 ["gemini-2.0-flash"] = Create("gemini-2.0-flash", "Gemini 2.0 Flash (Cloud Code Assist)", "google-gemini-cli", "google-gemini-cli", "https://cloudcode-pa.googleapis.com", false, 1048576, 8192, 0.0m, 0.0m, 0.0m, 0.0m) with

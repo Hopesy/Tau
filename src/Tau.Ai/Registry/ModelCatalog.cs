@@ -22,7 +22,10 @@ public sealed class ModelCatalog
         ["google-vertex"] = "gemini-3-pro-preview",
         ["google-gemini-cli"] = "gemini-2.5-pro",
         ["google-antigravity"] = "gemini-3.1-pro-high",
-        ["amazon-bedrock"] = "us.anthropic.claude-opus-4-6-v1"
+        ["amazon-bedrock"] = "us.anthropic.claude-opus-4-6-v1",
+        ["deepseek"] = "deepseek-v4-pro",
+        ["groq"] = "openai/gpt-oss-120b",
+        ["cerebras"] = "gpt-oss-120b"
     };
 
     private readonly Dictionary<string, Dictionary<string, Model>> _models = new(StringComparer.OrdinalIgnoreCase);
