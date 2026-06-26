@@ -7,6 +7,95 @@ internal static class CodingAgentFooterFormatter
 {
     public static string FormatLeft(string? baseStatus, CodingAgentFooterDataProvider? footerDataProvider)
     {
+        return FormatLeft(baseStatus, footerDataProvider, includeGitBranch: true);
+    }
+
+    public static string FormatDefaultLeft(
+        string cwd,
+        string? home,
+        string? sessionName,
+        CodingAgentFooterDataProvider? footerDataProvider)
+    {
+        var location = FormatLocation(cwd, home, sessionName, footerDataProvider);
+        return FormatLeft(location, footerDataProvider, includeGitBranch: false);
+    }
+
+    public static string FormatLocation(
+        string cwd,
+        string? home,
+        string? sessionName,
+        CodingAgentFooterDataProvider? footerDataProvider)
+    {
+        var location = SanitizeStatusText(FormatCwdForFooter(cwd, home));
+        if (location.Length == 0)
+        {
+            location = ".";
+        }
+
+        var branch = SanitizeStatusText(footerDataProvider?.GetGitBranch());
+        if (branch.Length > 0)
+        {
+            location = $"{location} ({branch})";
+        }
+
+        var sanitizedSessionName = SanitizeStatusText(sessionName);
+        if (sanitizedSessionName.Length > 0)
+        {
+            location = $"{location} • {sanitizedSessionName}";
+        }
+
+        return location;
+    }
+
+    public static string FormatCwdForFooter(string cwd, string? home)
+    {
+        if (string.IsNullOrWhiteSpace(cwd) || string.IsNullOrWhiteSpace(home))
+        {
+            return cwd;
+        }
+
+        string resolvedCwd;
+        string resolvedHome;
+        try
+        {
+            resolvedCwd = Path.GetFullPath(cwd);
+            resolvedHome = Path.GetFullPath(home);
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return cwd;
+        }
+
+        string relativeToHome;
+        try
+        {
+            relativeToHome = Path.GetRelativePath(resolvedHome, resolvedCwd);
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return cwd;
+        }
+
+        if (relativeToHome == ".")
+        {
+            return "~";
+        }
+
+        var isInsideHome = relativeToHome.Length > 0 &&
+            !Path.IsPathRooted(relativeToHome) &&
+            !relativeToHome.Equals("..", StringComparison.Ordinal) &&
+            !relativeToHome.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal) &&
+            !relativeToHome.StartsWith(".." + Path.AltDirectorySeparatorChar, StringComparison.Ordinal);
+        return isInsideHome
+            ? $"~{Path.DirectorySeparatorChar}{relativeToHome}"
+            : cwd;
+    }
+
+    private static string FormatLeft(
+        string? baseStatus,
+        CodingAgentFooterDataProvider? footerDataProvider,
+        bool includeGitBranch)
+    {
         var left = SanitizeStatusText(baseStatus);
         if (left.Length == 0)
         {
@@ -18,10 +107,13 @@ internal static class CodingAgentFooterFormatter
             return left;
         }
 
-        var branch = SanitizeStatusText(footerDataProvider.GetGitBranch());
-        if (branch.Length > 0)
+        if (includeGitBranch)
         {
-            left = $"{left} ({branch})";
+            var branch = SanitizeStatusText(footerDataProvider.GetGitBranch());
+            if (branch.Length > 0)
+            {
+                left = $"{left} ({branch})";
+            }
         }
 
         var extensionStatuses = footerDataProvider

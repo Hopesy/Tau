@@ -36,6 +36,66 @@ public class CodingAgentFooterFormatterTests
     }
 
     [Fact]
+    public void FormatCwdForFooter_ReplacesHomeWithTilde()
+    {
+        var home = Path.Combine(Path.GetTempPath(), $"tau-footer-home-{Guid.NewGuid():N}");
+        var cwd = Path.Combine(home, "repo", "src");
+
+        var formatted = CodingAgentFooterFormatter.FormatCwdForFooter(cwd, home);
+
+        Assert.Equal($"~{Path.DirectorySeparatorChar}repo{Path.DirectorySeparatorChar}src", formatted);
+    }
+
+    [Fact]
+    public void FormatCwdForFooter_UsesTildeForHomeItself()
+    {
+        var home = Path.Combine(Path.GetTempPath(), $"tau-footer-home-{Guid.NewGuid():N}");
+
+        var formatted = CodingAgentFooterFormatter.FormatCwdForFooter(home, home);
+
+        Assert.Equal("~", formatted);
+    }
+
+    [Fact]
+    public void FormatCwdForFooter_KeepsPathOutsideHome()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"tau-footer-root-{Guid.NewGuid():N}");
+        var home = Path.Combine(root, "home");
+        var cwd = Path.Combine(root, "workspace");
+
+        var formatted = CodingAgentFooterFormatter.FormatCwdForFooter(cwd, home);
+
+        Assert.Equal(cwd, formatted);
+    }
+
+    [Fact]
+    public void FormatDefaultLeft_RendersCwdBranchSessionNameAndExtensionStatuses()
+    {
+        var home = Path.Combine(Path.GetTempPath(), $"tau-footer-home-{Guid.NewGuid():N}");
+        var directory = Path.Combine(home, "work", "repo");
+        var provider = new CodingAgentFooterDataProvider(CreateGitDirectory("feature/footer", directory));
+        provider.SetExtensionStatus("build", "done\tok");
+
+        try
+        {
+            var formatted = CodingAgentFooterFormatter.FormatDefaultLeft(
+                directory,
+                home,
+                "demo\nsession",
+                provider);
+
+            Assert.Equal(
+                $"~{Path.DirectorySeparatorChar}work{Path.DirectorySeparatorChar}repo (feature/footer) • demo session | done ok",
+                formatted);
+        }
+        finally
+        {
+            provider.Dispose();
+            Directory.Delete(home, recursive: true);
+        }
+    }
+
+    [Fact]
     public void FormatRight_UsesModelOnlyWhenSingleProviderIsAvailable()
     {
         var directory = CreateGitDirectory("main");
@@ -134,9 +194,9 @@ public class CodingAgentFooterFormatterTests
         Reasoning = true
     };
 
-    private static string CreateGitDirectory(string branch)
+    private static string CreateGitDirectory(string branch, string? directory = null)
     {
-        var directory = Path.Combine(Path.GetTempPath(), $"tau-footer-formatter-{Guid.NewGuid():N}");
+        directory ??= Path.Combine(Path.GetTempPath(), $"tau-footer-formatter-{Guid.NewGuid():N}");
         var gitDirectory = Path.Combine(directory, ".git");
         Directory.CreateDirectory(gitDirectory);
         File.WriteAllText(Path.Combine(gitDirectory, "HEAD"), $"ref: refs/heads/{branch}");

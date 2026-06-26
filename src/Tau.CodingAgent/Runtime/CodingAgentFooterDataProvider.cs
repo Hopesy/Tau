@@ -45,6 +45,15 @@ public sealed class CodingAgentFooterDataProvider : IDisposable
         }
     }
 
+    public string GetCwd()
+    {
+        lock (_sync)
+        {
+            ThrowIfDisposed();
+            return _cwd;
+        }
+    }
+
     public IReadOnlyDictionary<string, string> GetExtensionStatuses()
     {
         lock (_sync)

@@ -1443,11 +1443,12 @@ public sealed class CodingAgentHost
             return;
         }
 
-        var baseLeft = string.IsNullOrWhiteSpace(statusLeftOverride)
-            ? FormatCompositionStatusLeft()
-            : statusLeftOverride;
+        var hasStatusOverride = !string.IsNullOrWhiteSpace(statusLeftOverride);
+        var baseLeft = hasStatusOverride ? statusLeftOverride! : FormatCompositionStatusLeft();
         var stats = GetFooterSessionStats();
-        var left = CodingAgentFooterFormatter.FormatLeft(baseLeft, _footerDataProvider);
+        var left = hasStatusOverride
+            ? CodingAgentFooterFormatter.FormatLeft(baseLeft, _footerDataProvider)
+            : baseLeft;
         var right = CodingAgentFooterFormatter.FormatRight(
             _runner.Model,
             _runner.ThinkingLevel,
@@ -1476,9 +1477,29 @@ public sealed class CodingAgentHost
     }
 
     private string FormatCompositionStatusLeft() =>
-        string.IsNullOrWhiteSpace(_runner.SessionName)
-            ? "ready"
-            : $"session: {_runner.SessionName}";
+        CodingAgentFooterFormatter.FormatDefaultLeft(
+            _footerDataProvider?.GetCwd() ?? Environment.CurrentDirectory,
+            GetHomeDirectory(),
+            _runner.SessionName,
+            _footerDataProvider);
+
+    private static string? GetHomeDirectory()
+    {
+        var home = Environment.GetEnvironmentVariable("HOME");
+        if (!string.IsNullOrWhiteSpace(home))
+        {
+            return home;
+        }
+
+        var userProfile = Environment.GetEnvironmentVariable("USERPROFILE");
+        if (!string.IsNullOrWhiteSpace(userProfile))
+        {
+            return userProfile;
+        }
+
+        var specialFolder = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        return string.IsNullOrWhiteSpace(specialFolder) ? null : specialFolder;
+    }
 
     private void WriteStatus(string message)
     {

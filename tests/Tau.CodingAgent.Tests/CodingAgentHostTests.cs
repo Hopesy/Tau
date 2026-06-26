@@ -1227,6 +1227,7 @@ public class CodingAgentHostTests
         var terminal = new FakeTerminal();
         terminal.QueueInput("exit");
         var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.SessionName = "footer slice";
         runner.MutableMessages.Add(new AssistantMessage([new TextContent("footer usage")])
         {
             Usage = new Usage(
@@ -1238,7 +1239,7 @@ public class CodingAgentHostTests
         });
         var footerDataProvider = new CodingAgentFooterDataProvider(directory);
         footerDataProvider.SetExtensionStatus("build", "done\tok");
-        var surface = new CapturingRenderSurface(width: 120, height: 4);
+        var surface = new CapturingRenderSurface(width: 240, height: 4);
         var compositionSession = new TuiCompositionSession(surface);
         var host = new CodingAgentHost(
             new InteractiveConsoleSession(terminal),
@@ -1255,9 +1256,10 @@ public class CodingAgentHostTests
                 .Where(static operation => operation.Kind == TuiRenderOperationKind.ReplaceLine)
                 .Select(static operation => operation.Text)
                 .ToArray();
+            Assert.Contains("Goodbye! (feature/footer) | done ok", compositionSession.Viewport.StatusLeft, StringComparison.Ordinal);
             Assert.Contains(
                 renderedLines,
-                static line => line.Contains("ready (feature/footer) | done ok", StringComparison.Ordinal));
+                static line => line.Contains("(feature/footer) • footer slice | done ok", StringComparison.Ordinal));
             Assert.Contains(
                 renderedLines,
                 static line => line.Contains("(openai) gpt-5.4 (thinking off)", StringComparison.Ordinal));
