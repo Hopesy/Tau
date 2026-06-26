@@ -85,7 +85,9 @@ public class CodingAgentHostTests
         Assert.Contains("you> hello\n", output);
         Assert.Contains("thinking", output);
         Assert.Contains("response", output);
-        Assert.Contains("tool> [read_file] (done)", output);
+        Assert.Contains("tool> read_file\n", output);
+        Assert.Contains("      partial\n", output);
+        Assert.Contains("      done\n", output);
         Assert.Contains("Goodbye!\n", output);
 
         static async IAsyncEnumerable<AgentEvent> GetEvents()
@@ -94,7 +96,39 @@ public class CodingAgentHostTests
             yield return new MessageUpdateEvent(new ThinkingDeltaEvent(0, "thinking", partial));
             yield return new MessageUpdateEvent(new TextDeltaEvent(1, "response", partial));
             yield return new ToolExecutionStartEvent("tool-1", "read_file");
+            yield return new ToolExecutionUpdateEvent("tool-1", new ToolUpdate("partial"), "read_file");
             yield return new ToolExecutionEndEvent("tool-1", new ToolResult([new TextContent("done")]));
+            yield return new AgentEndEvent();
+            await Task.CompletedTask;
+        }
+    }
+
+    [Fact]
+    public async Task RunAsync_RendersShellToolLifecycleWithBashComponent()
+    {
+        var terminal = new FakeTerminal();
+        terminal.QueueInput("run command");
+        terminal.QueueInput("exit");
+
+        var runner = new FakeCodingAgentRunner((_, _) => GetEvents());
+        var host = new CodingAgentHost(new InteractiveConsoleSession(terminal), runner);
+
+        await host.RunAsync();
+
+        var output = terminal.FlattenedText();
+
+        Assert.Contains("tool> $ dotnet test\n", output);
+        Assert.Contains("line 1", output);
+        Assert.Contains("(exit 2)", output);
+
+        static async IAsyncEnumerable<AgentEvent> GetEvents()
+        {
+            yield return new ToolExecutionStartEvent("tool-shell", "shell", """{"command":"dotnet test"}""");
+            yield return new ToolExecutionUpdateEvent("tool-shell", new ToolUpdate("line 1"), "shell");
+            yield return new ToolExecutionEndEvent(
+                "tool-shell",
+                new ToolResult([new TextContent("line 1\n[exit code: 2]")], IsError: true),
+                "shell");
             yield return new AgentEndEvent();
             await Task.CompletedTask;
         }

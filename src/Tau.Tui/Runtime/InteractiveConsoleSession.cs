@@ -175,6 +175,35 @@ public sealed class InteractiveConsoleSession
         NotifyTranscriptChanged();
     }
 
+    public void WriteToolComponent(ITuiComponent component, int width = 80)
+    {
+        ArgumentNullException.ThrowIfNull(component);
+        EnsureStreamingLineClosed();
+
+        var text = RenderComponentText(component, width);
+        if (text.Length == 0)
+        {
+            return;
+        }
+
+        var lines = text.Split('\n');
+        for (var i = 0; i < lines.Length; i++)
+        {
+            if (i == 0)
+            {
+                _terminal.Write("tool> ", ConsoleColor.Yellow);
+                _terminal.WriteLine(lines[i]);
+            }
+            else
+            {
+                _terminal.WriteLine("      " + lines[i]);
+            }
+        }
+
+        _transcript.Add(new TranscriptEntry(TranscriptEntryKind.Tool, text));
+        NotifyTranscriptChanged();
+    }
+
     public void WriteBranchSummary(string message)
     {
         EnsureStreamingLineClosed();
@@ -307,6 +336,56 @@ public sealed class InteractiveConsoleSession
             TranscriptEntryKind.Status => TuiMessageRole.Status,
             _ => TuiMessageRole.Status,
         };
+
+    private static string RenderComponentText(ITuiComponent component, int width)
+    {
+        var lines = component.Render(Math.Max(1, width))
+            .Select(static line => line.TrimEnd())
+            .ToList();
+
+        while (lines.Count > 0 && string.IsNullOrWhiteSpace(lines[0]))
+        {
+            lines.RemoveAt(0);
+        }
+
+        while (lines.Count > 0 && string.IsNullOrWhiteSpace(lines[^1]))
+        {
+            lines.RemoveAt(lines.Count - 1);
+        }
+
+        if (lines.Count == 0)
+        {
+            return string.Empty;
+        }
+
+        var commonIndent = lines
+            .Where(static line => line.Length > 0)
+            .Select(LeadingSpaceCount)
+            .DefaultIfEmpty(0)
+            .Min();
+        if (commonIndent > 0)
+        {
+            for (var i = 0; i < lines.Count; i++)
+            {
+                lines[i] = lines[i].Length >= commonIndent
+                    ? lines[i][commonIndent..]
+                    : string.Empty;
+            }
+        }
+
+        return string.Join('\n', lines);
+    }
+
+    private static int LeadingSpaceCount(string line)
+    {
+        var count = 0;
+        while (count < line.Length && line[count] == ' ')
+        {
+            count++;
+        }
+
+        return count;
+    }
 
     private void NotifyTranscriptChanged() => TranscriptChanged?.Invoke();
 }

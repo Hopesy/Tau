@@ -1,4 +1,5 @@
 using Tau.Tui.Abstractions;
+using Tau.Tui.Components;
 using Tau.Tui.Runtime;
 
 namespace Tau.Tui.Tests;
@@ -25,6 +26,28 @@ public class InteractiveConsoleSessionTests
         Assert.Contains($"{PromptZoneStart}tau> hello\n{PromptZoneEnd}{PromptZoneFinal}tool> [read_file] (done)\n", output);
         Assert.Contains(session.Transcript, entry => entry is { Kind: TranscriptEntryKind.Assistant, Text: "hello" });
         Assert.Contains(session.Transcript, entry => entry is { Kind: TranscriptEntryKind.Tool, Text: "[read_file]" });
+    }
+
+    [Fact]
+    public void ToolComponent_WritesRenderedComponentAndTranscript()
+    {
+        var terminal = new FakeTerminal();
+        var session = new InteractiveConsoleSession(terminal);
+        var component = new TuiToolExecution("read_file", "call-1", """{"path":"README.md"}""");
+        component.UpdateResult(new TuiToolExecutionResult([new TuiToolTextBlock("done")]));
+
+        session.WriteToolComponent(component, width: 32);
+
+        var output = terminal.FlattenedText();
+
+        Assert.Contains("tool> read_file\n", output);
+        Assert.Contains("      \"path\": \"README.md\"\n", output);
+        Assert.Contains("      done\n", output);
+        Assert.Contains(
+            session.Transcript,
+            entry => entry.Kind == TranscriptEntryKind.Tool &&
+                entry.Text.Contains("read_file", StringComparison.Ordinal) &&
+                entry.Text.Contains("done", StringComparison.Ordinal));
     }
 
     [Fact]

@@ -4,6 +4,7 @@ using Tau.Ai;
 using Tau.Ai.Auth.OAuth;
 using Tau.Ai.Observability;
 using Tau.Tui.Abstractions;
+using Tau.Tui.Components;
 using Tau.Tui.Runtime;
 
 namespace Tau.CodingAgent.Runtime;
@@ -36,6 +37,8 @@ public sealed class CodingAgentHost
     private readonly IDisposable? _compositionBinding;
     private IReadOnlyDictionary<KeyBinding, CodingAgentExtensionShortcut> _extensionShortcuts =
         new Dictionary<KeyBinding, CodingAgentExtensionShortcut>();
+    private readonly Dictionary<string, TuiToolExecution> _activeToolExecutions = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, TuiBashExecution> _activeBashExecutions = new(StringComparer.Ordinal);
     private CodingAgentRetryOptions _retryOptions;
     private bool _shutdownRendered;
 
@@ -1232,11 +1235,15 @@ public sealed class CodingAgentHost
                 break;
 
             case ToolExecutionStartEvent toolStart:
-                _ui.WriteToolStart(toolStart.ToolName);
+                HandleToolStart(toolStart);
+                break;
+
+            case ToolExecutionUpdateEvent toolUpdate:
+                HandleToolUpdate(toolUpdate);
                 break;
 
             case ToolExecutionEndEvent toolEnd:
-                _ui.WriteToolEnd(toolEnd.Result.IsError);
+                HandleToolEnd(toolEnd);
                 break;
 
             case AgentEndEvent end when end.ErrorMessage is not null:
@@ -1248,6 +1255,171 @@ public sealed class CodingAgentHost
                 RefreshCompositionStatus();
                 break;
         }
+    }
+
+    private void HandleToolStart(ToolExecutionStartEvent toolStart)
+    {
+        if (IsBashTool(toolStart.ToolName))
+        {
+            var bash = new TuiBashExecution(TryGetCommandFromArgs(toolStart.Args) ?? toolStart.ToolName);
+            _activeBashExecutions[toolStart.ToolCallId] = bash;
+            _ui.WriteToolComponent(bash);
+            return;
+        }
+
+        var tool = new TuiToolExecution(toolStart.ToolName, toolStart.ToolCallId, toolStart.Args);
+        tool.MarkExecutionStarted();
+        tool.SetArgsComplete();
+        _activeToolExecutions[toolStart.ToolCallId] = tool;
+        _ui.WriteToolComponent(tool);
+    }
+
+    private void HandleToolUpdate(ToolExecutionUpdateEvent toolUpdate)
+    {
+        if (_activeBashExecutions.TryGetValue(toolUpdate.ToolCallId, out var bash))
+        {
+            var output = !string.IsNullOrEmpty(toolUpdate.Update.Text)
+                ? toolUpdate.Update.Text
+                : ExtractText(toolUpdate.PartialResult);
+            bash.AppendOutput(output);
+            _ui.WriteToolComponent(bash);
+            return;
+        }
+
+        if (!_activeToolExecutions.TryGetValue(toolUpdate.ToolCallId, out var tool))
+        {
+            tool = new TuiToolExecution(
+                string.IsNullOrWhiteSpace(toolUpdate.ToolName) ? "tool" : toolUpdate.ToolName,
+                toolUpdate.ToolCallId,
+                toolUpdate.Args);
+            tool.MarkExecutionStarted();
+            _activeToolExecutions[toolUpdate.ToolCallId] = tool;
+        }
+
+        if (!string.IsNullOrWhiteSpace(toolUpdate.Args))
+        {
+            tool.UpdateArgs(toolUpdate.Args);
+        }
+
+        if (toolUpdate.PartialResult is { } partialResult)
+        {
+            tool.UpdateResult(ToTuiToolExecutionResult(partialResult), isPartial: true);
+        }
+        else if (!string.IsNullOrEmpty(toolUpdate.Update.Text) || toolUpdate.Update.Content is not null)
+        {
+            tool.UpdateResult(
+                ToTuiToolExecutionResult(
+                    new ToolResult(
+                        toolUpdate.Update.Content ?? [new TextContent(toolUpdate.Update.Text)],
+                        toolUpdate.Update.IsError.GetValueOrDefault(),
+                        toolUpdate.Update.Details,
+                        toolUpdate.Update.Terminate.GetValueOrDefault())),
+                isPartial: true);
+        }
+
+        _ui.WriteToolComponent(tool);
+    }
+
+    private void HandleToolEnd(ToolExecutionEndEvent toolEnd)
+    {
+        if (_activeBashExecutions.TryGetValue(toolEnd.ToolCallId, out var bash))
+        {
+            if (bash.OutputLines.Count == 0)
+            {
+                bash.AppendOutput(ExtractText(toolEnd.Result));
+            }
+
+            bash.SetComplete(
+                TryGetExitCode(toolEnd.Result) ?? (toolEnd.Result.IsError ? 1 : 0),
+                cancelled: false);
+            _ui.WriteToolComponent(bash);
+            _activeBashExecutions.Remove(toolEnd.ToolCallId);
+            return;
+        }
+
+        if (!_activeToolExecutions.TryGetValue(toolEnd.ToolCallId, out var tool))
+        {
+            tool = new TuiToolExecution(
+                string.IsNullOrWhiteSpace(toolEnd.ToolName) ? "tool" : toolEnd.ToolName,
+                toolEnd.ToolCallId);
+        }
+
+        tool.UpdateResult(ToTuiToolExecutionResult(toolEnd.Result));
+        _ui.WriteToolComponent(tool);
+        _activeToolExecutions.Remove(toolEnd.ToolCallId);
+    }
+
+    private static bool IsBashTool(string? toolName) =>
+        string.Equals(toolName, "bash", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(toolName, "shell", StringComparison.OrdinalIgnoreCase);
+
+    private static string? TryGetCommandFromArgs(string? args)
+    {
+        if (string.IsNullOrWhiteSpace(args))
+        {
+            return null;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(args);
+            if (document.RootElement.ValueKind == JsonValueKind.Object &&
+                document.RootElement.TryGetProperty("command", out var command) &&
+                command.ValueKind == JsonValueKind.String)
+            {
+                return command.GetString();
+            }
+        }
+        catch (JsonException)
+        {
+        }
+
+        return args;
+    }
+
+    private static TuiToolExecutionResult ToTuiToolExecutionResult(ToolResult result) =>
+        new(
+            result.Content.Select(ToTuiToolResultBlock).ToArray(),
+            result.IsError,
+            result.Details);
+
+    private static TuiToolResultBlock ToTuiToolResultBlock(ContentBlock block) =>
+        block switch
+        {
+            TextContent text => new TuiToolTextBlock(text.Text),
+            ImageContent image => new TuiToolImageBlock(image.Data, image.MimeType),
+            _ => new TuiToolTextBlock($"[{block.Type}]")
+        };
+
+    private static string ExtractText(ToolResult? result)
+    {
+        if (result is null)
+        {
+            return string.Empty;
+        }
+
+        return string.Join('\n', result.Content.OfType<TextContent>().Select(static text => text.Text));
+    }
+
+    private static int? TryGetExitCode(ToolResult result)
+    {
+        foreach (var line in ExtractText(result).Split('\n'))
+        {
+            var trimmed = line.Trim();
+            const string prefix = "[exit code: ";
+            if (!trimmed.StartsWith(prefix, StringComparison.Ordinal) || !trimmed.EndsWith(']'))
+            {
+                continue;
+            }
+
+            var value = trimmed[prefix.Length..^1];
+            if (int.TryParse(value, out var exitCode))
+            {
+                return exitCode;
+            }
+        }
+
+        return null;
     }
 
     private void RefreshCompositionStatus(string? statusLeftOverride = null)
