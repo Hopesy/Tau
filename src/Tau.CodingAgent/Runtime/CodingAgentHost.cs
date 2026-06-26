@@ -680,7 +680,7 @@ public sealed class CodingAgentHost
 
         try
         {
-            RefreshCompositionStatus("running");
+            RefreshCompositionStatus(GetRunningStatusText());
             var events = prompt.HasImages
                 ? _runner.RunAsync(prompt.ToContentBlocks(), logContext, cancellationToken)
                 : _runner.RunAsync(prompt.Text, logContext, cancellationToken);
@@ -791,7 +791,7 @@ public sealed class CodingAgentHost
 
         try
         {
-            RefreshCompositionStatus("running");
+            RefreshCompositionStatus(GetRunningStatusText());
             var events = _runner.RunAsync(input, logContext, cancellationToken);
             turnInputTask = StartTurnInputListener(turnInputCts.Token);
 
@@ -1468,6 +1468,9 @@ public sealed class CodingAgentHost
             _autoCompaction.IsEnabled);
         _compositionSession.SetStatus(left, right);
     }
+
+    private string GetRunningStatusText() =>
+        CodingAgentFooterFormatter.FormatWorkingStatus("running", _footerDataProvider);
 
     private CodingAgentSessionStats? GetFooterSessionStats()
     {

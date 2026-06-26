@@ -175,6 +175,34 @@ internal static class CodingAgentFooterFormatter
             : $"{statsText} {right}";
     }
 
+    public static string FormatWorkingStatus(
+        string defaultStatus,
+        CodingAgentFooterDataProvider? footerDataProvider)
+    {
+        if (footerDataProvider is null)
+        {
+            return SanitizeStatusText(defaultStatus);
+        }
+
+        var status = footerDataProvider.GetWorkingStatus();
+        var hasCustomMessage = status.Message is not null;
+        var hasCustomIndicator = status.IndicatorFrames is not null;
+        if (!hasCustomMessage && !hasCustomIndicator)
+        {
+            return SanitizeStatusText(defaultStatus);
+        }
+
+        var message = SanitizeStatusText(hasCustomMessage ? status.Message : defaultStatus);
+        var frame = status.IndicatorFrames?.FirstOrDefault();
+        var indicator = SanitizeStatusText(frame);
+        if (indicator.Length == 0)
+        {
+            return message.Length == 0 ? SanitizeStatusText(defaultStatus) : message;
+        }
+
+        return message.Length == 0 ? indicator : $"{indicator} {message}";
+    }
+
     public static string FormatModelRight(
         Model model,
         ThinkingLevel? thinkingLevel,

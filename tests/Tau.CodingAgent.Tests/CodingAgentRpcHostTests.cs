@@ -684,10 +684,14 @@ public sealed class CodingAgentRpcHostTests
         await bridge.NotifyAsync("Heads up", "warning");
         await bridge.SetWidgetAsync("summary", ["line 1", "line 2"], "belowEditor");
         await bridge.SetFooterAsync(["custom footer", "build\tok"]);
+        await bridge.SetWorkingMessageAsync("Working custom");
+        await bridge.SetWorkingIndicatorAsync(["a", "b"], 120);
         await bridge.NotifyAsync("Plain notice");
         await bridge.SetStatusAsync("idle", null);
         await bridge.SetWidgetAsync("empty", null);
         await bridge.SetFooterAsync(null);
+        await bridge.SetWorkingMessageAsync(null);
+        await bridge.SetWorkingIndicatorAsync(null);
         await bridge.SetTitleAsync("Tau");
         await bridge.SetEditorTextAsync("draft");
 
@@ -743,7 +747,34 @@ public sealed class CodingAgentRpcHostTests
         var clearedFooter = lines.Single(line =>
             line.GetProperty("method").GetString() == "setFooter" &&
             !line.TryGetProperty("footerLines", out _));
+        Assert.Equal("setFooter", clearedFooter.GetProperty("method").GetString());
         Assert.Null(footerDataProvider.GetCustomFooterLines());
+
+        var workingMessage = lines.Single(line =>
+            line.GetProperty("method").GetString() == "setWorkingMessage" &&
+            line.TryGetProperty("workingMessage", out _));
+        Assert.Equal("Working custom", workingMessage.GetProperty("workingMessage").GetString());
+
+        var workingIndicator = lines.Single(line =>
+            line.GetProperty("method").GetString() == "setWorkingIndicator" &&
+            line.TryGetProperty("workingIndicatorFrames", out _));
+        Assert.Equal(
+            ["a", "b"],
+            workingIndicator.GetProperty("workingIndicatorFrames").EnumerateArray().Select(line => line.GetString()!).ToArray());
+        Assert.Equal(120, workingIndicator.GetProperty("workingIndicatorIntervalMs").GetInt32());
+
+        var clearedWorkingMessage = lines.Single(line =>
+            line.GetProperty("method").GetString() == "setWorkingMessage" &&
+            !line.TryGetProperty("workingMessage", out _));
+        var clearedWorkingIndicator = lines.Single(line =>
+            line.GetProperty("method").GetString() == "setWorkingIndicator" &&
+            !line.TryGetProperty("workingIndicatorFrames", out _));
+        Assert.Equal("setWorkingMessage", clearedWorkingMessage.GetProperty("method").GetString());
+        Assert.Equal("setWorkingIndicator", clearedWorkingIndicator.GetProperty("method").GetString());
+        var workingStatus = footerDataProvider.GetWorkingStatus();
+        Assert.Null(workingStatus.Message);
+        Assert.Null(workingStatus.IndicatorFrames);
+        Assert.Null(workingStatus.IndicatorIntervalMilliseconds);
 
         Assert.Equal("Tau", lines.Single(line => line.GetProperty("method").GetString() == "setTitle").GetProperty("title").GetString());
         Assert.Equal(
@@ -791,6 +822,8 @@ public sealed class CodingAgentRpcHostTests
                     ctx.ui.setStatus("build", "done");
                     ctx.ui.setWidget("summary", ["one", "two"], { placement: "belowEditor" });
                     ctx.ui.setFooter(() => ({ render: () => ["footer one", "footer two"] }));
+                    ctx.ui.setWorkingMessage("Working custom");
+                    ctx.ui.setWorkingIndicator({ frames: ["a", "b"], intervalMs: 120.8 });
                     ctx.ui.setTitle("Tau UI");
                     ctx.ui.setEditorText("draft text");
                     ctx.ui.pasteToEditor("pasted text");
@@ -835,6 +868,13 @@ public sealed class CodingAgentRpcHostTests
         Assert.Equal(
             ["footer one", "footer two"],
             footer.GetProperty("footerLines").EnumerateArray().Select(line => line.GetString()!).ToArray());
+        var workingMessage = lines.Single(line => line.GetProperty("method").GetString() == "setWorkingMessage");
+        Assert.Equal("Working custom", workingMessage.GetProperty("workingMessage").GetString());
+        var workingIndicator = lines.Single(line => line.GetProperty("method").GetString() == "setWorkingIndicator");
+        Assert.Equal(
+            ["a", "b"],
+            workingIndicator.GetProperty("workingIndicatorFrames").EnumerateArray().Select(line => line.GetString()!).ToArray());
+        Assert.Equal(120, workingIndicator.GetProperty("workingIndicatorIntervalMs").GetInt32());
         Assert.Equal("Tau UI", lines.Single(line => line.GetProperty("method").GetString() == "setTitle").GetProperty("title").GetString());
         Assert.Equal(
             ["draft text", "pasted text"],

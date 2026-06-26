@@ -73,6 +73,9 @@ public sealed record CodingAgentJavaScriptExtensionUiAction(
     IReadOnlyList<string>? WidgetLines,
     string? WidgetPlacement,
     IReadOnlyList<string>? FooterLines,
+    string? WorkingMessage,
+    IReadOnlyList<string>? WorkingIndicatorFrames,
+    int? WorkingIndicatorIntervalMilliseconds,
     string? Title,
     string? Text);
 
@@ -531,6 +534,20 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
     private ProcessExecutionResult Execute(string payloadJson)
     {
         var executable = string.IsNullOrWhiteSpace(_nodeExecutable) ? "node" : _nodeExecutable!;
+        var scriptDirectory = Path.Combine(Path.GetTempPath(), "tau-node-extension-" + Guid.NewGuid().ToString("N"));
+        string? scriptPath = null;
+        try
+        {
+            Directory.CreateDirectory(scriptDirectory);
+            scriptPath = Path.Combine(scriptDirectory, "runtime.cjs");
+            File.WriteAllText(scriptPath, NodeScript, Encoding.UTF8);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException)
+        {
+            TryDeleteDirectory(scriptDirectory);
+            return ProcessExecutionResult.Failed($"node extension runtime script unavailable: {ex.Message}");
+        }
+
         using var process = new Process();
         process.StartInfo = new ProcessStartInfo(executable)
         {
@@ -540,8 +557,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
             RedirectStandardError = true,
             CreateNoWindow = true
         };
-        process.StartInfo.ArgumentList.Add("-e");
-        process.StartInfo.ArgumentList.Add(NodeScript);
+        process.StartInfo.ArgumentList.Add(scriptPath!);
         if (Directory.Exists(_cwd))
         {
             process.StartInfo.WorkingDirectory = _cwd;
@@ -553,6 +569,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
         }
         catch (Exception ex) when (ex is InvalidOperationException or Win32Exception)
         {
+            TryDeleteDirectory(scriptDirectory);
             return ProcessExecutionResult.Failed($"node extension runtime unavailable: {ex.Message}");
         }
 
@@ -564,6 +581,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
         {
             TryKill(process);
             Task.WaitAll([stdoutTask, stderrTask], TimeSpan.FromSeconds(1));
+            TryDeleteDirectory(scriptDirectory);
             return ProcessExecutionResult.Failed("node extension runtime timed out");
         }
 
@@ -571,6 +589,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
         var stdout = stdoutTask.Result;
         var stderr = stderrTask.Result;
         var resultJson = ExtractResultJson(stdout);
+        TryDeleteDirectory(scriptDirectory);
         if (resultJson is null)
         {
             var suffix = process.ExitCode == 0
@@ -585,6 +604,21 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
         }
 
         return ProcessExecutionResult.Succeeded(resultJson);
+    }
+
+    private static void TryDeleteDirectory(string path)
+    {
+        try
+        {
+            if (Directory.Exists(path))
+            {
+                Directory.Delete(path, recursive: true);
+            }
+        }
+        catch
+        {
+            // Temporary script cleanup is best-effort; extension execution should not fail after Node completed.
+        }
     }
 
     private string BuildPayload(
@@ -987,6 +1021,19 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
                         .GetAwaiter()
                         .GetResult();
                     break;
+                case "setWorkingMessage":
+                    bridge.SetWorkingMessageAsync(action.WorkingMessage, CancellationToken.None)
+                        .GetAwaiter()
+                        .GetResult();
+                    break;
+                case "setWorkingIndicator":
+                    bridge.SetWorkingIndicatorAsync(
+                            action.WorkingIndicatorFrames,
+                            action.WorkingIndicatorIntervalMilliseconds,
+                            CancellationToken.None)
+                        .GetAwaiter()
+                        .GetResult();
+                    break;
                 case "setTitle":
                     if (!string.IsNullOrWhiteSpace(action.Title))
                     {
@@ -1037,6 +1084,9 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
                 ReadOptionalStringArray(action, "widgetLines"),
                 ReadString(action, "widgetPlacement"),
                 ReadOptionalStringArray(action, "footerLines"),
+                ReadString(action, "workingMessage"),
+                ReadOptionalStringArray(action, "workingIndicatorFrames"),
+                ReadOptionalInt32(action, "workingIndicatorIntervalMs"),
                 ReadString(action, "title"),
                 ReadString(action, "text")));
         }
@@ -1087,6 +1137,19 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
         }
 
         return values.ToArray();
+    }
+
+    private static int? ReadOptionalInt32(JsonElement root, string propertyName)
+    {
+        if (!root.TryGetProperty(propertyName, out var property) ||
+            property.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+        {
+            return null;
+        }
+
+        return property.ValueKind == JsonValueKind.Number && property.TryGetInt32(out var value)
+            ? value
+            : null;
     }
 
     private static CodingAgentJavaScriptExtensionUnsupportedRegistrations ReadUnsupported(JsonElement root)
@@ -1586,6 +1649,13 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
           return text ? text.split(/\r?\n/) : [];
         }
 
+        function normalizeIndicator(o) {
+          if (o == null) return { frames: undefined, intervalMs: undefined };
+          const frames = normalizeStringArray(o.frames) ?? [];
+          const n = Number(o.intervalMs);
+          return { frames, intervalMs: Number.isFinite(n) ? Math.max(0, Math.trunc(n)) : undefined };
+        }
+
         const supportedEventNames = new Set([
           "tool_call",
           "tool_result",
@@ -1707,7 +1777,16 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
               statusKey: String(key ?? ""),
               statusText: text === undefined ? undefined : toText(text)
             }),
-            setWorkingMessage: () => {},
+            setWorkingMessage: message => addUiAction("setWorkingMessage", {
+              workingMessage: message === undefined ? undefined : toText(message)
+            }),
+            setWorkingIndicator: options => {
+              const indicator = normalizeIndicator(options);
+              addUiAction("setWorkingIndicator", {
+                workingIndicatorFrames: indicator.frames,
+                workingIndicatorIntervalMs: indicator.intervalMs
+              });
+            },
             setHiddenThinkingLabel: () => {},
             setWidget: (key, content, options = {}) => {
               const widgetLines = normalizeStringArray(content);

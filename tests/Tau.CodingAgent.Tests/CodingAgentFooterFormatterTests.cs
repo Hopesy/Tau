@@ -262,6 +262,48 @@ public class CodingAgentFooterFormatterTests
     }
 
     [Fact]
+    public void FormatWorkingStatus_UsesCustomMessageAndIndicator()
+    {
+        var directory = CreateGitDirectory("main");
+        var provider = new CodingAgentFooterDataProvider(directory);
+        provider.SetWorkingMessage("Working custom");
+        provider.SetWorkingIndicator(["*"], 120);
+
+        try
+        {
+            var formatted = CodingAgentFooterFormatter.FormatWorkingStatus("running", provider);
+
+            Assert.Equal("* Working custom", formatted);
+        }
+        finally
+        {
+            provider.Dispose();
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void FormatWorkingStatus_HidesIndicatorWhenFramesAreEmpty()
+    {
+        var directory = CreateGitDirectory("main");
+        var provider = new CodingAgentFooterDataProvider(directory);
+        provider.SetWorkingMessage("Working custom");
+        provider.SetWorkingIndicator([], 120);
+
+        try
+        {
+            var formatted = CodingAgentFooterFormatter.FormatWorkingStatus("running", provider);
+
+            Assert.Equal("Working custom", formatted);
+        }
+        finally
+        {
+            provider.Dispose();
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public void SanitizeStatusText_CollapsesControlAndWhitespace()
     {
         var formatted = CodingAgentFooterFormatter.SanitizeStatusText(" alpha\r\n beta\t\u0001 gamma  ");

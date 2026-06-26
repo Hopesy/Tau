@@ -194,6 +194,38 @@ public sealed class CodingAgentRpcExtensionUiBridge
             cancellationToken);
     }
 
+    public Task SetWorkingMessageAsync(
+        string? message,
+        CancellationToken cancellationToken = default)
+    {
+        GetFooterDataProvider()?.SetWorkingMessage(message);
+
+        return SendFireAndForgetAsync(
+            new Dictionary<string, object?>
+            {
+                ["method"] = "setWorkingMessage",
+                ["workingMessage"] = message
+            },
+            cancellationToken);
+    }
+
+    public Task SetWorkingIndicatorAsync(
+        IReadOnlyList<string>? frames,
+        int? intervalMilliseconds = null,
+        CancellationToken cancellationToken = default)
+    {
+        GetFooterDataProvider()?.SetWorkingIndicator(frames, intervalMilliseconds);
+
+        return SendFireAndForgetAsync(
+            new Dictionary<string, object?>
+            {
+                ["method"] = "setWorkingIndicator",
+                ["workingIndicatorFrames"] = frames?.ToArray(),
+                ["workingIndicatorIntervalMs"] = intervalMilliseconds
+            },
+            cancellationToken);
+    }
+
     public Task SetTitleAsync(string title, CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(title);

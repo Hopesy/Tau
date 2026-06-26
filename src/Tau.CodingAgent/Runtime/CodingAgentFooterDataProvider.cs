@@ -10,6 +10,9 @@ public sealed class CodingAgentFooterDataProvider : IDisposable
     private readonly Dictionary<string, string> _extensionStatuses = new(StringComparer.Ordinal);
     private readonly List<Action> _branchChangeCallbacks = [];
     private IReadOnlyList<string>? _customFooterLines;
+    private string? _workingMessage;
+    private IReadOnlyList<string>? _workingIndicatorFrames;
+    private int? _workingIndicatorIntervalMilliseconds;
     private string _cwd;
     private CodingAgentGitPaths? _gitPaths;
     private string? _cachedBranch;
@@ -73,6 +76,18 @@ public sealed class CodingAgentFooterDataProvider : IDisposable
         }
     }
 
+    public CodingAgentWorkingStatus GetWorkingStatus()
+    {
+        lock (_sync)
+        {
+            ThrowIfDisposed();
+            return new CodingAgentWorkingStatus(
+                _workingMessage,
+                _workingIndicatorFrames?.ToArray(),
+                _workingIndicatorIntervalMilliseconds);
+        }
+    }
+
     public IDisposable OnBranchChange(Action callback)
     {
         ArgumentNullException.ThrowIfNull(callback);
@@ -121,6 +136,25 @@ public sealed class CodingAgentFooterDataProvider : IDisposable
         {
             ThrowIfDisposed();
             _customFooterLines = lines?.ToArray();
+        }
+    }
+
+    public void SetWorkingMessage(string? message)
+    {
+        lock (_sync)
+        {
+            ThrowIfDisposed();
+            _workingMessage = message;
+        }
+    }
+
+    public void SetWorkingIndicator(IReadOnlyList<string>? frames, int? intervalMilliseconds)
+    {
+        lock (_sync)
+        {
+            ThrowIfDisposed();
+            _workingIndicatorFrames = frames?.ToArray();
+            _workingIndicatorIntervalMilliseconds = intervalMilliseconds;
         }
     }
 
@@ -595,5 +629,10 @@ public sealed record CodingAgentGitPaths(string RepoDir, string CommonGitDir, st
     public string ReftableDir => Path.Combine(CommonGitDir, "reftable");
     public string ReftableTablesListPath => Path.Combine(ReftableDir, "tables.list");
 }
+
+public sealed record CodingAgentWorkingStatus(
+    string? Message,
+    IReadOnlyList<string>? IndicatorFrames,
+    int? IndicatorIntervalMilliseconds);
 
 internal readonly record struct CodingAgentFileSnapshot(DateTime LastWriteTimeUtc, DateTime CreationTimeUtc, long Length);

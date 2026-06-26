@@ -214,6 +214,27 @@ public sealed class CodingAgentFooterDataProviderTests
     }
 
     [Fact]
+    public void WorkingStatus_IsMutableSnapshotAndCanBeCleared()
+    {
+        using var temp = TempDirectory.Create();
+        using var provider = new CodingAgentFooterDataProvider(temp.Path);
+
+        provider.SetWorkingMessage("Working custom");
+        provider.SetWorkingIndicator(["a", "b"], 120);
+        var snapshot = provider.GetWorkingStatus();
+        provider.SetWorkingMessage(null);
+        provider.SetWorkingIndicator(null, null);
+
+        Assert.Equal("Working custom", snapshot.Message);
+        Assert.Equal(["a", "b"], snapshot.IndicatorFrames);
+        Assert.Equal(120, snapshot.IndicatorIntervalMilliseconds);
+        var cleared = provider.GetWorkingStatus();
+        Assert.Null(cleared.Message);
+        Assert.Null(cleared.IndicatorFrames);
+        Assert.Null(cleared.IndicatorIntervalMilliseconds);
+    }
+
+    [Fact]
     public void AvailableProviderCount_ClampsNegativeValues()
     {
         using var temp = TempDirectory.Create();
