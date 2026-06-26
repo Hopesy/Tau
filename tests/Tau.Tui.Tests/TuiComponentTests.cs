@@ -311,6 +311,77 @@ public sealed class TuiComponentTests
     }
 
     [Fact]
+    public void ToolExecution_RendersImageBlocksWhenTerminalSupportsKitty()
+    {
+        TuiTerminalImage.SetCellDimensions(new TuiCellDimensions(10, 10));
+        TuiTerminalImage.SetCapabilities(new TuiTerminalCapabilities(TuiImageProtocol.Kitty, TrueColor: true, Hyperlinks: true));
+        var tool = new TuiToolExecution(
+            "read_file",
+            "call-img",
+            showImages: true,
+            imageWidthCells: 7);
+        tool.UpdateResult(new TuiToolExecutionResult(
+            [
+                new TuiToolTextBlock("Read image file [image/png]"),
+                new TuiToolImageBlock(
+                    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=",
+                    "image/png")
+            ]));
+
+        var text = string.Join('\n', tool.Render(40));
+
+        Assert.Contains(TuiTerminalImage.KittyPrefix, text, StringComparison.Ordinal);
+        Assert.Contains("c=7", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("[Image: [image/png]", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ToolExecution_DoesNotWrapImageProtocolLinesWithBackground()
+    {
+        TuiTerminalImage.SetCellDimensions(new TuiCellDimensions(10, 10));
+        TuiTerminalImage.SetCapabilities(new TuiTerminalCapabilities(TuiImageProtocol.Kitty, TrueColor: true, Hyperlinks: true));
+        var tool = new TuiToolExecution(
+            "read_file",
+            "call-img-bg",
+            theme: new TuiToolExecutionTheme(SuccessBackground: static value => $"\u001b[42m{value}\u001b[0m"),
+            showImages: true,
+            imageWidthCells: 4);
+        tool.UpdateResult(new TuiToolExecutionResult(
+            [
+                new TuiToolTextBlock("image ready"),
+                new TuiToolImageBlock(
+                    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=",
+                    "image/png")
+            ]));
+
+        var lines = tool.Render(40);
+        var protocolLine = Assert.Single(lines, static line => TuiTerminalImage.IsImageLine(line));
+
+        Assert.StartsWith("\u001b[42m", lines[0], StringComparison.Ordinal);
+        Assert.False(protocolLine.StartsWith("\u001b[42m", StringComparison.Ordinal));
+        Assert.Contains("c=4", protocolLine, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ToolExecution_RendersImageFallbackWhenImagesAreDisabled()
+    {
+        TuiTerminalImage.SetCapabilities(new TuiTerminalCapabilities(TuiImageProtocol.Kitty, TrueColor: true, Hyperlinks: true));
+        var tool = new TuiToolExecution("read_file", "call-img-off", showImages: false);
+        tool.UpdateResult(new TuiToolExecutionResult(
+            [
+                new TuiToolTextBlock("image hidden"),
+                new TuiToolImageBlock(
+                    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=",
+                    "image/png")
+            ]));
+
+        var text = string.Join('\n', tool.Render(40));
+
+        Assert.Contains("[Image: [image/png] 1x1]", text, StringComparison.Ordinal);
+        Assert.DoesNotContain(TuiTerminalImage.KittyPrefix, text, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void ToolExecution_ErrorResultUsesErrorBackgroundAfterPartialCompletes()
     {
         var tool = new TuiToolExecution(

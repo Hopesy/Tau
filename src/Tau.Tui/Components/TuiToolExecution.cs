@@ -107,23 +107,36 @@ public sealed partial class TuiToolExecution : ITuiComponent
     {
         width = Math.Max(1, width);
         var text = FormatToolExecution();
-        if (string.IsNullOrWhiteSpace(text))
+        var imageLines = RenderImageBlocks(width);
+        if (string.IsNullOrWhiteSpace(text) && imageLines.Count == 0)
         {
             return [];
         }
 
-        var contentWidth = Math.Max(1, width - 2);
-        var lines = new List<string>
+        var lines = new List<string>();
+        if (!string.IsNullOrWhiteSpace(text))
         {
-            FormatLine(string.Empty, width)
-        };
+            var contentWidth = Math.Max(1, width - 2);
+            lines.Add(FormatLine(string.Empty, width));
 
-        foreach (var line in TuiText.WrapTextWithAnsi(text, contentWidth))
-        {
-            lines.Add(FormatLine(" " + line, width));
+            foreach (var line in TuiText.WrapTextWithAnsi(text, contentWidth))
+            {
+                lines.Add(FormatLine(" " + line, width));
+            }
+
+            lines.Add(FormatLine(string.Empty, width));
         }
 
-        lines.Add(FormatLine(string.Empty, width));
+        if (imageLines.Count > 0)
+        {
+            if (lines.Count > 0)
+            {
+                lines.Add(string.Empty);
+            }
+
+            lines.AddRange(imageLines);
+        }
+
         return lines;
     }
 
@@ -154,6 +167,53 @@ public sealed partial class TuiToolExecution : ITuiComponent
         return CurrentBackgroundFormatter() is { } formatter
             ? formatter(padded)
             : padded;
+    }
+
+    private IReadOnlyList<string> RenderImageBlocks(int width)
+    {
+        if (_result is null || !_showImages)
+        {
+            return [];
+        }
+
+        var capabilities = TuiTerminalImage.GetCapabilities();
+        if (capabilities.Images == TuiImageProtocol.None)
+        {
+            return [];
+        }
+
+        var lines = new List<string>();
+        foreach (var block in _result.Content.OfType<TuiToolImageBlock>())
+        {
+            if (string.IsNullOrWhiteSpace(block.Data))
+            {
+                continue;
+            }
+
+            var mimeType = string.IsNullOrWhiteSpace(block.MimeType)
+                ? "image/unknown"
+                : block.MimeType;
+            if (capabilities.Images == TuiImageProtocol.Kitty &&
+                !string.Equals(mimeType, "image/png", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (lines.Count > 0)
+            {
+                lines.Add(string.Empty);
+            }
+
+            var dimensions = TuiTerminalImage.GetImageDimensions(block.Data, mimeType);
+            var image = new TuiImage(
+                block.Data,
+                mimeType,
+                options: new TuiImageOptions { MaxWidthCells = _imageWidthCells },
+                dimensions: dimensions);
+            lines.AddRange(image.Render(width));
+        }
+
+        return lines;
     }
 
     private Func<string, string>? CurrentBackgroundFormatter()
