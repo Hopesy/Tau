@@ -5,6 +5,10 @@ namespace Tau.Tui.Tests;
 
 public class InteractiveConsoleSessionTests
 {
+    private const string PromptZoneStart = "\u001b]133;A\u0007";
+    private const string PromptZoneEnd = "\u001b]133;B\u0007";
+    private const string PromptZoneFinal = "\u001b]133;C\u0007";
+
     [Fact]
     public void ToolStart_ClosesStreamingLine_BeforeWritingToolName()
     {
@@ -18,9 +22,23 @@ public class InteractiveConsoleSessionTests
 
         var output = terminal.FlattenedText();
 
-        Assert.Contains("tau> hello\ntool> [read_file] (done)\n", output);
+        Assert.Contains($"{PromptZoneStart}tau> hello\n{PromptZoneEnd}{PromptZoneFinal}tool> [read_file] (done)\n", output);
         Assert.Contains(session.Transcript, entry => entry is { Kind: TranscriptEntryKind.Assistant, Text: "hello" });
         Assert.Contains(session.Transcript, entry => entry is { Kind: TranscriptEntryKind.Tool, Text: "[read_file]" });
+    }
+
+    [Fact]
+    public void UserMessage_WritesPromptZone()
+    {
+        var terminal = new FakeTerminal();
+        var session = new InteractiveConsoleSession(terminal);
+
+        session.WriteUserMessage("hello");
+
+        var output = terminal.FlattenedText();
+
+        Assert.Contains($"{PromptZoneStart}you> hello\n{PromptZoneEnd}{PromptZoneFinal}", output);
+        Assert.Contains(session.Transcript, entry => entry is { Kind: TranscriptEntryKind.User, Text: "hello" });
     }
 
     [Fact]
@@ -160,7 +178,7 @@ public class InteractiveConsoleSessionTests
 
         var output = terminal.FlattenedText();
 
-        Assert.Contains("thinking> plan\ntau> answer\n", output);
+        Assert.Contains($"thinking> plan\n{PromptZoneStart}tau> answer\n{PromptZoneEnd}{PromptZoneFinal}", output);
         Assert.Contains(session.Transcript, entry => entry is { Kind: TranscriptEntryKind.Thinking, Text: "plan" });
         Assert.Contains(session.Transcript, entry => entry is { Kind: TranscriptEntryKind.Assistant, Text: "answer" });
     }

@@ -7,6 +7,9 @@ public sealed class InteractiveConsoleSession
 {
     private const string DefaultPrompt = "> ";
     private const ConsoleColor DefaultPromptColor = ConsoleColor.Green;
+    private const string PromptZoneStart = "\u001b]133;A\u0007";
+    private const string PromptZoneEnd = "\u001b]133;B\u0007";
+    private const string PromptZoneFinal = "\u001b]133;C\u0007";
     private readonly ITerminal _terminal;
     private readonly InteractiveInputEditor? _editor;
     private readonly Action? _clearScreenAction;
@@ -113,8 +116,10 @@ public sealed class InteractiveConsoleSession
     public void WriteUserMessage(string message)
     {
         EnsureStreamingLineClosed();
+        _terminal.Write(PromptZoneStart);
         _terminal.Write("you> ", ConsoleColor.Green);
         _terminal.WriteLine(message);
+        _terminal.Write(PromptZoneEnd + PromptZoneFinal);
         _transcript.Add(new TranscriptEntry(TranscriptEntryKind.User, message));
         NotifyTranscriptChanged();
     }
@@ -251,6 +256,11 @@ public sealed class InteractiveConsoleSession
         }
 
         _terminal.WriteLine();
+        if (_streamingKind == TranscriptEntryKind.Assistant)
+        {
+            _terminal.Write(PromptZoneEnd + PromptZoneFinal);
+        }
+
         _streamingLineOpen = false;
         if (_streamingKind is not null)
         {
@@ -270,6 +280,11 @@ public sealed class InteractiveConsoleSession
         }
 
         EnsureStreamingLineClosed();
+        if (kind == TranscriptEntryKind.Assistant)
+        {
+            _terminal.Write(PromptZoneStart);
+        }
+
         _terminal.Write(prefix, prefixColor);
         _streamingLineOpen = true;
         _streamingKind = kind;
