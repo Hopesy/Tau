@@ -75,7 +75,8 @@ public class CodingAgentHostTests
         terminal.QueueInput("exit");
 
         var runner = new FakeCodingAgentRunner((_, _) => GetEvents());
-        var host = new CodingAgentHost(new InteractiveConsoleSession(terminal), runner);
+        var session = new InteractiveConsoleSession(terminal);
+        var host = new CodingAgentHost(session, runner);
 
         await host.RunAsync();
 
@@ -89,6 +90,9 @@ public class CodingAgentHostTests
         Assert.Contains("      partial\n", output);
         Assert.Contains("      done\n", output);
         Assert.Contains("Goodbye!\n", output);
+        var toolEntry = Assert.Single(session.Transcript, entry => entry is { Kind: TranscriptEntryKind.Tool, Key: "tool-1" });
+        Assert.Contains("done", toolEntry.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("partial", toolEntry.Text, StringComparison.Ordinal);
 
         static async IAsyncEnumerable<AgentEvent> GetEvents()
         {
@@ -111,7 +115,8 @@ public class CodingAgentHostTests
         terminal.QueueInput("exit");
 
         var runner = new FakeCodingAgentRunner((_, _) => GetEvents());
-        var host = new CodingAgentHost(new InteractiveConsoleSession(terminal), runner);
+        var session = new InteractiveConsoleSession(terminal);
+        var host = new CodingAgentHost(session, runner);
 
         await host.RunAsync();
 
@@ -120,6 +125,8 @@ public class CodingAgentHostTests
         Assert.Contains("tool> $ dotnet test\n", output);
         Assert.Contains("line 1", output);
         Assert.Contains("(exit 2)", output);
+        var toolEntry = Assert.Single(session.Transcript, entry => entry is { Kind: TranscriptEntryKind.Tool, Key: "tool-shell" });
+        Assert.Contains("(exit 2)", toolEntry.Text, StringComparison.Ordinal);
 
         static async IAsyncEnumerable<AgentEvent> GetEvents()
         {

@@ -51,6 +51,27 @@ public class InteractiveConsoleSessionTests
     }
 
     [Fact]
+    public void ToolComponent_WithSameKeyUpdatesExistingTranscriptEntry()
+    {
+        var terminal = new FakeTerminal();
+        var session = new InteractiveConsoleSession(terminal);
+        var component = new TuiToolExecution("read_file", "call-1", """{"path":"README.md"}""");
+
+        session.WriteToolComponent(component, width: 32, key: "call-1");
+        component.UpdateResult(new TuiToolExecutionResult([new TuiToolTextBlock("done")]));
+        session.WriteToolComponent(component, width: 32, key: "call-1");
+
+        var entry = Assert.Single(session.Transcript, entry => entry.Kind == TranscriptEntryKind.Tool);
+        Assert.Equal("call-1", entry.Key);
+        Assert.Contains("done", entry.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            session.SnapshotMessages(),
+            message => message.Role == TuiMessageRole.Tool &&
+                message.Text.Contains("\"path\": \"README.md\"", StringComparison.Ordinal) &&
+                !message.Text.Contains("done", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void UserMessage_WritesPromptZone()
     {
         var terminal = new FakeTerminal();

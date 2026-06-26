@@ -1263,7 +1263,7 @@ public sealed class CodingAgentHost
         {
             var bash = new TuiBashExecution(TryGetCommandFromArgs(toolStart.Args) ?? toolStart.ToolName);
             _activeBashExecutions[toolStart.ToolCallId] = bash;
-            _ui.WriteToolComponent(bash);
+            _ui.WriteToolComponent(bash, key: toolStart.ToolCallId);
             return;
         }
 
@@ -1271,7 +1271,7 @@ public sealed class CodingAgentHost
         tool.MarkExecutionStarted();
         tool.SetArgsComplete();
         _activeToolExecutions[toolStart.ToolCallId] = tool;
-        _ui.WriteToolComponent(tool);
+        _ui.WriteToolComponent(tool, key: toolStart.ToolCallId);
     }
 
     private void HandleToolUpdate(ToolExecutionUpdateEvent toolUpdate)
@@ -1282,7 +1282,7 @@ public sealed class CodingAgentHost
                 ? toolUpdate.Update.Text
                 : ExtractText(toolUpdate.PartialResult);
             bash.AppendOutput(output);
-            _ui.WriteToolComponent(bash);
+            _ui.WriteToolComponent(bash, key: toolUpdate.ToolCallId);
             return;
         }
 
@@ -1317,7 +1317,7 @@ public sealed class CodingAgentHost
                 isPartial: true);
         }
 
-        _ui.WriteToolComponent(tool);
+        _ui.WriteToolComponent(tool, key: toolUpdate.ToolCallId);
     }
 
     private void HandleToolEnd(ToolExecutionEndEvent toolEnd)
@@ -1332,7 +1332,7 @@ public sealed class CodingAgentHost
             bash.SetComplete(
                 TryGetExitCode(toolEnd.Result) ?? (toolEnd.Result.IsError ? 1 : 0),
                 cancelled: false);
-            _ui.WriteToolComponent(bash);
+            _ui.WriteToolComponent(bash, key: toolEnd.ToolCallId);
             _activeBashExecutions.Remove(toolEnd.ToolCallId);
             return;
         }
@@ -1345,7 +1345,7 @@ public sealed class CodingAgentHost
         }
 
         tool.UpdateResult(ToTuiToolExecutionResult(toolEnd.Result));
-        _ui.WriteToolComponent(tool);
+        _ui.WriteToolComponent(tool, key: toolEnd.ToolCallId);
         _activeToolExecutions.Remove(toolEnd.ToolCallId);
     }
 

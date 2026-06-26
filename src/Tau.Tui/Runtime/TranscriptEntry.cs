@@ -1,6 +1,6 @@
 namespace Tau.Tui.Runtime;
 
-public sealed record TranscriptEntry(TranscriptEntryKind Kind, string Text);
+public sealed record TranscriptEntry(TranscriptEntryKind Kind, string Text, string? Key = null);
 
 public enum TranscriptEntryKind
 {

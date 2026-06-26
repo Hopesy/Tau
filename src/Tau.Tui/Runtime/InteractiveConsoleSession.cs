@@ -175,7 +175,7 @@ public sealed class InteractiveConsoleSession
         NotifyTranscriptChanged();
     }
 
-    public void WriteToolComponent(ITuiComponent component, int width = 80)
+    public void WriteToolComponent(ITuiComponent component, int width = 80, string? key = null)
     {
         ArgumentNullException.ThrowIfNull(component);
         EnsureStreamingLineClosed();
@@ -200,7 +200,7 @@ public sealed class InteractiveConsoleSession
             }
         }
 
-        _transcript.Add(new TranscriptEntry(TranscriptEntryKind.Tool, text));
+        UpsertTranscriptEntry(TranscriptEntryKind.Tool, text, key);
         NotifyTranscriptChanged();
     }
 
@@ -385,6 +385,23 @@ public sealed class InteractiveConsoleSession
         }
 
         return count;
+    }
+
+    private void UpsertTranscriptEntry(TranscriptEntryKind kind, string text, string? key)
+    {
+        if (!string.IsNullOrWhiteSpace(key))
+        {
+            var index = _transcript.FindIndex(entry =>
+                entry.Kind == kind &&
+                string.Equals(entry.Key, key, StringComparison.Ordinal));
+            if (index >= 0)
+            {
+                _transcript[index] = new TranscriptEntry(kind, text, key);
+                return;
+            }
+        }
+
+        _transcript.Add(new TranscriptEntry(kind, text, string.IsNullOrWhiteSpace(key) ? null : key));
     }
 
     private void NotifyTranscriptChanged() => TranscriptChanged?.Invoke();
