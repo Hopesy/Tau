@@ -33,13 +33,15 @@ public sealed class TuiTranscriptViewport
 
     public int Width => _width;
     public int Height => _height;
-    public int MessageHeight => Math.Max(0, _height - 1);
+    public int StatusHeight => Math.Min(_height, _statusBar.LineCount);
+    public int MessageHeight => Math.Max(0, _height - StatusHeight);
     public int ScrollOffsetFromBottom => _scrollback.ScrollOffsetFromBottom;
     public bool IsFollowingBottom => _scrollback.IsFollowingBottom;
     public IReadOnlyList<TuiMessage> Messages => _messageArea.Messages;
     public IReadOnlyList<string> ScrollbackLines => _scrollback.Lines;
     public string StatusLeft => _statusBar.Left;
     public string StatusRight => _statusBar.Right;
+    public IReadOnlyList<TuiStatusBarLine> StatusLines => _statusBar.Lines;
 
     private int ScrollbackHeight => Math.Max(1, MessageHeight);
 
@@ -77,7 +79,17 @@ public sealed class TuiTranscriptViewport
         _scrollback.Clear();
     }
 
-    public void SetStatus(string left, string right) => _statusBar.SetSegments(left, right);
+    public void SetStatus(string left, string right)
+    {
+        _statusBar.SetSegments(left, right);
+        _scrollback.SetHeight(ScrollbackHeight);
+    }
+
+    public void SetStatusLines(IEnumerable<TuiStatusBarLine> lines)
+    {
+        _statusBar.SetLines(lines);
+        _scrollback.SetHeight(ScrollbackHeight);
+    }
 
     public void Resize(int width, int height)
     {
@@ -149,7 +161,7 @@ public sealed class TuiTranscriptViewport
             rows.Add(TuiText.TruncateToWidth(line, _width, string.Empty, pad: true));
         }
 
-        rows.AddRange(_statusBar.Render(_width));
+        rows.AddRange(_statusBar.Render(_width).TakeLast(StatusHeight));
         return rows;
     }
 

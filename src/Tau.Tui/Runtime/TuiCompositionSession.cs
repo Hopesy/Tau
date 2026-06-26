@@ -86,6 +86,9 @@ public sealed class TuiCompositionSession
     public TuiTranscriptRenderResult? SetStatus(string left, string right) =>
         Host.SetStatus(left, right);
 
+    public TuiTranscriptRenderResult? SetStatusLines(IEnumerable<TuiStatusBarLine> lines) =>
+        Host.SetStatusLines(lines);
+
     public TuiTranscriptOverlayHandle OpenOverlay(
         ITuiComponent component,
         TuiTranscriptOverlayOptions? options = null) =>

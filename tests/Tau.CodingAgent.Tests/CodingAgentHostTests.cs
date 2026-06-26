@@ -1259,7 +1259,7 @@ public class CodingAgentHostTests
             Assert.Contains("Goodbye! (feature/footer) | done ok", compositionSession.Viewport.StatusLeft, StringComparison.Ordinal);
             Assert.Contains(
                 renderedLines,
-                static line => line.Contains("(feature/footer) • footer slice | done ok", StringComparison.Ordinal));
+                static line => line.Contains("(feature/footer) • footer slice", StringComparison.Ordinal));
             Assert.Contains(
                 renderedLines,
                 static line => line.Contains("(openai) gpt-5.4 (thinking off)", StringComparison.Ordinal));
@@ -1269,6 +1269,9 @@ public class CodingAgentHostTests
             Assert.Contains(
                 renderedLines,
                 static line => line.Contains("%/128k", StringComparison.Ordinal));
+            Assert.Contains(
+                renderedLines,
+                static line => line.Contains("done ok", StringComparison.Ordinal));
         }
         finally
         {

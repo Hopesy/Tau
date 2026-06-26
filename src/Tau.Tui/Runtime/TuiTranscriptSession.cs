@@ -160,6 +160,12 @@ public sealed class TuiTranscriptSession
         return RenderAfterStateChange();
     }
 
+    public TuiTranscriptRenderResult? SetStatusLines(IEnumerable<TuiStatusBarLine> lines)
+    {
+        Host.SetStatusLines(lines);
+        return RenderAfterStateChange();
+    }
+
     public TuiTranscriptOverlayHandle OpenOverlay(
         ITuiComponent component,
         TuiTranscriptOverlayOptions? options = null)

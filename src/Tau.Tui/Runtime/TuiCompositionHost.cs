@@ -167,6 +167,15 @@ public sealed class TuiCompositionHost
         }
     }
 
+    public TuiTranscriptRenderResult? SetStatusLines(IEnumerable<TuiStatusBarLine> lines)
+    {
+        lock (_sync)
+        {
+            TranscriptHost.SetStatusLines(lines);
+            return RenderAfterStateChangeCore();
+        }
+    }
+
     public TuiTranscriptOverlayHandle OpenOverlay(
         ITuiComponent component,
         TuiTranscriptOverlayOptions? options = null)

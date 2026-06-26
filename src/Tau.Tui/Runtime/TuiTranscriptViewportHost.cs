@@ -127,6 +127,8 @@ public sealed class TuiTranscriptViewportHost
 
     public void SetStatus(string left, string right) => Viewport.SetStatus(left, right);
 
+    public void SetStatusLines(IEnumerable<TuiStatusBarLine> lines) => Viewport.SetStatusLines(lines);
+
     public void ScrollLine(int delta) => Viewport.ScrollLine(delta);
 
     public void ScrollPage(int delta) => Viewport.ScrollPage(delta);

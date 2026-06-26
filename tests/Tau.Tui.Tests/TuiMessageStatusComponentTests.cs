@@ -98,4 +98,28 @@ public sealed class TuiMessageStatusComponentTests
 
         Assert.Equal(["     ready"], bar.Render(10));
     }
+
+    [Fact]
+    public void StatusBar_RendersMultipleLinesWithIndependentAlignment()
+    {
+        var bar = new TuiStatusBar("cwd", "");
+        bar.SetLines(
+            [
+                new TuiStatusBarLine("~/work", ""),
+                new TuiStatusBarLine("in1.5k out200", "gpt-5"),
+                new TuiStatusBarLine("build ok", "")
+            ]);
+
+        var lines = bar.Render(20);
+
+        Assert.Equal(
+            [
+                "~/work              ",
+                "in1.5k out200  gpt-5",
+                "build ok            "
+            ],
+            lines);
+        Assert.Equal(3, bar.LineCount);
+        Assert.All(lines, line => Assert.Equal(20, TuiText.VisibleWidth(line)));
+    }
 }

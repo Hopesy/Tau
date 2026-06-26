@@ -1,5 +1,6 @@
 using System.Text;
 using Tau.Ai;
+using Tau.Tui.Components;
 
 namespace Tau.CodingAgent.Runtime;
 
@@ -18,6 +19,33 @@ internal static class CodingAgentFooterFormatter
     {
         var location = FormatLocation(cwd, home, sessionName, footerDataProvider);
         return FormatLeft(location, footerDataProvider, includeGitBranch: false);
+    }
+
+    public static IReadOnlyList<TuiStatusBarLine> FormatDefaultLines(
+        string cwd,
+        string? home,
+        string? sessionName,
+        Model model,
+        ThinkingLevel? thinkingLevel,
+        CodingAgentFooterDataProvider? footerDataProvider,
+        CodingAgentSessionStats? stats = null,
+        bool autoCompactEnabled = true)
+    {
+        var lines = new List<TuiStatusBarLine>
+        {
+            new(FormatLocation(cwd, home, sessionName, footerDataProvider), string.Empty),
+            new(
+                FormatStats(stats, autoCompactEnabled),
+                FormatModelRight(model, thinkingLevel, footerDataProvider))
+        };
+
+        var extensionStatuses = FormatExtensionStatuses(footerDataProvider);
+        if (extensionStatuses.Length > 0)
+        {
+            lines.Add(new TuiStatusBarLine(extensionStatuses, string.Empty));
+        }
+
+        return lines;
     }
 
     public static string FormatLocation(
@@ -134,6 +162,18 @@ internal static class CodingAgentFooterFormatter
         CodingAgentSessionStats? stats = null,
         bool autoCompactEnabled = true)
     {
+        var right = FormatModelRight(model, thinkingLevel, footerDataProvider);
+        var statsText = FormatStats(stats, autoCompactEnabled);
+        return statsText.Length == 0
+            ? right
+            : $"{statsText} {right}";
+    }
+
+    public static string FormatModelRight(
+        Model model,
+        ThinkingLevel? thinkingLevel,
+        CodingAgentFooterDataProvider? footerDataProvider)
+    {
         ArgumentNullException.ThrowIfNull(model);
 
         var modelText = SanitizeStatusText(model.Id);
@@ -147,13 +187,9 @@ internal static class CodingAgentFooterFormatter
             modelText = $"{modelText} (thinking {CodingAgentThinkingLevels.Format(thinkingLevel)})";
         }
 
-        var right = footerDataProvider?.GetAvailableProviderCount() > 1
+        return footerDataProvider?.GetAvailableProviderCount() > 1
             ? $"({SanitizeStatusText(model.Provider)}) {modelText}"
             : modelText;
-        var statsText = FormatStats(stats, autoCompactEnabled);
-        return statsText.Length == 0
-            ? right
-            : $"{statsText} {right}";
     }
 
     public static string FormatStats(CodingAgentSessionStats? stats, bool autoCompactEnabled = true)
@@ -265,5 +301,21 @@ internal static class CodingAgentFooterFormatter
         }
 
         return builder.ToString().Trim();
+    }
+
+    private static string FormatExtensionStatuses(CodingAgentFooterDataProvider? footerDataProvider)
+    {
+        if (footerDataProvider is null)
+        {
+            return string.Empty;
+        }
+
+        var extensionStatuses = footerDataProvider
+            .GetExtensionStatuses()
+            .OrderBy(static pair => pair.Key, StringComparer.Ordinal)
+            .Select(static pair => SanitizeStatusText(pair.Value))
+            .Where(static text => text.Length > 0)
+            .ToArray();
+        return string.Join(' ', extensionStatuses);
     }
 }

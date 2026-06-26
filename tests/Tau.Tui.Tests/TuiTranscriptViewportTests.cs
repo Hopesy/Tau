@@ -118,6 +118,34 @@ public sealed class TuiTranscriptViewportTests
     }
 
     [Fact]
+    public void Render_MultilineStatusReservesRowsBelowTranscript()
+    {
+        var viewport = new TuiTranscriptViewport(width: 18, height: 5);
+        viewport.SetStatusLines(
+            [
+                new TuiStatusBarLine("~/repo (main)", ""),
+                new TuiStatusBarLine("in12 out4", "gpt"),
+                new TuiStatusBarLine("build ok", "")
+            ]);
+        viewport.AppendMessages(
+            [
+                new TuiMessage(TuiMessageRole.User, "one"),
+                new TuiMessage(TuiMessageRole.Assistant, "two"),
+                new TuiMessage(TuiMessageRole.Tool, "three"),
+            ]);
+
+        var rows = viewport.Render();
+
+        Assert.Equal(3, viewport.StatusHeight);
+        Assert.Equal(2, viewport.MessageHeight);
+        Assert.Equal(["tau> two", "tool> three"], MessageRows(rows, viewport));
+        Assert.Equal("~/repo (main)     ", rows[^3]);
+        Assert.Equal("in12 out4      gpt", rows[^2]);
+        Assert.Equal("build ok          ", rows[^1]);
+        Assert.All(rows, row => Assert.Equal(18, TuiText.VisibleWidth(row)));
+    }
+
+    [Fact]
     public void Resize_RewrapsMessagesWhenWidthChangesAndRestoresScrolledOffset()
     {
         var viewport = new TuiTranscriptViewport(width: 24, height: 3);

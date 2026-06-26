@@ -3,31 +3,51 @@ using Tau.Tui.Rendering;
 
 namespace Tau.Tui.Components;
 
+public readonly record struct TuiStatusBarLine(string Left, string Right);
+
 public sealed class TuiStatusBar : ITuiComponent
 {
-    private string _left;
-    private string _right;
+    private readonly List<TuiStatusBarLine> _lines = [];
 
     public TuiStatusBar(string left = "", string right = "")
     {
-        _left = left ?? string.Empty;
-        _right = right ?? string.Empty;
+        SetSegments(left, right);
     }
 
-    public string Left => _left;
-    public string Right => _right;
+    public string Left => _lines.Count == 0 ? string.Empty : _lines[0].Left;
+    public string Right => _lines.Count == 0 ? string.Empty : _lines[0].Right;
+    public IReadOnlyList<TuiStatusBarLine> Lines => _lines;
+    public int LineCount => _lines.Count;
 
     public void SetSegments(string left, string right)
     {
-        _left = left ?? string.Empty;
-        _right = right ?? string.Empty;
+        SetLines([new TuiStatusBarLine(left ?? string.Empty, right ?? string.Empty)]);
+    }
+
+    public void SetLines(IEnumerable<TuiStatusBarLine> lines)
+    {
+        ArgumentNullException.ThrowIfNull(lines);
+
+        _lines.Clear();
+        foreach (var line in lines)
+        {
+            _lines.Add(new TuiStatusBarLine(
+                TuiText.NormalizeSingleLine(line.Left),
+                TuiText.NormalizeSingleLine(line.Right)));
+        }
+
+        if (_lines.Count == 0)
+        {
+            _lines.Add(new TuiStatusBarLine(string.Empty, string.Empty));
+        }
     }
 
     public void Invalidate()
     {
     }
 
-    public IReadOnlyList<string> Render(int width) => [RenderLine(_left, _right, width)];
+    public IReadOnlyList<string> Render(int width) =>
+        _lines.Select(line => RenderLine(line.Left, line.Right, width)).ToArray();
 
     public static string RenderLine(string? left, string? right, int width)
     {

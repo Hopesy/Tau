@@ -1444,11 +1444,22 @@ public sealed class CodingAgentHost
         }
 
         var hasStatusOverride = !string.IsNullOrWhiteSpace(statusLeftOverride);
-        var baseLeft = hasStatusOverride ? statusLeftOverride! : FormatCompositionStatusLeft();
         var stats = GetFooterSessionStats();
-        var left = hasStatusOverride
-            ? CodingAgentFooterFormatter.FormatLeft(baseLeft, _footerDataProvider)
-            : baseLeft;
+        if (!hasStatusOverride)
+        {
+            _compositionSession.SetStatusLines(CodingAgentFooterFormatter.FormatDefaultLines(
+                _footerDataProvider?.GetCwd() ?? Environment.CurrentDirectory,
+                GetHomeDirectory(),
+                _runner.SessionName,
+                _runner.Model,
+                _runner.ThinkingLevel,
+                _footerDataProvider,
+                stats,
+                _autoCompaction.IsEnabled));
+            return;
+        }
+
+        var left = CodingAgentFooterFormatter.FormatLeft(statusLeftOverride!, _footerDataProvider);
         var right = CodingAgentFooterFormatter.FormatRight(
             _runner.Model,
             _runner.ThinkingLevel,
@@ -1475,13 +1486,6 @@ public sealed class CodingAgentHost
             return null;
         }
     }
-
-    private string FormatCompositionStatusLeft() =>
-        CodingAgentFooterFormatter.FormatDefaultLeft(
-            _footerDataProvider?.GetCwd() ?? Environment.CurrentDirectory,
-            GetHomeDirectory(),
-            _runner.SessionName,
-            _footerDataProvider);
 
     private static string? GetHomeDirectory()
     {
