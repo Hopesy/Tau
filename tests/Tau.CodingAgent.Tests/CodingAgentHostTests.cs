@@ -2161,8 +2161,8 @@ public class CodingAgentHostTests
         runner.CompactHandler = (_, _) =>
         {
             runner.MutableMessages.Clear();
-            runner.MutableMessages.Add(new UserMessage("The conversation history before this point was compacted into the following summary:\n\n<summary>\nsummary\n</summary>"));
-            return Task.FromResult(new CodingAgentCompactionResult("summary", 5, 1));
+            runner.MutableMessages.Add(CodingAgentCompactionMessages.CreateSummaryMessage("summary"));
+            return Task.FromResult(new CodingAgentCompactionResult("summary", 5, 1, 1234));
         };
         var host = new CodingAgentHost(new InteractiveConsoleSession(terminal), runner, new CodingAgentSessionStore(path));
 
@@ -2172,7 +2172,9 @@ public class CodingAgentHostTests
 
             Assert.Empty(runner.Inputs);
             Assert.Equal("keep blockers", runner.LastCompactInstructions);
-            Assert.Contains("status> compacted session: 5 -> 1 messages", terminal.FlattenedText());
+            var output = terminal.FlattenedText();
+            Assert.Contains("compaction> [compaction] Compacted from 1,234 tokens", output);
+            Assert.Contains("status> compacted session: 5 -> 1 messages", output);
 
             var loaded = new CodingAgentSessionStore(path).Load();
             var message = Assert.Single(loaded.Messages);

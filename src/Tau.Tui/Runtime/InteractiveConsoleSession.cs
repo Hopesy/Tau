@@ -170,6 +170,23 @@ public sealed class InteractiveConsoleSession
         NotifyTranscriptChanged();
     }
 
+    public void WriteBranchSummary(string message)
+    {
+        EnsureStreamingLineClosed();
+        _terminal.Write("branch> ", ConsoleColor.Magenta);
+        _terminal.WriteLine(message);
+        _transcript.Add(new TranscriptEntry(TranscriptEntryKind.BranchSummary, message));
+        NotifyTranscriptChanged();
+    }
+
+    public void WriteCompactionSummary(string message)
+    {
+        EnsureStreamingLineClosed();
+        _terminal.Write("compaction> ", ConsoleColor.Magenta);
+        _terminal.WriteLine(message);
+        _transcript.Add(new TranscriptEntry(TranscriptEntryKind.CompactionSummary, message));
+        NotifyTranscriptChanged();
+    }
 
     public void WriteStatus(string message)
     {
@@ -267,6 +284,8 @@ public sealed class InteractiveConsoleSession
             TranscriptEntryKind.Assistant => TuiMessageRole.Assistant,
             TranscriptEntryKind.Thinking => TuiMessageRole.Thinking,
             TranscriptEntryKind.Tool => TuiMessageRole.Tool,
+            TranscriptEntryKind.BranchSummary => TuiMessageRole.BranchSummary,
+            TranscriptEntryKind.CompactionSummary => TuiMessageRole.CompactionSummary,
             TranscriptEntryKind.Custom => TuiMessageRole.Custom,
             TranscriptEntryKind.Skill => TuiMessageRole.Skill,
             TranscriptEntryKind.Error => TuiMessageRole.Error,

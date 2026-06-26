@@ -3216,6 +3216,9 @@ public class CodingAgentCommandRouterTests
             Assert.False(result.IsError);
             Assert.Contains($"resumed session from {importPath}:", result.Message, StringComparison.Ordinal);
             Assert.Contains("previous branch summary 2 entries, tokens ~29", result.Message, StringComparison.Ordinal);
+            var displayMessage = Assert.Single(result.DisplayMessages ?? []);
+            Assert.Equal(CodingAgentMessageDisplayFormatter.BranchSummaryKind, displayMessage.Kind);
+            Assert.Equal("[branch] Branch summary", displayMessage.Text);
             Assert.Equal(importPath, currentTree.Path);
             Assert.Equal("imported session", runner.SessionName);
             Assert.Equal(2, runner.Messages.Count);
@@ -3410,6 +3413,9 @@ public class CodingAgentCommandRouterTests
             Assert.False(result.IsError);
             Assert.Contains("started new session with model openai/gpt-5.4", result.Message, StringComparison.Ordinal);
             Assert.Contains("previous branch summary 2 entries, tokens ~44", result.Message, StringComparison.Ordinal);
+            var displayMessage = Assert.Single(result.DisplayMessages ?? []);
+            Assert.Equal(CodingAgentMessageDisplayFormatter.BranchSummaryKind, displayMessage.Kind);
+            Assert.Equal("[branch] Branch summary", displayMessage.Text);
             Assert.Equal(1, runner.ResetSessionCalls);
             Assert.Empty(runner.Messages);
             Assert.Null(runner.SessionName);
@@ -4076,6 +4082,9 @@ public class CodingAgentCommandRouterTests
             Assert.True(result.Handled);
             Assert.False(result.IsError);
             Assert.Contains("branch summary 3 entries, tokens ~123", result.Message, StringComparison.Ordinal);
+            var displayMessage = Assert.Single(result.DisplayMessages ?? []);
+            Assert.Equal(CodingAgentMessageDisplayFormatter.BranchSummaryKind, displayMessage.Kind);
+            Assert.Equal("[branch] Branch summary", displayMessage.Text);
             Assert.Equal("focus decisions", runner.LastBranchSummaryInstructions);
             Assert.Equal(2, runner.Messages.Count);
             Assert.Equal("root task", ReadText(runner.Messages[0]));
@@ -4410,6 +4419,9 @@ public class CodingAgentCommandRouterTests
             Assert.True(result.Handled);
             Assert.False(result.IsError);
             Assert.Contains("previous branch summary 4 entries, tokens ~77", result.Message, StringComparison.Ordinal);
+            var displayMessage = Assert.Single(result.DisplayMessages ?? []);
+            Assert.Equal(CodingAgentMessageDisplayFormatter.BranchSummaryKind, displayMessage.Kind);
+            Assert.Equal("[branch] Branch summary", displayMessage.Text);
             Assert.Equal(otherPath, currentTree.Path);
             Assert.Equal("other session", runner.SessionName);
             Assert.Equal(2, runner.Messages.Count);
@@ -5893,7 +5905,7 @@ public class CodingAgentCommandRouterTests
     {
         var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>())
         {
-            CompactHandler = (_, _) => Task.FromResult(new CodingAgentCompactionResult("summary", 6, 1))
+            CompactHandler = (_, _) => Task.FromResult(new CodingAgentCompactionResult("summary", 6, 1, 1234))
         };
         var router = new CodingAgentCommandRouter(runner);
 
@@ -5902,6 +5914,9 @@ public class CodingAgentCommandRouterTests
         Assert.True(result.Handled);
         Assert.False(result.IsError);
         Assert.Equal("compacted session: 6 -> 1 messages", result.Message);
+        var displayMessage = Assert.Single(result.DisplayMessages ?? []);
+        Assert.Equal(CodingAgentMessageDisplayFormatter.CompactionSummaryKind, displayMessage.Kind);
+        Assert.Equal("[compaction] Compacted from 1,234 tokens", displayMessage.Text);
         Assert.Equal("keep decisions and blockers", runner.LastCompactInstructions);
     }
 

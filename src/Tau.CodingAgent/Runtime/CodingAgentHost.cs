@@ -627,20 +627,41 @@ public sealed class CodingAgentHost
 
     private void RenderDisplayedInput(string displayedInput)
     {
-        foreach (var message in CodingAgentMessageDisplayFormatter.FormatUserMessage(displayedInput))
+        RenderDisplayedMessages(CodingAgentMessageDisplayFormatter.FormatUserMessage(displayedInput));
+    }
+
+    private void RenderDisplayedMessages(IReadOnlyList<CodingAgentDisplayedMessage>? messages)
+    {
+        if (messages is not { Count: > 0 })
         {
-            switch (message.Kind)
-            {
-                case CodingAgentMessageDisplayFormatter.SkillKind:
-                    _ui.WriteSkillInvocation(message.Text);
-                    break;
-                case CodingAgentMessageDisplayFormatter.CustomKind:
-                    _ui.WriteCustomMessage(message.Text);
-                    break;
-                default:
-                    _ui.WriteUserMessage(message.Text);
-                    break;
-            }
+            return;
+        }
+
+        foreach (var message in messages)
+        {
+            RenderDisplayedMessage(message);
+        }
+    }
+
+    private void RenderDisplayedMessage(CodingAgentDisplayedMessage message)
+    {
+        switch (message.Kind)
+        {
+            case CodingAgentMessageDisplayFormatter.BranchSummaryKind:
+                _ui.WriteBranchSummary(message.Text);
+                break;
+            case CodingAgentMessageDisplayFormatter.CompactionSummaryKind:
+                _ui.WriteCompactionSummary(message.Text);
+                break;
+            case CodingAgentMessageDisplayFormatter.SkillKind:
+                _ui.WriteSkillInvocation(message.Text);
+                break;
+            case CodingAgentMessageDisplayFormatter.CustomKind:
+                _ui.WriteCustomMessage(message.Text);
+                break;
+            default:
+                _ui.WriteUserMessage(message.Text);
+                break;
         }
     }
 
@@ -854,6 +875,8 @@ public sealed class CodingAgentHost
 
     private void RenderCommandResult(CodingAgentCommandResult result)
     {
+        RenderDisplayedMessages(result.DisplayMessages);
+
         if (!string.IsNullOrWhiteSpace(result.Message))
         {
             if (result.IsError)

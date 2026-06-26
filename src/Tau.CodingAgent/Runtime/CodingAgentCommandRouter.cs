@@ -957,7 +957,8 @@ public sealed class CodingAgentCommandRouter
                 var importedTreeSnapshot = _treeSessionController.Resume(importPath);
                 _runner.RestoreSession(importedTreeSnapshot.ToFlatSnapshot());
                 return CodingAgentCommandResult.Status(
-                    $"resumed session from {importedTreeSnapshot.FilePath}: {importedTreeSnapshot.Messages.Count} messages, model {_runner.Model.Provider}/{_runner.Model.Id}, name {FormatSessionName(_runner.SessionName)}, leaf {FormatTreeId(importedTreeSnapshot.LeafId)}{FormatSessionSwitchSummarySuffix(switchSummary)}");
+                    $"resumed session from {importedTreeSnapshot.FilePath}: {importedTreeSnapshot.Messages.Count} messages, model {_runner.Model.Provider}/{_runner.Model.Id}, name {FormatSessionName(_runner.SessionName)}, leaf {FormatTreeId(importedTreeSnapshot.LeafId)}{FormatSessionSwitchSummarySuffix(switchSummary)}",
+                    FormatBranchSummaryMessages(switchSummary));
             }
 
             var treeSnapshot = _treeSessionController.Resume(importPath);
@@ -996,7 +997,8 @@ public sealed class CodingAgentCommandRouter
         _runner.ResetSession();
         _treeSessionController?.StartNewFromRunner(_runner);
         return CodingAgentCommandResult.Status(
-            $"started new session with model {_runner.Model.Provider}/{_runner.Model.Id}{FormatSessionSwitchSummarySuffix(switchSummary)}");
+            $"started new session with model {_runner.Model.Provider}/{_runner.Model.Id}{FormatSessionSwitchSummarySuffix(switchSummary)}",
+            FormatBranchSummaryMessages(switchSummary));
     }
 
     private static CodingAgentCommandResult HandleQuitCommand(IReadOnlyList<string> parts)
@@ -1194,12 +1196,14 @@ public sealed class CodingAgentCommandRouter
                 {
                     _inputDraftSetter?.Invoke(selectedItem.NavigationDraftText);
                     return CodingAgentCommandResult.Status(
-                        $"tree rewound to {FormatTreeId(navigationTargetId)} from user entry {selectedItem.EntryId}: loaded draft, messages {snapshot.Messages.Count}{FormatTreeSummarySuffix(summary)}");
+                        $"tree rewound to {FormatTreeId(navigationTargetId)} from user entry {selectedItem.EntryId}: loaded draft, messages {snapshot.Messages.Count}{FormatTreeSummarySuffix(summary)}",
+                        FormatBranchSummaryMessages(summary));
                 }
 
                 _inputDraftSetter?.Invoke(null);
                 return CodingAgentCommandResult.Status(
-                    $"navigated tree to {selectedItem.EntryId}: messages {snapshot.Messages.Count}{FormatTreeSummarySuffix(summary)}");
+                    $"navigated tree to {selectedItem.EntryId}: messages {snapshot.Messages.Count}{FormatTreeSummarySuffix(summary)}",
+                    FormatBranchSummaryMessages(summary));
             }
         }
 
@@ -1281,7 +1285,8 @@ public sealed class CodingAgentCommandRouter
             ? summarize ? ", branch summary none" : string.Empty
             : $", branch summary {summary.EntryCount} entries, tokens ~{summary.TokensBefore}";
         return CodingAgentCommandResult.Status(
-            $"forked session at {entryId}: leaf {FormatTreeId(snapshot.LeafId)}, messages {snapshot.Messages.Count}, model {_runner.Model.Provider}/{_runner.Model.Id}{summarySuffix}");
+            $"forked session at {entryId}: leaf {FormatTreeId(snapshot.LeafId)}, messages {snapshot.Messages.Count}, model {_runner.Model.Provider}/{_runner.Model.Id}{summarySuffix}",
+            FormatBranchSummaryMessages(summary));
     }
 
     private CodingAgentCommandResult HandleCloneCommand(IReadOnlyList<string> parts)
@@ -1361,7 +1366,8 @@ public sealed class CodingAgentCommandRouter
         var snapshot = _treeSessionController.Resume(path);
         _runner.RestoreSession(snapshot.ToFlatSnapshot());
         return CodingAgentCommandResult.Status(
-            $"resumed session from {snapshot.FilePath}: {snapshot.Messages.Count} messages, model {_runner.Model.Provider}/{_runner.Model.Id}, name {FormatSessionName(_runner.SessionName)}, leaf {FormatTreeId(snapshot.LeafId)}{FormatSessionSwitchSummarySuffix(switchSummary)}");
+            $"resumed session from {snapshot.FilePath}: {snapshot.Messages.Count} messages, model {_runner.Model.Provider}/{_runner.Model.Id}, name {FormatSessionName(_runner.SessionName)}, leaf {FormatTreeId(snapshot.LeafId)}{FormatSessionSwitchSummarySuffix(switchSummary)}",
+            FormatBranchSummaryMessages(switchSummary));
     }
 
     private async Task<CodingAgentCommandResult> HandleInteractiveResumeSelectionAsync(CancellationToken cancellationToken)
@@ -1417,7 +1423,8 @@ public sealed class CodingAgentCommandRouter
         var snapshot = _treeSessionController.Resume(normalizedSelectedPath);
         _runner.RestoreSession(snapshot.ToFlatSnapshot());
         return CodingAgentCommandResult.Status(
-            $"resumed session from {snapshot.FilePath}: {snapshot.Messages.Count} messages, model {_runner.Model.Provider}/{_runner.Model.Id}, name {FormatSessionName(_runner.SessionName)}, leaf {FormatTreeId(snapshot.LeafId)}{FormatSessionSwitchSummarySuffix(switchSummary)}");
+            $"resumed session from {snapshot.FilePath}: {snapshot.Messages.Count} messages, model {_runner.Model.Provider}/{_runner.Model.Id}, name {FormatSessionName(_runner.SessionName)}, leaf {FormatTreeId(snapshot.LeafId)}{FormatSessionSwitchSummarySuffix(switchSummary)}",
+            FormatBranchSummaryMessages(switchSummary));
     }
 
     public CodingAgentCommandResult CycleModel(string direction = "forward")
@@ -2838,7 +2845,8 @@ public sealed class CodingAgentCommandRouter
         _treeSessionController?.RecordCompaction(_runner, result);
         var messagesAfter = _treeSessionController is null ? result.MessagesAfter : _runner.Messages.Count;
         return CodingAgentCommandResult.Status(
-            $"compacted session: {result.MessagesBefore} -> {messagesAfter} messages");
+            $"compacted session: {result.MessagesBefore} -> {messagesAfter} messages",
+            [CodingAgentMessageDisplayFormatter.FormatCompactionSummary(result)]);
     }
 
     private void SaveDefaultModel(Model model)
@@ -3061,6 +3069,16 @@ public sealed class CodingAgentCommandRouter
 
     private static string FormatTreeSummarySuffix(CodingAgentBranchSummaryResult? summary) =>
         summary is null ? string.Empty : $", branch summary {summary.EntryCount} entries, tokens ~{summary.TokensBefore}";
+
+    private static IReadOnlyList<CodingAgentDisplayedMessage> FormatBranchSummaryMessages(
+        CodingAgentBranchSummaryResult? summary) =>
+        summary is null
+            ? []
+            : [CodingAgentMessageDisplayFormatter.FormatBranchSummary(summary)];
+
+    private static IReadOnlyList<CodingAgentDisplayedMessage> FormatBranchSummaryMessages(
+        CodingAgentSessionSwitchSummaryResult result) =>
+        FormatBranchSummaryMessages(result.Summary);
 
     private static string FormatSessionSwitchSummarySuffix(CodingAgentSessionSwitchSummaryResult result) =>
         result.SummarizedCurrentBranch

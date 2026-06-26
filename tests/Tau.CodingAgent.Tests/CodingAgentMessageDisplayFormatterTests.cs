@@ -68,6 +68,66 @@ public sealed class CodingAgentMessageDisplayFormatterTests
     }
 
     [Fact]
+    public void FormatUserMessage_CollapsesCompactionSummaryWrapper()
+    {
+        var text = CodingAgentCompactionMessages.CreateSummaryText("summary body");
+
+        var messages = CodingAgentMessageDisplayFormatter.FormatUserMessage(text);
+
+        var message = Assert.Single(messages);
+        Assert.Equal(CodingAgentMessageDisplayFormatter.CompactionSummaryKind, message.Kind);
+        Assert.Equal("[compaction] Compacted from unknown tokens", message.Text);
+    }
+
+    [Fact]
+    public void FormatUserMessage_CanExpandCompactionSummaryWrapper()
+    {
+        var text = CodingAgentCompactionMessages.CreateSummaryText("summary body");
+
+        var messages = CodingAgentMessageDisplayFormatter.FormatUserMessage(text, expanded: true);
+
+        var message = Assert.Single(messages);
+        Assert.Equal(CodingAgentMessageDisplayFormatter.CompactionSummaryKind, message.Kind);
+        Assert.Contains("[compaction] Compacted from unknown tokens", message.Text, StringComparison.Ordinal);
+        Assert.Contains("summary body", message.Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void FormatCompactionSummary_RendersTokenCount()
+    {
+        var rendered = CodingAgentMessageDisplayFormatter.FormatCompactionSummary(
+            new CodingAgentCompactionResult("summary body", 5, 1, TokensBefore: 1234));
+
+        Assert.Equal(CodingAgentMessageDisplayFormatter.CompactionSummaryKind, rendered.Kind);
+        Assert.Equal("[compaction] Compacted from 1,234 tokens", rendered.Text);
+    }
+
+    [Fact]
+    public void FormatUserMessage_CollapsesBranchSummaryWrapper()
+    {
+        var text = CodingAgentCompactionMessages.CreateBranchSummaryText("branch body", "entry-1");
+
+        var messages = CodingAgentMessageDisplayFormatter.FormatUserMessage(text);
+
+        var message = Assert.Single(messages);
+        Assert.Equal(CodingAgentMessageDisplayFormatter.BranchSummaryKind, message.Kind);
+        Assert.Equal("[branch] Branch summary", message.Text);
+    }
+
+    [Fact]
+    public void FormatUserMessage_CanExpandBranchSummaryWrapper()
+    {
+        var text = CodingAgentCompactionMessages.CreateBranchSummaryText("branch body", "entry-1");
+
+        var messages = CodingAgentMessageDisplayFormatter.FormatUserMessage(text, expanded: true);
+
+        var message = Assert.Single(messages);
+        Assert.Equal(CodingAgentMessageDisplayFormatter.BranchSummaryKind, message.Kind);
+        Assert.Contains("[branch] Branch summary", message.Text, StringComparison.Ordinal);
+        Assert.Contains("branch body", message.Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void FormatCustomMessage_RendersLabelAndTextContent()
     {
         IReadOnlyList<ContentBlock> content =

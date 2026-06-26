@@ -9,6 +9,8 @@ public enum TranscriptEntryKind
     Assistant,
     Thinking,
     Tool,
+    BranchSummary,
+    CompactionSummary,
     Custom,
     Skill,
     Error,

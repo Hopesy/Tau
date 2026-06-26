@@ -59,14 +59,18 @@ public sealed class TuiMessageStatusComponentTests
             [
                 new TuiMessage(TuiMessageRole.Skill, "[skill] reviewer"),
                 new TuiMessage(TuiMessageRole.Custom, "[deploy]\nstarted"),
+                new TuiMessage(TuiMessageRole.BranchSummary, "[branch] Branch summary"),
+                new TuiMessage(TuiMessageRole.CompactionSummary, "[compaction] Compacted from 1,234 tokens"),
             ],
-            width: 24);
+            width: 52);
 
-        Assert.Equal(3, lines.Count);
+        Assert.Equal(5, lines.Count);
         Assert.StartsWith("skill> [skill] reviewer", lines[0], StringComparison.Ordinal);
         Assert.StartsWith("custom> [deploy]", lines[1], StringComparison.Ordinal);
         Assert.StartsWith("        started", lines[2], StringComparison.Ordinal);
-        Assert.All(lines, line => Assert.Equal(24, TuiText.VisibleWidth(line)));
+        Assert.StartsWith("branch> [branch] Branch summary", lines[3], StringComparison.Ordinal);
+        Assert.StartsWith("compaction> [compaction] Compacted from 1,234 tokens", lines[4], StringComparison.Ordinal);
+        Assert.All(lines, line => Assert.Equal(52, TuiText.VisibleWidth(line)));
     }
 
     [Fact]
