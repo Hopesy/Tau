@@ -1,4 +1,5 @@
 using Tau.CodingAgent.Runtime;
+using Tau.Tui.Rendering;
 
 namespace Tau.CodingAgent.Tests;
 
@@ -183,6 +184,40 @@ public class CodingAgentThemeStoreTests
             Assert.Equal("#101010", theme.ExportColors["pageBg"]);
             Assert.Equal("#202020", theme.ExportColors["cardBg"]);
             Assert.Equal("#303030", theme.ExportColors["infoBg"]);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Theme_ToSyntaxHighlightTheme_UsesConfiguredSyntaxColors()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-themes-syntax-" + Guid.NewGuid().ToString("N"));
+        var themes = Path.Combine(directory, "themes");
+        Directory.CreateDirectory(themes);
+        File.WriteAllText(
+            Path.Combine(themes, "syntax.json"),
+            CreateThemeJson("syntax")
+                .Replace("\"syntaxKeyword\": \"#ff7b72\"", "\"syntaxKeyword\": \"#010203\"", StringComparison.Ordinal)
+                .Replace("\"syntaxNumber\": \"#79c0ff\"", "\"syntaxNumber\": 208", StringComparison.Ordinal));
+
+        try
+        {
+            var store = new CodingAgentThemeStore(
+                cwd: directory,
+                explicitPaths: [themes],
+                includeDefaults: false);
+
+            var theme = Assert.Single(store.LoadStatus().Themes);
+            var line = TuiSyntaxHighlighter.HighlightLines("const count = 1", "javascript", theme.ToSyntaxHighlightTheme())[0];
+            var diffLines = TuiSyntaxHighlighter.HighlightLines("+new\n-old", "diff", theme.ToSyntaxHighlightTheme());
+
+            Assert.Contains("\u001b[38;2;1;2;3mconst\u001b[39m", line, StringComparison.Ordinal);
+            Assert.Contains("\u001b[38;5;208m1\u001b[39m", line, StringComparison.Ordinal);
+            Assert.Equal("\u001b[38;2;63;185;80m+new\u001b[39m", diffLines[0]);
+            Assert.Equal("\u001b[38;2;248;81;73m-old\u001b[39m", diffLines[1]);
         }
         finally
         {

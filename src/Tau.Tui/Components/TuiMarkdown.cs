@@ -29,7 +29,9 @@ public sealed class TuiMarkdownTheme
     public Func<string, string> Italic { get; init; } = static value => value;
     public Func<string, string> Strikethrough { get; init; } = static value => value;
     public Func<string, string> Underline { get; init; } = static value => value;
-    public Func<string, string?, IReadOnlyList<string>>? HighlightCode { get; init; } = TuiSyntaxHighlighter.HighlightLines;
+    public TuiSyntaxHighlightTheme? SyntaxHighlightTheme { get; init; }
+    public Func<string, string?, IReadOnlyList<string>>? HighlightCode { get; init; }
+    public bool EnableSyntaxHighlighting { get; init; } = true;
     public string CodeBlockIndent { get; init; } = "  ";
 }
 
@@ -230,6 +232,16 @@ public sealed class TuiMarkdown : ITuiComponent
         if (_theme.HighlightCode is { } highlighter)
         {
             foreach (var highlighted in highlighter(string.Join('\n', code), string.IsNullOrWhiteSpace(lang) ? null : lang))
+            {
+                output.Add(_theme.CodeBlockIndent + highlighted);
+            }
+        }
+        else if (_theme.EnableSyntaxHighlighting)
+        {
+            foreach (var highlighted in TuiSyntaxHighlighter.HighlightLines(
+                string.Join('\n', code),
+                string.IsNullOrWhiteSpace(lang) ? null : lang,
+                _theme.SyntaxHighlightTheme))
             {
                 output.Add(_theme.CodeBlockIndent + highlighted);
             }

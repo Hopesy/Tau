@@ -80,6 +80,41 @@ public sealed class TuiMarkdownTests
     }
 
     [Fact]
+    public void Markdown_RendersFencedCodeWithSyntaxTheme()
+    {
+        var theme = new TuiMarkdownTheme
+        {
+            SyntaxHighlightTheme = TuiSyntaxHighlightTheme.FromAnsiColors(
+                new Dictionary<string, string>
+                {
+                    ["syntaxKeyword"] = "#010203",
+                    ["syntaxVariable"] = "#040506"
+                })
+        };
+        var markdown = new TuiMarkdown("```json\n{\"ok\": true}\n```", theme: theme);
+
+        var lines = markdown.Render(80);
+
+        Assert.Contains("\u001b[38;2;4;5;6m\"ok\"\u001b[39m", lines[1], StringComparison.Ordinal);
+        Assert.Contains("\u001b[38;2;1;2;3mtrue\u001b[39m", lines[1], StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Markdown_CanDisableDefaultSyntaxHighlighting()
+    {
+        var theme = new TuiMarkdownTheme
+        {
+            EnableSyntaxHighlighting = false,
+            CodeBlock = static value => $"code:{value}"
+        };
+        var markdown = new TuiMarkdown("```json\n{\"ok\": true}\n```", theme: theme);
+
+        var lines = markdown.Render(80);
+
+        Assert.Equal("  code:{\"ok\": true}", lines[1].TrimEnd());
+    }
+
+    [Fact]
     public void Markdown_RendersUnorderedOrderedAndNestedLists()
     {
         var markdown = new TuiMarkdown("- one\n  - two\n3. three");

@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text.Json;
+using Tau.Tui.Rendering;
 
 namespace Tau.CodingAgent.Runtime;
 
@@ -8,7 +9,11 @@ public sealed record CodingAgentTheme(
     string? FilePath,
     string Scope,
     IReadOnlyDictionary<string, string> Colors,
-    IReadOnlyDictionary<string, string> ExportColors);
+    IReadOnlyDictionary<string, string> ExportColors)
+{
+    public TuiSyntaxHighlightTheme ToSyntaxHighlightTheme() =>
+        TuiSyntaxHighlightTheme.FromAnsiColors(Colors);
+}
 
 public sealed record CodingAgentThemeDiagnostic(
     string Severity,

@@ -52,4 +52,38 @@ public sealed class TuiSyntaxHighlighterTests
 
         Assert.Equal("\u001b[38;2;212;212;212mconst value = 1\u001b[39m", line);
     }
+
+    [Fact]
+    public void HighlightLines_UsesCustomThemeFormattersWithScopePrefixFallback()
+    {
+        var theme = new TuiSyntaxHighlightTheme(
+            new Dictionary<string, Func<string, string>>
+            {
+                ["keyword"] = static value => $"kw[{value}]",
+                ["function"] = static value => $"fn[{value}]"
+            },
+            static value => $"plain[{value}]");
+
+        var line = TuiSyntaxHighlighter.HighlightLines("function call() { return 1 }", "javascript", theme)[0];
+
+        Assert.Contains("kw[function]", line, StringComparison.Ordinal);
+        Assert.Contains("fn[call]", line, StringComparison.Ordinal);
+        Assert.Contains("plain[1]", line, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void HighlightLines_CreatesThemeFromAnsiColorMap()
+    {
+        var theme = TuiSyntaxHighlightTheme.FromAnsiColors(
+            new Dictionary<string, string>
+            {
+                ["syntaxKeyword"] = "#010203",
+                ["syntaxNumber"] = "208"
+            });
+
+        var line = TuiSyntaxHighlighter.HighlightLines("const count = 1", "javascript", theme)[0];
+
+        Assert.Contains("\u001b[38;2;1;2;3mconst\u001b[39m", line, StringComparison.Ordinal);
+        Assert.Contains("\u001b[38;5;208m1\u001b[39m", line, StringComparison.Ordinal);
+    }
 }

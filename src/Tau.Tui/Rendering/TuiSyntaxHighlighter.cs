@@ -2,10 +2,173 @@ using System.Text;
 
 namespace Tau.Tui.Rendering;
 
-public static class TuiSyntaxHighlighter
+public sealed class TuiSyntaxHighlightTheme
 {
     private const string ResetForeground = "\u001b[39m";
 
+    private static readonly IReadOnlyDictionary<string, (int R, int G, int B)> DefaultRgbColors =
+        new Dictionary<string, (int R, int G, int B)>(StringComparer.Ordinal)
+        {
+            ["default"] = (212, 212, 212),
+            ["comment"] = (106, 153, 85),
+            ["keyword"] = (86, 156, 214),
+            ["function"] = (220, 220, 170),
+            ["variable"] = (156, 220, 254),
+            ["string"] = (206, 145, 120),
+            ["number"] = (181, 206, 168),
+            ["type"] = (78, 201, 176),
+            ["operator"] = (212, 212, 212),
+            ["punctuation"] = (212, 212, 212),
+            ["meta"] = (128, 128, 128),
+            ["addition"] = (181, 189, 104),
+            ["deletion"] = (204, 102, 102)
+        };
+
+    private static readonly IReadOnlyDictionary<string, string[]> ThemeColorKeys =
+        new Dictionary<string, string[]>(StringComparer.Ordinal)
+        {
+            ["default"] = ["syntaxDefault", "text"],
+            ["comment"] = ["syntaxComment"],
+            ["keyword"] = ["syntaxKeyword"],
+            ["function"] = ["syntaxFunction"],
+            ["variable"] = ["syntaxVariable"],
+            ["string"] = ["syntaxString"],
+            ["number"] = ["syntaxNumber"],
+            ["type"] = ["syntaxType"],
+            ["operator"] = ["syntaxOperator"],
+            ["punctuation"] = ["syntaxPunctuation"],
+            ["meta"] = ["syntaxMeta", "dim"],
+            ["addition"] = ["syntaxAddition", "toolDiffAdded", "success"],
+            ["deletion"] = ["syntaxDeletion", "toolDiffRemoved", "error"]
+        };
+
+    private readonly IReadOnlyDictionary<string, Func<string, string>> _formatters;
+
+    public TuiSyntaxHighlightTheme(
+        IReadOnlyDictionary<string, Func<string, string>>? formatters = null,
+        Func<string, string>? defaultFormatter = null)
+    {
+        _formatters = formatters is null
+            ? new Dictionary<string, Func<string, string>>(StringComparer.Ordinal)
+            : new Dictionary<string, Func<string, string>>(formatters, StringComparer.Ordinal);
+        DefaultFormatter = defaultFormatter;
+    }
+
+    public static TuiSyntaxHighlightTheme Default { get; } = CreateDefault();
+
+    public Func<string, string>? DefaultFormatter { get; }
+
+    public static TuiSyntaxHighlightTheme FromAnsiColors(IReadOnlyDictionary<string, string> colors)
+    {
+        ArgumentNullException.ThrowIfNull(colors);
+
+        var formatters = new Dictionary<string, Func<string, string>>(StringComparer.Ordinal);
+        foreach (var (scope, themeKeys) in ThemeColorKeys)
+        {
+            if (TryCreateAnsiForeground(colors, themeKeys, out var formatter))
+            {
+                formatters[scope] = formatter;
+            }
+        }
+
+        return new TuiSyntaxHighlightTheme(
+            formatters,
+            formatters.TryGetValue("default", out var defaultFormatter) ? defaultFormatter : null);
+    }
+
+    public string Format(string scope, string text)
+    {
+        if (text.Length == 0)
+        {
+            return text;
+        }
+
+        return GetScopeFormatter(scope)?.Invoke(text) ??
+            DefaultFormatter?.Invoke(text) ??
+            text;
+    }
+
+    private Func<string, string>? GetScopeFormatter(string scope)
+    {
+        if (_formatters.TryGetValue(scope, out var exact))
+        {
+            return exact;
+        }
+
+        var dotIndex = scope.IndexOf('.', StringComparison.Ordinal);
+        if (dotIndex > 0 && _formatters.TryGetValue(scope[..dotIndex], out var dotPrefix))
+        {
+            return dotPrefix;
+        }
+
+        var dashIndex = scope.IndexOf('-', StringComparison.Ordinal);
+        return dashIndex > 0 && _formatters.TryGetValue(scope[..dashIndex], out var dashPrefix)
+            ? dashPrefix
+            : null;
+    }
+
+    private static TuiSyntaxHighlightTheme CreateDefault()
+    {
+        var formatters = DefaultRgbColors.ToDictionary(
+            static pair => pair.Key,
+            static pair => Foreground(pair.Value.R, pair.Value.G, pair.Value.B),
+            StringComparer.Ordinal);
+        return new TuiSyntaxHighlightTheme(formatters, formatters["default"]);
+    }
+
+    private static bool TryCreateAnsiForeground(string color, out Func<string, string> formatter)
+    {
+        formatter = static value => value;
+        if (string.IsNullOrWhiteSpace(color))
+        {
+            return false;
+        }
+
+        var trimmed = color.Trim();
+        if (trimmed.StartsWith('#') &&
+            trimmed.Length == 7 &&
+            byte.TryParse(trimmed.AsSpan(1, 2), System.Globalization.NumberStyles.HexNumber, null, out var r) &&
+            byte.TryParse(trimmed.AsSpan(3, 2), System.Globalization.NumberStyles.HexNumber, null, out var g) &&
+            byte.TryParse(trimmed.AsSpan(5, 2), System.Globalization.NumberStyles.HexNumber, null, out var b))
+        {
+            formatter = Foreground(r, g, b);
+            return true;
+        }
+
+        if (int.TryParse(trimmed, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var ansi) &&
+            ansi is >= 0 and <= 255)
+        {
+            formatter = value => $"\u001b[38;5;{ansi}m{value}{ResetForeground}";
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool TryCreateAnsiForeground(
+        IReadOnlyDictionary<string, string> colors,
+        IReadOnlyList<string> keys,
+        out Func<string, string> formatter)
+    {
+        foreach (var key in keys)
+        {
+            if (colors.TryGetValue(key, out var color) &&
+                TryCreateAnsiForeground(color, out formatter))
+            {
+                return true;
+            }
+        }
+
+        formatter = static value => value;
+        return false;
+    }
+
+    private static Func<string, string> Foreground(int r, int g, int b) =>
+        value => $"\u001b[38;2;{r};{g};{b}m{value}{ResetForeground}";
+}
+
+public static class TuiSyntaxHighlighter
+{
     private static readonly HashSet<string> CSharpKeywords = new(StringComparer.Ordinal)
     {
         "abstract", "as", "base", "break", "case", "catch", "class", "const", "continue", "default",
@@ -59,18 +222,19 @@ public static class TuiSyntaxHighlighter
         "then", "until", "while"
     };
 
-    public static IReadOnlyList<string> HighlightLines(string code, string? language)
+    public static IReadOnlyList<string> HighlightLines(string code, string? language, TuiSyntaxHighlightTheme? theme = null)
     {
         var normalizedCode = (code ?? string.Empty)
             .Replace("\r\n", "\n", StringComparison.Ordinal)
             .Replace('\r', '\n');
         var normalizedLanguage = NormalizeLanguage(language);
+        var effectiveTheme = theme ?? TuiSyntaxHighlightTheme.Default;
         var lines = normalizedCode.Split('\n');
         var highlighted = new string[lines.Length];
 
         for (var i = 0; i < lines.Length; i++)
         {
-            highlighted[i] = HighlightLine(lines[i], normalizedLanguage);
+            highlighted[i] = HighlightLine(lines[i], normalizedLanguage, effectiveTheme);
         }
 
         return highlighted;
@@ -78,18 +242,18 @@ public static class TuiSyntaxHighlighter
 
     public static bool SupportsLanguage(string? language) => NormalizeLanguage(language) is not null;
 
-    private static string HighlightLine(string line, string? language) =>
+    private static string HighlightLine(string line, string? language, TuiSyntaxHighlightTheme theme) =>
         language switch
         {
-            "json" => HighlightJsonLine(line),
-            "csharp" => HighlightCStyleLine(line, CSharpKeywords, CSharpTypes, language),
-            "javascript" => HighlightCStyleLine(line, JavaScriptKeywords, JavaScriptTypes, language),
-            "python" => HighlightShellLikeLine(line, PythonKeywords, highlightDollarVariables: false, pythonDecorators: true),
-            "powershell" => HighlightShellLikeLine(line, PowerShellKeywords, highlightDollarVariables: true, pythonDecorators: false),
-            "shell" => HighlightShellLikeLine(line, ShellKeywords, highlightDollarVariables: true, pythonDecorators: false),
-            "xml" => HighlightXmlLine(line),
-            "diff" => HighlightDiffLine(line),
-            _ => Style(TokenKind.Default, line)
+            "json" => HighlightJsonLine(line, theme),
+            "csharp" => HighlightCStyleLine(line, CSharpKeywords, CSharpTypes, language, theme),
+            "javascript" => HighlightCStyleLine(line, JavaScriptKeywords, JavaScriptTypes, language, theme),
+            "python" => HighlightShellLikeLine(line, PythonKeywords, highlightDollarVariables: false, pythonDecorators: true, theme),
+            "powershell" => HighlightShellLikeLine(line, PowerShellKeywords, highlightDollarVariables: true, pythonDecorators: false, theme),
+            "shell" => HighlightShellLikeLine(line, ShellKeywords, highlightDollarVariables: true, pythonDecorators: false, theme),
+            "xml" => HighlightXmlLine(line, theme),
+            "diff" => HighlightDiffLine(line, theme),
+            _ => Style(theme, TokenKind.Default, line)
         };
 
     private static string? NormalizeLanguage(string? language)
@@ -117,7 +281,7 @@ public static class TuiSyntaxHighlighter
         };
     }
 
-    private static string HighlightJsonLine(string line)
+    private static string HighlightJsonLine(string line, TuiSyntaxHighlightTheme theme)
     {
         var builder = new StringBuilder();
         var index = 0;
@@ -128,7 +292,7 @@ public static class TuiSyntaxHighlighter
             {
                 var end = FindStringEnd(line, index, '"', '\\');
                 var kind = IsJsonPropertyName(line, end) ? TokenKind.Variable : TokenKind.String;
-                builder.Append(Style(kind, line[index..end]));
+                builder.Append(Style(theme, kind, line[index..end]));
                 index = end;
                 continue;
             }
@@ -138,7 +302,7 @@ public static class TuiSyntaxHighlighter
                 var end = ReadJsonNumber(line, index);
                 if (end > index)
                 {
-                    builder.Append(Style(TokenKind.Number, line[index..end]));
+                    builder.Append(Style(theme, TokenKind.Number, line[index..end]));
                     index = end;
                     continue;
                 }
@@ -148,12 +312,12 @@ public static class TuiSyntaxHighlighter
             {
                 var end = ReadIdentifier(line, index);
                 var token = line[index..end];
-                builder.Append(token is "true" or "false" or "null" ? Style(TokenKind.Keyword, token) : token);
+                builder.Append(token is "true" or "false" or "null" ? Style(theme, TokenKind.Keyword, token) : token);
                 index = end;
                 continue;
             }
 
-            builder.Append(IsJsonOperator(current) ? Style(TokenKind.Punctuation, current.ToString()) : current);
+            builder.Append(IsJsonOperator(current) ? Style(theme, TokenKind.Punctuation, current.ToString()) : current);
             index++;
         }
 
@@ -164,7 +328,8 @@ public static class TuiSyntaxHighlighter
         string line,
         ISet<string> keywords,
         ISet<string> types,
-        string language)
+        string language,
+        TuiSyntaxHighlightTheme theme)
     {
         var builder = new StringBuilder();
         var index = 0;
@@ -172,7 +337,7 @@ public static class TuiSyntaxHighlighter
         {
             if (line[index] == '/' && index + 1 < line.Length && line[index + 1] == '/')
             {
-                builder.Append(Style(TokenKind.Comment, line[index..]));
+                builder.Append(Style(theme, TokenKind.Comment, line[index..]));
                 break;
             }
 
@@ -180,14 +345,14 @@ public static class TuiSyntaxHighlighter
             {
                 var end = line.IndexOf("*/", index + 2, StringComparison.Ordinal);
                 end = end < 0 ? line.Length : end + 2;
-                builder.Append(Style(TokenKind.Comment, line[index..end]));
+                builder.Append(Style(theme, TokenKind.Comment, line[index..end]));
                 index = end;
                 continue;
             }
 
             if (language == "csharp" && TryReadCSharpStringPrefix(line, index, out var prefixedStringEnd))
             {
-                builder.Append(Style(TokenKind.String, line[index..prefixedStringEnd]));
+                builder.Append(Style(theme, TokenKind.String, line[index..prefixedStringEnd]));
                 index = prefixedStringEnd;
                 continue;
             }
@@ -196,14 +361,14 @@ public static class TuiSyntaxHighlighter
             {
                 var quote = line[index];
                 var end = FindStringEnd(line, index, quote, '\\');
-                builder.Append(Style(TokenKind.String, line[index..end]));
+                builder.Append(Style(theme, TokenKind.String, line[index..end]));
                 index = end;
                 continue;
             }
 
             if (language == "javascript" && line[index] == '/' && TryReadJavaScriptRegex(line, index, out var regexEnd))
             {
-                builder.Append(Style(TokenKind.String, line[index..regexEnd]));
+                builder.Append(Style(theme, TokenKind.String, line[index..regexEnd]));
                 index = regexEnd;
                 continue;
             }
@@ -213,7 +378,7 @@ public static class TuiSyntaxHighlighter
                 var end = ReadShellVariable(line, index);
                 if (end > index + 1)
                 {
-                    builder.Append(Style(TokenKind.Variable, line[index..end]));
+                    builder.Append(Style(theme, TokenKind.Variable, line[index..end]));
                     index = end;
                     continue;
                 }
@@ -222,7 +387,7 @@ public static class TuiSyntaxHighlighter
             if (char.IsDigit(line[index]))
             {
                 var end = ReadNumber(line, index);
-                builder.Append(Style(TokenKind.Number, line[index..end]));
+                builder.Append(Style(theme, TokenKind.Number, line[index..end]));
                 index = end;
                 continue;
             }
@@ -242,15 +407,15 @@ public static class TuiSyntaxHighlighter
                 var next = NextNonWhitespace(line, end);
                 if (keywords.Contains(token))
                 {
-                    builder.Append(Style(TokenKind.Keyword, token));
+                    builder.Append(Style(theme, TokenKind.Keyword, token));
                 }
                 else if (types.Contains(token) || (token.Length > 0 && char.IsUpper(token[0]) && next != '('))
                 {
-                    builder.Append(Style(TokenKind.Type, token));
+                    builder.Append(Style(theme, TokenKind.Type, token));
                 }
                 else if (next == '(')
                 {
-                    builder.Append(Style(TokenKind.Function, token));
+                    builder.Append(Style(theme, TokenKind.Function, token));
                 }
                 else
                 {
@@ -261,7 +426,7 @@ public static class TuiSyntaxHighlighter
                 continue;
             }
 
-            builder.Append(IsCodeOperator(line[index]) ? Style(TokenKind.Operator, line[index].ToString()) : line[index]);
+            builder.Append(IsCodeOperator(line[index]) ? Style(theme, TokenKind.Operator, line[index].ToString()) : line[index]);
             index++;
         }
 
@@ -272,7 +437,8 @@ public static class TuiSyntaxHighlighter
         string line,
         ISet<string> keywords,
         bool highlightDollarVariables,
-        bool pythonDecorators)
+        bool pythonDecorators,
+        TuiSyntaxHighlightTheme theme)
     {
         var builder = new StringBuilder();
         var index = 0;
@@ -280,14 +446,14 @@ public static class TuiSyntaxHighlighter
         {
             if (line[index] == '#')
             {
-                builder.Append(Style(TokenKind.Comment, line[index..]));
+                builder.Append(Style(theme, TokenKind.Comment, line[index..]));
                 break;
             }
 
             if (pythonDecorators && line[index] == '@' && index + 1 < line.Length && IsIdentifierStart(line[index + 1]))
             {
                 var end = ReadIdentifier(line, index + 1);
-                builder.Append(Style(TokenKind.Meta, line[index..end]));
+                builder.Append(Style(theme, TokenKind.Meta, line[index..end]));
                 index = end;
                 continue;
             }
@@ -297,7 +463,7 @@ public static class TuiSyntaxHighlighter
                 var quote = line[index];
                 var escape = quote == '"' ? '\\' : '\0';
                 var end = FindStringEnd(line, index, quote, escape);
-                builder.Append(Style(TokenKind.String, line[index..end]));
+                builder.Append(Style(theme, TokenKind.String, line[index..end]));
                 index = end;
                 continue;
             }
@@ -307,7 +473,7 @@ public static class TuiSyntaxHighlighter
                 var end = ReadShellVariable(line, index);
                 if (end > index + 1)
                 {
-                    builder.Append(Style(TokenKind.Variable, line[index..end]));
+                    builder.Append(Style(theme, TokenKind.Variable, line[index..end]));
                     index = end;
                     continue;
                 }
@@ -316,7 +482,7 @@ public static class TuiSyntaxHighlighter
             if (char.IsDigit(line[index]))
             {
                 var end = ReadNumber(line, index);
-                builder.Append(Style(TokenKind.Number, line[index..end]));
+                builder.Append(Style(theme, TokenKind.Number, line[index..end]));
                 index = end;
                 continue;
             }
@@ -328,11 +494,11 @@ public static class TuiSyntaxHighlighter
                 var next = NextNonWhitespace(line, end);
                 if (keywords.Contains(token))
                 {
-                    builder.Append(Style(TokenKind.Keyword, token));
+                    builder.Append(Style(theme, TokenKind.Keyword, token));
                 }
                 else if (next == '(')
                 {
-                    builder.Append(Style(TokenKind.Function, token));
+                    builder.Append(Style(theme, TokenKind.Function, token));
                 }
                 else
                 {
@@ -343,14 +509,14 @@ public static class TuiSyntaxHighlighter
                 continue;
             }
 
-            builder.Append(IsCodeOperator(line[index]) ? Style(TokenKind.Operator, line[index].ToString()) : line[index]);
+            builder.Append(IsCodeOperator(line[index]) ? Style(theme, TokenKind.Operator, line[index].ToString()) : line[index]);
             index++;
         }
 
         return builder.ToString();
     }
 
-    private static string HighlightXmlLine(string line)
+    private static string HighlightXmlLine(string line, TuiSyntaxHighlightTheme theme)
     {
         var builder = new StringBuilder();
         var index = 0;
@@ -360,7 +526,7 @@ public static class TuiSyntaxHighlighter
             {
                 var end = line.IndexOf("-->", index + 4, StringComparison.Ordinal);
                 end = end < 0 ? line.Length : end + 3;
-                builder.Append(Style(TokenKind.Comment, line[index..end]));
+                builder.Append(Style(theme, TokenKind.Comment, line[index..end]));
                 index = end;
                 continue;
             }
@@ -379,14 +545,14 @@ public static class TuiSyntaxHighlighter
                 break;
             }
 
-            builder.Append(HighlightXmlTag(line[index..(tagEnd + 1)]));
+            builder.Append(HighlightXmlTag(line[index..(tagEnd + 1)], theme));
             index = tagEnd + 1;
         }
 
         return builder.ToString();
     }
 
-    private static string HighlightXmlTag(string tag)
+    private static string HighlightXmlTag(string tag, TuiSyntaxHighlightTheme theme)
     {
         var builder = new StringBuilder();
         var index = 0;
@@ -395,7 +561,7 @@ public static class TuiSyntaxHighlighter
             var current = tag[index];
             if (current is '<' or '>' or '/' or '?' or '!' or '=')
             {
-                builder.Append(Style(TokenKind.Punctuation, current.ToString()));
+                builder.Append(Style(theme, TokenKind.Punctuation, current.ToString()));
                 index++;
                 continue;
             }
@@ -403,7 +569,7 @@ public static class TuiSyntaxHighlighter
             if (current is '"' or '\'')
             {
                 var end = FindStringEnd(tag, index, current, '\0');
-                builder.Append(Style(TokenKind.String, tag[index..end]));
+                builder.Append(Style(theme, TokenKind.String, tag[index..end]));
                 index = end;
                 continue;
             }
@@ -417,7 +583,7 @@ public static class TuiSyntaxHighlighter
                 }
 
                 var token = tag[index..end];
-                builder.Append(Style(IsXmlTagName(tag, index) ? TokenKind.Keyword : TokenKind.Variable, token));
+                builder.Append(Style(theme, IsXmlTagName(tag, index) ? TokenKind.Keyword : TokenKind.Variable, token));
                 index = end;
                 continue;
             }
@@ -429,7 +595,7 @@ public static class TuiSyntaxHighlighter
         return builder.ToString();
     }
 
-    private static string HighlightDiffLine(string line)
+    private static string HighlightDiffLine(string line, TuiSyntaxHighlightTheme theme)
     {
         if (line.StartsWith("@@", StringComparison.Ordinal) ||
             line.StartsWith("diff ", StringComparison.Ordinal) ||
@@ -437,15 +603,15 @@ public static class TuiSyntaxHighlighter
             line.StartsWith("+++", StringComparison.Ordinal) ||
             line.StartsWith("---", StringComparison.Ordinal))
         {
-            return Style(TokenKind.Meta, line);
+            return Style(theme, TokenKind.Meta, line);
         }
 
         if (line.StartsWith('+'))
         {
-            return Style(TokenKind.Addition, line);
+            return Style(theme, TokenKind.Addition, line);
         }
 
-        return line.StartsWith('-') ? Style(TokenKind.Deletion, line) : Style(TokenKind.Default, line);
+        return line.StartsWith('-') ? Style(theme, TokenKind.Deletion, line) : Style(theme, TokenKind.Default, line);
     }
 
     private static bool TryReadCSharpStringPrefix(string line, int index, out int end)
@@ -719,30 +885,30 @@ public static class TuiSyntaxHighlighter
         return previous >= 0 && tag[previous] is '<' or '/' or '?' or '!';
     }
 
-    private static string Style(TokenKind kind, string text)
+    private static string Style(TuiSyntaxHighlightTheme theme, TokenKind kind, string text)
     {
         if (text.Length == 0)
         {
             return text;
         }
 
-        var (r, g, b) = kind switch
+        var scope = kind switch
         {
-            TokenKind.Comment => (106, 153, 85),
-            TokenKind.Keyword => (86, 156, 214),
-            TokenKind.Function => (220, 220, 170),
-            TokenKind.Variable => (156, 220, 254),
-            TokenKind.String => (206, 145, 120),
-            TokenKind.Number => (181, 206, 168),
-            TokenKind.Type => (78, 201, 176),
-            TokenKind.Operator or TokenKind.Punctuation => (212, 212, 212),
-            TokenKind.Meta => (128, 128, 128),
-            TokenKind.Addition => (181, 189, 104),
-            TokenKind.Deletion => (204, 102, 102),
-            _ => (212, 212, 212)
+            TokenKind.Comment => "comment",
+            TokenKind.Keyword => "keyword",
+            TokenKind.Function => "function",
+            TokenKind.Variable => "variable",
+            TokenKind.String => "string",
+            TokenKind.Number => "number",
+            TokenKind.Type => "type",
+            TokenKind.Operator => "operator",
+            TokenKind.Punctuation => "punctuation",
+            TokenKind.Meta => "meta",
+            TokenKind.Addition => "addition",
+            TokenKind.Deletion => "deletion",
+            _ => "default"
         };
-
-        return $"\u001b[38;2;{r};{g};{b}m{text}{ResetForeground}";
+        return theme.Format(scope, text);
     }
 
     private enum TokenKind
