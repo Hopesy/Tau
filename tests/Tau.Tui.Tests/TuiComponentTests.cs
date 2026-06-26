@@ -253,6 +253,106 @@ public sealed class TuiComponentTests
     }
 
     [Fact]
+    public void ToolExecution_RendersFallbackCallArgsAndPendingBackground()
+    {
+        using var args = System.Text.Json.JsonDocument.Parse("""{"path":"src/Program.cs","limit":2}""");
+        var tool = new TuiToolExecution(
+            "read_file",
+            "call-1",
+            args.RootElement,
+            new TuiToolExecutionTheme(PendingBackground: static value => $"\u001b[43m{value}\u001b[0m"));
+
+        var lines = tool.Render(40);
+        var text = string.Join('\n', lines);
+
+        Assert.True(tool.IsPartial);
+        Assert.All(lines, line =>
+        {
+            Assert.StartsWith("\u001b[43m", line, StringComparison.Ordinal);
+            Assert.Equal(40, TuiText.VisibleWidth(line));
+        });
+        Assert.Contains(" read_file", text, StringComparison.Ordinal);
+        Assert.Contains("\"path\": \"src/Program.cs\"", text, StringComparison.Ordinal);
+        Assert.Contains("\"limit\": 2", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ToolExecution_ResultTextStripsAnsiSanitizesControlCharsAndUsesSuccessBackground()
+    {
+        TuiTerminalImage.SetCapabilities(new TuiTerminalCapabilities(TuiImageProtocol.None, TrueColor: true, Hyperlinks: false));
+        var tool = new TuiToolExecution(
+            "grep",
+            "call-2",
+            """{"pattern":"TODO"}""",
+            new TuiToolExecutionTheme(SuccessBackground: static value => $"\u001b[42m{value}\u001b[0m"));
+
+        tool.UpdateResult(new TuiToolExecutionResult(
+            [
+                new TuiToolTextBlock("\u001b[31mred\u001b[0m\u0001 text\r\nnext"),
+                new TuiToolImageBlock(
+                    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=",
+                    "image/png")
+            ]));
+
+        var lines = tool.Render(48);
+        var text = string.Join('\n', lines);
+
+        Assert.False(tool.IsPartial);
+        Assert.All(lines, line =>
+        {
+            Assert.StartsWith("\u001b[42m", line, StringComparison.Ordinal);
+            Assert.Equal(48, TuiText.VisibleWidth(line));
+        });
+        Assert.Contains(" red text", text, StringComparison.Ordinal);
+        Assert.Contains(" next", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("\u001b[31m", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("\u0001", text, StringComparison.Ordinal);
+        Assert.Contains("[Image: [image/png] 1x1]", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ToolExecution_ErrorResultUsesErrorBackgroundAfterPartialCompletes()
+    {
+        var tool = new TuiToolExecution(
+            "write",
+            "call-3",
+            null,
+            new TuiToolExecutionTheme(
+                PendingBackground: static value => $"\u001b[43m{value}\u001b[0m",
+                ErrorBackground: static value => $"\u001b[41m{value}\u001b[0m"));
+
+        tool.UpdateResult(
+            new TuiToolExecutionResult([new TuiToolTextBlock("still running")], IsError: true),
+            isPartial: true);
+
+        Assert.All(tool.Render(24), line => Assert.StartsWith("\u001b[43m", line, StringComparison.Ordinal));
+
+        tool.UpdateResult(new TuiToolExecutionResult([new TuiToolTextBlock("failed")], IsError: true));
+
+        Assert.All(tool.Render(24), line => Assert.StartsWith("\u001b[41m", line, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void ToolExecution_TracksExecutionArgsExpansionAndImageOptions()
+    {
+        var tool = new TuiToolExecution("custom", "call-4");
+
+        tool.MarkExecutionStarted();
+        tool.SetArgsComplete();
+        tool.UpdateArgs("""{"value":true}""");
+        tool.SetExpanded(true);
+        tool.SetShowImages(false);
+        tool.SetImageWidthCells(0);
+
+        Assert.True(tool.ExecutionStarted);
+        Assert.True(tool.ArgsComplete);
+        Assert.True(tool.Expanded);
+        Assert.False(tool.ShowImages);
+        Assert.Equal(1, tool.ImageWidthCells);
+        Assert.Contains("\"value\": true", string.Join('\n', tool.Render(32)), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void SelectList_RendersDescriptionsInAlignedColumn()
     {
         var list = new TuiSelectList(
