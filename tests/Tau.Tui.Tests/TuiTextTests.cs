@@ -88,4 +88,58 @@ public sealed class TuiTextTests
         Assert.Equal(string.Empty, strict.After);
         Assert.Equal(0, strict.AfterWidth);
     }
+
+    [Fact]
+    public void TruncateToVisualLines_ReturnsEmptyForEmptyText()
+    {
+        var result = TuiText.TruncateToVisualLines(string.Empty, maxVisualLines: 5, width: 12);
+
+        Assert.Empty(result.VisualLines);
+        Assert.Equal(0, result.SkippedCount);
+    }
+
+    [Fact]
+    public void TruncateToVisualLines_TakesLastWrappedVisualLines()
+    {
+        var result = TuiText.TruncateToVisualLines("one two three four", maxVisualLines: 2, width: 5);
+
+        Assert.Equal(2, result.SkippedCount);
+        Assert.Equal(
+            [
+                "three",
+                "four "
+            ],
+            result.VisualLines);
+        Assert.All(result.VisualLines, line => Assert.Equal(5, TuiText.VisibleWidth(line)));
+    }
+
+    [Fact]
+    public void TruncateToVisualLines_AppliesHorizontalPadding()
+    {
+        var result = TuiText.TruncateToVisualLines("alpha beta", maxVisualLines: 3, width: 8, paddingX: 1);
+
+        Assert.Equal(0, result.SkippedCount);
+        Assert.Equal(
+            [
+                " alpha  ",
+                " beta   "
+            ],
+            result.VisualLines);
+        Assert.All(result.VisualLines, line => Assert.Equal(8, TuiText.VisibleWidth(line)));
+    }
+
+    [Fact]
+    public void TruncateToVisualLines_PreservesAnsiStyleAcrossWrappedTail()
+    {
+        var result = TuiText.TruncateToVisualLines("\u001b[31mabcdef", maxVisualLines: 2, width: 3);
+
+        Assert.Equal(0, result.SkippedCount);
+        Assert.Equal(
+            [
+                "\u001b[31mabc",
+                "\u001b[31mdef"
+            ],
+            result.VisualLines);
+        Assert.All(result.VisualLines, line => Assert.Equal(3, TuiText.VisibleWidth(line)));
+    }
 }

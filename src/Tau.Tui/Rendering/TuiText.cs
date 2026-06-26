@@ -3,6 +3,10 @@ using System.Text;
 
 namespace Tau.Tui.Rendering;
 
+public sealed record TuiVisualTruncateResult(
+    IReadOnlyList<string> VisualLines,
+    int SkippedCount);
+
 public static class TuiText
 {
     public static int VisibleWidth(string? text)
@@ -109,6 +113,35 @@ public static class TuiText
     public static IReadOnlyList<string> Wrap(string? text, int width)
     {
         return WrapTextWithAnsi(text, width);
+    }
+
+    public static TuiVisualTruncateResult TruncateToVisualLines(
+        string? text,
+        int maxVisualLines,
+        int width,
+        int paddingX = 0)
+    {
+        if (string.IsNullOrEmpty(text) || maxVisualLines <= 0)
+        {
+            return new TuiVisualTruncateResult([], 0);
+        }
+
+        width = Math.Max(1, width);
+        paddingX = Math.Max(0, paddingX);
+        var contentWidth = Math.Max(1, width - (paddingX * 2));
+        var left = new string(' ', paddingX);
+        var right = new string(' ', paddingX);
+        var allVisualLines = WrapTextWithAnsi(text, contentWidth)
+            .Select(line => PadRightToWidth(left + line + right, width))
+            .ToArray();
+
+        if (allVisualLines.Length <= maxVisualLines)
+        {
+            return new TuiVisualTruncateResult(allVisualLines, 0);
+        }
+
+        var skippedCount = allVisualLines.Length - maxVisualLines;
+        return new TuiVisualTruncateResult(allVisualLines.Skip(skippedCount).ToArray(), skippedCount);
     }
 
     public static IReadOnlyList<string> WrapTextWithAnsi(string? text, int width)
