@@ -6,9 +6,18 @@ public sealed class CodingAgentGitUrlParserTests
 {
     [Theory]
     [InlineData("git:github.com/example/pkg@main", "https://github.com/example/pkg", "github.com", "example/pkg", "main", true)]
+    [InlineData("git:user/repo#v2", "https://github.com/user/repo", "github.com", "user/repo", "v2", true)]
     [InlineData("git:github:user/repo#v1.2.3", "https://github.com/user/repo", "github.com", "user/repo", "v1.2.3", true)]
+    [InlineData("git:gist:user/abcdef#v1", "https://gist.github.com/user/abcdef", "gist.github.com", "user/abcdef", "v1", true)]
+    [InlineData("git:sourcehut:~user/repo#main", "https://git.sr.ht/~user/repo", "git.sr.ht", "~user/repo", "main", true)]
     [InlineData("git:git@gitlab.com:group/repo@feature/foo", "git@gitlab.com:group/repo", "gitlab.com", "group/repo", "feature/foo", true)]
     [InlineData("https://github.com/user/repo.git", "https://github.com/user/repo.git", "github.com", "user/repo", null, false)]
+    [InlineData("https://www.github.com/user/repo.git#v1", "https://www.github.com/user/repo.git", "github.com", "user/repo", "v1", true)]
+    [InlineData("https://github.com/user/repo/tree/release", "https://github.com/user/repo/tree/release", "github.com", "user/repo", "release", true)]
+    [InlineData("https://gitlab.com/group/subgroup/repo.git#v3", "https://gitlab.com/group/subgroup/repo.git", "gitlab.com", "group/subgroup/repo", "v3", true)]
+    [InlineData("https://bitbucket.org/team/repo.git#stable", "https://bitbucket.org/team/repo.git", "bitbucket.org", "team/repo", "stable", true)]
+    [InlineData("https://gist.github.com/user/abcdef.git#rev", "https://gist.github.com/user/abcdef.git", "gist.github.com", "user/abcdef", "rev", true)]
+    [InlineData("https://git.sr.ht/~user/repo#tip", "https://git.sr.ht/~user/repo", "git.sr.ht", "~user/repo", "tip", true)]
     [InlineData("ssh://git@example.com/org/repo@release", "ssh://git@example.com/org/repo", "example.com", "org/repo", "release", true)]
     [InlineData("git:localhost/org/repo", "https://localhost/org/repo", "localhost", "org/repo", null, false)]
     public void TryParse_ReturnsGitSourceForSupportedForms(
