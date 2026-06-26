@@ -142,6 +142,53 @@ public class CodingAgentHostTests
     }
 
     [Fact]
+    public async Task RunAsync_ConvertsNonPngToolImagesForKittyRendering()
+    {
+        TuiTerminalImage.SetCellDimensions(new TuiCellDimensions(10, 10));
+        TuiTerminalImage.SetCapabilities(new TuiTerminalCapabilities(TuiImageProtocol.Kitty, TrueColor: true, Hyperlinks: true));
+        try
+        {
+            var terminal = new FakeTerminal();
+            terminal.QueueInput("read jpeg");
+            terminal.QueueInput("exit");
+
+            var runner = new FakeCodingAgentRunner((_, _) => GetEvents());
+            var session = new InteractiveConsoleSession(terminal);
+            var host = new CodingAgentHost(session, runner);
+
+            await host.RunAsync();
+
+            var output = terminal.FlattenedText();
+            var toolEntry = Assert.Single(session.Transcript, entry => entry is { Kind: TranscriptEntryKind.Tool, Key: "tool-jpeg" });
+
+            Assert.Contains(TuiTerminalImage.KittyPrefix, output, StringComparison.Ordinal);
+            Assert.Contains(TuiTerminalImage.KittyPrefix, toolEntry.Text, StringComparison.Ordinal);
+            Assert.Contains("c=60", output, StringComparison.Ordinal);
+            Assert.Contains("Read image file [image/jpeg]", output, StringComparison.Ordinal);
+            Assert.DoesNotContain("[Image: [image/jpeg]", output, StringComparison.Ordinal);
+        }
+        finally
+        {
+            TuiTerminalImage.SetCapabilities(new TuiTerminalCapabilities(TuiImageProtocol.None, TrueColor: true, Hyperlinks: false));
+        }
+
+        static async IAsyncEnumerable<AgentEvent> GetEvents()
+        {
+            yield return new ToolExecutionStartEvent("tool-jpeg", "read_file");
+            yield return new ToolExecutionEndEvent(
+                "tool-jpeg",
+                new ToolResult(
+                    [
+                        new TextContent("Read image file [image/jpeg]"),
+                        new ImageContent(Convert.ToBase64String(ImageTestData.CreateJpeg(11, 7)), "image/jpeg")
+                    ]),
+                "read_file");
+            yield return new AgentEndEvent();
+            await Task.CompletedTask;
+        }
+    }
+
+    [Fact]
     public async Task RunAsync_RunningTurnForwardsSteeringInputToRunner()
     {
         var terminal = new FakeTerminal();

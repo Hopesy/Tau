@@ -5,6 +5,7 @@ using Tau.Ai.Auth.OAuth;
 using Tau.Ai.Observability;
 using Tau.Tui.Abstractions;
 using Tau.Tui.Components;
+using Tau.Tui.Rendering;
 using Tau.Tui.Runtime;
 
 namespace Tau.CodingAgent.Runtime;
@@ -1387,9 +1388,22 @@ public sealed class CodingAgentHost
         block switch
         {
             TextContent text => new TuiToolTextBlock(text.Text),
-            ImageContent image => new TuiToolImageBlock(image.Data, image.MimeType),
+            ImageContent image => ToTuiToolImageBlock(image),
             _ => new TuiToolTextBlock($"[{block.Type}]")
         };
+
+    private static TuiToolImageBlock ToTuiToolImageBlock(ImageContent image)
+    {
+        var capabilities = TuiTerminalImage.GetCapabilities();
+        if (capabilities.Images == TuiImageProtocol.Kitty &&
+            !image.MimeType.Equals("image/png", StringComparison.OrdinalIgnoreCase) &&
+            CodingAgentImageConverter.ConvertToPng(image.Data, image.MimeType) is { } converted)
+        {
+            return new TuiToolImageBlock(converted.Data, converted.MimeType);
+        }
+
+        return new TuiToolImageBlock(image.Data, image.MimeType);
+    }
 
     private static string ExtractText(ToolResult? result)
     {
