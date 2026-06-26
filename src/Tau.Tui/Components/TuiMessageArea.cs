@@ -10,6 +10,8 @@ public enum TuiMessageRole
     Thinking,
     System,
     Tool,
+    Custom,
+    Skill,
     Error,
     Status,
 }
@@ -104,6 +106,8 @@ public sealed class TuiMessageArea : ITuiComponent
             TuiMessageRole.Thinking => "thinking> ",
             TuiMessageRole.System => "system> ",
             TuiMessageRole.Tool => "tool> ",
+            TuiMessageRole.Custom => "custom> ",
+            TuiMessageRole.Skill => "skill> ",
             TuiMessageRole.Error => "error> ",
             TuiMessageRole.Status => "status> ",
             _ => "msg> ",

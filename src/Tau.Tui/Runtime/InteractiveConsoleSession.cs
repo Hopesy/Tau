@@ -119,6 +119,24 @@ public sealed class InteractiveConsoleSession
         NotifyTranscriptChanged();
     }
 
+    public void WriteCustomMessage(string message)
+    {
+        EnsureStreamingLineClosed();
+        _terminal.Write("custom> ", ConsoleColor.Magenta);
+        _terminal.WriteLine(message);
+        _transcript.Add(new TranscriptEntry(TranscriptEntryKind.Custom, message));
+        NotifyTranscriptChanged();
+    }
+
+    public void WriteSkillInvocation(string message)
+    {
+        EnsureStreamingLineClosed();
+        _terminal.Write("skill> ", ConsoleColor.Magenta);
+        _terminal.WriteLine(message);
+        _transcript.Add(new TranscriptEntry(TranscriptEntryKind.Skill, message));
+        NotifyTranscriptChanged();
+    }
+
     public void WriteAssistantText(string delta)
     {
         EnsureStreamingMode(TranscriptEntryKind.Assistant, "tau> ", ConsoleColor.Cyan);
@@ -249,6 +267,8 @@ public sealed class InteractiveConsoleSession
             TranscriptEntryKind.Assistant => TuiMessageRole.Assistant,
             TranscriptEntryKind.Thinking => TuiMessageRole.Thinking,
             TranscriptEntryKind.Tool => TuiMessageRole.Tool,
+            TranscriptEntryKind.Custom => TuiMessageRole.Custom,
+            TranscriptEntryKind.Skill => TuiMessageRole.Skill,
             TranscriptEntryKind.Error => TuiMessageRole.Error,
             TranscriptEntryKind.Status => TuiMessageRole.Status,
             _ => TuiMessageRole.Status,

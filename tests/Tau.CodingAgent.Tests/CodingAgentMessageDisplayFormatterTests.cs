@@ -1,0 +1,94 @@
+using Tau.AgentCore.Harness;
+using Tau.Ai;
+using Tau.CodingAgent.Runtime;
+
+namespace Tau.CodingAgent.Tests;
+
+public sealed class CodingAgentMessageDisplayFormatterTests
+{
+    [Fact]
+    public void FormatUserMessage_LeavesNormalTextAsUserMessage()
+    {
+        var messages = CodingAgentMessageDisplayFormatter.FormatUserMessage("plain request");
+
+        var message = Assert.Single(messages);
+        Assert.Equal(CodingAgentMessageDisplayFormatter.UserKind, message.Kind);
+        Assert.Equal("plain request", message.Text);
+    }
+
+    [Fact]
+    public void FormatUserMessage_CollapsesSkillInvocationAndKeepsUserMessageSeparate()
+    {
+        var text = """
+            <skill name="reviewer" location="C:\skills\reviewer\SKILL.md">
+            References are relative to C:\skills\reviewer.
+
+            Check the diff and explain risks.
+            </skill>
+
+            src/app.cs
+            """;
+
+        var messages = CodingAgentMessageDisplayFormatter.FormatUserMessage(text);
+
+        Assert.Equal(2, messages.Count);
+        Assert.Equal(CodingAgentMessageDisplayFormatter.SkillKind, messages[0].Kind);
+        Assert.Equal("[skill] reviewer", messages[0].Text);
+        Assert.Equal(CodingAgentMessageDisplayFormatter.UserKind, messages[1].Kind);
+        Assert.Equal("src/app.cs", messages[1].Text);
+    }
+
+    [Fact]
+    public void FormatUserMessage_CanExpandSkillInvocationContent()
+    {
+        var text = """
+            <skill name="reviewer" location="/skills/reviewer/SKILL.md">
+            References are relative to /skills/reviewer.
+
+            Check the diff.
+            </skill>
+            """;
+
+        var messages = CodingAgentMessageDisplayFormatter.FormatUserMessage(text, expanded: true);
+
+        var message = Assert.Single(messages);
+        Assert.Equal(CodingAgentMessageDisplayFormatter.SkillKind, message.Kind);
+        Assert.Contains("[skill] reviewer", message.Text, StringComparison.Ordinal);
+        Assert.Contains("Check the diff.", message.Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TryParseSkillBlock_RejectsPartialXmlInsideOrdinaryMessage()
+    {
+        var parsed = CodingAgentMessageDisplayFormatter.TryParseSkillBlock(
+            "Please read <skill name=\"x\" location=\"y\">inline</skill>",
+            out _);
+
+        Assert.False(parsed);
+    }
+
+    [Fact]
+    public void FormatCustomMessage_RendersLabelAndTextContent()
+    {
+        IReadOnlyList<ContentBlock> content =
+        [
+            new TextContent("started"),
+            new ImageContent("abc", "image/png")
+        ];
+        var message = new AgentCustomMessage(
+            "deploy",
+            content,
+            true);
+
+        var rendered = CodingAgentMessageDisplayFormatter.FormatCustomMessage(message);
+
+        Assert.Equal(CodingAgentMessageDisplayFormatter.CustomKind, rendered.Kind);
+        Assert.Equal(
+            """
+            [deploy]
+            started
+            [image:image/png]
+            """,
+            rendered.Text);
+    }
+}

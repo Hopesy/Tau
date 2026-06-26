@@ -865,7 +865,10 @@ public class CodingAgentHostTests
             Assert.Contains($"References are relative to {skillDirectory}.", input, StringComparison.Ordinal);
             Assert.Contains("Check the diff and explain risks.", input, StringComparison.Ordinal);
             Assert.EndsWith("src/app.cs", input, StringComparison.Ordinal);
-            Assert.Contains("you> <skill name=\"reviewer\"", terminal.FlattenedText());
+            var output = terminal.FlattenedText();
+            Assert.Contains("skill> [skill] reviewer\n", output, StringComparison.Ordinal);
+            Assert.Contains("you> src/app.cs\n", output, StringComparison.Ordinal);
+            Assert.DoesNotContain("you> <skill name=\"reviewer\"", output, StringComparison.Ordinal);
         }
         finally
         {

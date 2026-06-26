@@ -522,7 +522,7 @@ public sealed class CodingAgentHost
         var logContext = CreateTurnLogContext();
         var retryAttempt = 0;
         var overflowRecoveryAttempted = false;
-        _ui.WriteUserMessage(displayedInput);
+        RenderDisplayedInput(displayedInput);
 
         while (true)
         {
@@ -622,6 +622,25 @@ public sealed class CodingAgentHost
 
             RollbackTurn(rollbackSnapshot, "rolled back failed turn");
             return;
+        }
+    }
+
+    private void RenderDisplayedInput(string displayedInput)
+    {
+        foreach (var message in CodingAgentMessageDisplayFormatter.FormatUserMessage(displayedInput))
+        {
+            switch (message.Kind)
+            {
+                case CodingAgentMessageDisplayFormatter.SkillKind:
+                    _ui.WriteSkillInvocation(message.Text);
+                    break;
+                case CodingAgentMessageDisplayFormatter.CustomKind:
+                    _ui.WriteCustomMessage(message.Text);
+                    break;
+                default:
+                    _ui.WriteUserMessage(message.Text);
+                    break;
+            }
         }
     }
 
