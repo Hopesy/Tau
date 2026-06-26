@@ -15,7 +15,12 @@ public sealed class CodingAgentFooterDataProvider : IDisposable
     private bool _branchResolved;
     private int _availableProviderCount;
     private FileSystemWatcher? _headWatcher;
+    private FileSystemWatcher? _reftableWatcher;
+    private FileSystemWatcher? _reftableTablesListWatcher;
     private Timer? _refreshTimer;
+    private Timer? _headPollingTimer;
+    private Timer? _gitWatcherRetryTimer;
+    private CodingAgentFileSnapshot? _lastHeadSnapshot;
     private bool _disposed;
 
     public CodingAgentFooterDataProvider(string cwd)
@@ -255,14 +260,90 @@ public sealed class CodingAgentFooterDataProvider : IDisposable
 
         try
         {
+            var headDirectory = Path.GetDirectoryName(_gitPaths.HeadPath);
+            if (string.IsNullOrWhiteSpace(headDirectory))
+            {
+                return;
+            }
+
             _headWatcher = CodingAgentFsWatch.WatchWithErrorHandler(
-                _gitPaths.HeadPath,
-                (_, _) => ScheduleRefresh(),
-                ScheduleRefresh);
+                headDirectory,
+                (_, fileName) =>
+                {
+                    if (string.IsNullOrWhiteSpace(fileName) || fileName.Equals("HEAD", StringComparison.Ordinal))
+                    {
+                        ScheduleRefresh();
+                    }
+                },
+                HandleGitWatcherError);
+
+            if (ShouldPollGitHead(_gitPaths.RepoDir))
+            {
+                _lastHeadSnapshot = GetFileSnapshot(_gitPaths.HeadPath);
+                _headPollingTimer = new Timer(_ => PollGitHead(), null, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1));
+            }
+
+            if (Directory.Exists(_gitPaths.ReftableDir))
+            {
+                _reftableWatcher = CodingAgentFsWatch.WatchWithErrorHandler(
+                    _gitPaths.ReftableDir,
+                    (_, _) => ScheduleRefresh(),
+                    HandleGitWatcherError);
+
+                if (File.Exists(_gitPaths.ReftableTablesListPath))
+                {
+                    _reftableTablesListWatcher = CodingAgentFsWatch.WatchWithErrorHandler(
+                        _gitPaths.ReftableTablesListPath,
+                        (_, _) => ScheduleRefresh(),
+                        HandleGitWatcherError);
+                }
+            }
         }
         catch
         {
             ClearGitWatcherCore();
+        }
+    }
+
+    private void HandleGitWatcherError()
+    {
+        lock (_sync)
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            ClearGitWatcherCore(clearRetryTimer: false);
+            _gitWatcherRetryTimer ??= new Timer(
+                _ => SetupGitWatcher(),
+                null,
+                CodingAgentFsWatch.RetryDelayMilliseconds,
+                Timeout.Infinite);
+        }
+    }
+
+    private void PollGitHead()
+    {
+        lock (_sync)
+        {
+            if (_disposed || _gitPaths is null)
+            {
+                return;
+            }
+
+            var current = GetFileSnapshot(_gitPaths.HeadPath);
+            if (current is null)
+            {
+                return;
+            }
+
+            if (_lastHeadSnapshot is not null && !_lastHeadSnapshot.Equals(current))
+            {
+                ScheduleRefresh();
+            }
+
+            _lastHeadSnapshot = current;
         }
     }
 
@@ -280,12 +361,24 @@ public sealed class CodingAgentFooterDataProvider : IDisposable
         }
     }
 
-    private void ClearGitWatcherCore()
+    private void ClearGitWatcherCore(bool clearRetryTimer = true)
     {
         _refreshTimer?.Dispose();
         _refreshTimer = null;
+        _headPollingTimer?.Dispose();
+        _headPollingTimer = null;
+        _lastHeadSnapshot = null;
         CodingAgentFsWatch.CloseWatcher(_headWatcher);
         _headWatcher = null;
+        CodingAgentFsWatch.CloseWatcher(_reftableWatcher);
+        _reftableWatcher = null;
+        CodingAgentFsWatch.CloseWatcher(_reftableTablesListWatcher);
+        _reftableTablesListWatcher = null;
+        if (clearRetryTimer)
+        {
+            _gitWatcherRetryTimer?.Dispose();
+            _gitWatcherRetryTimer = null;
+        }
     }
 
     private string? ResolveGitBranch()
@@ -357,6 +450,69 @@ public sealed class CodingAgentFooterDataProvider : IDisposable
         }
     }
 
+    internal static bool ShouldPollGitHead(
+        string repoDir,
+        IReadOnlyDictionary<string, string?>? environment = null,
+        PlatformID? platform = null) =>
+        IsWslEnvironment(environment, platform) && IsWindowsMountedRepoPath(repoDir);
+
+    internal static bool IsWslEnvironment(
+        IReadOnlyDictionary<string, string?>? environment = null,
+        PlatformID? platform = null)
+    {
+        platform ??= Environment.OSVersion.Platform;
+        if (platform is not PlatformID.Unix)
+        {
+            return false;
+        }
+
+        environment ??= CaptureEnvironment();
+        return Has(environment, "WSL_DISTRO_NAME") || Has(environment, "WSL_INTEROP");
+    }
+
+    internal static bool IsWindowsMountedRepoPath(string repoDir)
+    {
+        if (string.IsNullOrWhiteSpace(repoDir))
+        {
+            return false;
+        }
+
+        var normalized = repoDir.Replace('\\', '/');
+        return normalized.Length >= 7 &&
+            normalized.StartsWith("/mnt/", StringComparison.OrdinalIgnoreCase) &&
+            char.IsLetter(normalized[5]) &&
+            normalized[6] == '/';
+    }
+
+    private static IReadOnlyDictionary<string, string?> CaptureEnvironment()
+    {
+        var values = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+        foreach (System.Collections.DictionaryEntry entry in Environment.GetEnvironmentVariables())
+        {
+            values[(string)entry.Key] = entry.Value?.ToString();
+        }
+
+        return values;
+    }
+
+    private static bool Has(IReadOnlyDictionary<string, string?> environment, string name) =>
+        environment.TryGetValue(name, out var value) && !string.IsNullOrEmpty(value);
+
+    private static CodingAgentFileSnapshot? GetFileSnapshot(string path)
+    {
+        try
+        {
+            var info = new FileInfo(path);
+            return info.Exists
+                ? new CodingAgentFileSnapshot(info.LastWriteTimeUtc, info.CreationTimeUtc, info.Length)
+                : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     private void Unsubscribe(Action callback)
     {
         lock (_sync)
@@ -406,4 +562,10 @@ public sealed class CodingAgentFooterDataProvider : IDisposable
     }
 }
 
-public sealed record CodingAgentGitPaths(string RepoDir, string CommonGitDir, string HeadPath);
+public sealed record CodingAgentGitPaths(string RepoDir, string CommonGitDir, string HeadPath)
+{
+    public string ReftableDir => Path.Combine(CommonGitDir, "reftable");
+    public string ReftableTablesListPath => Path.Combine(ReftableDir, "tables.list");
+}
+
+internal readonly record struct CodingAgentFileSnapshot(DateTime LastWriteTimeUtc, DateTime CreationTimeUtc, long Length);

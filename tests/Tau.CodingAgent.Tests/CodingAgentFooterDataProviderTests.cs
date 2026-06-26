@@ -116,6 +116,73 @@ public sealed class CodingAgentFooterDataProviderTests
     }
 
     [Fact]
+    public async Task GitHeadWatcher_NotifiesWhenHeadIsAtomicallyReplaced()
+    {
+        using var temp = TempDirectory.Create();
+        var repo = CreateRepo(temp.Path, "repo", "main");
+        var headPath = Path.Combine(repo, ".git", "HEAD");
+        using var provider = new CodingAgentFooterDataProvider(repo);
+        Assert.Equal("main", provider.GetGitBranch());
+        var changed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        provider.OnBranchChange(() => changed.TrySetResult());
+
+        var tempHead = Path.Combine(repo, ".git", "HEAD.lock");
+        await File.WriteAllTextAsync(tempHead, "ref: refs/heads/renamed");
+        File.Move(tempHead, headPath, overwrite: true);
+
+        await changed.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal("renamed", provider.GetGitBranch());
+    }
+
+    [Fact]
+    public void FindGitPaths_ExposesReftablePathsFromCommonGitDir()
+    {
+        using var temp = TempDirectory.Create();
+        var worktree = Path.Combine(temp.Path, "work");
+        var gitRoot = Path.Combine(temp.Path, "git");
+        var worktreeGitDir = Path.Combine(gitRoot, "worktrees", "feature");
+        Directory.CreateDirectory(worktree);
+        Directory.CreateDirectory(worktreeGitDir);
+        File.WriteAllText(Path.Combine(worktree, ".git"), "gitdir: ../git/worktrees/feature");
+        File.WriteAllText(Path.Combine(worktreeGitDir, "HEAD"), "ref: refs/heads/feature/reftable");
+        File.WriteAllText(Path.Combine(worktreeGitDir, "commondir"), "../..");
+
+        var paths = CodingAgentFooterDataProvider.FindGitPaths(worktree);
+
+        Assert.NotNull(paths);
+        Assert.Equal(Path.Combine(gitRoot, "reftable"), paths!.ReftableDir);
+        Assert.Equal(Path.Combine(gitRoot, "reftable", "tables.list"), paths.ReftableTablesListPath);
+    }
+
+    [Fact]
+    public void ShouldPollGitHead_OnlyForWslWindowsMounts()
+    {
+        var wslEnvironment = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["WSL_DISTRO_NAME"] = "Ubuntu"
+        };
+        var linuxEnvironment = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+
+        Assert.True(CodingAgentFooterDataProvider.ShouldPollGitHead(
+            "/mnt/c/projects/repo",
+            wslEnvironment,
+            PlatformID.Unix));
+        Assert.False(CodingAgentFooterDataProvider.ShouldPollGitHead(
+            "/home/user/repo",
+            wslEnvironment,
+            PlatformID.Unix));
+        Assert.False(CodingAgentFooterDataProvider.ShouldPollGitHead(
+            "/mnt/c/projects/repo",
+            linuxEnvironment,
+            PlatformID.Unix));
+        Assert.False(CodingAgentFooterDataProvider.ShouldPollGitHead(
+            "C:\\projects\\repo",
+            wslEnvironment,
+            PlatformID.Win32NT));
+    }
+
+    [Fact]
     public void ExtensionStatuses_AreMutableSnapshotAndCanBeCleared()
     {
         using var temp = TempDirectory.Create();
