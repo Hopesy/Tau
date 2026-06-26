@@ -163,6 +163,96 @@ public sealed class TuiComponentTests
     }
 
     [Fact]
+    public void BashExecution_RendersCommandAndRunningStatus()
+    {
+        var bash = new TuiBashExecution("dotnet test", excludeFromContext: true);
+
+        var lines = bash.Render(32);
+
+        Assert.Equal(2, lines.Count);
+        Assert.Equal("!! $ dotnet test                ", lines[0]);
+        Assert.Equal("Running... (Esc to cancel)      ", lines[1]);
+        Assert.All(lines, line => Assert.Equal(32, TuiText.VisibleWidth(line)));
+    }
+
+    [Fact]
+    public void BashExecution_NormalizesAnsiAndCrLfOutput()
+    {
+        var bash = new TuiBashExecution("echo");
+
+        bash.AppendOutput("\u001b[31mred\u001b[0m\r\nnext");
+        bash.SetComplete(exitCode: 0);
+
+        var lines = bash.Render(12);
+
+        Assert.Equal(
+            [
+                "$ echo      ",
+                " red        ",
+                " next       "
+            ],
+            lines);
+        Assert.Equal(BashExecutionStatus.Complete, bash.Status);
+    }
+
+    [Fact]
+    public void BashExecution_CollapsedPreviewKeepsTailVisualLines()
+    {
+        var bash = new TuiBashExecution("build", previewLines: 2);
+
+        bash.AppendOutput("one two three four");
+        bash.SetComplete(exitCode: 0);
+
+        var lines = bash.Render(7);
+
+        Assert.Equal(
+            [
+                "$ build",
+                " three ",
+                " four  ",
+                "... 2 m"
+            ],
+            lines);
+        Assert.All(lines, line => Assert.Equal(7, TuiText.VisibleWidth(line)));
+    }
+
+    [Fact]
+    public void BashExecution_ExpandedShowsAllOutputAndCollapseHint()
+    {
+        var bash = new TuiBashExecution("build", previewLines: 1);
+
+        bash.AppendOutput("one\ntwo");
+        bash.SetExpanded(true);
+        bash.SetComplete(exitCode: 0);
+
+        var lines = bash.Render(20);
+
+        Assert.Equal(
+            [
+                "$ build             ",
+                " one                ",
+                " two                ",
+                "(collapse to preview"
+            ],
+            lines);
+        Assert.All(lines, line => Assert.Equal(20, TuiText.VisibleWidth(line)));
+    }
+
+    [Fact]
+    public void BashExecution_RendersErrorCancellationAndTruncationStatus()
+    {
+        var failed = new TuiBashExecution("fail");
+        failed.SetComplete(exitCode: 2, truncated: true, fullOutputPath: "logs/out.txt");
+
+        var cancelled = new TuiBashExecution("stop");
+        cancelled.SetComplete(exitCode: null, cancelled: true);
+
+        Assert.Contains("(exit 2)", string.Join('\n', failed.Render(80)), StringComparison.Ordinal);
+        Assert.Contains("Output truncated. Full output: logs/out.txt", string.Join('\n', failed.Render(80)), StringComparison.Ordinal);
+        Assert.Contains("(cancelled)", string.Join('\n', cancelled.Render(80)), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void SelectList_RendersDescriptionsInAlignedColumn()
     {
         var list = new TuiSelectList(
