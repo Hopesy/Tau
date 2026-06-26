@@ -200,6 +200,20 @@ public sealed class CodingAgentFooterDataProviderTests
     }
 
     [Fact]
+    public void CustomFooterLines_AreMutableSnapshotAndCanBeCleared()
+    {
+        using var temp = TempDirectory.Create();
+        using var provider = new CodingAgentFooterDataProvider(temp.Path);
+
+        provider.SetCustomFooterLines(["alpha", "beta"]);
+        var snapshot = provider.GetCustomFooterLines();
+        provider.SetCustomFooterLines(null);
+
+        Assert.Equal(["alpha", "beta"], snapshot);
+        Assert.Null(provider.GetCustomFooterLines());
+    }
+
+    [Fact]
     public void AvailableProviderCount_ClampsNegativeValues()
     {
         using var temp = TempDirectory.Create();

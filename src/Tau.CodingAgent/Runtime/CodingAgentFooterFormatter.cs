@@ -31,6 +31,12 @@ internal static class CodingAgentFooterFormatter
         CodingAgentSessionStats? stats = null,
         bool autoCompactEnabled = true)
     {
+        var customFooterLines = FormatCustomFooterLines(footerDataProvider);
+        if (customFooterLines.Count > 0)
+        {
+            return customFooterLines;
+        }
+
         var lines = new List<TuiStatusBarLine>
         {
             new(FormatLocation(cwd, home, sessionName, footerDataProvider), string.Empty),
@@ -317,5 +323,21 @@ internal static class CodingAgentFooterFormatter
             .Where(static text => text.Length > 0)
             .ToArray();
         return string.Join(' ', extensionStatuses);
+    }
+
+    private static IReadOnlyList<TuiStatusBarLine> FormatCustomFooterLines(CodingAgentFooterDataProvider? footerDataProvider)
+    {
+        if (footerDataProvider is null)
+        {
+            return [];
+        }
+
+        var lines = footerDataProvider
+            .GetCustomFooterLines()
+            ?.Select(SanitizeStatusText)
+            .Where(static text => text.Length > 0)
+            .Select(static text => new TuiStatusBarLine(text, string.Empty))
+            .ToArray();
+        return lines is { Length: > 0 } ? lines : [];
     }
 }

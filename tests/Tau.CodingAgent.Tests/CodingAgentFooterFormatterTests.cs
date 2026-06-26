@@ -232,6 +232,36 @@ public class CodingAgentFooterFormatterTests
     }
 
     [Fact]
+    public void FormatDefaultLines_UsesCustomFooterLinesWhenExtensionSetsFooter()
+    {
+        var directory = CreateGitDirectory("feature/footer");
+        var provider = new CodingAgentFooterDataProvider(directory);
+        provider.SetCustomFooterLines([" custom footer\nline ", "second\tline", " \r\n "]);
+
+        try
+        {
+            var lines = CodingAgentFooterFormatter.FormatDefaultLines(
+                directory,
+                home: null,
+                sessionName: "ignored",
+                Model(),
+                ThinkingLevel.High,
+                provider);
+
+            Assert.Equal(2, lines.Count);
+            Assert.Equal("custom footer line", lines[0].Left);
+            Assert.Equal(string.Empty, lines[0].Right);
+            Assert.Equal("second line", lines[1].Left);
+            Assert.Equal(string.Empty, lines[1].Right);
+        }
+        finally
+        {
+            provider.Dispose();
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public void SanitizeStatusText_CollapsesControlAndWhitespace()
     {
         var formatted = CodingAgentFooterFormatter.SanitizeStatusText(" alpha\r\n beta\t\u0001 gamma  ");

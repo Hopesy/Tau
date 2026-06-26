@@ -179,6 +179,21 @@ public sealed class CodingAgentRpcExtensionUiBridge
             cancellationToken);
     }
 
+    public Task SetFooterAsync(
+        IReadOnlyList<string>? footerLines,
+        CancellationToken cancellationToken = default)
+    {
+        GetFooterDataProvider()?.SetCustomFooterLines(footerLines);
+
+        return SendFireAndForgetAsync(
+            new Dictionary<string, object?>
+            {
+                ["method"] = "setFooter",
+                ["footerLines"] = footerLines?.ToArray()
+            },
+            cancellationToken);
+    }
+
     public Task SetTitleAsync(string title, CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(title);

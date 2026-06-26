@@ -9,6 +9,7 @@ public sealed class CodingAgentFooterDataProvider : IDisposable
     private readonly object _sync = new();
     private readonly Dictionary<string, string> _extensionStatuses = new(StringComparer.Ordinal);
     private readonly List<Action> _branchChangeCallbacks = [];
+    private IReadOnlyList<string>? _customFooterLines;
     private string _cwd;
     private CodingAgentGitPaths? _gitPaths;
     private string? _cachedBranch;
@@ -63,6 +64,15 @@ public sealed class CodingAgentFooterDataProvider : IDisposable
         }
     }
 
+    public IReadOnlyList<string>? GetCustomFooterLines()
+    {
+        lock (_sync)
+        {
+            ThrowIfDisposed();
+            return _customFooterLines?.ToArray();
+        }
+    }
+
     public IDisposable OnBranchChange(Action callback)
     {
         ArgumentNullException.ThrowIfNull(callback);
@@ -102,6 +112,15 @@ public sealed class CodingAgentFooterDataProvider : IDisposable
         {
             ThrowIfDisposed();
             _extensionStatuses.Clear();
+        }
+    }
+
+    public void SetCustomFooterLines(IReadOnlyList<string>? lines)
+    {
+        lock (_sync)
+        {
+            ThrowIfDisposed();
+            _customFooterLines = lines?.ToArray();
         }
     }
 

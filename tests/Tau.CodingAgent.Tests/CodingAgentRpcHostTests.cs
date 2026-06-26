@@ -683,9 +683,11 @@ public sealed class CodingAgentRpcHostTests
         await bridge.SetStatusAsync("build", "running");
         await bridge.NotifyAsync("Heads up", "warning");
         await bridge.SetWidgetAsync("summary", ["line 1", "line 2"], "belowEditor");
+        await bridge.SetFooterAsync(["custom footer", "build\tok"]);
         await bridge.NotifyAsync("Plain notice");
         await bridge.SetStatusAsync("idle", null);
         await bridge.SetWidgetAsync("empty", null);
+        await bridge.SetFooterAsync(null);
         await bridge.SetTitleAsync("Tau");
         await bridge.SetEditorTextAsync("draft");
 
@@ -730,6 +732,18 @@ public sealed class CodingAgentRpcHostTests
             line.GetProperty("widgetKey").GetString() == "empty");
         Assert.False(emptyWidget.TryGetProperty("widgetLines", out _));
         Assert.False(emptyWidget.TryGetProperty("widgetPlacement", out _));
+
+        var footer = lines.Single(line =>
+            line.GetProperty("method").GetString() == "setFooter" &&
+            line.TryGetProperty("footerLines", out _));
+        Assert.Equal(
+            ["custom footer", "build\tok"],
+            footer.GetProperty("footerLines").EnumerateArray().Select(line => line.GetString()!).ToArray());
+
+        var clearedFooter = lines.Single(line =>
+            line.GetProperty("method").GetString() == "setFooter" &&
+            !line.TryGetProperty("footerLines", out _));
+        Assert.Null(footerDataProvider.GetCustomFooterLines());
 
         Assert.Equal("Tau", lines.Single(line => line.GetProperty("method").GetString() == "setTitle").GetProperty("title").GetString());
         Assert.Equal(
@@ -776,6 +790,7 @@ public sealed class CodingAgentRpcHostTests
                     ctx.ui.notify("Build finished", "warning");
                     ctx.ui.setStatus("build", "done");
                     ctx.ui.setWidget("summary", ["one", "two"], { placement: "belowEditor" });
+                    ctx.ui.setFooter(() => ({ render: () => ["footer one", "footer two"] }));
                     ctx.ui.setTitle("Tau UI");
                     ctx.ui.setEditorText("draft text");
                     ctx.ui.pasteToEditor("pasted text");
@@ -816,6 +831,10 @@ public sealed class CodingAgentRpcHostTests
         Assert.Equal(
             ["one", "two"],
             widget.GetProperty("widgetLines").EnumerateArray().Select(line => line.GetString()!).ToArray());
+        var footer = lines.Single(line => line.GetProperty("method").GetString() == "setFooter");
+        Assert.Equal(
+            ["footer one", "footer two"],
+            footer.GetProperty("footerLines").EnumerateArray().Select(line => line.GetString()!).ToArray());
         Assert.Equal("Tau UI", lines.Single(line => line.GetProperty("method").GetString() == "setTitle").GetProperty("title").GetString());
         Assert.Equal(
             ["draft text", "pasted text"],

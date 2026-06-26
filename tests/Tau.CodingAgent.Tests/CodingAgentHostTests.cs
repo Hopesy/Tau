@@ -1173,6 +1173,9 @@ public class CodingAgentHostTests
                   }
                   ctx.ui.setStatus("build", "running");
                   ctx.ui.setStatus("idle", undefined);
+                  ctx.ui.setFooter(() => ({
+                    render: () => ["custom footer", "shortcut footer"]
+                  }));
                 }
               });
             }
@@ -1208,6 +1211,7 @@ public class CodingAgentHostTests
             var statuses = footerDataProvider.GetExtensionStatuses();
             Assert.Equal("running", statuses["build"]);
             Assert.False(statuses.ContainsKey("idle"));
+            Assert.Equal(["custom footer", "shortcut footer"], footerDataProvider.GetCustomFooterLines());
             Assert.Contains("status> extension shortcut 'ctrl+s' completed", terminal.FlattenedText());
         }
         finally

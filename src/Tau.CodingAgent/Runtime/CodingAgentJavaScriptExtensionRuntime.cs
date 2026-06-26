@@ -72,6 +72,7 @@ public sealed record CodingAgentJavaScriptExtensionUiAction(
     string? WidgetKey,
     IReadOnlyList<string>? WidgetLines,
     string? WidgetPlacement,
+    IReadOnlyList<string>? FooterLines,
     string? Title,
     string? Text);
 
@@ -981,6 +982,11 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
                             .GetResult();
                     }
                     break;
+                case "setFooter":
+                    bridge.SetFooterAsync(action.FooterLines, CancellationToken.None)
+                        .GetAwaiter()
+                        .GetResult();
+                    break;
                 case "setTitle":
                     if (!string.IsNullOrWhiteSpace(action.Title))
                     {
@@ -1030,6 +1036,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
                 ReadString(action, "widgetKey"),
                 ReadOptionalStringArray(action, "widgetLines"),
                 ReadString(action, "widgetPlacement"),
+                ReadOptionalStringArray(action, "footerLines"),
                 ReadString(action, "title"),
                 ReadString(action, "text")));
         }
@@ -1570,6 +1577,15 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
           return value.map(item => toText(item));
         }
 
+        function normalizeFooterLines(v) {
+          if (v == null) return undefined;
+          if (typeof v === "function") v = v();
+          if (v && typeof v.render === "function") v = v.render(120);
+          if (Array.isArray(v)) return v.map(toText);
+          const text = toText(v);
+          return text ? text.split(/\r?\n/) : [];
+        }
+
         const supportedEventNames = new Set([
           "tool_call",
           "tool_result",
@@ -1703,7 +1719,9 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
                 });
               }
             },
-            setFooter: () => {},
+            setFooter: footer => addUiAction("setFooter", {
+              footerLines: normalizeFooterLines(footer)
+            }),
             setHeader: () => {},
             setTitle: title => addUiAction("setTitle", { title: toText(title) }),
             custom: async () => undefined,
