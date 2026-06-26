@@ -9,6 +9,7 @@ public sealed class CodingAgentFooterDataProvider : IDisposable
     private readonly object _sync = new();
     private readonly Dictionary<string, string> _extensionStatuses = new(StringComparer.Ordinal);
     private readonly List<Action> _branchChangeCallbacks = [];
+    private IReadOnlyList<string>? _customHeaderLines;
     private IReadOnlyList<string>? _customFooterLines;
     private string? _workingMessage;
     private IReadOnlyList<string>? _workingIndicatorFrames;
@@ -76,6 +77,15 @@ public sealed class CodingAgentFooterDataProvider : IDisposable
         }
     }
 
+    public IReadOnlyList<string>? GetCustomHeaderLines()
+    {
+        lock (_sync)
+        {
+            ThrowIfDisposed();
+            return _customHeaderLines?.ToArray();
+        }
+    }
+
     public CodingAgentWorkingStatus GetWorkingStatus()
     {
         lock (_sync)
@@ -136,6 +146,15 @@ public sealed class CodingAgentFooterDataProvider : IDisposable
         {
             ThrowIfDisposed();
             _customFooterLines = lines?.ToArray();
+        }
+    }
+
+    public void SetCustomHeaderLines(IReadOnlyList<string>? lines)
+    {
+        lock (_sync)
+        {
+            ThrowIfDisposed();
+            _customHeaderLines = lines?.ToArray();
         }
     }
 

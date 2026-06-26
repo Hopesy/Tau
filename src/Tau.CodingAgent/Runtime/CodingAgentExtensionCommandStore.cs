@@ -170,9 +170,9 @@ public sealed class CodingAgentExtensionCommandStore
         return LoadStatus().Commands;
     }
 
-    public void SetExtensionUiBridge(CodingAgentRpcExtensionUiBridge? extensionUiBridge)
+    public void SetExtensionUiBridge(CodingAgentRpcExtensionUiBridge? extensionUiBridge, string mode = "tui")
     {
-        _javaScriptRuntime.SetExtensionUiBridge(extensionUiBridge);
+        _javaScriptRuntime.SetExtensionUiBridge(extensionUiBridge, mode);
     }
 
     public IReadOnlyList<CodingAgentExtensionTool> LoadToolDefinitions()
@@ -237,6 +237,52 @@ public sealed class CodingAgentExtensionCommandStore
         return modules.Length == 0
             ? null
             : new CodingAgentExtensionLifecycleEventSink(modules, _javaScriptRuntime);
+    }
+
+    public Task<IReadOnlyList<CodingAgentExtensionLifecycleEventError>> PublishSessionStartAsync(
+        string reason = "startup",
+        CancellationToken cancellationToken = default)
+    {
+        var modules = LoadStatus()
+            .EventHandlers
+            .Where(static handler => handler.EventType.Equals("session_start", StringComparison.Ordinal))
+            .GroupBy(static handler => Path.GetFullPath(handler.FilePath), StringComparer.OrdinalIgnoreCase)
+            .Select(static group => group.First())
+            .ToArray();
+        if (modules.Length == 0)
+        {
+            return Task.FromResult<IReadOnlyList<CodingAgentExtensionLifecycleEventError>>([]);
+        }
+
+        var errors = new List<CodingAgentExtensionLifecycleEventError>();
+        using var document = CreateSessionStartEventDocument(reason);
+        foreach (var module in modules)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var result = _javaScriptRuntime.EmitEvent(module.FilePath, document.RootElement);
+            if (!result.Success)
+            {
+                errors.Add(new CodingAgentExtensionLifecycleEventError(
+                    module.FilePath,
+                    module.Scope,
+                    module.Runtime,
+                    "session_start",
+                    result.Error ?? "javascript extension session_start handler failed"));
+                continue;
+            }
+
+            foreach (var handlerError in result.HandlerErrors)
+            {
+                errors.Add(new CodingAgentExtensionLifecycleEventError(
+                    module.FilePath,
+                    module.Scope,
+                    module.Runtime,
+                    "session_start",
+                    handlerError));
+            }
+        }
+
+        return Task.FromResult<IReadOnlyList<CodingAgentExtensionLifecycleEventError>>(errors);
     }
 
     public CodingAgentExtensionResources LoadResources()
@@ -991,6 +1037,21 @@ public sealed class CodingAgentExtensionCommandStore
         }
 
         return property.ValueKind == JsonValueKind.String ? property.GetString() : null;
+    }
+
+    private static JsonDocument CreateSessionStartEventDocument(string reason)
+    {
+        using var stream = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(stream))
+        {
+            writer.WriteStartObject();
+            writer.WriteString("type", "session_start");
+            writer.WriteString("reason", string.IsNullOrWhiteSpace(reason) ? "startup" : reason);
+            writer.WriteEndObject();
+        }
+
+        stream.Position = 0;
+        return JsonDocument.Parse(stream);
     }
 
     private static bool? ReadBool(JsonElement element, string propertyName)

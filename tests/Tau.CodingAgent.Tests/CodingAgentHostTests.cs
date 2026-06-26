@@ -1221,6 +1221,71 @@ public class CodingAgentHostTests
     }
 
     [Fact]
+    public async Task RunAsync_ExtensionSessionStartSetsCustomHeader()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-host-header-" + Guid.NewGuid().ToString("N"));
+        var extensionDirectory = Path.Combine(directory, ".tau", "extensions", "header");
+        Directory.CreateDirectory(extensionDirectory);
+        await File.WriteAllTextAsync(
+            Path.Combine(extensionDirectory, "package.json"),
+            """
+            {
+              "type": "module",
+              "pi": {
+                "extensions": ["index.js"]
+              }
+            }
+            """);
+        await File.WriteAllTextAsync(
+            Path.Combine(extensionDirectory, "index.js"),
+            """
+            export default function(pi) {
+              pi.on("session_start", async (_event, ctx) => {
+                if (ctx.mode === "tui") {
+                  ctx.ui.setHeader((_tui, theme) => ({
+                    render: () => [
+                      theme.fg("accent", "Custom Header"),
+                      "second header line"
+                    ],
+                    invalidate() {}
+                  }));
+                }
+              });
+            }
+            """);
+
+        var terminal = new FakeTerminal();
+        terminal.QueueInput("exit");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var extensionStore = new CodingAgentExtensionCommandStore(
+            cwd: directory,
+            userExtensionsDirectory: Path.Combine(directory, "missing-user-extensions"),
+            javaScriptRuntime: new CodingAgentJavaScriptExtensionRuntime(directory, nodeExecutable: "node"));
+        using var footerDataProvider = new CodingAgentFooterDataProvider(directory);
+        var host = new CodingAgentHost(
+            new InteractiveConsoleSession(terminal),
+            runner,
+            extensionCommandStore: extensionStore,
+            footerDataProvider: footerDataProvider);
+
+        try
+        {
+            await host.RunAsync();
+
+            Assert.Empty(runner.Inputs);
+            Assert.Equal(["Custom Header", "second header line"], footerDataProvider.GetCustomHeaderLines());
+            var output = terminal.FlattenedText();
+            Assert.Contains("Custom Header\nsecond header line\n\n", output, StringComparison.Ordinal);
+            Assert.DoesNotContain("Tau — Coding Agent", output, StringComparison.Ordinal);
+            Assert.DoesNotContain("Type your message, or 'exit' to quit.", output, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task RunAsync_ExtensionWorkingUiCustomizesRunningStatus()
     {
         var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-host-working-" + Guid.NewGuid().ToString("N"));

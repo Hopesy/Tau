@@ -34,13 +34,25 @@ public sealed class InteractiveConsoleSession
         _clearScreenAction = clearScreenAction;
     }
 
-    public void ShowWelcome(string title, string promptHint)
+    public void ShowWelcome(string title, string promptHint, IReadOnlyList<string>? customHeaderLines = null)
     {
-        _terminal.WriteLine(title, ConsoleColor.Cyan);
-        _terminal.WriteLine(promptHint);
+        if (customHeaderLines is null)
+        {
+            _terminal.WriteLine(title, ConsoleColor.Cyan);
+            _terminal.WriteLine(promptHint);
+            _transcript.Add(new TranscriptEntry(TranscriptEntryKind.System, title));
+            _transcript.Add(new TranscriptEntry(TranscriptEntryKind.System, promptHint));
+        }
+        else
+        {
+            foreach (var line in customHeaderLines)
+            {
+                _terminal.WriteLine(line);
+                _transcript.Add(new TranscriptEntry(TranscriptEntryKind.System, line));
+            }
+        }
+
         _terminal.WriteLine();
-        _transcript.Add(new TranscriptEntry(TranscriptEntryKind.System, title));
-        _transcript.Add(new TranscriptEntry(TranscriptEntryKind.System, promptHint));
         NotifyTranscriptChanged();
     }
 

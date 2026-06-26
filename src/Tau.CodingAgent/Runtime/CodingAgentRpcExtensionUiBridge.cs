@@ -194,6 +194,21 @@ public sealed class CodingAgentRpcExtensionUiBridge
             cancellationToken);
     }
 
+    public Task SetHeaderAsync(
+        IReadOnlyList<string>? headerLines,
+        CancellationToken cancellationToken = default)
+    {
+        GetFooterDataProvider()?.SetCustomHeaderLines(headerLines);
+
+        return SendFireAndForgetAsync(
+            new Dictionary<string, object?>
+            {
+                ["method"] = "setHeader",
+                ["headerLines"] = headerLines?.ToArray()
+            },
+            cancellationToken);
+    }
+
     public Task SetWorkingMessageAsync(
         string? message,
         CancellationToken cancellationToken = default)

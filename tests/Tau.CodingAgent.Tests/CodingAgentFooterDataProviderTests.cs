@@ -214,6 +214,20 @@ public sealed class CodingAgentFooterDataProviderTests
     }
 
     [Fact]
+    public void CustomHeaderLines_AreMutableSnapshotAndCanBeCleared()
+    {
+        using var temp = TempDirectory.Create();
+        using var provider = new CodingAgentFooterDataProvider(temp.Path);
+
+        provider.SetCustomHeaderLines(["header", "second line"]);
+        var snapshot = provider.GetCustomHeaderLines();
+        provider.SetCustomHeaderLines(null);
+
+        Assert.Equal(["header", "second line"], snapshot);
+        Assert.Null(provider.GetCustomHeaderLines());
+    }
+
+    [Fact]
     public void WorkingStatus_IsMutableSnapshotAndCanBeCleared()
     {
         using var temp = TempDirectory.Create();

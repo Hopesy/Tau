@@ -684,12 +684,14 @@ public sealed class CodingAgentRpcHostTests
         await bridge.NotifyAsync("Heads up", "warning");
         await bridge.SetWidgetAsync("summary", ["line 1", "line 2"], "belowEditor");
         await bridge.SetFooterAsync(["custom footer", "build\tok"]);
+        await bridge.SetHeaderAsync(["custom header", "second"]);
         await bridge.SetWorkingMessageAsync("Working custom");
         await bridge.SetWorkingIndicatorAsync(["a", "b"], 120);
         await bridge.NotifyAsync("Plain notice");
         await bridge.SetStatusAsync("idle", null);
         await bridge.SetWidgetAsync("empty", null);
         await bridge.SetFooterAsync(null);
+        await bridge.SetHeaderAsync(null);
         await bridge.SetWorkingMessageAsync(null);
         await bridge.SetWorkingIndicatorAsync(null);
         await bridge.SetTitleAsync("Tau");
@@ -749,6 +751,19 @@ public sealed class CodingAgentRpcHostTests
             !line.TryGetProperty("footerLines", out _));
         Assert.Equal("setFooter", clearedFooter.GetProperty("method").GetString());
         Assert.Null(footerDataProvider.GetCustomFooterLines());
+
+        var header = lines.Single(line =>
+            line.GetProperty("method").GetString() == "setHeader" &&
+            line.TryGetProperty("headerLines", out _));
+        Assert.Equal(
+            ["custom header", "second"],
+            header.GetProperty("headerLines").EnumerateArray().Select(line => line.GetString()!).ToArray());
+
+        var clearedHeader = lines.Single(line =>
+            line.GetProperty("method").GetString() == "setHeader" &&
+            !line.TryGetProperty("headerLines", out _));
+        Assert.Equal("setHeader", clearedHeader.GetProperty("method").GetString());
+        Assert.Null(footerDataProvider.GetCustomHeaderLines());
 
         var workingMessage = lines.Single(line =>
             line.GetProperty("method").GetString() == "setWorkingMessage" &&
@@ -822,6 +837,7 @@ public sealed class CodingAgentRpcHostTests
                     ctx.ui.setStatus("build", "done");
                     ctx.ui.setWidget("summary", ["one", "two"], { placement: "belowEditor" });
                     ctx.ui.setFooter(() => ({ render: () => ["footer one", "footer two"] }));
+                    ctx.ui.setHeader(() => ({ render: () => ["header one", "header two"] }));
                     ctx.ui.setWorkingMessage("Working custom");
                     ctx.ui.setWorkingIndicator({ frames: ["a", "b"], intervalMs: 120.8 });
                     ctx.ui.setTitle("Tau UI");
@@ -868,6 +884,10 @@ public sealed class CodingAgentRpcHostTests
         Assert.Equal(
             ["footer one", "footer two"],
             footer.GetProperty("footerLines").EnumerateArray().Select(line => line.GetString()!).ToArray());
+        var header = lines.Single(line => line.GetProperty("method").GetString() == "setHeader");
+        Assert.Equal(
+            ["header one", "header two"],
+            header.GetProperty("headerLines").EnumerateArray().Select(line => line.GetString()!).ToArray());
         var workingMessage = lines.Single(line => line.GetProperty("method").GetString() == "setWorkingMessage");
         Assert.Equal("Working custom", workingMessage.GetProperty("workingMessage").GetString());
         var workingIndicator = lines.Single(line => line.GetProperty("method").GetString() == "setWorkingIndicator");

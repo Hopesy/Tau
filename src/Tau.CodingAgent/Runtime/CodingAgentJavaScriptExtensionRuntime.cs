@@ -73,6 +73,7 @@ public sealed record CodingAgentJavaScriptExtensionUiAction(
     IReadOnlyList<string>? WidgetLines,
     string? WidgetPlacement,
     IReadOnlyList<string>? FooterLines,
+    IReadOnlyList<string>? HeaderLines,
     string? WorkingMessage,
     IReadOnlyList<string>? WorkingIndicatorFrames,
     int? WorkingIndicatorIntervalMilliseconds,
@@ -123,6 +124,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
     private readonly TimeSpan _timeout;
     private IReadOnlyDictionary<string, object> _flagValues = EmptyFlagValues;
     private CodingAgentRpcExtensionUiBridge? _extensionUiBridge;
+    private string _extensionMode = "print";
 
     private static readonly IReadOnlyDictionary<string, object> EmptyFlagValues =
         new Dictionary<string, object>(StringComparer.Ordinal);
@@ -150,9 +152,10 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
         _flagValues = flagValues ?? EmptyFlagValues;
     }
 
-    public void SetExtensionUiBridge(CodingAgentRpcExtensionUiBridge? extensionUiBridge)
+    public void SetExtensionUiBridge(CodingAgentRpcExtensionUiBridge? extensionUiBridge, string mode = "tui")
     {
         _extensionUiBridge = extensionUiBridge;
+        _extensionMode = extensionUiBridge is null || string.IsNullOrWhiteSpace(mode) ? "print" : mode;
     }
 
     public CodingAgentJavaScriptExtensionLoadResult Load(string filePath)
@@ -641,6 +644,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
             writer.WriteString("mode", mode);
             writer.WriteString("filePath", Path.GetFullPath(filePath));
             writer.WriteString("cwd", cwd);
+            writer.WriteString("extensionMode", _extensionMode);
             if (commandName is not null)
             {
                 writer.WriteString("commandName", commandName);
@@ -1021,6 +1025,11 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
                         .GetAwaiter()
                         .GetResult();
                     break;
+                case "setHeader":
+                    bridge.SetHeaderAsync(action.HeaderLines, CancellationToken.None)
+                        .GetAwaiter()
+                        .GetResult();
+                    break;
                 case "setWorkingMessage":
                     bridge.SetWorkingMessageAsync(action.WorkingMessage, CancellationToken.None)
                         .GetAwaiter()
@@ -1084,6 +1093,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
                 ReadOptionalStringArray(action, "widgetLines"),
                 ReadString(action, "widgetPlacement"),
                 ReadOptionalStringArray(action, "footerLines"),
+                ReadOptionalStringArray(action, "headerLines"),
                 ReadString(action, "workingMessage"),
                 ReadOptionalStringArray(action, "workingIndicatorFrames"),
                 ReadOptionalInt32(action, "workingIndicatorIntervalMs"),
@@ -1640,9 +1650,19 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
           return value.map(item => toText(item));
         }
 
-        function normalizeFooterLines(v) {
+        const themeProxy = {
+          fg(_name, text) { return toText(text); },
+          bg(_name, text) { return toText(text); },
+          style(_name, text) { return toText(text); },
+          bold(text) { return toText(text); },
+          dim(text) { return toText(text); },
+          italic(text) { return toText(text); },
+          underline(text) { return toText(text); }
+        };
+
+        function normalizeComponentLines(v) {
           if (v == null) return undefined;
-          if (typeof v === "function") v = v();
+          if (typeof v === "function") v = v(undefined, themeProxy, {});
           if (v && typeof v.render === "function") v = v.render(120);
           if (Array.isArray(v)) return v.map(toText);
           const text = toText(v);
@@ -1659,6 +1679,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
         const supportedEventNames = new Set([
           "tool_call",
           "tool_result",
+          "session_start",
           "agent_start",
           "agent_end",
           "turn_start",
@@ -1799,9 +1820,11 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
               }
             },
             setFooter: footer => addUiAction("setFooter", {
-              footerLines: normalizeFooterLines(footer)
+              footerLines: normalizeComponentLines(footer)
             }),
-            setHeader: () => {},
+            setHeader: header => addUiAction("setHeader", {
+              headerLines: normalizeComponentLines(header)
+            }),
             setTitle: title => addUiAction("setTitle", { title: toText(title) }),
             custom: async () => undefined,
             pasteToEditor(text) { this.setEditorText(text); },
@@ -1815,6 +1838,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
           return {
             ui: createUiContext(actions),
             hasUI: payload.hasExtensionUi === true,
+            mode: typeof payload.extensionMode === "string" ? payload.extensionMode : (payload.hasExtensionUi === true ? "tui" : "print"),
             cwd: payload.cwd,
             sessionManager: {},
             modelRegistry: {},

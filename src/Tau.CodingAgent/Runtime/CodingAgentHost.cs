@@ -161,7 +161,16 @@ public sealed class CodingAgentHost
         try
         {
             _compositionSession?.Start();
-            _ui.ShowWelcome("Tau — Coding Agent", "Type your message, or 'exit' to quit.");
+            var startupExtensionErrors = await PublishExtensionSessionStartAsync(cancellationToken).ConfigureAwait(false);
+            _ui.ShowWelcome(
+                "Tau — Coding Agent",
+                "Type your message, or 'exit' to quit.",
+                _footerDataProvider?.GetCustomHeaderLines());
+            foreach (var error in startupExtensionErrors)
+            {
+                WriteRuntimeError($"extension {error.EventType} failed: {error.Error}");
+            }
+
             ShowStartupNoticeIfNeeded();
             StartVersionUpdateCheck(cancellationToken);
             await RunInitialInputsAsync(cancellationToken).ConfigureAwait(false);
@@ -431,6 +440,14 @@ public sealed class CodingAgentHost
             .ToDictionary(
                 static resolved => resolved.KeyBinding,
                 static resolved => resolved.Shortcut);
+    }
+
+    private Task<IReadOnlyList<CodingAgentExtensionLifecycleEventError>> PublishExtensionSessionStartAsync(
+        CancellationToken cancellationToken)
+    {
+        return _extensionCommandStore is null
+            ? Task.FromResult<IReadOnlyList<CodingAgentExtensionLifecycleEventError>>([])
+            : _extensionCommandStore.PublishSessionStartAsync("startup", cancellationToken);
     }
 
     private static int CountAvailableProviders(ICodingAgentRunner runner, IReadOnlyList<string>? scopedModelsOverride)
