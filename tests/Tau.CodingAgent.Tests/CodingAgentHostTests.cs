@@ -1227,6 +1227,15 @@ public class CodingAgentHostTests
         var terminal = new FakeTerminal();
         terminal.QueueInput("exit");
         var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.MutableMessages.Add(new AssistantMessage([new TextContent("footer usage")])
+        {
+            Usage = new Usage(
+                InputTokens: 100,
+                OutputTokens: 20,
+                CacheReadTokens: 3,
+                CacheWriteTokens: 4,
+                Cost: new UsageCost(0.01m, 0.02m, 0.003m, 0.004m))
+        });
         var footerDataProvider = new CodingAgentFooterDataProvider(directory);
         footerDataProvider.SetExtensionStatus("build", "done\tok");
         var surface = new CapturingRenderSurface(width: 120, height: 4);
@@ -1252,6 +1261,12 @@ public class CodingAgentHostTests
             Assert.Contains(
                 renderedLines,
                 static line => line.Contains("(openai) gpt-5.4 (thinking off)", StringComparison.Ordinal));
+            Assert.Contains(
+                renderedLines,
+                static line => line.Contains("in100 out20 R3 W4 $0.037", StringComparison.Ordinal));
+            Assert.Contains(
+                renderedLines,
+                static line => line.Contains("%/128k", StringComparison.Ordinal));
         }
         finally
         {

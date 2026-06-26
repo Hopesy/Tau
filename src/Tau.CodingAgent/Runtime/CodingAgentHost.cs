@@ -1446,9 +1446,33 @@ public sealed class CodingAgentHost
         var baseLeft = string.IsNullOrWhiteSpace(statusLeftOverride)
             ? FormatCompositionStatusLeft()
             : statusLeftOverride;
+        var stats = GetFooterSessionStats();
         var left = CodingAgentFooterFormatter.FormatLeft(baseLeft, _footerDataProvider);
-        var right = CodingAgentFooterFormatter.FormatRight(_runner.Model, _runner.ThinkingLevel, _footerDataProvider);
+        var right = CodingAgentFooterFormatter.FormatRight(
+            _runner.Model,
+            _runner.ThinkingLevel,
+            _footerDataProvider,
+            stats,
+            _autoCompaction.IsEnabled);
         _compositionSession.SetStatus(left, right);
+    }
+
+    private CodingAgentSessionStats? GetFooterSessionStats()
+    {
+        try
+        {
+            var stats = _runner.GetSessionStats(_sessionStore?.Path);
+            return _treeSessionController is null
+                ? stats
+                : stats.WithUsage(_treeSessionController.GetCurrentBranchUsageSummary());
+        }
+        catch (Exception ex) when (
+            ex is IOException or
+                UnauthorizedAccessException or
+                InvalidOperationException)
+        {
+            return null;
+        }
     }
 
     private string FormatCompositionStatusLeft() =>
