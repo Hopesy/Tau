@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Tau.AgentCore;
+using Tau.AgentCore.Harness;
 using Tau.Tui.Abstractions;
 
 namespace Tau.CodingAgent.Runtime;
@@ -16,18 +17,36 @@ public sealed record CodingAgentExtensionCommand(
     string Scope,
     string Runtime = "json");
 
+public sealed record CodingAgentExtensionCustomMessageDelivery(
+    AgentCustomMessage Message,
+    bool TriggerTurn,
+    string? DeliverAs);
+
 public sealed record CodingAgentExtensionCommandInvocation(
     bool Handled,
     bool IsError,
     bool SendToRunner,
     string Message,
-    CodingAgentExtensionCommand Command)
+    CodingAgentExtensionCommand Command,
+    IReadOnlyList<CodingAgentDisplayedMessage>? DisplayMessages = null,
+    IReadOnlyList<AgentCustomMessage>? CustomMessages = null,
+    IReadOnlyList<CodingAgentExtensionCustomMessageDelivery>? CustomMessageDeliveries = null)
 {
-    public static CodingAgentExtensionCommandInvocation Status(CodingAgentExtensionCommand command, string message) =>
-        new(true, false, false, message, command);
+    public static CodingAgentExtensionCommandInvocation Status(
+        CodingAgentExtensionCommand command,
+        string message,
+        IReadOnlyList<CodingAgentDisplayedMessage>? displayMessages = null,
+        IReadOnlyList<AgentCustomMessage>? customMessages = null,
+        IReadOnlyList<CodingAgentExtensionCustomMessageDelivery>? customMessageDeliveries = null) =>
+        new(true, false, false, message, command, displayMessages, customMessages, customMessageDeliveries);
 
-    public static CodingAgentExtensionCommandInvocation Runner(CodingAgentExtensionCommand command, string message) =>
-        new(true, false, true, message, command);
+    public static CodingAgentExtensionCommandInvocation Runner(
+        CodingAgentExtensionCommand command,
+        string message,
+        IReadOnlyList<CodingAgentDisplayedMessage>? displayMessages = null,
+        IReadOnlyList<AgentCustomMessage>? customMessages = null,
+        IReadOnlyList<CodingAgentExtensionCustomMessageDelivery>? customMessageDeliveries = null) =>
+        new(true, false, true, message, command, displayMessages, customMessages, customMessageDeliveries);
 
     public static CodingAgentExtensionCommandInvocation Error(CodingAgentExtensionCommand command, string message) =>
         new(true, true, false, message, command);
@@ -70,13 +89,26 @@ public sealed record CodingAgentExtensionShortcutInvocation(
     bool IsError,
     bool SendToRunner,
     string Message,
-    CodingAgentExtensionShortcut Shortcut)
+    CodingAgentExtensionShortcut Shortcut,
+    IReadOnlyList<CodingAgentDisplayedMessage>? DisplayMessages = null,
+    IReadOnlyList<AgentCustomMessage>? CustomMessages = null,
+    IReadOnlyList<CodingAgentExtensionCustomMessageDelivery>? CustomMessageDeliveries = null)
 {
-    public static CodingAgentExtensionShortcutInvocation Status(CodingAgentExtensionShortcut shortcut, string message) =>
-        new(true, false, false, message, shortcut);
+    public static CodingAgentExtensionShortcutInvocation Status(
+        CodingAgentExtensionShortcut shortcut,
+        string message,
+        IReadOnlyList<CodingAgentDisplayedMessage>? displayMessages = null,
+        IReadOnlyList<AgentCustomMessage>? customMessages = null,
+        IReadOnlyList<CodingAgentExtensionCustomMessageDelivery>? customMessageDeliveries = null) =>
+        new(true, false, false, message, shortcut, displayMessages, customMessages, customMessageDeliveries);
 
-    public static CodingAgentExtensionShortcutInvocation Runner(CodingAgentExtensionShortcut shortcut, string message) =>
-        new(true, false, true, message, shortcut);
+    public static CodingAgentExtensionShortcutInvocation Runner(
+        CodingAgentExtensionShortcut shortcut,
+        string message,
+        IReadOnlyList<CodingAgentDisplayedMessage>? displayMessages = null,
+        IReadOnlyList<AgentCustomMessage>? customMessages = null,
+        IReadOnlyList<CodingAgentExtensionCustomMessageDelivery>? customMessageDeliveries = null) =>
+        new(true, false, true, message, shortcut, displayMessages, customMessages, customMessageDeliveries);
 
     public static CodingAgentExtensionShortcutInvocation Error(CodingAgentExtensionShortcut shortcut, string message) =>
         new(true, true, false, message, shortcut);
@@ -115,6 +147,12 @@ public sealed record CodingAgentExtensionEventHandler(
     string Runtime,
     string EventType);
 
+public sealed record CodingAgentExtensionMessageRenderer(
+    string CustomType,
+    string FilePath,
+    string Scope,
+    string Runtime);
+
 public sealed record CodingAgentExtensionDiagnostic(
     string Severity,
     string Message,
@@ -130,6 +168,7 @@ public sealed record CodingAgentExtensionStatus(
     IReadOnlyList<CodingAgentExtensionFileStatus> Files,
     IReadOnlyList<CodingAgentExtensionModule> Modules,
     IReadOnlyList<CodingAgentExtensionEventHandler> EventHandlers,
+    IReadOnlyList<CodingAgentExtensionMessageRenderer> MessageRenderers,
     IReadOnlyList<CodingAgentExtensionDiagnostic> Diagnostics)
 {
     public IReadOnlyList<CodingAgentResourceDiagnostic> ResourceDiagnostics =>
@@ -185,6 +224,62 @@ public sealed class CodingAgentExtensionCommandStore
         return LoadToolDefinitions()
             .Select(tool => new CodingAgentExtensionToolAdapter(tool, _javaScriptRuntime))
             .ToArray();
+    }
+
+    /// <summary>
+    /// 加载扩展注册的自定义消息渲染器。
+    /// </summary>
+    /// <returns>按扩展加载顺序去重后的消息渲染器列表。</returns>
+    public IReadOnlyList<CodingAgentExtensionMessageRenderer> LoadMessageRenderers()
+    {
+        return LoadStatus().MessageRenderers;
+    }
+
+    /// <summary>
+    /// 尝试使用扩展注册的消息渲染器渲染自定义消息。
+    /// </summary>
+    /// <param name="message">需要展示的自定义消息。</param>
+    /// <param name="rendered">渲染成功时返回可写入 transcript 的显示消息。</param>
+    /// <param name="expanded">是否按展开状态调用扩展 renderer。</param>
+    /// <returns>找到 renderer 且渲染出非空文本时返回 <see langword="true"/>；否则返回 <see langword="false"/>。</returns>
+    public bool TryRenderCustomMessage(
+        AgentCustomMessage message,
+        out CodingAgentDisplayedMessage? rendered,
+        bool expanded = true)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        rendered = null;
+
+        foreach (var renderer in LoadMessageRenderers())
+        {
+            if (!renderer.CustomType.Equals(message.CustomType, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var result = _javaScriptRuntime.RenderMessage(
+                renderer.FilePath,
+                renderer.CustomType,
+                message,
+                expanded);
+            if (!result.Success)
+            {
+                return false;
+            }
+
+            var text = string.Join(Environment.NewLine, result.Lines);
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                return false;
+            }
+
+            rendered = new CodingAgentDisplayedMessage(
+                CodingAgentMessageDisplayFormatter.CustomKind,
+                text);
+            return true;
+        }
+
+        return false;
     }
 
     public IReadOnlyList<IToolInterceptor> LoadToolInterceptors()
@@ -302,11 +397,12 @@ public sealed class CodingAgentExtensionCommandStore
         var files = new List<CodingAgentExtensionFileStatus>();
         var modules = new List<CodingAgentExtensionModule>();
         var eventHandlers = new List<CodingAgentExtensionEventHandler>();
+        var messageRenderers = new List<CodingAgentExtensionMessageRenderer>();
         var diagnostics = new List<CodingAgentExtensionDiagnostic>();
         if (_includeDefaults)
         {
-            LoadSourceDirectory(_userExtensionsDirectory, "user", definitions, tools, flags, shortcuts, skillPaths, promptPaths, themePaths, files, modules, eventHandlers, diagnostics, _javaScriptRuntime);
-            LoadSourceDirectory(Path.Combine(_cwd, ".tau", "extensions"), "project", definitions, tools, flags, shortcuts, skillPaths, promptPaths, themePaths, files, modules, eventHandlers, diagnostics, _javaScriptRuntime);
+            LoadSourceDirectory(_userExtensionsDirectory, "user", definitions, tools, flags, shortcuts, skillPaths, promptPaths, themePaths, files, modules, eventHandlers, messageRenderers, diagnostics, _javaScriptRuntime);
+            LoadSourceDirectory(Path.Combine(_cwd, ".tau", "extensions"), "project", definitions, tools, flags, shortcuts, skillPaths, promptPaths, themePaths, files, modules, eventHandlers, messageRenderers, diagnostics, _javaScriptRuntime);
         }
 
         foreach (var path in GetExplicitPaths())
@@ -314,7 +410,7 @@ public sealed class CodingAgentExtensionCommandStore
             var resolved = ResolvePath(path, _cwd);
             if (Directory.Exists(resolved))
             {
-                LoadSourceDirectory(resolved, "path", definitions, tools, flags, shortcuts, skillPaths, promptPaths, themePaths, files, modules, eventHandlers, diagnostics, _javaScriptRuntime, reportMissing: true);
+                LoadSourceDirectory(resolved, "path", definitions, tools, flags, shortcuts, skillPaths, promptPaths, themePaths, files, modules, eventHandlers, messageRenderers, diagnostics, _javaScriptRuntime, reportMissing: true);
             }
             else if (File.Exists(resolved) && Path.GetExtension(resolved).Equals(".json", StringComparison.OrdinalIgnoreCase))
             {
@@ -322,7 +418,7 @@ public sealed class CodingAgentExtensionCommandStore
             }
             else if (File.Exists(resolved) && IsModuleFile(resolved))
             {
-                AddModule(resolved, "path", modules, eventHandlers, definitions, tools, flags, shortcuts, diagnostics, _javaScriptRuntime);
+                AddModule(resolved, "path", modules, eventHandlers, messageRenderers, definitions, tools, flags, shortcuts, diagnostics, _javaScriptRuntime);
             }
             else if (File.Exists(resolved))
             {
@@ -364,6 +460,7 @@ public sealed class CodingAgentExtensionCommandStore
                 .DistinctBy(static module => Path.GetFullPath(module.FilePath), StringComparer.OrdinalIgnoreCase)
                 .ToArray(),
             eventHandlers,
+            messageRenderers,
             diagnostics);
     }
 
@@ -425,19 +522,30 @@ public sealed class CodingAgentExtensionCommandStore
                 return true;
             }
 
+            var customMessages = result.CustomMessages.Select(static message => message.Message).ToArray();
+            var customMessageDeliveries = CreateCustomMessageDeliveries(result.CustomMessages);
+            var displayMessages = RenderCustomMessages(result.CustomMessages);
             if (result.RunnerMessages.Count > 0)
             {
                 invocation = CodingAgentExtensionCommandInvocation.Runner(
                     command,
-                    string.Join($"{Environment.NewLine}{Environment.NewLine}", result.RunnerMessages));
+                    string.Join($"{Environment.NewLine}{Environment.NewLine}", result.RunnerMessages),
+                    displayMessages,
+                    customMessages,
+                    customMessageDeliveries);
                 return true;
             }
 
             invocation = CodingAgentExtensionCommandInvocation.Status(
                 command,
-                string.IsNullOrWhiteSpace(result.StatusMessage)
+                displayMessages.Count > 0 && string.IsNullOrWhiteSpace(result.StatusMessage)
+                    ? string.Empty
+                    : string.IsNullOrWhiteSpace(result.StatusMessage)
                     ? $"extension command '/{command.InvocationName}' completed"
-                    : result.StatusMessage);
+                    : result.StatusMessage,
+                displayMessages,
+                customMessages,
+                customMessageDeliveries);
             return true;
         }
 
@@ -497,20 +605,78 @@ public sealed class CodingAgentExtensionCommandStore
             return true;
         }
 
+        var customMessages = result.CustomMessages.Select(static message => message.Message).ToArray();
+        var customMessageDeliveries = CreateCustomMessageDeliveries(result.CustomMessages);
+        var displayMessages = RenderCustomMessages(result.CustomMessages);
         if (result.RunnerMessages.Count > 0)
         {
             invocation = CodingAgentExtensionShortcutInvocation.Runner(
                 shortcut,
-                string.Join($"{Environment.NewLine}{Environment.NewLine}", result.RunnerMessages));
+                string.Join($"{Environment.NewLine}{Environment.NewLine}", result.RunnerMessages),
+                displayMessages,
+                customMessages,
+                customMessageDeliveries);
             return true;
         }
 
         invocation = CodingAgentExtensionShortcutInvocation.Status(
             shortcut,
-            string.IsNullOrWhiteSpace(result.StatusMessage)
+            displayMessages.Count > 0 && string.IsNullOrWhiteSpace(result.StatusMessage)
+                ? string.Empty
+                : string.IsNullOrWhiteSpace(result.StatusMessage)
                 ? $"extension shortcut '{shortcut.Shortcut}' completed"
-                : result.StatusMessage);
+                : result.StatusMessage,
+            displayMessages,
+            customMessages,
+            customMessageDeliveries);
         return true;
+    }
+
+    private static IReadOnlyList<CodingAgentExtensionCustomMessageDelivery> CreateCustomMessageDeliveries(
+        IReadOnlyList<CodingAgentJavaScriptExtensionCustomMessage> messages)
+    {
+        if (messages.Count == 0)
+        {
+            return [];
+        }
+
+        return messages
+            .Select(static message => new CodingAgentExtensionCustomMessageDelivery(
+                message.Message,
+                message.TriggerTurn,
+                message.DeliverAs))
+            .ToArray();
+    }
+
+    private IReadOnlyList<CodingAgentDisplayedMessage> RenderCustomMessages(
+        IReadOnlyList<CodingAgentJavaScriptExtensionCustomMessage> messages)
+    {
+        if (messages.Count == 0)
+        {
+            return [];
+        }
+
+        var rendered = new List<CodingAgentDisplayedMessage>();
+        foreach (var custom in messages)
+        {
+            if (!custom.Message.Display)
+            {
+                continue;
+            }
+
+            var text = string.Join(Environment.NewLine, custom.RenderedLines);
+            if (!string.IsNullOrWhiteSpace(text))
+            {
+                rendered.Add(new CodingAgentDisplayedMessage(CodingAgentMessageDisplayFormatter.CustomKind, text));
+                continue;
+            }
+
+            rendered.Add(TryRenderCustomMessage(custom.Message, out var rendererMessage) && rendererMessage is not null
+                ? rendererMessage
+                : CodingAgentMessageDisplayFormatter.FormatCustomMessage(custom.Message));
+        }
+
+        return rendered.ToArray();
     }
 
     /// <summary>
@@ -646,6 +812,7 @@ public sealed class CodingAgentExtensionCommandStore
             or EditorAction.CycleModelForward
             or EditorAction.CycleModelBackward
             or EditorAction.SelectModel
+            or EditorAction.OpenExternalEditor
             or EditorAction.KillToLineEnd;
 
     public static bool TryParseShortcutKey(string shortcut, out KeyBinding keyBinding)
@@ -741,6 +908,7 @@ public sealed class CodingAgentExtensionCommandStore
         ICollection<CodingAgentExtensionFileStatus> fileStatuses,
         ICollection<CodingAgentExtensionModule> modules,
         ICollection<CodingAgentExtensionEventHandler> eventHandlers,
+        ICollection<CodingAgentExtensionMessageRenderer> messageRenderers,
         ICollection<CodingAgentExtensionDiagnostic> diagnostics,
         CodingAgentJavaScriptExtensionRuntime javaScriptRuntime,
         bool reportMissing = false)
@@ -784,7 +952,7 @@ public sealed class CodingAgentExtensionCommandStore
 
         foreach (var module in DiscoverModuleFiles(directory))
         {
-            AddModule(module, scope, modules, eventHandlers, definitions, tools, flags, shortcuts, diagnostics, javaScriptRuntime);
+            AddModule(module, scope, modules, eventHandlers, messageRenderers, definitions, tools, flags, shortcuts, diagnostics, javaScriptRuntime);
         }
     }
 
@@ -1297,6 +1465,7 @@ public sealed class CodingAgentExtensionCommandStore
         string scope,
         ICollection<CodingAgentExtensionModule> modules,
         ICollection<CodingAgentExtensionEventHandler> eventHandlers,
+        ICollection<CodingAgentExtensionMessageRenderer> messageRenderers,
         ICollection<CommandDefinition> definitions,
         ICollection<CodingAgentExtensionTool> tools,
         ICollection<CodingAgentExtensionFlag> flags,
@@ -1409,6 +1578,41 @@ public sealed class CodingAgentExtensionCommandStore
                 eventType));
         }
 
+        foreach (var renderer in result.MessageRenderers)
+        {
+            var customType = renderer.CustomType.Trim();
+            if (string.IsNullOrWhiteSpace(customType))
+            {
+                diagnostics.Add(new CodingAgentExtensionDiagnostic(
+                    "warning",
+                    $"{runtime} extension registered a message renderer with an invalid custom type",
+                    fullPath,
+                    scope));
+                continue;
+            }
+
+            if (!renderer.HasRenderer)
+            {
+                diagnostics.Add(new CodingAgentExtensionDiagnostic(
+                    "warning",
+                    $"{runtime} extension message renderer '{customType}' has no renderer function",
+                    fullPath,
+                    scope));
+                continue;
+            }
+
+            if (messageRenderers.Any(existing => existing.CustomType.Equals(customType, StringComparison.Ordinal)))
+            {
+                continue;
+            }
+
+            messageRenderers.Add(new CodingAgentExtensionMessageRenderer(
+                customType,
+                fullPath,
+                scope,
+                runtime));
+        }
+
         foreach (var flag in result.Flags)
         {
             var name = NormalizeName(flag.Name);
@@ -1509,6 +1713,12 @@ public sealed class CodingAgentExtensionCommandStore
         if (result.EventHandlerTypes.Count > 0)
         {
             status = $"{status}; events {result.EventHandlerTypes.Count}";
+        }
+
+        var messageRendererCount = result.MessageRenderers.Count(static renderer => renderer.HasRenderer);
+        if (messageRendererCount > 0)
+        {
+            status = $"{status}; message renderers {messageRendererCount}";
         }
 
         status = $"{status}; limited runtime";

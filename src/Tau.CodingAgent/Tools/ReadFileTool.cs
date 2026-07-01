@@ -179,62 +179,8 @@ public sealed class ReadFileTool : IAgentTool
     private static long EstimateBase64ByteCount(long byteCount) =>
         ((byteCount + 2) / 3) * 4;
 
-    private static async Task<string?> DetectImageMimeTypeAsync(string path, CancellationToken ct)
-    {
-        await using var stream = File.OpenRead(path);
-        var header = new byte[12];
-        var bytesRead = await stream.ReadAsync(header, ct).ConfigureAwait(false);
-        return DetectImageMimeType(header.AsSpan(0, bytesRead));
-    }
-
-    private static string? DetectImageMimeType(ReadOnlySpan<byte> header)
-    {
-        if (header.Length >= 8 &&
-            header[0] == 0x89 &&
-            header[1] == 0x50 &&
-            header[2] == 0x4E &&
-            header[3] == 0x47 &&
-            header[4] == 0x0D &&
-            header[5] == 0x0A &&
-            header[6] == 0x1A &&
-            header[7] == 0x0A)
-        {
-            return "image/png";
-        }
-
-        if (header.Length >= 2 &&
-            header[0] == 0xFF &&
-            header[1] == 0xD8)
-        {
-            return "image/jpeg";
-        }
-
-        if (header.Length >= 6 &&
-            header[0] == 0x47 &&
-            header[1] == 0x49 &&
-            header[2] == 0x46 &&
-            header[3] == 0x38 &&
-            (header[4] == 0x37 || header[4] == 0x39) &&
-            header[5] == 0x61)
-        {
-            return "image/gif";
-        }
-
-        if (header.Length >= 12 &&
-            header[0] == 0x52 &&
-            header[1] == 0x49 &&
-            header[2] == 0x46 &&
-            header[3] == 0x46 &&
-            header[8] == 0x57 &&
-            header[9] == 0x45 &&
-            header[10] == 0x42 &&
-            header[11] == 0x50)
-        {
-            return "image/webp";
-        }
-
-        return null;
-    }
+    private static Task<string?> DetectImageMimeTypeAsync(string path, CancellationToken ct) =>
+        CodingAgentImageMimeDetector.DetectSupportedImageMimeTypeFromFileAsync(path, ct);
 
     private static string? GuessLanguageFromPath(string path) =>
         Path.GetExtension(path).ToLowerInvariant() switch

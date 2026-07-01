@@ -49,6 +49,42 @@ public sealed class AgentRuntimeQueueModeTests
     }
 
     [Fact]
+    public async Task RunAsync_SteeringQueuedMessagesEmitLifecycleBeforeAssistantResponse()
+    {
+        var provider = new RecordingProvider();
+        var runtime = new AgentRuntime
+        {
+            SteeringMode = AgentQueueMode.All
+        };
+        runtime.AddMessage(new UserMessage("initial"));
+        runtime.Steer(new UserMessage("steer 1"));
+        runtime.Steer(new UserMessage("steer 2"));
+
+        var events = await CollectAsync(runtime.RunAsync(CreateConfig(provider)));
+
+        Assert.Equal(
+            [
+                "agent_start",
+                "turn_start",
+                "message_start",
+                "message_end",
+                "message_start",
+                "message_end",
+                "message_start",
+                "message_end",
+                "turn_end",
+                "agent_end"
+            ],
+            events.Select(evt => evt.Type));
+        Assert.Equal(
+            ["steer 1", "steer 2", "turn 1"],
+            events.OfType<MessageStartEvent>().Select(evt => ReadText(evt.Message)));
+        Assert.Equal(
+            ["steer 1", "steer 2", "turn 1"],
+            events.OfType<MessageEndEvent>().Select(evt => ReadText(evt.Message)));
+    }
+
+    [Fact]
     public async Task RunAsync_FollowUpOneAtATimeProcessesOneQueuedMessagePerOuterTurn()
     {
         var provider = new RecordingProvider();
@@ -92,6 +128,46 @@ public sealed class AgentRuntimeQueueModeTests
     }
 
     [Fact]
+    public async Task RunAsync_FollowUpQueuedMessagesEmitLifecycleAtNextTurnStart()
+    {
+        var provider = new RecordingProvider();
+        var runtime = new AgentRuntime
+        {
+            FollowUpMode = AgentQueueMode.All
+        };
+        runtime.AddMessage(new UserMessage("initial"));
+        runtime.FollowUp(new UserMessage("follow 1"));
+        runtime.FollowUp(new UserMessage("follow 2"));
+
+        var events = await CollectAsync(runtime.RunAsync(CreateConfig(provider)));
+
+        Assert.Equal(
+            [
+                "agent_start",
+                "turn_start",
+                "message_start",
+                "message_end",
+                "turn_end",
+                "turn_start",
+                "message_start",
+                "message_end",
+                "message_start",
+                "message_end",
+                "message_start",
+                "message_end",
+                "turn_end",
+                "agent_end"
+            ],
+            events.Select(evt => evt.Type));
+        Assert.Equal(
+            ["turn 1", "follow 1", "follow 2", "turn 2"],
+            events.OfType<MessageStartEvent>().Select(evt => ReadText(evt.Message)));
+        Assert.Equal(
+            ["turn 1", "follow 1", "follow 2", "turn 2"],
+            events.OfType<MessageEndEvent>().Select(evt => ReadText(evt.Message)));
+    }
+
+    [Fact]
     public void ClearQueuesResetsPendingMessageCount()
     {
         var runtime = new AgentRuntime();
@@ -122,6 +198,17 @@ public sealed class AgentRuntimeQueueModeTests
             ProviderRegistry = registry,
             Tools = []
         };
+    }
+
+    private static async Task<IReadOnlyList<AgentEvent>> CollectAsync(IAsyncEnumerable<AgentEvent> events)
+    {
+        var collected = new List<AgentEvent>();
+        await foreach (var evt in events)
+        {
+            collected.Add(evt);
+        }
+
+        return collected;
     }
 
     private static async Task DrainAsync(IAsyncEnumerable<AgentEvent> events)

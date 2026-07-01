@@ -31,6 +31,112 @@ public class RuntimeCodingAgentRunnerTests
         Assert.Equal("claude-opus-4-6-thinking", runner.Model.Id, ignoreCase: true);
     }
 
+    [Fact]
+    public async Task RunAsync_WithOpenRouterModel_InjectsAttributionHeaders()
+    {
+        IDictionary<string, string>? capturedHeaders = null;
+        var registry = new ProviderRegistry();
+        registry.Register(
+            "attribution-capture-test",
+            () => new HeaderCapturingProvider(headers => capturedHeaders = headers),
+            sourceId: "test");
+        var catalog = new Tau.Ai.Registry.ModelCatalog();
+        catalog.RegisterModel(new Model
+        {
+            Provider = "openrouter",
+            Id = "test-model",
+            Name = "Test Model",
+            Api = "attribution-capture-test"
+        });
+
+        var runner = RuntimeCodingAgentRunner.Create(
+            "openrouter",
+            "test-model",
+            toolsOverride: [],
+            providerRegistryOverride: registry,
+            modelCatalogOverride: catalog);
+        runner.InstallTelemetryEnabled = true;
+
+        await foreach (var _ in runner.RunAsync("hello")) { }
+
+        Assert.NotNull(capturedHeaders);
+        Assert.Equal("https://pi.dev", capturedHeaders!["HTTP-Referer"]);
+        Assert.Equal("pi", capturedHeaders["X-OpenRouter-Title"]);
+        Assert.Equal("cli-agent", capturedHeaders["X-OpenRouter-Categories"]);
+    }
+
+    [Fact]
+    public async Task RunAsync_WithTelemetryDisabled_OmitsAttributionHeaders()
+    {
+        IDictionary<string, string>? capturedHeaders = null;
+        var registry = new ProviderRegistry();
+        registry.Register(
+            "attribution-capture-test",
+            () => new HeaderCapturingProvider(headers => capturedHeaders = headers),
+            sourceId: "test");
+        var catalog = new Tau.Ai.Registry.ModelCatalog();
+        catalog.RegisterModel(new Model
+        {
+            Provider = "openrouter",
+            Id = "test-model",
+            Name = "Test Model",
+            Api = "attribution-capture-test"
+        });
+
+        var runner = RuntimeCodingAgentRunner.Create(
+            "openrouter",
+            "test-model",
+            toolsOverride: [],
+            providerRegistryOverride: registry,
+            modelCatalogOverride: catalog);
+        runner.InstallTelemetryEnabled = false;
+
+        await foreach (var _ in runner.RunAsync("hello")) { }
+
+        Assert.True(capturedHeaders is null || !capturedHeaders.ContainsKey("HTTP-Referer"));
+    }
+
+    [Fact]
+    public async Task RunAsync_AfterModelSwitch_RecomputesAttributionForNewProvider()
+    {
+        IDictionary<string, string>? capturedHeaders = null;
+        var registry = new ProviderRegistry();
+        registry.Register(
+            "attribution-capture-test",
+            () => new HeaderCapturingProvider(headers => capturedHeaders = headers),
+            sourceId: "test");
+        var catalog = new Tau.Ai.Registry.ModelCatalog();
+        catalog.RegisterModel(new Model
+        {
+            Provider = "openrouter",
+            Id = "router-model",
+            Name = "Router Model",
+            Api = "attribution-capture-test"
+        });
+        catalog.RegisterModel(new Model
+        {
+            Provider = "nvidia",
+            Id = "nim-model",
+            Name = "NIM Model",
+            Api = "attribution-capture-test"
+        });
+
+        var runner = RuntimeCodingAgentRunner.Create(
+            "openrouter",
+            "router-model",
+            toolsOverride: [],
+            providerRegistryOverride: registry,
+            modelCatalogOverride: catalog);
+        runner.InstallTelemetryEnabled = true;
+
+        runner.SelectModel("nvidia", "nim-model");
+        await foreach (var _ in runner.RunAsync("hello")) { }
+
+        Assert.NotNull(capturedHeaders);
+        Assert.Equal("Pi", capturedHeaders!["X-BILLING-INVOKE-ORIGIN"]);
+        Assert.False(capturedHeaders.ContainsKey("HTTP-Referer"));
+    }
+
 
 
     [Fact]
@@ -608,6 +714,28 @@ public class RuntimeCodingAgentRunnerTests
     }
 
     [Fact]
+    public async Task RunAsync_WithCustomMessageConvertsCustomContentToLlmUserMessage()
+    {
+        LlmContext? capturedContext = null;
+        var runner = RuntimeCodingAgentRunner.Create(
+            "test-provider",
+            "test-model",
+            toolsOverride: [],
+            providerRegistryOverride: CreatePromptCapturingRegistry(context => capturedContext = context),
+            modelCatalogOverride: CreatePromptCapturingModelCatalog());
+
+        await foreach (var _ in runner.RunAsync(new AgentCustomMessage("file-trigger", "changed", display: true)))
+        {
+        }
+
+        Assert.NotNull(capturedContext);
+        var user = Assert.IsType<UserMessage>(Assert.Single(capturedContext!.Value.Messages));
+        Assert.Equal("changed", Assert.IsType<TextContent>(Assert.Single(user.Content)).Text);
+        var stored = Assert.IsType<AgentCustomMessage>(runner.Messages[0]);
+        Assert.Equal("file-trigger", stored.CustomType);
+    }
+
+    [Fact]
     public async Task RunAsync_EmitsJavascriptLifecycleEvents()
     {
         var directory = Path.Combine(Path.GetTempPath(), "tau-runtime-lifecycle-" + Guid.NewGuid().ToString("N"));
@@ -653,6 +781,211 @@ public class RuntimeCodingAgentRunnerTests
             Assert.Contains("message_start:assistant:summary result\n", log, StringComparison.Ordinal);
             Assert.Contains("message_end:assistant:summary result\n", log, StringComparison.Ordinal);
             Assert.Contains("agent_end:2\n", log, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RunAsync_QueuedCustomMessageEmitsJavascriptLifecycleEvents()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-runtime-custom-lifecycle-" + Guid.NewGuid().ToString("N"));
+        var extensionDirectory = Path.Combine(directory, ".tau", "extensions", "lifecycle");
+        Directory.CreateDirectory(extensionDirectory);
+        WriteJavaScriptExtension(
+            extensionDirectory,
+            """
+            import fs from "node:fs";
+
+            export default function(pi) {
+              pi.on("message_start", (event) => {
+                const message = event.message;
+                if (message?.role === "custom") {
+                  const first = message.content?.[0]?.text ?? "";
+                  const level = message.details?.level ?? "";
+                  fs.appendFileSync("events.log", `${event.type}:${message.role}:${message.customType}:${message.display}:${level}:${first}\n`);
+                }
+              });
+              pi.on("message_end", (event) => {
+                const message = event.message;
+                if (message?.role === "custom") {
+                  const first = message.content?.[0]?.text ?? "";
+                  const level = message.details?.level ?? "";
+                  fs.appendFileSync("events.log", `${event.type}:${message.role}:${message.customType}:${message.display}:${level}:${first}\n`);
+                }
+              });
+            }
+            """);
+
+        try
+        {
+            var extensionStore = new CodingAgentExtensionCommandStore(
+                cwd: directory,
+                userExtensionsDirectory: Path.Combine(directory, "missing-user-extensions"),
+                javaScriptRuntime: new CodingAgentJavaScriptExtensionRuntime(directory, nodeExecutable: "node"));
+            RuntimeCodingAgentRunner? runner = null;
+            var callCount = 0;
+            runner = RuntimeCodingAgentRunner.Create(
+                "test-provider",
+                "test-model",
+                toolsOverride: [],
+                providerRegistryOverride: CreatePromptCapturingRegistry(_ =>
+                {
+                    callCount++;
+                    if (callCount == 1)
+                    {
+                        using var details = JsonDocument.Parse("""{"level":"queued"}""");
+                        runner!.Steer(new AgentCustomMessage(
+                            CustomType: "queued-custom",
+                            Content: new ContentBlock[] { new TextContent("queued update") },
+                            Display: false,
+                            Details: details.RootElement.Clone(),
+                            Timestamp: DateTimeOffset.FromUnixTimeMilliseconds(456)));
+                    }
+                }),
+                modelCatalogOverride: CreatePromptCapturingModelCatalog(),
+                extensionLifecycleEventSink: extensionStore.LoadLifecycleEventSink());
+
+            await foreach (var _ in runner.RunAsync("hello")) { }
+
+            Assert.Equal(2, callCount);
+            var log = File.ReadAllText(Path.Combine(directory, "events.log")).ReplaceLineEndings("\n");
+            Assert.Contains(
+                "message_start:custom:queued-custom:false:queued:queued update\n",
+                log,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "message_end:custom:queued-custom:false:queued:queued update\n",
+                log,
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RunAsync_MessageEndLifecycleReplacementFeedsNextTurnContext()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-runtime-message-end-replace-" + Guid.NewGuid().ToString("N"));
+        var extensionDirectory = Path.Combine(directory, ".tau", "extensions", "lifecycle");
+        Directory.CreateDirectory(extensionDirectory);
+        WriteJavaScriptExtension(
+            extensionDirectory,
+            """
+            export default function(pi) {
+              pi.on("message_end", (event) => {
+                if (event.message?.role !== "assistant") return;
+                return {
+                  message: {
+                    ...event.message,
+                    content: [{ type: "text", text: "patched answer" }]
+                  }
+                };
+              });
+            }
+            """);
+
+        try
+        {
+            var contexts = new List<LlmContext>();
+            RuntimeCodingAgentRunner? runner = null;
+            var callCount = 0;
+            var extensionStore = new CodingAgentExtensionCommandStore(
+                cwd: directory,
+                userExtensionsDirectory: Path.Combine(directory, "missing-user-extensions"),
+                javaScriptRuntime: new CodingAgentJavaScriptExtensionRuntime(directory, nodeExecutable: "node"));
+            runner = RuntimeCodingAgentRunner.Create(
+                "test-provider",
+                "test-model",
+                toolsOverride: [],
+                providerRegistryOverride: CreatePromptCapturingRegistry(context =>
+                {
+                    contexts.Add(context);
+                    callCount++;
+                    if (callCount == 1)
+                    {
+                        runner!.Steer(new UserMessage("queued prompt"));
+                    }
+                }),
+                modelCatalogOverride: CreatePromptCapturingModelCatalog(),
+                extensionLifecycleEventSink: extensionStore.LoadLifecycleEventSink());
+
+            var events = new List<AgentEvent>();
+            await foreach (var evt in runner.RunAsync("hello"))
+            {
+                events.Add(evt);
+            }
+
+            Assert.Equal(2, contexts.Count);
+            Assert.Contains(
+                contexts[1].Messages.OfType<AssistantMessage>(),
+                message => ReadText(message) == "patched answer");
+            Assert.Equal(
+                ["patched answer", "patched answer"],
+                runner.Messages.OfType<AssistantMessage>().Select(ReadText));
+            Assert.Equal(
+                ["patched answer", "patched answer"],
+                events
+                    .OfType<MessageEndEvent>()
+                    .Select(static evt => evt.Message)
+                    .OfType<AssistantMessage>()
+                    .Select(ReadText));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RunAsync_MessageEndLifecycleRejectsReplacementWithDifferentRole()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-runtime-message-end-reject-" + Guid.NewGuid().ToString("N"));
+        var extensionDirectory = Path.Combine(directory, ".tau", "extensions", "lifecycle");
+        Directory.CreateDirectory(extensionDirectory);
+        WriteJavaScriptExtension(
+            extensionDirectory,
+            """
+            export default function(pi) {
+              pi.on("message_end", (event) => {
+                if (event.message?.role !== "assistant") return;
+                return {
+                  message: {
+                    role: "user",
+                    content: [{ type: "text", text: "wrong role" }]
+                  }
+                };
+              });
+            }
+            """);
+
+        try
+        {
+            var sink = new RecordingLogSink();
+            var extensionStore = new CodingAgentExtensionCommandStore(
+                cwd: directory,
+                userExtensionsDirectory: Path.Combine(directory, "missing-user-extensions"),
+                javaScriptRuntime: new CodingAgentJavaScriptExtensionRuntime(directory, nodeExecutable: "node"));
+            var runner = RuntimeCodingAgentRunner.Create(
+                "test-provider",
+                "test-model",
+                toolsOverride: [],
+                logSink: sink,
+                providerRegistryOverride: CreatePromptCapturingRegistry(_ => { }),
+                modelCatalogOverride: CreatePromptCapturingModelCatalog(),
+                extensionLifecycleEventSink: extensionStore.LoadLifecycleEventSink());
+
+            await foreach (var _ in runner.RunAsync("hello")) { }
+
+            var assistant = Assert.Single(runner.Messages.OfType<AssistantMessage>());
+            Assert.Equal("summary result", ReadText(assistant));
+            var errorEvent = Assert.Single(sink.Events, e => e.Category == "extension" && e.Event == "event.error");
+            Assert.Equal("message_end", errorEvent.Fields["eventType"]);
+            Assert.Contains("same role", errorEvent.Fields["error"], StringComparison.Ordinal);
         }
         finally
         {
@@ -723,6 +1056,19 @@ public class RuntimeCodingAgentRunnerTests
         });
         return catalog;
     }
+
+    private static string ReadText(ChatMessage message) =>
+        message switch
+        {
+            UserMessage user => ReadContentText(user.Content),
+            AssistantMessage assistant => ReadContentText(assistant.Content),
+            ToolResultMessage tool => ReadContentText(tool.Content),
+            AgentCustomMessage custom => ReadContentText(custom.Content),
+            _ => string.Empty
+        };
+
+    private static string ReadContentText(IReadOnlyList<ContentBlock> content) =>
+        string.Join("\n", content.OfType<TextContent>().Select(static block => block.Text));
 
     private static void WriteJavaScriptExtension(string extensionDirectory, string source)
     {
@@ -813,6 +1159,32 @@ file sealed class OptionsCapturingProvider : IStreamProvider
     public AssistantMessageStream StreamSimple(Model model, LlmContext context, SimpleStreamOptions options)
     {
         _captureApiKey(options.ApiKey);
+        return CreateStream();
+    }
+
+    private static AssistantMessageStream CreateStream()
+    {
+        var stream = new AssistantMessageStream();
+        stream.Push(new DoneEvent(new AssistantMessage([new TextContent("ok")])));
+        return stream;
+    }
+}
+
+file sealed class HeaderCapturingProvider : IStreamProvider
+{
+    private readonly Action<IDictionary<string, string>?> _captureHeaders;
+    public HeaderCapturingProvider(Action<IDictionary<string, string>?> captureHeaders) => _captureHeaders = captureHeaders;
+    public string Api => "attribution-capture-test";
+
+    public AssistantMessageStream Stream(Model model, LlmContext context, StreamOptions options)
+    {
+        _captureHeaders(options.Headers);
+        return CreateStream();
+    }
+
+    public AssistantMessageStream StreamSimple(Model model, LlmContext context, SimpleStreamOptions options)
+    {
+        _captureHeaders(options.Headers);
         return CreateStream();
     }
 

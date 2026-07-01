@@ -46,6 +46,8 @@ public sealed class KeyBindingMap : IKeyBindingMap
     {
         yield return Pair(ConsoleKey.C, ConsoleModifiers.Control, EditorAction.Cancel);
         yield return Pair(ConsoleKey.Enter, default, EditorAction.Submit);
+        yield return Pair(ConsoleKey.Enter, ConsoleModifiers.Shift, EditorAction.NewLine);
+        yield return Pair(ConsoleKey.J, ConsoleModifiers.Control, EditorAction.NewLine);
         yield return Pair(ConsoleKey.Backspace, default, EditorAction.DeletePrevChar);
         yield return Pair(ConsoleKey.Backspace, ConsoleModifiers.Control, EditorAction.DeletePrevWord);
         yield return Pair(ConsoleKey.Delete, default, EditorAction.DeleteNextChar);
@@ -69,6 +71,11 @@ public sealed class KeyBindingMap : IKeyBindingMap
         yield return Pair(ConsoleKey.P, ConsoleModifiers.Control | ConsoleModifiers.Shift, EditorAction.CycleModelBackward);
         yield return Pair(ConsoleKey.L, ConsoleModifiers.Control, EditorAction.SelectModel);
         yield return Pair(ConsoleKey.V, ConsoleModifiers.Control, EditorAction.PasteImage);
+        yield return Pair(ConsoleKey.T, ConsoleModifiers.Control, EditorAction.ToggleThinkingBlock);
+        yield return Pair(ConsoleKey.O, ConsoleModifiers.Control, EditorAction.ToggleToolOutputExpansion);
+        yield return Pair(ConsoleKey.G, ConsoleModifiers.Control, EditorAction.OpenExternalEditor);
+        yield return Pair(ConsoleKey.Enter, ConsoleModifiers.Alt, EditorAction.QueueFollowUpMessage);
+        yield return Pair(ConsoleKey.UpArrow, ConsoleModifiers.Alt, EditorAction.RestoreQueuedMessages);
     }
 
     private static KeyValuePair<KeyBinding, EditorAction> Pair(ConsoleKey key, ConsoleModifiers mods, EditorAction action) =>

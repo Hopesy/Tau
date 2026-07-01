@@ -249,6 +249,20 @@ public sealed class CodingAgentFooterDataProviderTests
     }
 
     [Fact]
+    public void HiddenThinkingLabel_IsMutableAndCanBeCleared()
+    {
+        using var temp = TempDirectory.Create();
+        using var provider = new CodingAgentFooterDataProvider(temp.Path);
+
+        provider.SetHiddenThinkingLabel("Pondering...");
+        var snapshot = provider.GetHiddenThinkingLabel();
+        provider.SetHiddenThinkingLabel(null);
+
+        Assert.Equal("Pondering...", snapshot);
+        Assert.Null(provider.GetHiddenThinkingLabel());
+    }
+
+    [Fact]
     public void AvailableProviderCount_ClampsNegativeValues()
     {
         using var temp = TempDirectory.Create();

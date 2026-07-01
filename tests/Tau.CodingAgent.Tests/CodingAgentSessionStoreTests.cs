@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Tau.AgentCore.Harness;
 using Tau.Ai;
 using Tau.CodingAgent.Runtime;
 
@@ -54,6 +55,91 @@ public class CodingAgentSessionStoreTests
             Assert.Equal("call-1", toolResult.ToolCallId);
             Assert.True(toolResult.IsError);
             Assert.Equal("done", Assert.IsType<TextContent>(Assert.Single(toolResult.Content)).Text);
+        }
+        finally
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+        }
+    }
+
+    [Fact]
+    public void SaveAndLoad_RoundTripsCustomMessage()
+    {
+        var path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"tau-coding-agent-session-custom-{Guid.NewGuid():N}.json");
+        var store = new CodingAgentSessionStore(path);
+        var timestamp = new DateTimeOffset(2026, 6, 30, 12, 0, 0, TimeSpan.Zero);
+
+        try
+        {
+            using var detailsDocument = JsonDocument.Parse("""{"level":"error","attempt":2}""");
+
+            store.Save(
+                [
+                    new AgentCustomMessage(
+                        "status-update",
+                        [new TextContent("deployed")],
+                        true,
+                        detailsDocument.RootElement.Clone(),
+                        timestamp)
+                ]);
+
+            var loaded = store.Load();
+
+            var custom = Assert.IsType<AgentCustomMessage>(Assert.Single(loaded.Messages));
+            Assert.Equal("status-update", custom.CustomType);
+            Assert.True(custom.Display);
+            Assert.Equal(timestamp, custom.Timestamp);
+            Assert.Equal("deployed", Assert.IsType<TextContent>(Assert.Single(custom.Content)).Text);
+            var details = Assert.IsType<JsonElement>(custom.Details);
+            Assert.Equal("error", details.GetProperty("level").GetString());
+            Assert.Equal(2, details.GetProperty("attempt").GetInt32());
+
+            using var document = JsonDocument.Parse(File.ReadAllText(path));
+            var message = document.RootElement.GetProperty("messages")[0];
+            Assert.Equal("custom", message.GetProperty("role").GetString());
+            Assert.Equal("status-update", message.GetProperty("customType").GetString());
+            Assert.True(message.GetProperty("display").GetBoolean());
+            Assert.Equal("error", message.GetProperty("details").GetProperty("level").GetString());
+        }
+        finally
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+        }
+    }
+
+    [Fact]
+    public void TreeSessionStore_RoundTripsCustomMessageThroughMessageEntries()
+    {
+        var path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"tau-coding-agent-tree-custom-{Guid.NewGuid():N}.jsonl");
+        var store = new CodingAgentTreeSessionStore(path);
+
+        try
+        {
+            using var detailsDocument = JsonDocument.Parse("""{"source":"extension"}""");
+            store.AppendMessages(
+                [
+                    new AgentCustomMessage(
+                        "plan-state",
+                        new ContentBlock[] { new TextContent("persisted") },
+                        false,
+                        detailsDocument.RootElement.Clone())
+                ],
+                startIndex: 0);
+
+            var loaded = store.LoadCurrentBranchSnapshot();
+
+            var custom = Assert.IsType<AgentCustomMessage>(Assert.Single(loaded.Messages));
+            Assert.Equal("plan-state", custom.CustomType);
+            Assert.False(custom.Display);
+            Assert.Equal("persisted", Assert.IsType<TextContent>(Assert.Single(custom.Content)).Text);
+            var details = Assert.IsType<JsonElement>(custom.Details);
+            Assert.Equal("extension", details.GetProperty("source").GetString());
         }
         finally
         {

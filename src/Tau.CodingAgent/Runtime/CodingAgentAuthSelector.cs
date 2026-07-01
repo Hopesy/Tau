@@ -53,7 +53,7 @@ public static class CodingAgentAuthSelector
         var items = state.Providers
             .Select(static status => new TuiSelectItem(
                 status.Provider,
-                status.Provider,
+                CodingAgentProviderDisplayNames.Resolve(status.Provider),
                 FormatDescription(status)))
             .ToArray();
         var selector = new TuiSelectList(

@@ -1,4 +1,6 @@
+using System.Text.Json;
 using Tau.AgentCore;
+using Tau.AgentCore.Harness;
 using Tau.AgentCore.Runtime;
 using Tau.Ai;
 using Tau.CodingAgent.Runtime;
@@ -108,6 +110,40 @@ public class CodingAgentHostTests
     }
 
     [Fact]
+    public async Task RunAsync_HideThinkingBlockRendersStaticLabelOnce()
+    {
+        var terminal = new FakeTerminal();
+        terminal.QueueInput("hello");
+        terminal.QueueInput("exit");
+
+        var runner = new FakeCodingAgentRunner((_, _) => GetEvents());
+        var session = new InteractiveConsoleSession(terminal);
+        var host = new CodingAgentHost(session, runner, hideThinkingBlock: true);
+
+        await host.RunAsync();
+
+        var output = terminal.FlattenedText();
+
+        Assert.Contains("thinking> Thinking...\n", output, StringComparison.Ordinal);
+        Assert.DoesNotContain("private plan", output, StringComparison.Ordinal);
+        Assert.DoesNotContain("private continuation", output, StringComparison.Ordinal);
+        Assert.Contains(session.Transcript, entry => entry is { Kind: TranscriptEntryKind.Thinking, Text: "Thinking..." });
+        Assert.DoesNotContain(session.Transcript, entry =>
+            entry.Kind == TranscriptEntryKind.Thinking &&
+            entry.Text.Contains("private", StringComparison.Ordinal));
+
+        static async IAsyncEnumerable<AgentEvent> GetEvents()
+        {
+            var partial = new AssistantMessage();
+            yield return new MessageUpdateEvent(new ThinkingDeltaEvent(0, "private plan", partial));
+            yield return new MessageUpdateEvent(new ThinkingDeltaEvent(0, "private continuation", partial));
+            yield return new MessageUpdateEvent(new TextDeltaEvent(1, "answer", partial));
+            yield return new AgentEndEvent();
+            await Task.CompletedTask;
+        }
+    }
+
+    [Fact]
     public async Task RunAsync_RendersShellToolLifecycleWithBashComponent()
     {
         var terminal = new FakeTerminal();
@@ -136,6 +172,100 @@ public class CodingAgentHostTests
                 "tool-shell",
                 new ToolResult([new TextContent("line 1\n[exit code: 2]")], IsError: true),
                 "shell");
+            yield return new AgentEndEvent();
+            await Task.CompletedTask;
+        }
+    }
+
+    [Fact]
+    public async Task RunAsync_ToggleToolOutputExpansionActionExpandsNextBashOutput()
+    {
+        var terminal = new FakeTerminal();
+        var keyReader = new ScriptedKeyReader();
+        keyReader.EnqueueRaw(new ConsoleKeyInfo('\x0F', ConsoleKey.O, shift: false, alt: false, control: true));
+        foreach (var ch in "run command")
+        {
+            keyReader.EnqueueRaw(new ConsoleKeyInfo(ch, ConsoleKey.NoName, shift: false, alt: false, control: false));
+        }
+
+        keyReader.EnqueueRaw(new ConsoleKeyInfo('\r', ConsoleKey.Enter, shift: false, alt: false, control: false));
+        foreach (var ch in "exit")
+        {
+            keyReader.EnqueueRaw(new ConsoleKeyInfo(ch, ConsoleKey.NoName, shift: false, alt: false, control: false));
+        }
+
+        keyReader.EnqueueRaw(new ConsoleKeyInfo('\r', ConsoleKey.Enter, shift: false, alt: false, control: false));
+
+        var output = string.Join('\n', Enumerable.Range(1, 25).Select(index => $"line {index}"));
+        var runner = new FakeCodingAgentRunner((_, _) => GetEvents(output));
+        var session = new InteractiveConsoleSession(
+            terminal,
+            new InteractiveInputEditor(keyReader, new CapturingRenderer()));
+        var host = new CodingAgentHost(session, runner);
+
+        await host.RunAsync();
+
+        var rendered = terminal.FlattenedText();
+        var toolEntry = Assert.Single(session.Transcript, entry => entry is { Kind: TranscriptEntryKind.Tool, Key: "tool-shell" });
+        Assert.Contains("status> tool output: expanded", rendered, StringComparison.Ordinal);
+        Assert.Contains("line 1", toolEntry.Text, StringComparison.Ordinal);
+        Assert.Contains("line 25", toolEntry.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("more visual lines", toolEntry.Text, StringComparison.Ordinal);
+
+        static async IAsyncEnumerable<AgentEvent> GetEvents(string output)
+        {
+            yield return new ToolExecutionStartEvent("tool-shell", "shell", """{"command":"dotnet test"}""");
+            yield return new ToolExecutionEndEvent(
+                "tool-shell",
+                new ToolResult([new TextContent(output)]),
+                "shell");
+            yield return new AgentEndEvent();
+            await Task.CompletedTask;
+        }
+    }
+
+    [Fact]
+    public async Task RunAsync_ToggleToolOutputExpansionActionExpandsNextToolOutput()
+    {
+        var terminal = new FakeTerminal();
+        var keyReader = new ScriptedKeyReader();
+        keyReader.EnqueueRaw(new ConsoleKeyInfo('\x0F', ConsoleKey.O, shift: false, alt: false, control: true));
+        foreach (var ch in "read file")
+        {
+            keyReader.EnqueueRaw(new ConsoleKeyInfo(ch, ConsoleKey.NoName, shift: false, alt: false, control: false));
+        }
+
+        keyReader.EnqueueRaw(new ConsoleKeyInfo('\r', ConsoleKey.Enter, shift: false, alt: false, control: false));
+        foreach (var ch in "exit")
+        {
+            keyReader.EnqueueRaw(new ConsoleKeyInfo(ch, ConsoleKey.NoName, shift: false, alt: false, control: false));
+        }
+
+        keyReader.EnqueueRaw(new ConsoleKeyInfo('\r', ConsoleKey.Enter, shift: false, alt: false, control: false));
+
+        var output = string.Join('\n', Enumerable.Range(1, 25).Select(index => $"line {index}"));
+        var runner = new FakeCodingAgentRunner((_, _) => GetEvents(output));
+        var session = new InteractiveConsoleSession(
+            terminal,
+            new InteractiveInputEditor(keyReader, new CapturingRenderer()));
+        var host = new CodingAgentHost(session, runner);
+
+        await host.RunAsync();
+
+        var rendered = terminal.FlattenedText();
+        var toolEntry = Assert.Single(session.Transcript, entry => entry is { Kind: TranscriptEntryKind.Tool, Key: "tool-read" });
+        Assert.Contains("status> tool output: expanded", rendered, StringComparison.Ordinal);
+        Assert.Contains("line 1", toolEntry.Text, StringComparison.Ordinal);
+        Assert.Contains("line 25", toolEntry.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("more lines", toolEntry.Text, StringComparison.Ordinal);
+
+        static async IAsyncEnumerable<AgentEvent> GetEvents(string output)
+        {
+            yield return new ToolExecutionStartEvent("tool-read", "read_file", """{"path":"README.md"}""");
+            yield return new ToolExecutionEndEvent(
+                "tool-read",
+                new ToolResult([new TextContent(output)]),
+                "read_file");
             yield return new AgentEndEvent();
             await Task.CompletedTask;
         }
@@ -1042,6 +1172,160 @@ public class CodingAgentHostTests
     }
 
     [Fact]
+    public async Task RunAsync_ExtensionCommandCustomMessageRendersDisplayMessageWithoutRunner()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-host-custom-command-" + Guid.NewGuid().ToString("N"));
+        var extensionDirectory = Path.Combine(directory, ".tau", "extensions", "status");
+        Directory.CreateDirectory(extensionDirectory);
+        await File.WriteAllTextAsync(
+            Path.Combine(extensionDirectory, "package.json"),
+            """
+            {
+              "type": "module",
+              "pi": {
+                "extensions": ["index.js"]
+              }
+            }
+            """);
+        await File.WriteAllTextAsync(
+            Path.Combine(extensionDirectory, "index.js"),
+            """
+            import { Box, Text } from "@mariozechner/pi-tui";
+
+            export default function(pi) {
+              pi.registerMessageRenderer("status-update", (message, _options, theme) => {
+                const level = message.details?.level ?? "info";
+                const box = new Box(1, 1);
+                box.addChild(new Text(`${theme.fg("error", `[${level.toUpperCase()}]`)} ${message.content}`, 0, 0));
+                return box;
+              });
+
+              pi.registerCommand("status", {
+                description: "Send status",
+                handler: async (args) => {
+                  pi.sendMessage({
+                    customType: "status-update",
+                    content: args || "ready",
+                    display: true,
+                    details: { level: "error" }
+                  });
+                }
+              });
+            }
+            """);
+
+        var terminal = new FakeTerminal();
+        terminal.QueueInput("/status deployed");
+        terminal.QueueInput("exit");
+        var sessionPath = Path.Combine(directory, "session.json");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var extensionStore = new CodingAgentExtensionCommandStore(
+            cwd: directory,
+            userExtensionsDirectory: Path.Combine(directory, "missing-user-extensions"),
+            javaScriptRuntime: new CodingAgentJavaScriptExtensionRuntime(directory, nodeExecutable: "node"));
+        var sessionStore = new CodingAgentSessionStore(sessionPath);
+        var host = new CodingAgentHost(
+            new InteractiveConsoleSession(terminal),
+            runner,
+            sessionStore: sessionStore,
+            extensionCommandStore: extensionStore);
+
+        try
+        {
+            await host.RunAsync();
+
+            var output = terminal.FlattenedText();
+            Assert.Empty(runner.Inputs);
+            Assert.Contains("custom> [ERROR] deployed\n", output, StringComparison.Ordinal);
+            Assert.DoesNotContain("status> extension command '/status' completed", output, StringComparison.Ordinal);
+            Assert.DoesNotContain("you> /status deployed", output, StringComparison.Ordinal);
+
+            var runnerMessage = Assert.IsType<AgentCustomMessage>(Assert.Single(runner.MutableMessages));
+            Assert.Equal("status-update", runnerMessage.CustomType);
+            Assert.True(runnerMessage.Display);
+            Assert.Equal("deployed", Assert.IsType<TextContent>(Assert.Single(runnerMessage.Content)).Text);
+            var runnerDetails = Assert.IsType<JsonElement>(runnerMessage.Details);
+            Assert.Equal("error", runnerDetails.GetProperty("level").GetString());
+
+            var persistedMessage = Assert.IsType<AgentCustomMessage>(Assert.Single(sessionStore.Load().Messages));
+            Assert.Equal("status-update", persistedMessage.CustomType);
+            Assert.Equal("deployed", Assert.IsType<TextContent>(Assert.Single(persistedMessage.Content)).Text);
+            var persistedDetails = Assert.IsType<JsonElement>(persistedMessage.Details);
+            Assert.Equal("error", persistedDetails.GetProperty("level").GetString());
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RunAsync_ExtensionCommandCustomMessagePublishesLifecycleEvents()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-host-custom-lifecycle-" + Guid.NewGuid().ToString("N"));
+        var extensionDirectory = Path.Combine(directory, ".tau", "extensions", "status");
+        await WriteJavaScriptExtensionAsync(
+            extensionDirectory,
+            """
+            export default function(pi) {
+              pi.registerCommand("status", {
+                description: "Send hidden status",
+                handler: async () => {
+                  pi.sendMessage({
+                    customType: "status-update",
+                    content: "hidden update",
+                    display: false,
+                    details: { level: "info" }
+                  });
+                }
+              });
+            }
+            """);
+
+        var terminal = new FakeTerminal();
+        terminal.QueueInput("/status");
+        terminal.QueueInput("exit");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var host = new CodingAgentHost(
+            new InteractiveConsoleSession(terminal),
+            runner,
+            extensionCommandStore: new CodingAgentExtensionCommandStore(
+                cwd: directory,
+                userExtensionsDirectory: Path.Combine(directory, "missing-user-extensions"),
+                javaScriptRuntime: new CodingAgentJavaScriptExtensionRuntime(directory, nodeExecutable: "node")));
+
+        try
+        {
+            await host.RunAsync();
+
+            var events = runner.PublishedLifecycleEvents;
+            Assert.Collection(
+                events,
+                start =>
+                {
+                    var messageStart = Assert.IsType<MessageStartEvent>(start);
+                    var custom = Assert.IsType<AgentCustomMessage>(messageStart.Message);
+                    Assert.Equal("status-update", custom.CustomType);
+                    Assert.False(custom.Display);
+                    Assert.Equal("hidden update", Assert.IsType<TextContent>(Assert.Single(custom.Content)).Text);
+                },
+                end =>
+                {
+                    var messageEnd = Assert.IsType<MessageEndEvent>(end);
+                    var custom = Assert.IsType<AgentCustomMessage>(messageEnd.Message);
+                    Assert.Equal("status-update", custom.CustomType);
+                    Assert.False(custom.Display);
+                });
+
+            Assert.DoesNotContain("custom> [status-update]", terminal.FlattenedText(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task RunAsync_ExtensionRunnerCommandInvokesRunnerWithExpandedPrompt()
     {
         var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-host-runner-" + Guid.NewGuid().ToString("N"));
@@ -1074,6 +1358,219 @@ public class CodingAgentHostTests
             var input = Assert.Single(runner.Inputs);
             Assert.Equal("Review src/app.cs with src/app.cs carefully", input);
             Assert.Contains("you> Review src/app.cs with src/app.cs carefully\n", terminal.FlattenedText());
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RunAsync_ExtensionCustomMessageWithTriggerTurnStartsCustomRunnerTurn()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-host-custom-trigger-" + Guid.NewGuid().ToString("N"));
+        var extensionDirectory = Path.Combine(directory, ".tau", "extensions", "trigger");
+        await WriteJavaScriptExtensionAsync(
+            extensionDirectory,
+            """
+            export default function(pi) {
+              pi.registerCommand("trigger", {
+                description: "Trigger custom message",
+                handler: async () => {
+                  pi.sendMessage(
+                    { customType: "file-trigger", content: "changed", display: true },
+                    { triggerTurn: true }
+                  );
+                }
+              });
+            }
+            """);
+
+        var terminal = new FakeTerminal();
+        terminal.QueueInput("/trigger");
+        terminal.QueueInput("exit");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var host = new CodingAgentHost(
+            new InteractiveConsoleSession(terminal),
+            runner,
+            extensionCommandStore: new CodingAgentExtensionCommandStore(
+                cwd: directory,
+                userExtensionsDirectory: Path.Combine(directory, "missing-user-extensions"),
+                javaScriptRuntime: new CodingAgentJavaScriptExtensionRuntime(directory, nodeExecutable: "node")));
+
+        try
+        {
+            await host.RunAsync();
+
+            Assert.Empty(runner.Inputs);
+            var customInput = Assert.IsType<AgentCustomMessage>(Assert.Single(runner.ChatInputs));
+            Assert.Equal("file-trigger", customInput.CustomType);
+            Assert.Equal("changed", Assert.IsType<TextContent>(Assert.Single(customInput.Content)).Text);
+
+            var output = terminal.FlattenedText();
+            Assert.Contains("custom> [file-trigger]\nchanged\n", output, StringComparison.Ordinal);
+            Assert.DoesNotContain("status> extension command '/trigger' completed", output, StringComparison.Ordinal);
+            Assert.DoesNotContain("you> /trigger", output, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RunAsync_ExtensionHiddenCustomMessageWithTriggerTurnDoesNotRenderCustomTranscript()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-host-custom-hidden-trigger-" + Guid.NewGuid().ToString("N"));
+        var extensionDirectory = Path.Combine(directory, ".tau", "extensions", "trigger");
+        await WriteJavaScriptExtensionAsync(
+            extensionDirectory,
+            """
+            export default function(pi) {
+              pi.registerCommand("trigger-hidden", {
+                description: "Trigger hidden custom message",
+                handler: async () => {
+                  pi.sendMessage(
+                    { customType: "hidden-trigger", content: "internal context", display: false },
+                    { triggerTurn: true }
+                  );
+                }
+              });
+            }
+            """);
+
+        var terminal = new FakeTerminal();
+        terminal.QueueInput("/trigger-hidden");
+        terminal.QueueInput("exit");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var host = new CodingAgentHost(
+            new InteractiveConsoleSession(terminal),
+            runner,
+            extensionCommandStore: new CodingAgentExtensionCommandStore(
+                cwd: directory,
+                userExtensionsDirectory: Path.Combine(directory, "missing-user-extensions"),
+                javaScriptRuntime: new CodingAgentJavaScriptExtensionRuntime(directory, nodeExecutable: "node")));
+
+        try
+        {
+            await host.RunAsync();
+
+            var customInput = Assert.IsType<AgentCustomMessage>(Assert.Single(runner.ChatInputs));
+            Assert.Equal("hidden-trigger", customInput.CustomType);
+            Assert.False(customInput.Display);
+            Assert.Equal("internal context", Assert.IsType<TextContent>(Assert.Single(customInput.Content)).Text);
+
+            var output = terminal.FlattenedText();
+            Assert.DoesNotContain("custom> [hidden-trigger]", output, StringComparison.Ordinal);
+            Assert.DoesNotContain("status> extension command '/trigger-hidden' completed", output, StringComparison.Ordinal);
+            Assert.DoesNotContain("you> /trigger-hidden", output, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RunAsync_ExtensionCustomMessageWithFollowUpQueuesTypedCustomMessage()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-host-custom-followup-" + Guid.NewGuid().ToString("N"));
+        var extensionDirectory = Path.Combine(directory, ".tau", "extensions", "followup");
+        await WriteJavaScriptExtensionAsync(
+            extensionDirectory,
+            """
+            export default function(pi) {
+              pi.registerCommand("later", {
+                description: "Queue follow-up custom message",
+                handler: async () => {
+                  pi.sendMessage(
+                    { customType: "queue-note", content: "run after current turn", display: false },
+                    { deliverAs: "followUp" }
+                  );
+                }
+              });
+            }
+            """);
+
+        var terminal = new FakeTerminal();
+        terminal.QueueInput("/later");
+        terminal.QueueInput("exit");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var host = new CodingAgentHost(
+            new InteractiveConsoleSession(terminal),
+            runner,
+            extensionCommandStore: new CodingAgentExtensionCommandStore(
+                cwd: directory,
+                userExtensionsDirectory: Path.Combine(directory, "missing-user-extensions"),
+                javaScriptRuntime: new CodingAgentJavaScriptExtensionRuntime(directory, nodeExecutable: "node")));
+
+        try
+        {
+            await host.RunAsync();
+
+            Assert.Empty(runner.Inputs);
+            Assert.Empty(runner.MutableMessages);
+            var queued = Assert.IsType<AgentCustomMessage>(Assert.Single(runner.FollowUpChatInputs));
+            Assert.Equal("queue-note", queued.CustomType);
+            Assert.Equal("run after current turn", Assert.IsType<TextContent>(Assert.Single(queued.Content)).Text);
+            Assert.Equal(1, runner.PendingMessageCount);
+            Assert.DoesNotContain("custom> [queue-note]", terminal.FlattenedText(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RunAsync_ExtensionCustomMessageWithNextTurnInjectsIntoNextPromptBatch()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-host-custom-nextturn-" + Guid.NewGuid().ToString("N"));
+        var extensionDirectory = Path.Combine(directory, ".tau", "extensions", "nextturn");
+        await WriteJavaScriptExtensionAsync(
+            extensionDirectory,
+            """
+            export default function(pi) {
+              pi.registerCommand("aside", {
+                description: "Queue next turn custom message",
+                handler: async () => {
+                  pi.sendMessage(
+                    { customType: "aside", content: "hidden context", display: false },
+                    { deliverAs: "nextTurn" }
+                  );
+                }
+              });
+            }
+            """);
+
+        var terminal = new FakeTerminal();
+        terminal.QueueInput("/aside");
+        terminal.QueueInput("next task");
+        terminal.QueueInput("exit");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var host = new CodingAgentHost(
+            new InteractiveConsoleSession(terminal),
+            runner,
+            extensionCommandStore: new CodingAgentExtensionCommandStore(
+                cwd: directory,
+                userExtensionsDirectory: Path.Combine(directory, "missing-user-extensions"),
+                javaScriptRuntime: new CodingAgentJavaScriptExtensionRuntime(directory, nodeExecutable: "node")));
+
+        try
+        {
+            await host.RunAsync();
+
+            Assert.Empty(runner.Inputs);
+            var batch = Assert.Single(runner.ChatBatchInputs);
+            var user = Assert.IsType<UserMessage>(batch[0]);
+            Assert.Equal("next task", Assert.IsType<TextContent>(Assert.Single(user.Content)).Text);
+            var custom = Assert.IsType<AgentCustomMessage>(batch[1]);
+            Assert.Equal("aside", custom.CustomType);
+            Assert.Equal("hidden context", Assert.IsType<TextContent>(Assert.Single(custom.Content)).Text);
+
+            var output = terminal.FlattenedText();
+            Assert.Contains("you> next task\n", output, StringComparison.Ordinal);
+            Assert.DoesNotContain("custom> [aside]", output, StringComparison.Ordinal);
         }
         finally
         {
@@ -1137,6 +1634,83 @@ public class CodingAgentHostTests
             Assert.Equal(["shortcut handled"], runner.Inputs);
             var output = terminal.FlattenedText();
             Assert.Contains("you> shortcut handled\n", output);
+            Assert.Contains("Goodbye!\n", output);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RunAsync_ExtensionShortcutCustomMessageRendersDisplayMessageWithoutRunner()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-host-custom-shortcut-" + Guid.NewGuid().ToString("N"));
+        var extensionDirectory = Path.Combine(directory, ".tau", "extensions", "shortcut");
+        Directory.CreateDirectory(extensionDirectory);
+        await File.WriteAllTextAsync(
+            Path.Combine(extensionDirectory, "package.json"),
+            """
+            {
+              "type": "module",
+              "pi": {
+                "extensions": ["index.js"]
+              }
+            }
+            """);
+        await File.WriteAllTextAsync(
+            Path.Combine(extensionDirectory, "index.js"),
+            """
+            import { Box, Text } from "@mariozechner/pi-tui";
+
+            export default function(pi) {
+              pi.registerMessageRenderer("status-update", (message) => {
+                const box = new Box(1, 1);
+                box.addChild(new Text(`[SHORTCUT] ${message.content}`, 0, 0));
+                return box;
+              });
+
+              pi.registerShortcut("ctrl+x", {
+                description: "Display shortcut status",
+                handler: async (ctx) => {
+                  ctx.sendMessage({
+                    customType: "status-update",
+                    content: "ready",
+                    display: true
+                  });
+                }
+              });
+            }
+            """);
+
+        var terminal = new FakeTerminal();
+        var keyReader = new ScriptedKeyReader();
+        keyReader.EnqueueRaw(new ConsoleKeyInfo('\x18', ConsoleKey.X, shift: false, alt: false, control: true));
+        keyReader.EnqueueRaw(new ConsoleKeyInfo('e', ConsoleKey.E, shift: false, alt: false, control: false));
+        keyReader.EnqueueRaw(new ConsoleKeyInfo('x', ConsoleKey.X, shift: false, alt: false, control: false));
+        keyReader.EnqueueRaw(new ConsoleKeyInfo('i', ConsoleKey.I, shift: false, alt: false, control: false));
+        keyReader.EnqueueRaw(new ConsoleKeyInfo('t', ConsoleKey.T, shift: false, alt: false, control: false));
+        keyReader.EnqueueRaw(new ConsoleKeyInfo('\r', ConsoleKey.Enter, shift: false, alt: false, control: false));
+        var editor = new InteractiveInputEditor(keyReader, new CapturingRenderer());
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var extensionStore = new CodingAgentExtensionCommandStore(
+            cwd: directory,
+            userExtensionsDirectory: Path.Combine(directory, "missing-user-extensions"),
+            javaScriptRuntime: new CodingAgentJavaScriptExtensionRuntime(directory, nodeExecutable: "node"));
+        var host = new CodingAgentHost(
+            new InteractiveConsoleSession(terminal, editor),
+            runner,
+            extensionCommandStore: extensionStore,
+            keyBindings: editor.KeyBindings);
+
+        try
+        {
+            await host.RunAsync();
+
+            var output = terminal.FlattenedText();
+            Assert.Empty(runner.Inputs);
+            Assert.Contains("custom> [SHORTCUT] ready\n", output, StringComparison.Ordinal);
+            Assert.DoesNotContain("status> extension shortcut 'ctrl+x' completed", output, StringComparison.Ordinal);
             Assert.Contains("Goodbye!\n", output);
         }
         finally
@@ -1282,6 +1856,71 @@ public class CodingAgentHostTests
         finally
         {
             Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RunAsync_ExtensionSessionStartSetsHiddenThinkingLabel()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-host-thinking-label-" + Guid.NewGuid().ToString("N"));
+        var extensionDirectory = Path.Combine(directory, ".tau", "extensions", "thinking-label");
+        Directory.CreateDirectory(extensionDirectory);
+        await File.WriteAllTextAsync(
+            Path.Combine(extensionDirectory, "package.json"),
+            """
+            {
+              "type": "module",
+              "pi": {
+                "extensions": ["index.js"]
+              }
+            }
+            """);
+        await File.WriteAllTextAsync(
+            Path.Combine(extensionDirectory, "index.js"),
+            """
+            export default function(pi) {
+              pi.on("session_start", async (_event, ctx) => {
+                ctx.ui.setHiddenThinkingLabel("Pondering...");
+              });
+            }
+            """);
+
+        var terminal = new FakeTerminal();
+        terminal.QueueInput("think");
+        terminal.QueueInput("exit");
+        var runner = new FakeCodingAgentRunner((_, _) => GetEvents());
+        var extensionStore = new CodingAgentExtensionCommandStore(
+            cwd: directory,
+            userExtensionsDirectory: Path.Combine(directory, "missing-user-extensions"),
+            javaScriptRuntime: new CodingAgentJavaScriptExtensionRuntime(directory, nodeExecutable: "node"));
+        using var footerDataProvider = new CodingAgentFooterDataProvider(directory);
+        var host = new CodingAgentHost(
+            new InteractiveConsoleSession(terminal),
+            runner,
+            extensionCommandStore: extensionStore,
+            footerDataProvider: footerDataProvider);
+
+        try
+        {
+            await host.RunAsync();
+
+            Assert.Equal(["think"], runner.Inputs);
+            Assert.Equal("Pondering...", footerDataProvider.GetHiddenThinkingLabel());
+            var output = terminal.FlattenedText();
+            Assert.Contains("Pondering...> plan\n", output, StringComparison.Ordinal);
+            Assert.DoesNotContain("thinking> plan\n", output, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+
+        static async IAsyncEnumerable<AgentEvent> GetEvents()
+        {
+            var partial = new AssistantMessage();
+            yield return new MessageUpdateEvent(new ThinkingDeltaEvent(0, "plan", partial));
+            yield return new AgentEndEvent();
+            await Task.CompletedTask;
         }
     }
 
@@ -1945,6 +2584,138 @@ public class CodingAgentHostTests
     }
 
     [Fact]
+    public async Task RunAsync_OpenExternalEditorActionUpdatesDraftBeforeSubmit()
+    {
+        var terminal = new FakeTerminal();
+        var keyReader = new ScriptedKeyReader();
+        foreach (var ch in "draft")
+        {
+            keyReader.EnqueueRaw(new ConsoleKeyInfo(ch, ConsoleKey.NoName, shift: false, alt: false, control: false));
+        }
+
+        keyReader.EnqueueRaw(new ConsoleKeyInfo('\x07', ConsoleKey.G, shift: false, alt: false, control: true));
+        keyReader.EnqueueRaw(new ConsoleKeyInfo('\r', ConsoleKey.Enter, shift: false, alt: false, control: false));
+        foreach (var ch in "exit")
+        {
+            keyReader.EnqueueRaw(new ConsoleKeyInfo(ch, ConsoleKey.NoName, shift: false, alt: false, control: false));
+        }
+
+        keyReader.EnqueueRaw(new ConsoleKeyInfo('\r', ConsoleKey.Enter, shift: false, alt: false, control: false));
+
+        var editor = new InteractiveInputEditor(keyReader, new CapturingRenderer());
+        var externalEditor = new FakeExternalEditor(new CodingAgentExternalEditorResult(
+            EditorConfigured: true,
+            Edited: true,
+            Text: "edited draft"));
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var host = new CodingAgentHost(
+            new InteractiveConsoleSession(terminal, editor),
+            runner,
+            externalEditor: externalEditor);
+
+        await host.RunAsync();
+
+        Assert.Equal(["draft"], externalEditor.Inputs);
+        Assert.Equal(["edited draft"], runner.Inputs);
+        Assert.Contains("status> external editor updated draft", terminal.FlattenedText());
+    }
+
+    [Fact]
+    public async Task RunAsync_OpenExternalEditorActionWithoutConfiguredEditorKeepsDraft()
+    {
+        var terminal = new FakeTerminal();
+        var keyReader = new ScriptedKeyReader();
+        foreach (var ch in "draft")
+        {
+            keyReader.EnqueueRaw(new ConsoleKeyInfo(ch, ConsoleKey.NoName, shift: false, alt: false, control: false));
+        }
+
+        keyReader.EnqueueRaw(new ConsoleKeyInfo('\x07', ConsoleKey.G, shift: false, alt: false, control: true));
+        keyReader.EnqueueRaw(new ConsoleKeyInfo('\r', ConsoleKey.Enter, shift: false, alt: false, control: false));
+        foreach (var ch in "exit")
+        {
+            keyReader.EnqueueRaw(new ConsoleKeyInfo(ch, ConsoleKey.NoName, shift: false, alt: false, control: false));
+        }
+
+        keyReader.EnqueueRaw(new ConsoleKeyInfo('\r', ConsoleKey.Enter, shift: false, alt: false, control: false));
+
+        var editor = new InteractiveInputEditor(keyReader, new CapturingRenderer());
+        var externalEditor = new FakeExternalEditor(new CodingAgentExternalEditorResult(
+            EditorConfigured: false,
+            Edited: false,
+            Text: null));
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var host = new CodingAgentHost(
+            new InteractiveConsoleSession(terminal, editor),
+            runner,
+            externalEditor: externalEditor);
+
+        await host.RunAsync();
+
+        Assert.Equal(["draft"], externalEditor.Inputs);
+        Assert.Equal(["draft"], runner.Inputs);
+        Assert.Contains("error> No editor configured. Set $VISUAL or $EDITOR environment variable.", terminal.FlattenedText());
+    }
+
+    [Fact]
+    public async Task RunAsync_ToggleThinkingBlockActionPersistsSettingAndHidesNextThinking()
+    {
+        var settingsPath = Path.Combine(
+            Path.GetTempPath(),
+            $"tau-coding-agent-toggle-thinking-{Guid.NewGuid():N}.json");
+        var terminal = new FakeTerminal();
+        var keyReader = new ScriptedKeyReader();
+        keyReader.EnqueueRaw(new ConsoleKeyInfo('\x14', ConsoleKey.T, shift: false, alt: false, control: true));
+        foreach (var ch in "hello")
+        {
+            keyReader.EnqueueRaw(new ConsoleKeyInfo(ch, ConsoleKey.NoName, shift: false, alt: false, control: false));
+        }
+
+        keyReader.EnqueueRaw(new ConsoleKeyInfo('\r', ConsoleKey.Enter, shift: false, alt: false, control: false));
+        foreach (var ch in "exit")
+        {
+            keyReader.EnqueueRaw(new ConsoleKeyInfo(ch, ConsoleKey.NoName, shift: false, alt: false, control: false));
+        }
+
+        keyReader.EnqueueRaw(new ConsoleKeyInfo('\r', ConsoleKey.Enter, shift: false, alt: false, control: false));
+
+        var session = new InteractiveConsoleSession(
+            terminal,
+            new InteractiveInputEditor(keyReader, new CapturingRenderer()));
+        var settingsStore = new CodingAgentSettingsStore(settingsPath);
+        var runner = new FakeCodingAgentRunner((_, _) => GetEvents());
+        var host = new CodingAgentHost(session, runner, settingsStore: settingsStore);
+
+        try
+        {
+            await host.RunAsync();
+
+            var output = terminal.FlattenedText();
+            Assert.Contains("status> thinking blocks: hidden", output, StringComparison.Ordinal);
+            Assert.Contains("thinking> Thinking...\n", output, StringComparison.Ordinal);
+            Assert.DoesNotContain("private plan", output, StringComparison.Ordinal);
+            Assert.True(settingsStore.Load().HideThinkingBlock);
+            Assert.Equal(["hello"], runner.Inputs);
+        }
+        finally
+        {
+            if (File.Exists(settingsPath))
+            {
+                File.Delete(settingsPath);
+            }
+        }
+
+        static async IAsyncEnumerable<AgentEvent> GetEvents()
+        {
+            var partial = new AssistantMessage();
+            yield return new MessageUpdateEvent(new ThinkingDeltaEvent(0, "private plan", partial));
+            yield return new MessageUpdateEvent(new TextDeltaEvent(1, "answer", partial));
+            yield return new AgentEndEvent();
+            await Task.CompletedTask;
+        }
+    }
+
+    [Fact]
     public async Task RunAsync_ExportCommand_RendersStatusAndWritesSnapshot()
     {
         var path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"tau-coding-agent-host-export-{Guid.NewGuid():N}.json");
@@ -2581,6 +3352,35 @@ public class CodingAgentHostTests
         public void Commit() { }
 
         public void Cancel() { }
+    }
+
+    private sealed class FakeExternalEditor(CodingAgentExternalEditorResult result) : ICodingAgentExternalEditor
+    {
+        public List<string> Inputs { get; } = [];
+
+        public Task<CodingAgentExternalEditorResult> EditAsync(
+            string currentText,
+            CancellationToken cancellationToken = default)
+        {
+            Inputs.Add(currentText);
+            return Task.FromResult(result);
+        }
+    }
+
+    private static async Task WriteJavaScriptExtensionAsync(string extensionDirectory, string source)
+    {
+        Directory.CreateDirectory(extensionDirectory);
+        await File.WriteAllTextAsync(
+            Path.Combine(extensionDirectory, "package.json"),
+            """
+            {
+              "type": "module",
+              "pi": {
+                "extensions": ["index.js"]
+              }
+            }
+            """);
+        await File.WriteAllTextAsync(Path.Combine(extensionDirectory, "index.js"), source);
     }
 
     private sealed class CapturingRenderSurface(int width, int height) : ITuiRenderSurface

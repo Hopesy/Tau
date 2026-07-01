@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text.Json;
 using Tau.AgentCore;
+using Tau.AgentCore.Harness;
 using Tau.Ai;
 using Tau.CodingAgent.Runtime;
 using Tau.Tui.Runtime;
@@ -547,6 +548,107 @@ public class CodingAgentExtensionCommandStoreTests
     }
 
     [Fact]
+    public void LoadStatus_LoadsJavascriptMessageRendererAndRendersCustomMessage()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-js-message-renderer-" + Guid.NewGuid().ToString("N"));
+        var extensionDirectory = Path.Combine(directory, ".tau", "extensions", "message-renderer");
+        Directory.CreateDirectory(extensionDirectory);
+        WriteJavaScriptExtension(
+            extensionDirectory,
+            """
+            import { Box, Text } from "@mariozechner/pi-tui";
+
+            export default function(pi) {
+              pi.registerMessageRenderer("status-update", (message, { expanded }, theme) => {
+                const level = message.details?.level ?? "info";
+                const text = message.content
+                  .filter(block => block.type === "text")
+                  .map(block => block.text)
+                  .join("\n");
+                const color = level === "error" ? "error" : "success";
+                const box = new Box(1, 1);
+                box.addChild(new Text(`${theme.fg(color, `[${level.toUpperCase()}]`)} ${text}`, 0, 0));
+                if (expanded && message.details?.timestamp) {
+                  box.addChild(new Text(`expanded ${message.timestamp}`, 0, 0));
+                }
+
+                return box;
+              });
+            }
+            """);
+
+        try
+        {
+            var store = CreateJavaScriptStore(directory);
+
+            var status = store.LoadStatus();
+
+            Assert.Empty(status.Diagnostics);
+            var renderer = Assert.Single(status.MessageRenderers);
+            Assert.Equal("status-update", renderer.CustomType);
+            Assert.Equal("javascript", renderer.Runtime);
+            Assert.Equal("loaded; commands 0; tools 0; message renderers 1; limited runtime", Assert.Single(status.Modules).Status);
+
+            using var detailsDocument = JsonDocument.Parse("""{"level":"error","timestamp":123}""");
+            var message = new AgentCustomMessage(
+                "status-update",
+                [new TextContent("deployed")],
+                true,
+                detailsDocument.RootElement.Clone(),
+                DateTimeOffset.FromUnixTimeMilliseconds(123456));
+
+            Assert.True(store.TryRenderCustomMessage(message, out var rendered, expanded: true));
+            Assert.NotNull(rendered);
+            Assert.Equal(CodingAgentMessageDisplayFormatter.CustomKind, rendered.Kind);
+            Assert.Equal(
+                string.Join(Environment.NewLine, ["[ERROR] deployed", "expanded 123456"]),
+                rendered.Text);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void TryRenderCustomMessage_FallsBackWhenJavascriptRendererFails()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-js-message-renderer-fallback-" + Guid.NewGuid().ToString("N"));
+        var extensionDirectory = Path.Combine(directory, ".tau", "extensions", "message-renderer");
+        Directory.CreateDirectory(extensionDirectory);
+        WriteJavaScriptExtension(
+            extensionDirectory,
+            """
+            export default function(pi) {
+              pi.registerMessageRenderer("status-update", () => {
+                throw new Error("renderer boom");
+              });
+            }
+            """);
+
+        try
+        {
+            var store = CreateJavaScriptStore(directory);
+            var message = new AgentCustomMessage("status-update", "deployed", true);
+
+            Assert.False(store.TryRenderCustomMessage(message, out var rendered));
+            Assert.Null(rendered);
+
+            var fallback = CodingAgentMessageDisplayFormatter.FormatCustomMessage(message);
+            Assert.Equal(
+                """
+                [status-update]
+                deployed
+                """,
+                fallback.Text);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public void TryInvoke_ExecutesJavascriptCommandAndSendsRunnerMessage()
     {
         var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-js-runner-" + Guid.NewGuid().ToString("N"));
@@ -613,6 +715,200 @@ public class CodingAgentExtensionCommandStoreTests
             Assert.False(invocation.SendToRunner);
             Assert.Equal("OK ready", invocation.Message);
             Assert.Equal("javascript", invocation.Command.Runtime);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void TryInvoke_JavascriptCommandCanDisplayCustomMessageWithRegisteredRenderer()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-js-custom-display-" + Guid.NewGuid().ToString("N"));
+        var extensionDirectory = Path.Combine(directory, ".tau", "extensions", "status");
+        Directory.CreateDirectory(extensionDirectory);
+        WriteJavaScriptExtension(
+            extensionDirectory,
+            """
+            import { Box, Text } from "@mariozechner/pi-tui";
+
+            export default function(pi) {
+              pi.registerMessageRenderer("status-update", (message, _options, theme) => {
+                const level = message.details?.level ?? "info";
+                const box = new Box(1, 1);
+                box.addChild(new Text(`${theme.fg("error", `[${level.toUpperCase()}]`)} ${message.content}`, 0, 0));
+                return box;
+              });
+
+              pi.registerCommand("status", {
+                description: "Send status",
+                handler: async (args) => {
+                  pi.sendMessage({
+                    customType: "status-update",
+                    content: args || "ready",
+                    display: true,
+                    details: { level: "error" }
+                  });
+                }
+              });
+            }
+            """);
+
+        try
+        {
+            var store = CreateJavaScriptStore(directory);
+
+            var handled = store.TryInvoke("/status deployed", out var invocation);
+
+            Assert.True(handled);
+            Assert.NotNull(invocation);
+            Assert.False(invocation.IsError);
+            Assert.False(invocation.SendToRunner);
+            Assert.Equal(string.Empty, invocation.Message);
+            var displayMessage = Assert.Single(invocation.DisplayMessages ?? []);
+            Assert.Equal(CodingAgentMessageDisplayFormatter.CustomKind, displayMessage.Kind);
+            Assert.Equal("[ERROR] deployed", displayMessage.Text);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void TryInvoke_JavascriptCommandDisplaysDefaultCustomMessageWithoutRenderer()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-js-custom-default-" + Guid.NewGuid().ToString("N"));
+        var extensionDirectory = Path.Combine(directory, ".tau", "extensions", "status");
+        Directory.CreateDirectory(extensionDirectory);
+        WriteJavaScriptExtension(
+            extensionDirectory,
+            """
+            export default function(pi) {
+              pi.registerCommand("plain", {
+                description: "Send plain custom",
+                handler: async () => {
+                  pi.sendMessage({
+                    customType: "plain",
+                    content: "hello",
+                    display: true
+                  });
+                }
+              });
+            }
+            """);
+
+        try
+        {
+            var store = CreateJavaScriptStore(directory);
+
+            var handled = store.TryInvoke("/plain", out var invocation);
+
+            Assert.True(handled);
+            Assert.NotNull(invocation);
+            Assert.False(invocation.IsError);
+            Assert.False(invocation.SendToRunner);
+            Assert.Equal(string.Empty, invocation.Message);
+            var displayMessage = Assert.Single(invocation.DisplayMessages ?? []);
+            Assert.Equal(CodingAgentMessageDisplayFormatter.CustomKind, displayMessage.Kind);
+            Assert.Equal(
+                """
+                [plain]
+                hello
+                """,
+                displayMessage.Text);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void TryInvoke_JavascriptCommandIgnoresHiddenCustomMessageDisplay()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-js-custom-hidden-" + Guid.NewGuid().ToString("N"));
+        var extensionDirectory = Path.Combine(directory, ".tau", "extensions", "status");
+        Directory.CreateDirectory(extensionDirectory);
+        WriteJavaScriptExtension(
+            extensionDirectory,
+            """
+            export default function(pi) {
+              pi.registerCommand("hidden", {
+                description: "Send hidden custom",
+                handler: async () => {
+                  pi.sendMessage({
+                    customType: "hidden",
+                    content: "internal only",
+                    display: false
+                  });
+                }
+              });
+            }
+            """);
+
+        try
+        {
+            var store = CreateJavaScriptStore(directory);
+
+            var handled = store.TryInvoke("/hidden", out var invocation);
+
+            Assert.True(handled);
+            Assert.NotNull(invocation);
+            Assert.False(invocation.IsError);
+            Assert.False(invocation.SendToRunner);
+            Assert.Equal("extension command '/hidden' completed", invocation.Message);
+            Assert.Empty(invocation.DisplayMessages ?? []);
+            var customMessage = Assert.Single(invocation.CustomMessages ?? []);
+            Assert.Equal("hidden", customMessage.CustomType);
+            Assert.False(customMessage.Display);
+            Assert.Equal("internal only", Assert.IsType<TextContent>(Assert.Single(customMessage.Content)).Text);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void TryInvoke_JavascriptCommandKeepsCustomMessageDeliveryOptions()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-js-custom-options-" + Guid.NewGuid().ToString("N"));
+        var extensionDirectory = Path.Combine(directory, ".tau", "extensions", "status");
+        Directory.CreateDirectory(extensionDirectory);
+        WriteJavaScriptExtension(
+            extensionDirectory,
+            """
+            export default function(pi) {
+              pi.registerCommand("trigger", {
+                description: "Trigger custom turn",
+                handler: async () => {
+                  pi.sendMessage(
+                    { customType: "file-trigger", content: "changed", display: true },
+                    { triggerTurn: true, deliverAs: "followUp" }
+                  );
+                }
+              });
+            }
+            """);
+
+        try
+        {
+            var store = CreateJavaScriptStore(directory);
+
+            var handled = store.TryInvoke("/trigger", out var invocation);
+
+            Assert.True(handled);
+            Assert.NotNull(invocation);
+            var delivery = Assert.Single(invocation.CustomMessageDeliveries ?? []);
+            Assert.True(delivery.TriggerTurn);
+            Assert.Equal("followUp", delivery.DeliverAs);
+            Assert.Equal("file-trigger", delivery.Message.CustomType);
+            Assert.Equal("changed", Assert.IsType<TextContent>(Assert.Single(delivery.Message.Content)).Text);
+
+            var customMessage = Assert.Single(invocation.CustomMessages ?? []);
+            Assert.Same(delivery.Message, customMessage);
         }
         finally
         {
@@ -860,6 +1156,58 @@ public class CodingAgentExtensionCommandStoreTests
     }
 
     [Fact]
+    public void TryInvokeShortcut_JavascriptHandlerCanDisplayCustomMessageWithRegisteredRenderer()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-js-shortcut-custom-display-" + Guid.NewGuid().ToString("N"));
+        var extensionDirectory = Path.Combine(directory, ".tau", "extensions", "shortcuts");
+        Directory.CreateDirectory(extensionDirectory);
+        WriteJavaScriptExtension(
+            extensionDirectory,
+            """
+            import { Box, Text } from "@mariozechner/pi-tui";
+
+            export default function(pi) {
+              pi.registerMessageRenderer("status-update", (message) => {
+                const box = new Box(1, 1);
+                box.addChild(new Text(`[SHORTCUT] ${message.content}`, 0, 0));
+                return box;
+              });
+
+              pi.registerShortcut("ctrl+x", {
+                description: "Display shortcut status",
+                handler: async (ctx) => {
+                  ctx.sendMessage({
+                    customType: "status-update",
+                    content: "ready",
+                    display: true
+                  });
+                }
+              });
+            }
+            """);
+
+        try
+        {
+            var store = CreateJavaScriptStore(directory);
+            var shortcut = Assert.Single(store.LoadStatus().Shortcuts);
+
+            Assert.True(store.TryInvokeShortcut(shortcut, out var invocation));
+
+            Assert.NotNull(invocation);
+            Assert.False(invocation.IsError);
+            Assert.False(invocation.SendToRunner);
+            Assert.Equal(string.Empty, invocation.Message);
+            var displayMessage = Assert.Single(invocation.DisplayMessages ?? []);
+            Assert.Equal(CodingAgentMessageDisplayFormatter.CustomKind, displayMessage.Kind);
+            Assert.Equal("[SHORTCUT] ready", displayMessage.Text);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public void LoadStatus_WithKeyBindingsSkipsBuiltInShortcutConflict()
     {
         var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-js-shortcut-conflict-" + Guid.NewGuid().ToString("N"));
@@ -869,8 +1217,8 @@ public class CodingAgentExtensionCommandStoreTests
             extensionDirectory,
             """
             export default function(pi) {
-              pi.registerShortcut("ctrl+p", {
-                description: "Conflicts with built-in model cycle",
+              pi.registerShortcut("ctrl+g", {
+                description: "Conflicts with built-in external editor",
                 handler: async () => {}
               });
             }
@@ -1277,6 +1625,55 @@ public class CodingAgentExtensionCommandStoreTests
 
             var logPath = Path.Combine(directory, "events.log");
             Assert.Equal("message_start:user:hello lifecycle\n", File.ReadAllText(logPath).ReplaceLineEndings("\n"));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task LoadLifecycleEventSink_EmitsJavascriptCustomMessageLifecycleHandler()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-js-custom-lifecycle-" + Guid.NewGuid().ToString("N"));
+        var extensionDirectory = Path.Combine(directory, ".tau", "extensions", "lifecycle");
+        Directory.CreateDirectory(extensionDirectory);
+        WriteJavaScriptExtension(
+            extensionDirectory,
+            """
+            import fs from "node:fs";
+
+            export default function(pi) {
+              pi.on("message_end", (event) => {
+                const content = event.message?.content?.[0]?.text ?? "";
+                const level = event.message?.details?.level ?? "";
+                fs.appendFileSync("events.log", `${event.type}:${event.message.role}:${event.message.customType}:${event.message.display}:${level}:${content}\n`);
+              });
+            }
+            """);
+
+        try
+        {
+            var store = CreateJavaScriptStore(directory);
+            var status = store.LoadStatus();
+
+            Assert.Empty(status.Diagnostics);
+            Assert.Equal("message_end", Assert.Single(status.EventHandlers).EventType);
+
+            var sink = store.LoadLifecycleEventSink();
+            Assert.NotNull(sink);
+            using var details = JsonDocument.Parse("""{"level":"info"}""");
+            await sink!.PublishAsync(new MessageEndEvent(new AgentCustomMessage(
+                CustomType: "status-update",
+                Content: new ContentBlock[] { new TextContent("deployed") },
+                Display: false,
+                Details: details.RootElement.Clone(),
+                Timestamp: DateTimeOffset.FromUnixTimeMilliseconds(123))));
+
+            var logPath = Path.Combine(directory, "events.log");
+            Assert.Equal(
+                "message_end:custom:status-update:false:info:deployed\n",
+                File.ReadAllText(logPath).ReplaceLineEndings("\n"));
         }
         finally
         {

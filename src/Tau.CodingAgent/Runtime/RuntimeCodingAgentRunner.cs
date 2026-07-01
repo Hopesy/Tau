@@ -58,8 +58,19 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner, ICodingAgentT
     public IReadOnlyList<ChatMessage> Messages => _runtime.State.Messages;
     public Model Model => _config.Model;
     public string? SessionName { get; set; }
+
+    /// <summary>
+    /// 转发给 opencode 系列提供方的会话标识，用于生成会话亲和归因请求头。
+    /// </summary>
+    public string? SessionId { get; set; }
+
+    /// <summary>
+    /// 是否启用安装遥测；用于控制 OpenRouter、NVIDIA、Cloudflare、Vercel 模型的产品归因请求头。
+    /// </summary>
+    public bool InstallTelemetryEnabled { get; set; } = true;
     public IReadOnlyDictionary<string, object?> ToolResultDetailsByToolCallId => _toolResultDetailsByToolCallId;
     public int PendingMessageCount => _runtime.PendingMessageCount;
+    public bool IsStreaming => _runtime.State.IsStreaming;
     public bool IsCompacting => Volatile.Read(ref _activeCompactionCount) > 0;
 
     public AgentQueueMode SteeringMode
@@ -338,6 +349,16 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner, ICodingAgentT
         _runtime.Steer(new UserMessage(input));
     }
 
+    /// <summary>
+    /// 将一条完整会话消息排入 steering 队列。
+    /// </summary>
+    /// <param name="input">需要在当前 assistant turn 后尽快注入的消息。</param>
+    public void Steer(ChatMessage input)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+        _runtime.Steer(input);
+    }
+
     public void FollowUp(string input)
     {
         if (string.IsNullOrWhiteSpace(input))
@@ -356,6 +377,77 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner, ICodingAgentT
         }
 
         _runtime.FollowUp(new UserMessage(input));
+    }
+
+    /// <summary>
+    /// 将一条完整会话消息排入 follow-up 队列。
+    /// </summary>
+    /// <param name="input">需要在当前 agent 自然停止后注入的消息。</param>
+    public void FollowUp(ChatMessage input)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+        _runtime.FollowUp(input);
+    }
+
+    public CodingAgentQueuedMessages DrainQueuedMessages() =>
+        new(
+            _runtime.DrainSteeringMessages().Select(QueuedMessageToText).Where(static text => text.Length > 0).ToArray(),
+            _runtime.DrainFollowUpMessages().Select(QueuedMessageToText).Where(static text => text.Length > 0).ToArray());
+
+    /// <summary>
+    /// 向当前运行时会话追加一条已经由宿主生成的消息。
+    /// </summary>
+    /// <param name="message">需要追加到会话状态的消息。</param>
+    public void AppendMessage(ChatMessage message)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        _runtime.AddMessage(message);
+    }
+
+    /// <summary>
+    /// 向扩展 lifecycle sink 发布一条宿主生成的 agent event。
+    /// </summary>
+    /// <param name="agentEvent">需要发布给扩展事件处理器的事件。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    public async Task PublishLifecycleEventAsync(
+        AgentEvent agentEvent,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(agentEvent);
+        if (_extensionLifecycleEventSink is null)
+        {
+            return;
+        }
+
+        try
+        {
+            var logContext = CreateRunLogContext();
+            var extensionErrors = await _extensionLifecycleEventSink
+                .PublishAsync(agentEvent, cancellationToken)
+                .ConfigureAwait(false);
+            foreach (var extensionError in extensionErrors)
+            {
+                LogExtensionEventError(extensionError, logContext);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logSink.Log(new TauLogEvent(
+                "extension",
+                "event.error",
+                DateTimeOffset.UtcNow,
+                new Dictionary<string, string?>
+                {
+                    ["eventType"] = agentEvent.Type,
+                    ["scope"] = "runtime",
+                    ["runtime"] = "unknown",
+                    ["error"] = ex.Message
+                }.WithLogContext(CreateRunLogContext())));
+        }
     }
 
     public void RestoreSession(CodingAgentSessionSnapshot snapshot)
@@ -386,7 +478,7 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner, ICodingAgentT
         _runtime.AddMessage(new UserMessage(input));
         var runLogContext = CreateRunLogContext(logContext);
         return InstrumentRun(
-            _runtime.RunAsync(_config with { LogContext = runLogContext }, cancellationToken),
+            _runtime.RunAsync(WithAttributionHeaders(runLogContext), cancellationToken),
             inputBytes: input?.Length ?? 0,
             runLogContext,
             cancellationToken);
@@ -411,11 +503,170 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner, ICodingAgentT
         var sizeHint = input.OfType<TextContent>().Sum(static block => block.Text.Length);
         var runLogContext = CreateRunLogContext(logContext);
         return InstrumentRun(
-            _runtime.RunAsync(_config with { LogContext = runLogContext }, cancellationToken),
+            _runtime.RunAsync(WithAttributionHeaders(runLogContext), cancellationToken),
             inputBytes: sizeHint,
             runLogContext,
             cancellationToken);
     }
+
+    public IAsyncEnumerable<AgentEvent> RunAsync(
+        ChatMessage input,
+        CancellationToken cancellationToken = default) =>
+        RunAsync(input, logContext: null, cancellationToken);
+
+    /// <summary>
+    /// 用一条完整会话消息启动 agent turn。
+    /// </summary>
+    /// <param name="input">作为 prompt 写入会话状态的消息，可为 custom/user 等上层消息。</param>
+    /// <param name="logContext">本轮运行日志上下文。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>agent 运行期间产生的事件流。</returns>
+    public IAsyncEnumerable<AgentEvent> RunAsync(
+        ChatMessage input,
+        TauRuntimeLogContext? logContext,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+        _runtime.AddMessage(input);
+        var runLogContext = CreateRunLogContext(logContext);
+        return InstrumentRun(
+            _runtime.RunAsync(WithAttributionHeaders(runLogContext), cancellationToken),
+            inputBytes: EstimateInputBytes(input),
+            runLogContext,
+            cancellationToken);
+    }
+
+    public IAsyncEnumerable<AgentEvent> RunAsync(
+        IReadOnlyList<ChatMessage> input,
+        CancellationToken cancellationToken = default) =>
+        RunAsync(input, logContext: null, cancellationToken);
+
+    /// <summary>
+    /// 用一批完整会话消息启动 agent turn。
+    /// </summary>
+    /// <param name="input">作为 prompt 写入会话状态的消息集合。</param>
+    /// <param name="logContext">本轮运行日志上下文。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>agent 运行期间产生的事件流。</returns>
+    public IAsyncEnumerable<AgentEvent> RunAsync(
+        IReadOnlyList<ChatMessage> input,
+        TauRuntimeLogContext? logContext,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+        if (input.Count == 0)
+        {
+            throw new ArgumentException("Input messages must not be empty.", nameof(input));
+        }
+
+        foreach (var message in input)
+        {
+            _runtime.AddMessage(message);
+        }
+
+        var runLogContext = CreateRunLogContext(logContext);
+        return InstrumentRun(
+            _runtime.RunAsync(WithAttributionHeaders(runLogContext), cancellationToken),
+            inputBytes: input.Sum(EstimateInputBytes),
+            runLogContext,
+            cancellationToken);
+    }
+
+    /// <summary>
+    /// 为单次运行生成带产品归因和会话请求头的循环配置；每次运行都会重新计算，保证会话内切换模型后归因仍然正确。
+    /// </summary>
+    private AgentLoopConfig WithAttributionHeaders(TauRuntimeLogContext runLogContext)
+    {
+        var baseOptions = _config.StreamOptions ?? new SimpleStreamOptions();
+        var sessionId = string.IsNullOrWhiteSpace(SessionId) ? baseOptions.SessionId : SessionId;
+        var merged = CodingAgentProviderAttribution.MergeAttributionHeaders(
+            _config.Model,
+            InstallTelemetryEnabled,
+            sessionId,
+            AsReadOnly(baseOptions.Headers));
+
+        var config = _config with { LogContext = runLogContext };
+        if (_extensionLifecycleEventSink is not null)
+        {
+            var previousMessageEndTransform = config.MessageEndTransformAsync;
+            config = config with
+            {
+                MessageEndTransformAsync = (message, token) =>
+                    TransformLifecycleMessageEndAsync(previousMessageEndTransform, message, runLogContext, token)
+            };
+        }
+
+        if (merged is null)
+        {
+            return config;
+        }
+
+        return config with
+        {
+            StreamOptions = baseOptions with { Headers = merged }
+        };
+    }
+
+    /// <summary>
+    /// 发布 message_end lifecycle event，并把扩展返回的替换消息接入 agent 状态写入路径。
+    /// </summary>
+    /// <param name="previousTransform">已有的消息结束转换钩子。</param>
+    /// <param name="message">准备结束并写入会话状态的消息。</param>
+    /// <param name="logContext">本轮运行日志上下文。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>扩展替换后的最终消息；扩展失败时返回原消息。</returns>
+    private async Task<ChatMessage> TransformLifecycleMessageEndAsync(
+        Func<ChatMessage, CancellationToken, Task<ChatMessage>>? previousTransform,
+        ChatMessage message,
+        TauRuntimeLogContext logContext,
+        CancellationToken cancellationToken)
+    {
+        var currentMessage = previousTransform is null
+            ? message
+            : await previousTransform(message, cancellationToken).ConfigureAwait(false);
+        if (_extensionLifecycleEventSink is null)
+        {
+            return currentMessage;
+        }
+
+        try
+        {
+            var result = await _extensionLifecycleEventSink
+                .TransformMessageEndAsync(currentMessage, cancellationToken)
+                .ConfigureAwait(false);
+            foreach (var extensionError in result.Errors)
+            {
+                LogExtensionEventError(extensionError, logContext);
+            }
+
+            return result.Message;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logSink.Log(new TauLogEvent(
+                "extension",
+                "event.error",
+                DateTimeOffset.UtcNow,
+                new Dictionary<string, string?>
+                {
+                    ["eventType"] = "message_end",
+                    ["scope"] = "runtime",
+                    ["runtime"] = "unknown",
+                    ["error"] = ex.Message
+                }.WithLogContext(logContext)));
+            return currentMessage;
+        }
+    }
+
+    private static IReadOnlyDictionary<string, string>? AsReadOnly(IDictionary<string, string>? headers) =>
+        headers is null
+            ? null
+            : headers as IReadOnlyDictionary<string, string>
+                ?? new Dictionary<string, string>(headers, StringComparer.OrdinalIgnoreCase);
 
     private TauRuntimeLogContext CreateRunLogContext(TauRuntimeLogContext? logContext = null)
     {
@@ -428,6 +679,27 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner, ICodingAgentT
                 FirstNonWhiteSpace(logContext.MessageId, baseContext.MessageId));
         return (effectiveContext ?? new TauRuntimeLogContext()).EnsureCorrelationId();
     }
+
+    private static string QueuedMessageToText(ChatMessage message) =>
+        message switch
+        {
+            UserMessage user => ContentBlocksToText(user.Content),
+            AgentCustomMessage custom => ContentBlocksToText(custom.Content),
+            _ => string.Empty
+        };
+
+    private static string ContentBlocksToText(IReadOnlyList<ContentBlock> content) =>
+        string.Join(Environment.NewLine, content.OfType<TextContent>().Select(static block => block.Text)).Trim();
+
+    private static int EstimateInputBytes(ChatMessage message) => message switch
+    {
+        UserMessage user => EstimateContentBytes(user.Content),
+        AgentCustomMessage custom => EstimateContentBytes(custom.Content),
+        _ => 0
+    };
+
+    private static int EstimateContentBytes(IEnumerable<ContentBlock> content) =>
+        content.OfType<TextContent>().Sum(static block => block.Text.Length);
 
     private static string? FirstNonWhiteSpace(string? primary, string? fallback) =>
         string.IsNullOrWhiteSpace(primary) ? fallback : primary;
@@ -480,7 +752,7 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner, ICodingAgentT
                     CaptureToolResultDetails(toolEnd);
                 }
 
-                if (_extensionLifecycleEventSink is not null)
+                if (_extensionLifecycleEventSink is not null && enumerator.Current is not MessageEndEvent)
                 {
                     try
                     {
@@ -626,6 +898,7 @@ public sealed class RuntimeCodingAgentRunner : ICodingAgentRunner, ICodingAgentT
             SystemPrompt = string.IsNullOrWhiteSpace(systemPromptOverride)
                 ? BuildSystemPrompt(tools, skills ?? [], contextFiles ?? [], appendSystemPrompt)
                 : AppendToSystemPrompt(systemPromptOverride, appendSystemPrompt),
+            ConvertToLlm = AgentHarnessMessages.ConvertToLlm,
             StreamOptions = new SimpleStreamOptions
             {
                 MaxTokens = 16_384,

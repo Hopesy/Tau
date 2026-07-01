@@ -101,6 +101,7 @@ public class CodingAgentSettingsStoreTests
                 LastChangelogVersion: " 0.1.0 ",
                 TerminalShowImages: false,
                 TerminalClearOnShrink: true,
+                HideThinkingBlock: true,
                 ImagesAutoResize: false,
                 ImagesBlockImages: true,
                 ShowHardwareCursor: true,
@@ -136,6 +137,7 @@ public class CodingAgentSettingsStoreTests
             Assert.Equal("0.1.0", loaded.LastChangelogVersion);
             Assert.False(loaded.TerminalShowImages);
             Assert.True(loaded.TerminalClearOnShrink);
+            Assert.True(loaded.HideThinkingBlock);
             Assert.False(loaded.ImagesAutoResize);
             Assert.True(loaded.ImagesBlockImages);
             Assert.True(loaded.ShowHardwareCursor);
@@ -276,6 +278,7 @@ public class CodingAgentSettingsStoreTests
             Assert.Null(loaded.LastChangelogVersion);
             Assert.Null(loaded.TerminalShowImages);
             Assert.Null(loaded.TerminalClearOnShrink);
+            Assert.Null(loaded.HideThinkingBlock);
             Assert.Null(loaded.ImagesAutoResize);
             Assert.Null(loaded.ImagesBlockImages);
             Assert.Null(loaded.ShowHardwareCursor);

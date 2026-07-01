@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Tau.AgentCore.Harness;
 using Tau.Ai;
 
 namespace Tau.CodingAgent.Runtime;
@@ -137,6 +138,15 @@ public sealed class CodingAgentSessionStore
                 IsError = toolResult.IsError,
                 Content = toolResult.Content.Select(FromContent).ToList()
             },
+            AgentCustomMessage custom => new CodingAgentSessionMessage
+            {
+                Role = "custom",
+                CustomType = Normalize(custom.CustomType),
+                Display = custom.Display,
+                Details = ToJsonElement(custom.Details),
+                Timestamp = custom.Timestamp,
+                Content = custom.Content.Select(FromContent).ToList()
+            },
             _ => new CodingAgentSessionMessage
             {
                 Role = message.Role,
@@ -168,6 +178,12 @@ public sealed class CodingAgentSessionStore
                 message.ToolCallId,
                 content,
                 message.IsError),
+            "custom" when !string.IsNullOrWhiteSpace(message.CustomType) => new AgentCustomMessage(
+                message.CustomType,
+                content,
+                message.Display,
+                message.Details?.Clone(),
+                message.Timestamp),
             _ => null
         };
     }
@@ -279,6 +295,17 @@ public sealed class CodingAgentSessionStore
         };
     }
 
+    private static JsonElement? ToJsonElement(object? value)
+    {
+        return value switch
+        {
+            null => null,
+            JsonElement element => element.Clone(),
+            JsonDocument document => document.RootElement.Clone(),
+            _ => JsonSerializer.SerializeToElement(value.ToString(), CodingAgentSessionJsonContext.Default.String)
+        };
+    }
+
     private static string? Normalize(string? value) =>
         string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 }
@@ -303,6 +330,9 @@ internal sealed class CodingAgentSessionMessage
     public string? Provider { get; init; }
     public string? Model { get; init; }
     public DateTimeOffset? Timestamp { get; init; }
+    public string? CustomType { get; init; }
+    public bool Display { get; init; }
+    public JsonElement? Details { get; init; }
     public List<CodingAgentSessionContent> Content { get; init; } = [];
 }
 
@@ -342,4 +372,5 @@ internal sealed class CodingAgentSessionContent
     WriteIndented = true,
     DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]
 [JsonSerializable(typeof(CodingAgentSessionDocument))]
+[JsonSerializable(typeof(string))]
 internal sealed partial class CodingAgentSessionJsonContext : JsonSerializerContext;

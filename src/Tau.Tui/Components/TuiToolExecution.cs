@@ -25,17 +25,20 @@ public sealed record TuiToolExecutionResult(
 
 public sealed partial class TuiToolExecution : ITuiComponent
 {
+    public const int DefaultPreviewLines = 20;
     private readonly string _toolName;
     private readonly string _toolCallId;
     private readonly TuiToolExecutionTheme _theme;
     private object? _args;
     private bool _expanded;
+    private int _previewLines = DefaultPreviewLines;
     private bool _showImages;
     private int _imageWidthCells;
     private bool _isPartial = true;
     private bool _executionStarted;
     private bool _argsComplete;
     private TuiToolExecutionResult? _result;
+    private string? _expandKeyHint;
 
     public TuiToolExecution(
         string toolName,
@@ -56,6 +59,7 @@ public sealed partial class TuiToolExecution : ITuiComponent
     public string ToolName => _toolName;
     public string ToolCallId => _toolCallId;
     public bool Expanded => _expanded;
+    public int PreviewLines => _previewLines;
     public bool ShowImages => _showImages;
     public int ImageWidthCells => _imageWidthCells;
     public bool IsPartial => _isPartial;
@@ -87,6 +91,16 @@ public sealed partial class TuiToolExecution : ITuiComponent
     public void SetExpanded(bool expanded)
     {
         _expanded = expanded;
+    }
+
+    public void SetExpandKeyHint(string? keyText)
+    {
+        _expandKeyHint = string.IsNullOrWhiteSpace(keyText) ? null : keyText.Trim();
+    }
+
+    public void SetPreviewLines(int previewLines)
+    {
+        _previewLines = Math.Max(1, previewLines);
     }
 
     public void SetShowImages(bool showImages)
@@ -154,12 +168,39 @@ public sealed partial class TuiToolExecution : ITuiComponent
         var output = GetTextOutput(_result, _showImages);
         if (!string.IsNullOrEmpty(output))
         {
-            builder.AppendLine();
-            builder.Append(output);
+            var outputLines = FormatTextOutput(output);
+            if (outputLines.Count > 0)
+            {
+                builder.AppendLine();
+                builder.AppendJoin('\n', outputLines);
+            }
         }
 
         return builder.ToString();
     }
+
+    private IReadOnlyList<string> FormatTextOutput(string output)
+    {
+        if (_expanded)
+        {
+            return output.Split('\n');
+        }
+
+        var logicalLines = output.Split('\n');
+        if (logicalLines.Length <= _previewLines)
+        {
+            return logicalLines;
+        }
+
+        var hiddenCount = logicalLines.Length - _previewLines;
+        return logicalLines
+            .Skip(hiddenCount)
+            .Concat([$"... {hiddenCount} more lines ({ExpandHintText()})"])
+            .ToArray();
+    }
+
+    private string ExpandHintText() =>
+        _expandKeyHint is null ? "expand to view" : $"{_expandKeyHint} to expand";
 
     private string FormatLine(string line, int width)
     {

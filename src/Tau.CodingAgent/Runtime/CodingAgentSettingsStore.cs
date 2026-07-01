@@ -27,6 +27,7 @@ public sealed record CodingAgentSettingsSnapshot(
     string? LastChangelogVersion = null,
     bool? TerminalShowImages = null,
     bool? TerminalClearOnShrink = null,
+    bool? HideThinkingBlock = null,
     bool? ImagesAutoResize = null,
     bool? ImagesBlockImages = null,
     bool? ShowHardwareCursor = null,
@@ -91,6 +92,7 @@ public sealed class CodingAgentSettingsStore
                 NormalizeOptionalString(document?.LastChangelogVersion),
                 document?.Terminal?.ShowImages,
                 document?.Terminal?.ClearOnShrink,
+                document?.HideThinkingBlock,
                 document?.Images?.AutoResize,
                 document?.Images?.BlockImages,
                 document?.ShowHardwareCursor,
@@ -143,6 +145,7 @@ public sealed class CodingAgentSettingsStore
             EnableInstallTelemetry = snapshot.EnableInstallTelemetry,
             LastChangelogVersion = NormalizeOptionalString(snapshot.LastChangelogVersion),
             Terminal = CreateTerminalSettingsDocument(snapshot),
+            HideThinkingBlock = snapshot.HideThinkingBlock,
             Images = CreateImageSettingsDocument(snapshot),
             ShowHardwareCursor = snapshot.ShowHardwareCursor,
             EditorPaddingX = NormalizeEditorPaddingX(snapshot.EditorPaddingX),
@@ -317,6 +320,7 @@ internal sealed class CodingAgentSettingsDocument
     public string? LastChangelogVersion { get; init; }
     public CodingAgentTerminalSettingsDocument? Terminal { get; init; }
     public CodingAgentImageSettingsDocument? Images { get; init; }
+    public bool? HideThinkingBlock { get; init; }
     public bool? ShowHardwareCursor { get; init; }
     public int? EditorPaddingX { get; init; }
     public int? AutocompleteMaxVisible { get; init; }

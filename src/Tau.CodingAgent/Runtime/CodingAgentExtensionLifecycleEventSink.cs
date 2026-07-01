@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Tau.AgentCore;
+using Tau.AgentCore.Harness;
 using Tau.Ai;
 
 namespace Tau.CodingAgent.Runtime;
@@ -16,6 +17,10 @@ public sealed record CodingAgentExtensionLifecycleEventError(
     string Runtime,
     string EventType,
     string Error);
+
+public sealed record CodingAgentExtensionLifecycleMessageEndResult(
+    IReadOnlyList<CodingAgentExtensionLifecycleEventError> Errors,
+    ChatMessage Message);
 
 public sealed class CodingAgentExtensionLifecycleEventSink
 {
@@ -91,6 +96,82 @@ public sealed class CodingAgentExtensionLifecycleEventSink
 
         return Task.FromResult<IReadOnlyList<CodingAgentExtensionLifecycleEventError>>(errors);
     }
+
+    /// <summary>
+    /// 发布 message_end lifecycle event，并返回扩展按顺序替换后的最终消息。
+    /// </summary>
+    /// <param name="message">准备结束并写入会话状态的消息。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>扩展错误集合与最终消息。</returns>
+    public Task<CodingAgentExtensionLifecycleMessageEndResult> TransformMessageEndAsync(
+        ChatMessage message,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        var errors = new List<CodingAgentExtensionLifecycleEventError>();
+        var currentMessage = message;
+        foreach (var module in _modules)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!module.EventTypes.Any(static type => type.Equals("message_end", StringComparison.Ordinal)))
+            {
+                continue;
+            }
+
+            using var payload = CodingAgentExtensionLifecycleEventJson.CreateDocument(new MessageEndEvent(currentMessage));
+            var result = _runtime.EmitEvent(module.FilePath, payload.RootElement);
+            if (!result.Success)
+            {
+                errors.Add(new CodingAgentExtensionLifecycleEventError(
+                    module.FilePath,
+                    module.Scope,
+                    module.Runtime,
+                    "message_end",
+                    result.Error ?? "javascript extension message_end handler failed"));
+                continue;
+            }
+
+            foreach (var handlerError in result.HandlerErrors)
+            {
+                errors.Add(new CodingAgentExtensionLifecycleEventError(
+                    module.FilePath,
+                    module.Scope,
+                    module.Runtime,
+                    "message_end",
+                    handlerError));
+            }
+
+            if (result.ReplacementMessage is null)
+            {
+                continue;
+            }
+
+            if (!IsCompatibleReplacement(currentMessage, result.ReplacementMessage))
+            {
+                errors.Add(new CodingAgentExtensionLifecycleEventError(
+                    module.FilePath,
+                    module.Scope,
+                    module.Runtime,
+                    "message_end",
+                    "message_end handlers must return a message with the same role and runtime type"));
+                continue;
+            }
+
+            currentMessage = result.ReplacementMessage;
+        }
+
+        return Task.FromResult(new CodingAgentExtensionLifecycleMessageEndResult(errors, currentMessage));
+    }
+
+    /// <summary>
+    /// 判断替换消息是否可以安全接替原消息。
+    /// </summary>
+    /// <param name="original">原始消息。</param>
+    /// <param name="replacement">扩展返回的替换消息。</param>
+    /// <returns>role 与 C# 消息类型一致时返回 <see langword="true"/>。</returns>
+    private static bool IsCompatibleReplacement(ChatMessage original, ChatMessage replacement) =>
+        replacement.Role.Equals(original.Role, StringComparison.Ordinal) &&
+        replacement.GetType() == original.GetType();
 }
 
 file static class CodingAgentExtensionLifecycleEventJson
@@ -222,6 +303,21 @@ file static class CodingAgentExtensionLifecycleEventJson
                 writer.WritePropertyName("content");
                 WriteContentBlocks(writer, toolResult.Content);
                 writer.WriteBoolean("isError", toolResult.IsError);
+                break;
+            case AgentCustomMessage custom:
+                writer.WriteString("customType", custom.CustomType);
+                writer.WritePropertyName("content");
+                WriteContentBlocks(writer, custom.Content);
+                writer.WriteBoolean("display", custom.Display);
+                if (custom.Details is not null)
+                {
+                    writer.WritePropertyName("details");
+                    WriteObjectValue(writer, custom.Details);
+                }
+                if (custom.Timestamp is not null)
+                {
+                    writer.WriteNumber("timestamp", custom.Timestamp.Value.ToUnixTimeMilliseconds());
+                }
                 break;
         }
 

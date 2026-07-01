@@ -16,6 +16,7 @@ public sealed record CodingAgentDisplayedMessage(
 
 public static partial class CodingAgentMessageDisplayFormatter
 {
+    public const string DefaultHiddenThinkingLabel = "Thinking...";
     public const string BranchSummaryKind = "branch-summary";
     public const string CompactionSummaryKind = "compaction-summary";
     public const string CustomKind = "custom";
@@ -38,6 +39,32 @@ public static partial class CodingAgentMessageDisplayFormatter
         return new CodingAgentDisplayedMessage(
             CustomKind,
             string.IsNullOrWhiteSpace(content) ? label : label + "\n" + content);
+    }
+
+    public static string FormatAssistantMessage(
+        AssistantMessage message,
+        bool hideThinkingBlock = false,
+        string? hiddenThinkingLabel = null)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+
+        return FormatContent(
+            message.Content,
+            hideThinkingBlock,
+            NormalizeHiddenThinkingLabel(hiddenThinkingLabel));
+    }
+
+    public static string FormatContentBlock(
+        ContentBlock block,
+        bool hideThinkingBlock = false,
+        string? hiddenThinkingLabel = null)
+    {
+        ArgumentNullException.ThrowIfNull(block);
+
+        return FormatBlock(
+            block,
+            hideThinkingBlock,
+            NormalizeHiddenThinkingLabel(hiddenThinkingLabel));
     }
 
     public static IReadOnlyList<CodingAgentDisplayedMessage> FormatUserMessage(
@@ -229,7 +256,13 @@ public static partial class CodingAgentMessageDisplayFormatter
         return summary.Length > 0;
     }
 
-    private static string ExtractText(IReadOnlyList<ContentBlock> content)
+    private static string ExtractText(IReadOnlyList<ContentBlock> content) =>
+        FormatContent(content, hideThinkingBlock: false, DefaultHiddenThinkingLabel);
+
+    private static string FormatContent(
+        IReadOnlyList<ContentBlock> content,
+        bool hideThinkingBlock,
+        string hiddenThinkingLabel)
     {
         if (content.Count == 0)
         {
@@ -238,18 +271,28 @@ public static partial class CodingAgentMessageDisplayFormatter
 
         return string.Join(
             "\n",
-            content.Select(FormatBlock).Where(static text => text.Length > 0));
+            content
+                .Select(block => FormatBlock(block, hideThinkingBlock, hiddenThinkingLabel))
+                .Where(static text => text.Length > 0));
     }
 
-    private static string FormatBlock(ContentBlock block) =>
+    private static string FormatBlock(
+        ContentBlock block,
+        bool hideThinkingBlock,
+        string hiddenThinkingLabel) =>
         block switch
         {
             TextContent text => text.Text,
             ImageContent image => $"[image:{image.MimeType}]",
-            ThinkingContent thinking => thinking.Thinking,
+            ThinkingContent thinking => hideThinkingBlock ? hiddenThinkingLabel : thinking.Thinking,
             ToolCallContent toolCall => $"[tool:{toolCall.Name}] {toolCall.Arguments}",
             _ => $"[{block.Type}]"
         };
+
+    private static string NormalizeHiddenThinkingLabel(string? hiddenThinkingLabel) =>
+        string.IsNullOrWhiteSpace(hiddenThinkingLabel)
+            ? DefaultHiddenThinkingLabel
+            : hiddenThinkingLabel.Trim();
 
     [GeneratedRegex(
         "^<skill name=\"(?<name>[^\"]+)\" location=\"(?<location>[^\"]+)\">\n(?<content>[\\s\\S]*?)\n</skill>(?:\n\n(?<userMessage>[\\s\\S]+))?$",

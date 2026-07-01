@@ -275,7 +275,9 @@ public sealed class ReadFileToolTests
     public async Task ExecuteAsync_WhenImageExceedsInlineLimit_OmitsAttachment()
     {
         var bytes = new byte[((ReadFileTool.DefaultMaxImageBase64Bytes + 3) / 4 * 3)];
-        Convert.FromHexString("89504E470D0A1A0A").CopyTo(bytes);
+        // 1. PNG 签名后必须跟长度为 13 的 IHDR chunk
+        // 2. 更严格的 MIME 嗅探需要真实 IHDR 才接受 image/png，不能只看裸签名
+        Convert.FromHexString("89504E470D0A1A0A0000000D49484452").CopyTo(bytes);
         var path = await CreateTempFileAsync(".png", bytes);
 
         try

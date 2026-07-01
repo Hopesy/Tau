@@ -1,4 +1,5 @@
 using Tau.AgentCore;
+using Tau.AgentCore.Harness;
 using Tau.AgentCore.Runtime;
 using Tau.Ai;
 using Tau.Ai.Auth;
@@ -14,6 +15,8 @@ public sealed class FakeCodingAgentRunner : ICodingAgentRunner, ICodingAgentTool
     private readonly object _gate = new();
     private readonly List<string> _pendingSteeringMessages = [];
     private readonly List<string> _pendingFollowUpMessages = [];
+    private readonly List<ChatMessage> _pendingSteeringChatMessages = [];
+    private readonly List<ChatMessage> _pendingFollowUpChatMessages = [];
     private int _activeCompactionCount;
     private readonly Dictionary<string, List<Model>> _models = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -54,9 +57,14 @@ public sealed class FakeCodingAgentRunner : ICodingAgentRunner, ICodingAgentTool
     public List<TauRuntimeLogContext?> RunLogContexts { get; } = [];
     public List<string> SteeringInputs { get; } = [];
     public List<IReadOnlyList<ContentBlock>> SteeringContentInputs { get; } = [];
+    public List<ChatMessage> SteeringChatInputs { get; } = [];
     public List<string> FollowUpInputs { get; } = [];
     public List<IReadOnlyList<ContentBlock>> FollowUpContentInputs { get; } = [];
+    public List<ChatMessage> FollowUpChatInputs { get; } = [];
     public List<ChatMessage> MutableMessages { get; } = [];
+    public List<ChatMessage> ChatInputs { get; } = [];
+    public List<IReadOnlyList<ChatMessage>> ChatBatchInputs { get; } = [];
+    public List<AgentEvent> PublishedLifecycleEvents { get; } = [];
     public Dictionary<string, object?> MutableToolResultDetailsByToolCallId { get; } = new(StringComparer.OrdinalIgnoreCase);
     public IReadOnlyList<ChatMessage> Messages => MutableMessages;
     public IReadOnlyDictionary<string, object?> ToolResultDetailsByToolCallId => MutableToolResultDetailsByToolCallId;
@@ -71,12 +79,16 @@ public sealed class FakeCodingAgentRunner : ICodingAgentRunner, ICodingAgentTool
         {
             lock (_gate)
             {
-                return _pendingSteeringMessages.Count + _pendingFollowUpMessages.Count;
+                return _pendingSteeringMessages.Count
+                    + _pendingFollowUpMessages.Count
+                    + _pendingSteeringChatMessages.Count
+                    + _pendingFollowUpChatMessages.Count;
             }
         }
     }
 
     public bool IsCompacting => Volatile.Read(ref _activeCompactionCount) > 0;
+    public bool IsStreaming { get; set; }
     public Func<string?, CancellationToken, Task<CodingAgentCompactionResult>>? CompactHandler { get; set; }
     public Func<IReadOnlyList<ChatMessage>, string?, bool, CancellationToken, Task<CodingAgentBranchSummaryResult>>? BranchSummaryHandler { get; set; }
     public Action<string>? SteeringObserver { get; set; }
@@ -96,6 +108,21 @@ public sealed class FakeCodingAgentRunner : ICodingAgentRunner, ICodingAgentTool
 
     public IReadOnlyList<Model> GetModels(string provider) =>
         _models.TryGetValue(provider, out var models) ? models : [];
+
+    /// <summary>
+    /// 向测试 runner 注册一个额外模型，用于覆盖模型选择相关分支。
+    /// </summary>
+    /// <param name="model">需要注册到测试模型目录中的模型。</param>
+    public void AddModel(Model model)
+    {
+        if (!_models.TryGetValue(model.Provider, out var models))
+        {
+            models = [];
+            _models[model.Provider] = models;
+        }
+
+        models.Add(model);
+    }
 
     public void SetModelReasoning(string provider, string modelId, bool reasoning)
     {
@@ -292,6 +319,20 @@ public sealed class FakeCodingAgentRunner : ICodingAgentRunner, ICodingAgentTool
         SteeringObserver?.Invoke(text);
     }
 
+    public void Steer(ChatMessage input)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+        SteeringChatInputs.Add(input);
+        var text = MessageText(input);
+        if (text.Length > 0)
+        {
+            SteeringInputs.Add(text);
+            SteeringObserver?.Invoke(text);
+        }
+
+        TrackPendingSteeringMessage(input);
+    }
+
     public void FollowUp(string input)
     {
         FollowUpInputs.Add(input);
@@ -306,6 +347,57 @@ public sealed class FakeCodingAgentRunner : ICodingAgentRunner, ICodingAgentTool
         FollowUpInputs.Add(text);
         TrackPendingFollowUpMessage(text);
         FollowUpObserver?.Invoke(text);
+    }
+
+    public void FollowUp(ChatMessage input)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+        FollowUpChatInputs.Add(input);
+        var text = MessageText(input);
+        if (text.Length > 0)
+        {
+            FollowUpInputs.Add(text);
+            FollowUpObserver?.Invoke(text);
+        }
+
+        TrackPendingFollowUpMessage(input);
+    }
+
+    public CodingAgentQueuedMessages DrainQueuedMessages()
+    {
+        lock (_gate)
+        {
+            var queued = new CodingAgentQueuedMessages(
+                _pendingSteeringMessages
+                    .Concat(_pendingSteeringChatMessages.Select(MessageText))
+                    .Where(static text => text.Length > 0)
+                    .ToArray(),
+                _pendingFollowUpMessages
+                    .Concat(_pendingFollowUpChatMessages.Select(MessageText))
+                    .Where(static text => text.Length > 0)
+                    .ToArray());
+            _pendingSteeringMessages.Clear();
+            _pendingFollowUpMessages.Clear();
+            _pendingSteeringChatMessages.Clear();
+            _pendingFollowUpChatMessages.Clear();
+            return queued;
+        }
+    }
+
+    public void AppendMessage(ChatMessage message)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        MutableMessages.Add(message);
+    }
+
+    public Task PublishLifecycleEventAsync(
+        AgentEvent agentEvent,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(agentEvent);
+        cancellationToken.ThrowIfCancellationRequested();
+        PublishedLifecycleEvents.Add(agentEvent);
+        return Task.CompletedTask;
     }
 
     public IAsyncEnumerable<AgentEvent> RunAsync(string input, CancellationToken cancellationToken = default) =>
@@ -336,6 +428,38 @@ public sealed class FakeCodingAgentRunner : ICodingAgentRunner, ICodingAgentTool
         return TrackPendingMessageConsumption(_run(ContentText(input), cancellationToken), cancellationToken);
     }
 
+    public IAsyncEnumerable<AgentEvent> RunAsync(ChatMessage input, CancellationToken cancellationToken = default) =>
+        RunAsync(input, logContext: null, cancellationToken);
+
+    public IAsyncEnumerable<AgentEvent> RunAsync(
+        ChatMessage input,
+        TauRuntimeLogContext? logContext,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+        ChatInputs.Add(input);
+        RunLogContexts.Add(logContext);
+        return TrackPendingMessageConsumption(_run(MessageText(input), cancellationToken), cancellationToken);
+    }
+
+    public IAsyncEnumerable<AgentEvent> RunAsync(
+        IReadOnlyList<ChatMessage> input,
+        CancellationToken cancellationToken = default) =>
+        RunAsync(input, logContext: null, cancellationToken);
+
+    public IAsyncEnumerable<AgentEvent> RunAsync(
+        IReadOnlyList<ChatMessage> input,
+        TauRuntimeLogContext? logContext,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+        ChatBatchInputs.Add(input);
+        RunLogContexts.Add(logContext);
+        return TrackPendingMessageConsumption(
+            _run(string.Join(Environment.NewLine, input.Select(MessageText).Where(static text => text.Length > 0)), cancellationToken),
+            cancellationToken);
+    }
+
     private async IAsyncEnumerable<AgentEvent> TrackPendingMessageConsumption(
         IAsyncEnumerable<AgentEvent> events,
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
@@ -359,11 +483,27 @@ public sealed class FakeCodingAgentRunner : ICodingAgentRunner, ICodingAgentTool
         }
     }
 
+    private void TrackPendingSteeringMessage(ChatMessage input)
+    {
+        lock (_gate)
+        {
+            _pendingSteeringChatMessages.Add(input);
+        }
+    }
+
     private void TrackPendingFollowUpMessage(string input)
     {
         lock (_gate)
         {
             _pendingFollowUpMessages.Add(input);
+        }
+    }
+
+    private void TrackPendingFollowUpMessage(ChatMessage input)
+    {
+        lock (_gate)
+        {
+            _pendingFollowUpChatMessages.Add(input);
         }
     }
 
@@ -378,10 +518,26 @@ public sealed class FakeCodingAgentRunner : ICodingAgentRunner, ICodingAgentTool
                 return;
             }
 
+            var steeringChatIndex = _pendingSteeringChatMessages.FindIndex(message =>
+                string.Equals(MessageText(message), input, StringComparison.Ordinal));
+            if (steeringChatIndex >= 0)
+            {
+                _pendingSteeringChatMessages.RemoveAt(steeringChatIndex);
+                return;
+            }
+
             var followUpIndex = _pendingFollowUpMessages.IndexOf(input);
             if (followUpIndex >= 0)
             {
                 _pendingFollowUpMessages.RemoveAt(followUpIndex);
+                return;
+            }
+
+            var followUpChatIndex = _pendingFollowUpChatMessages.FindIndex(message =>
+                string.Equals(MessageText(message), input, StringComparison.Ordinal));
+            if (followUpChatIndex >= 0)
+            {
+                _pendingFollowUpChatMessages.RemoveAt(followUpChatIndex);
             }
         }
     }
@@ -392,9 +548,18 @@ public sealed class FakeCodingAgentRunner : ICodingAgentRunner, ICodingAgentTool
         {
             _pendingSteeringMessages.Clear();
             _pendingFollowUpMessages.Clear();
+            _pendingSteeringChatMessages.Clear();
+            _pendingFollowUpChatMessages.Clear();
         }
     }
 
     private static string ContentText(IReadOnlyList<ContentBlock> input) =>
         string.Join(Environment.NewLine, input.OfType<TextContent>().Select(content => content.Text));
+
+    private static string MessageText(ChatMessage message) => message switch
+    {
+        UserMessage user => ContentText(user.Content),
+        AgentCustomMessage custom => ContentText(custom.Content),
+        _ => string.Empty
+    };
 }

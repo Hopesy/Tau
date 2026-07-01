@@ -16,6 +16,7 @@ public sealed partial class TuiBashExecution : ITuiComponent
     private int? _exitCode;
     private bool _truncated;
     private string? _fullOutputPath;
+    private string? _expandKeyHint;
 
     public TuiBashExecution(
         string command,
@@ -35,6 +36,14 @@ public sealed partial class TuiBashExecution : ITuiComponent
     public void SetExpanded(bool expanded)
     {
         _expanded = expanded;
+    }
+
+    /// <summary>
+    /// 设置展开/收起提示中显示的快捷键文本，例如 <c>Ctrl+O</c>；为空时回退到默认提示文案。
+    /// </summary>
+    public void SetExpandKeyHint(string? keyText)
+    {
+        _expandKeyHint = string.IsNullOrWhiteSpace(keyText) ? null : keyText.Trim();
     }
 
     public void AppendOutput(string? chunk)
@@ -105,7 +114,7 @@ public sealed partial class TuiBashExecution : ITuiComponent
 
                 if (preview.SkippedCount > 0)
                 {
-                    lines.Add(FormatLine($"... {preview.SkippedCount} more visual lines (expand to view)", width));
+                    lines.Add(FormatLine($"... {preview.SkippedCount} more visual lines ({ExpandHintText()})", width));
                 }
             }
         }
@@ -123,6 +132,12 @@ public sealed partial class TuiBashExecution : ITuiComponent
         var prefix = _excludeFromContext ? "!! $" : "$";
         return $"{prefix} {_command}";
     }
+
+    private string ExpandHintText() =>
+        _expandKeyHint is null ? "expand to view" : $"{_expandKeyHint} to expand";
+
+    private string CollapseHintText() =>
+        _expandKeyHint is null ? "collapse to preview" : $"{_expandKeyHint} to collapse";
 
     private string GetAvailableOutput()
     {
@@ -144,7 +159,7 @@ public sealed partial class TuiBashExecution : ITuiComponent
 
         if (_expanded && _outputLines.Count > _previewLines)
         {
-            yield return "(collapse to preview)";
+            yield return $"({CollapseHintText()})";
         }
 
         if (_status == BashExecutionStatus.Cancelled)

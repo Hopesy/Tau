@@ -10,6 +10,7 @@ internal static class CodingAgentHotkeysFormatter
         {
             [EditorAction.Cancel] = "Cancel input",
             [EditorAction.Submit] = "Submit input",
+            [EditorAction.NewLine] = "Insert newline",
             [EditorAction.DeletePrevChar] = "Delete previous character",
             [EditorAction.DeletePrevWord] = "Delete previous word",
             [EditorAction.DeleteNextChar] = "Delete next character",
@@ -28,7 +29,12 @@ internal static class CodingAgentHotkeysFormatter
             [EditorAction.CycleModelForward] = "Cycle to next model",
             [EditorAction.CycleModelBackward] = "Cycle to previous model",
             [EditorAction.SelectModel] = "Open model selector",
-            [EditorAction.PasteImage] = "Paste image from clipboard"
+            [EditorAction.PasteImage] = "Paste image from clipboard",
+            [EditorAction.ToggleThinkingBlock] = "Toggle thinking blocks",
+            [EditorAction.ToggleToolOutputExpansion] = "Toggle tool output",
+            [EditorAction.OpenExternalEditor] = "Open external editor",
+            [EditorAction.QueueFollowUpMessage] = "Queue follow-up message",
+            [EditorAction.RestoreQueuedMessages] = "Restore queued messages"
         };
 
     public static string Format(IKeyBindingMap bindings)
@@ -60,6 +66,7 @@ internal static class CodingAgentHotkeysFormatter
     private static string FormatActionName(EditorAction action) => action switch
     {
         EditorAction.DeletePrevChar => "delete-prev-char",
+        EditorAction.NewLine => "new-line",
         EditorAction.DeletePrevWord => "delete-prev-word",
         EditorAction.DeleteNextChar => "delete-next-char",
         EditorAction.DeleteNextWord => "delete-next-word",
@@ -78,6 +85,11 @@ internal static class CodingAgentHotkeysFormatter
         EditorAction.CycleModelBackward => "cycle-model-backward",
         EditorAction.SelectModel => "select-model",
         EditorAction.PasteImage => "paste-image",
+        EditorAction.ToggleThinkingBlock => "toggle-thinking-block",
+        EditorAction.ToggleToolOutputExpansion => "toggle-tool-output",
+        EditorAction.OpenExternalEditor => "open-external-editor",
+        EditorAction.QueueFollowUpMessage => "queue-follow-up-message",
+        EditorAction.RestoreQueuedMessages => "restore-queued-messages",
         _ => action.ToString().ToLowerInvariant()
     };
 

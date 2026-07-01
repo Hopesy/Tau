@@ -151,4 +151,39 @@ public sealed class CodingAgentMessageDisplayFormatterTests
             """,
             rendered.Text);
     }
+
+    [Fact]
+    public void FormatAssistantMessage_CanCollapseThinkingToDefaultLabel()
+    {
+        var message = new AssistantMessage(
+        [
+            new ThinkingContent("internal reasoning"),
+            new TextContent("visible answer")
+        ]);
+
+        var rendered = CodingAgentMessageDisplayFormatter.FormatAssistantMessage(
+            message,
+            hideThinkingBlock: true);
+
+        Assert.Equal(
+            """
+            Thinking...
+            visible answer
+            """,
+            rendered);
+        Assert.DoesNotContain("internal reasoning", rendered, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void FormatAssistantMessage_UsesCustomHiddenThinkingLabel()
+    {
+        var message = new AssistantMessage([new ThinkingContent("internal reasoning")]);
+
+        var rendered = CodingAgentMessageDisplayFormatter.FormatAssistantMessage(
+            message,
+            hideThinkingBlock: true,
+            hiddenThinkingLabel: "Pondering...");
+
+        Assert.Equal("Pondering...", rendered);
+    }
 }

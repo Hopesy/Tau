@@ -241,6 +241,21 @@ public sealed class CodingAgentRpcExtensionUiBridge
             cancellationToken);
     }
 
+    public Task SetHiddenThinkingLabelAsync(
+        string? label,
+        CancellationToken cancellationToken = default)
+    {
+        GetFooterDataProvider()?.SetHiddenThinkingLabel(label);
+
+        return SendFireAndForgetAsync(
+            new Dictionary<string, object?>
+            {
+                ["method"] = "setHiddenThinkingLabel",
+                ["hiddenThinkingLabel"] = label
+            },
+            cancellationToken);
+    }
+
     public Task SetTitleAsync(string title, CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(title);

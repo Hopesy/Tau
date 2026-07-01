@@ -23,6 +23,7 @@ public sealed class CodingAgentCommandRouter
     private readonly CodingAgentAutoCompactionOptions _autoCompaction;
     private readonly Action<CodingAgentRetryOptions>? _retryOptionsChanged;
     private readonly Action<bool?>? _autoCompactionChanged;
+    private readonly Action<bool>? _hideThinkingBlockChanged;
     private readonly Func<int, IReadOnlyList<string>>? _historySnapshotProvider;
     private readonly Action? _clearScreenAction;
     private readonly Action<string?>? _inputDraftSetter;
@@ -65,6 +66,7 @@ public sealed class CodingAgentCommandRouter
         CodingAgentRetryOptions? retryOptions = null,
         Action<CodingAgentRetryOptions>? retryOptionsChanged = null,
         Action<bool?>? autoCompactionChanged = null,
+        Action<bool>? hideThinkingBlockChanged = null,
         Func<int, IReadOnlyList<string>>? historySnapshotProvider = null,
         Action? clearScreenAction = null,
         Action<string?>? inputDraftSetter = null,
@@ -104,6 +106,7 @@ public sealed class CodingAgentCommandRouter
         _retryOptions = retryOptions ?? CodingAgentRetryOptions.Disabled;
         _retryOptionsChanged = retryOptionsChanged;
         _autoCompactionChanged = autoCompactionChanged;
+        _hideThinkingBlockChanged = hideThinkingBlockChanged;
         _historySnapshotProvider = historySnapshotProvider;
         _clearScreenAction = clearScreenAction;
         _inputDraftSetter = inputDraftSetter;
@@ -154,6 +157,8 @@ public sealed class CodingAgentCommandRouter
                 "/help" => HandleHelpCommand(parts),
                 "/reload" => HandleReloadCommand(parts),
                 "/hotkeys" => HandleHotkeysCommand(parts),
+                "/arminsayshi" => HandleArminSaysHiCommand(parts),
+                "/dementedelves" => HandleDementedDelvesCommand(parts),
                 "/settings" => await HandleSettingsCommandAsync(parts, cancellationToken).ConfigureAwait(false),
                 "/theme" => await HandleThemeCommandAsync(parts, cancellationToken).ConfigureAwait(false),
                 "/name" => HandleNameCommand(input, parts),
@@ -311,6 +316,30 @@ public sealed class CodingAgentCommandRouter
         return CodingAgentCommandResult.Status(CodingAgentHotkeysFormatter.Format(_keyBindings));
     }
 
+    private static CodingAgentCommandResult HandleArminSaysHiCommand(IReadOnlyList<string> parts)
+    {
+        if (parts.Count != 1)
+        {
+            return CodingAgentCommandResult.Error("usage: /arminsayshi");
+        }
+
+        return CodingAgentCommandResult.Status(
+            string.Empty,
+            [CodingAgentEasterEggFormatter.FormatArminSaysHi()]);
+    }
+
+    private static CodingAgentCommandResult HandleDementedDelvesCommand(IReadOnlyList<string> parts)
+    {
+        if (parts.Count != 1)
+        {
+            return CodingAgentCommandResult.Error("usage: /dementedelves");
+        }
+
+        return CodingAgentCommandResult.Status(
+            string.Empty,
+            [CodingAgentEasterEggFormatter.FormatEarendilAnnouncement()]);
+    }
+
     private async Task<CodingAgentCommandResult> HandleSettingsCommandAsync(
         IReadOnlyList<string> parts,
         CancellationToken cancellationToken)
@@ -413,6 +442,8 @@ public sealed class CodingAgentCommandRouter
                 SaveBooleanSetting(current, settingValue, "auto-resize images", value => current with { ImagesAutoResize = value }),
             CodingAgentSettingsSelector.ImagesBlockImagesAction =>
                 SaveBooleanSetting(current, settingValue, "block images", value => current with { ImagesBlockImages = value }),
+            CodingAgentSettingsSelector.HideThinkingBlockAction =>
+                SaveHideThinkingBlockValue(current, settingValue),
             CodingAgentSettingsSelector.ShowHardwareCursorAction =>
                 SaveBooleanSetting(current, settingValue, "show hardware cursor", value => current with { ShowHardwareCursor = value }),
             CodingAgentSettingsSelector.EditorPaddingAction =>
@@ -569,6 +600,18 @@ public sealed class CodingAgentCommandRouter
         return CodingAgentCommandResult.Status($"{label}: {FormatSettingsBoolean(enabled)}");
     }
 
+    private CodingAgentCommandResult SaveHideThinkingBlockValue(CodingAgentSettingsSnapshot current, string value)
+    {
+        if (!TryParseSettingsBoolean(value, out var enabled))
+        {
+            return CodingAgentCommandResult.Error($"settings selector returned unsupported boolean '{value}'");
+        }
+
+        _settingsStore?.Save(current with { HideThinkingBlock = enabled });
+        _hideThinkingBlockChanged?.Invoke(enabled);
+        return CodingAgentCommandResult.Status($"hide thinking blocks: {FormatSettingsBoolean(enabled)}");
+    }
+
     private CodingAgentCommandResult SaveBoundedIntSetting(
         CodingAgentSettingsSnapshot current,
         string value,
@@ -638,6 +681,7 @@ public sealed class CodingAgentCommandRouter
             $"tree filter: {FormatTreeFilterSetting(settings.TreeFilterMode)}",
             $"retry: {FormatRetryPolicy(CodingAgentRetryOptions.FromSettingsOrEnvironment(settings))}",
             $"default thinking: {FormatSettingsThinkingLevel(settings.DefaultThinkingLevel)}",
+            $"hide thinking blocks: {FormatSettingsBoolean(settings.HideThinkingBlock ?? false)}",
             $"steering mode: {CodingAgentQueueModes.NormalizeOrDefault(settings.SteeringMode)}",
             $"follow-up mode: {CodingAgentQueueModes.NormalizeOrDefault(settings.FollowUpMode)}",
             $"auto compaction: {FormatSettingsAutoCompaction(settings.AutoCompactionEnabled)}",
@@ -1459,7 +1503,7 @@ public sealed class CodingAgentCommandRouter
         ApplyScopedThinkingOverride(next.ThinkingLevel);
         _treeSessionController?.SyncFromRunner(_runner);
         var scopeSuffix = FormatModelCycleScopeSuffix(isScoped, next.ThinkingLevel, _runner.ThinkingLevel);
-        return CodingAgentCommandResult.Status($"model: {selected.Provider}/{selected.Id}{scopeSuffix}");
+        return ModelStatusWithEasterEgg(selected, $"model: {selected.Provider}/{selected.Id}{scopeSuffix}");
     }
 
     public async Task<CodingAgentCommandResult> SelectModelAsync(
@@ -1508,7 +1552,7 @@ public sealed class CodingAgentCommandRouter
         SaveDefaultModel(model);
         ClampCurrentThinkingLevel();
         _treeSessionController?.SyncFromRunner(_runner);
-        return CodingAgentCommandResult.Status($"model: {model.Provider}/{model.Id}");
+        return ModelStatusWithEasterEgg(model, $"model: {model.Provider}/{model.Id}");
     }
 
     private async Task<CodingAgentCommandResult> HandleModelCommandAsync(
@@ -1560,7 +1604,7 @@ public sealed class CodingAgentCommandRouter
         SaveDefaultModel(selected);
         ClampCurrentThinkingLevel();
         _treeSessionController?.SyncFromRunner(_runner);
-        return CodingAgentCommandResult.Status($"model: {selected.Provider}/{selected.Id}");
+        return ModelStatusWithEasterEgg(selected, $"model: {selected.Provider}/{selected.Id}");
     }
 
     private CodingAgentCommandResult HandleProviderCommand(IReadOnlyList<string> parts)
@@ -1579,7 +1623,7 @@ public sealed class CodingAgentCommandRouter
         SaveDefaultModel(selected);
         ClampCurrentThinkingLevel();
         _treeSessionController?.SyncFromRunner(_runner);
-        return CodingAgentCommandResult.Status($"model: {selected.Provider}/{selected.Id}");
+        return ModelStatusWithEasterEgg(selected, $"model: {selected.Provider}/{selected.Id}");
     }
 
     private CodingAgentCommandResult HandleModelsCommand(IReadOnlyList<string> parts)
@@ -1745,6 +1789,18 @@ public sealed class CodingAgentCommandRouter
     private IReadOnlyList<Model> GetAuthConfiguredModels(IReadOnlyList<Model>? registeredModels = null)
     {
         return CodingAgentModelAvailability.GetAuthConfiguredModels(_runner, registeredModels);
+    }
+
+    private static CodingAgentCommandResult ModelStatusWithEasterEgg(
+        Model selected,
+        string message)
+    {
+        if (CodingAgentEasterEggFormatter.TryFormatDaxnuts(selected, out var easterEgg))
+        {
+            return CodingAgentCommandResult.Status(message, [easterEgg]);
+        }
+
+        return CodingAgentCommandResult.Status(message);
     }
 
     private List<CodingAgentScopedModelEntry> GetModelCycleCandidates(out bool isScoped)
@@ -2535,8 +2591,8 @@ public sealed class CodingAgentCommandRouter
             var block = content[blockIndex];
             string? text = block switch
             {
-                TextContent t => t.Text,
-                ToolCallContent c => $"[{c.Name}] {c.Arguments}",
+                TextContent or ThinkingContent or ToolCallContent =>
+                    CodingAgentMessageDisplayFormatter.FormatContentBlock(block),
                 _ => null
             };
 

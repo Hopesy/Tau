@@ -604,6 +604,9 @@ var runner = RuntimeCodingAgentRunner.Create(
 runner.SessionName = session.Name;
 runner.SteeringMode = CodingAgentQueueModes.ToAgentQueueMode(settings.SteeringMode);
 runner.FollowUpMode = CodingAgentQueueModes.ToAgentQueueMode(settings.FollowUpMode);
+runner.InstallTelemetryEnabled = CodingAgentTelemetry.IsInstallTelemetryEnabled(
+    settings,
+    Environment.GetEnvironmentVariable("PI_TELEMETRY"));
 var autoCompaction = CodingAgentAutoCompactionOptions.FromEnvironment();
 // An explicit --thinking flag overrides the persisted defaultThinkingLevel, mirroring upstream
 // main.ts where parsed.thinking takes precedence over saved/scoped thinking levels.
@@ -685,6 +688,7 @@ var host = new CodingAgentHost(
     autoCompaction: autoCompaction,
     autoCompactionEnabled: settings.AutoCompactionEnabled,
     retryOptions: CodingAgentRetryOptions.FromSettingsOrEnvironment(settings),
+    hideThinkingBlock: settings.HideThinkingBlock ?? false,
     turnInputSource: editor is null
         ? null
         : compositionSession is null

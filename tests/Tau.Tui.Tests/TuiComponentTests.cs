@@ -311,6 +311,31 @@ public sealed class TuiComponentTests
     }
 
     [Fact]
+    public void ToolExecution_CollapsedPreviewKeepsTailAndExpandedShowsFullOutput()
+    {
+        var tool = new TuiToolExecution("grep", "call-preview");
+        tool.SetPreviewLines(2);
+        tool.UpdateResult(new TuiToolExecutionResult([new TuiToolTextBlock("one\ntwo\nthree\nfour")]));
+
+        var collapsed = string.Join('\n', tool.Render(40));
+
+        Assert.DoesNotContain(" one", collapsed, StringComparison.Ordinal);
+        Assert.DoesNotContain(" two", collapsed, StringComparison.Ordinal);
+        Assert.Contains(" three", collapsed, StringComparison.Ordinal);
+        Assert.Contains(" four", collapsed, StringComparison.Ordinal);
+        Assert.Contains("... 2 more lines (expand to view)", collapsed, StringComparison.Ordinal);
+
+        tool.SetExpanded(true);
+        var expanded = string.Join('\n', tool.Render(40));
+
+        Assert.Contains(" one", expanded, StringComparison.Ordinal);
+        Assert.Contains(" two", expanded, StringComparison.Ordinal);
+        Assert.Contains(" three", expanded, StringComparison.Ordinal);
+        Assert.Contains(" four", expanded, StringComparison.Ordinal);
+        Assert.DoesNotContain("more lines", expanded, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void ToolExecution_RendersImageBlocksWhenTerminalSupportsKitty()
     {
         TuiTerminalImage.SetCellDimensions(new TuiCellDimensions(10, 10));

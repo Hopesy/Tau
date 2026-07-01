@@ -208,6 +208,9 @@ public static class CodingAgentSdk
         runner.SteeringMode = CodingAgentQueueModes.ToAgentQueueMode(settings.SteeringMode);
         runner.FollowUpMode = CodingAgentQueueModes.ToAgentQueueMode(settings.FollowUpMode);
         runner.ThinkingLevel = thinkingLevel;
+        runner.InstallTelemetryEnabled = CodingAgentTelemetry.IsInstallTelemetryEnabled(
+            settings,
+            Environment.GetEnvironmentVariable("PI_TELEMETRY"));
 
         return Task.FromResult(new CodingAgentSdkSession(
             runner,

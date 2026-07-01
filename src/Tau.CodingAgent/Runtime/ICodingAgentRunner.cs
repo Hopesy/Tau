@@ -7,6 +7,10 @@ using Tau.Ai.Observability;
 
 namespace Tau.CodingAgent.Runtime;
 
+public sealed record CodingAgentQueuedMessages(
+    IReadOnlyList<string> Steering,
+    IReadOnlyList<string> FollowUp);
+
 public interface ICodingAgentRunner
 {
     IReadOnlyList<ChatMessage> Messages { get; }
@@ -16,6 +20,7 @@ public interface ICodingAgentRunner
     AgentQueueMode SteeringMode { get; set; }
     AgentQueueMode FollowUpMode { get; set; }
     int PendingMessageCount { get; }
+    bool IsStreaming { get; }
     bool IsCompacting { get; }
     IReadOnlyList<string> GetProviders();
     IReadOnlyList<Model> GetModels(string provider);
@@ -37,12 +42,19 @@ public interface ICodingAgentRunner
         CancellationToken cancellationToken = default);
     void Steer(string input);
     void Steer(IReadOnlyList<ContentBlock> input);
+    void Steer(ChatMessage input);
     void FollowUp(string input);
     void FollowUp(IReadOnlyList<ContentBlock> input);
+    void FollowUp(ChatMessage input);
+    CodingAgentQueuedMessages DrainQueuedMessages();
+    void AppendMessage(ChatMessage message);
+    Task PublishLifecycleEventAsync(AgentEvent agentEvent, CancellationToken cancellationToken = default);
     void RestoreSession(CodingAgentSessionSnapshot snapshot);
     void ResetSession();
     IAsyncEnumerable<AgentEvent> RunAsync(string input, CancellationToken cancellationToken = default);
     IAsyncEnumerable<AgentEvent> RunAsync(IReadOnlyList<ContentBlock> input, CancellationToken cancellationToken = default);
+    IAsyncEnumerable<AgentEvent> RunAsync(ChatMessage input, CancellationToken cancellationToken = default);
+    IAsyncEnumerable<AgentEvent> RunAsync(IReadOnlyList<ChatMessage> input, CancellationToken cancellationToken = default);
     IAsyncEnumerable<AgentEvent> RunAsync(
         string input,
         TauRuntimeLogContext? logContext,
@@ -50,6 +62,16 @@ public interface ICodingAgentRunner
         RunAsync(input, cancellationToken);
     IAsyncEnumerable<AgentEvent> RunAsync(
         IReadOnlyList<ContentBlock> input,
+        TauRuntimeLogContext? logContext,
+        CancellationToken cancellationToken) =>
+        RunAsync(input, cancellationToken);
+    IAsyncEnumerable<AgentEvent> RunAsync(
+        ChatMessage input,
+        TauRuntimeLogContext? logContext,
+        CancellationToken cancellationToken) =>
+        RunAsync(input, cancellationToken);
+    IAsyncEnumerable<AgentEvent> RunAsync(
+        IReadOnlyList<ChatMessage> input,
         TauRuntimeLogContext? logContext,
         CancellationToken cancellationToken) =>
         RunAsync(input, cancellationToken);

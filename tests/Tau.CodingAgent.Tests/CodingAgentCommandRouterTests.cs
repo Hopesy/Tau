@@ -55,6 +55,63 @@ public class CodingAgentCommandRouterTests
     }
 
     [Fact]
+    public async Task TryHandleAsync_ArminSaysHiCommand_ReturnsCustomDisplayMessage()
+    {
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var router = new CodingAgentCommandRouter(runner);
+
+        var result = await router.TryHandleAsync("/arminsayshi");
+
+        Assert.True(result.Handled);
+        Assert.False(result.IsError);
+        Assert.Equal(string.Empty, result.Message);
+        var displayMessage = Assert.Single(result.DisplayMessages ?? []);
+        Assert.Equal(CodingAgentMessageDisplayFormatter.CustomKind, displayMessage.Kind);
+        Assert.Contains("ARMIN SAYS HI", displayMessage.Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_DementedDelvesCommand_ReturnsAnnouncementDisplayMessage()
+    {
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        var router = new CodingAgentCommandRouter(runner);
+
+        var result = await router.TryHandleAsync("/dementedelves");
+
+        Assert.True(result.Handled);
+        Assert.False(result.IsError);
+        Assert.Equal(string.Empty, result.Message);
+        var displayMessage = Assert.Single(result.DisplayMessages ?? []);
+        Assert.Equal(CodingAgentMessageDisplayFormatter.CustomKind, displayMessage.Kind);
+        Assert.Contains("pi has joined Earendil", displayMessage.Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_ModelCommand_WithOpenCodeKimiK25_ReturnsDaxnutsDisplayMessage()
+    {
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.AddModel(new Model
+        {
+            Provider = "opencode",
+            Id = "kimi-k2.5-preview",
+            Name = "Kimi K2.5 Preview",
+            Api = "openai-chat-completions",
+            ContextWindow = 256_000
+        });
+        runner.ConfigureAuth("opencode");
+        var router = new CodingAgentCommandRouter(runner);
+
+        var result = await router.TryHandleAsync("/model opencode kimi-k2.5-preview");
+
+        Assert.True(result.Handled);
+        Assert.False(result.IsError);
+        Assert.Equal("model: opencode/kimi-k2.5-preview", result.Message);
+        var displayMessage = Assert.Single(result.DisplayMessages ?? []);
+        Assert.Equal(CodingAgentMessageDisplayFormatter.CustomKind, displayMessage.Kind);
+        Assert.Contains("Powered by daxnuts", displayMessage.Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task TryHandleAsync_ScopedModelsCommand_ShowsAllModelsWhenUnset()
     {
         var settingsPath = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-scoped-models-{Guid.NewGuid():N}.json");
@@ -539,6 +596,7 @@ public class CodingAgentCommandRouterTests
             CodingAgentSettingsSelector.FormatSelection(CodingAgentSettingsSelector.TerminalShowImagesAction, "false"),
             CodingAgentSettingsSelector.FormatSelection(CodingAgentSettingsSelector.ImagesAutoResizeAction, "false"),
             CodingAgentSettingsSelector.FormatSelection(CodingAgentSettingsSelector.ImagesBlockImagesAction, "true"),
+            CodingAgentSettingsSelector.FormatSelection(CodingAgentSettingsSelector.HideThinkingBlockAction, "true"),
             CodingAgentSettingsSelector.FormatSelection(CodingAgentSettingsSelector.ShowHardwareCursorAction, "true"),
             CodingAgentSettingsSelector.FormatSelection(CodingAgentSettingsSelector.EditorPaddingAction, "3"),
             CodingAgentSettingsSelector.FormatSelection(CodingAgentSettingsSelector.AutocompleteMaxVisibleAction, "15"),
@@ -553,10 +611,12 @@ public class CodingAgentCommandRouterTests
             CodingAgentSettingsSelector.FormatSelection(CodingAgentSettingsSelector.AutoCompactionAction, "true")
         ]);
         bool? autoCompactionChanged = null;
+        bool? hideThinkingBlockChanged = null;
         var router = new CodingAgentCommandRouter(
             runner,
             settingsStore,
             autoCompactionChanged: enabled => autoCompactionChanged = enabled,
+            hideThinkingBlockChanged: enabled => hideThinkingBlockChanged = enabled,
             settingsSelector: (_, _) => Task.FromResult(selections.Dequeue()));
 
         try
@@ -586,6 +646,7 @@ public class CodingAgentCommandRouterTests
             Assert.Contains(results, result => result.Message == "show images: disabled");
             Assert.Contains(results, result => result.Message == "auto-resize images: disabled");
             Assert.Contains(results, result => result.Message == "block images: enabled");
+            Assert.Contains(results, result => result.Message == "hide thinking blocks: enabled");
             Assert.Contains(results, result => result.Message == "show hardware cursor: enabled");
             Assert.Contains(results, result => result.Message == "editor padding: 3");
             Assert.Contains(results, result => result.Message == "autocomplete max items: 15");
@@ -602,6 +663,7 @@ public class CodingAgentCommandRouterTests
             Assert.False(saved.TerminalShowImages);
             Assert.False(saved.ImagesAutoResize);
             Assert.True(saved.ImagesBlockImages);
+            Assert.True(saved.HideThinkingBlock);
             Assert.True(saved.ShowHardwareCursor);
             Assert.Equal(3, saved.EditorPaddingX);
             Assert.Equal(15, saved.AutocompleteMaxVisible);
@@ -618,6 +680,7 @@ public class CodingAgentCommandRouterTests
             Assert.Equal(AgentQueueMode.All, runner.FollowUpMode);
             Assert.Equal(ThinkingLevel.High, runner.ThinkingLevel);
             Assert.True(autoCompactionChanged);
+            Assert.True(hideThinkingBlockChanged);
             Assert.Equal("openai", saved.DefaultProvider);
             Assert.Equal("gpt-5.4", saved.DefaultModel);
             Assert.Equal(4, saved.RetryMaxAttempts);
@@ -1816,7 +1879,11 @@ public class CodingAgentCommandRouterTests
 
             var hotkeys = await router.TryHandleAsync("/hotkeys");
             Assert.Contains("F2", hotkeys.Message, StringComparison.Ordinal);
-            Assert.DoesNotContain("Enter", hotkeys.Message, StringComparison.Ordinal);
+            Assert.DoesNotContain("submit               Enter", hotkeys.Message, StringComparison.Ordinal);
+            Assert.Contains("queue-follow-up-message", hotkeys.Message, StringComparison.Ordinal);
+            Assert.Contains("Alt+Enter", hotkeys.Message, StringComparison.Ordinal);
+            Assert.Contains("restore-queued-messages", hotkeys.Message, StringComparison.Ordinal);
+            Assert.Contains("Alt+Up", hotkeys.Message, StringComparison.Ordinal);
             Assert.Empty(runner.Inputs);
         }
         finally
@@ -1857,9 +1924,24 @@ public class CodingAgentCommandRouterTests
         Assert.Contains("hotkeys:", result.Message, StringComparison.Ordinal);
         Assert.Contains("submit", result.Message, StringComparison.Ordinal);
         Assert.Contains("F1", result.Message, StringComparison.Ordinal);
-        Assert.DoesNotContain("Enter", result.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("submit               Enter", result.Message, StringComparison.Ordinal);
         Assert.Contains("cancel", result.Message, StringComparison.Ordinal);
         Assert.Contains("Ctrl+C", result.Message, StringComparison.Ordinal);
+        Assert.Contains("toggle-thinking-block", result.Message, StringComparison.Ordinal);
+        Assert.Contains("Ctrl+T", result.Message, StringComparison.Ordinal);
+        Assert.Contains("Toggle thinking blocks", result.Message, StringComparison.Ordinal);
+        Assert.Contains("toggle-tool-output", result.Message, StringComparison.Ordinal);
+        Assert.Contains("Ctrl+O", result.Message, StringComparison.Ordinal);
+        Assert.Contains("Toggle tool output", result.Message, StringComparison.Ordinal);
+        Assert.Contains("open-external-editor", result.Message, StringComparison.Ordinal);
+        Assert.Contains("Ctrl+G", result.Message, StringComparison.Ordinal);
+        Assert.Contains("Open external editor", result.Message, StringComparison.Ordinal);
+        Assert.Contains("queue-follow-up-message", result.Message, StringComparison.Ordinal);
+        Assert.Contains("Alt+Enter", result.Message, StringComparison.Ordinal);
+        Assert.Contains("Queue follow-up message", result.Message, StringComparison.Ordinal);
+        Assert.Contains("restore-queued-messages", result.Message, StringComparison.Ordinal);
+        Assert.Contains("Alt+Up", result.Message, StringComparison.Ordinal);
+        Assert.Contains("Restore queued messages", result.Message, StringComparison.Ordinal);
         Assert.Empty(runner.Inputs);
     }
 
@@ -5162,6 +5244,21 @@ public class CodingAgentCommandRouterTests
     }
 
     [Fact]
+    public async Task TryHandleAsync_FindCommand_LocatesThinkingContent()
+    {
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.MutableMessages.Add(new AssistantMessage([new ThinkingContent("internal AWS credential plan")]));
+        var router = new CodingAgentCommandRouter(runner);
+
+        var result = await router.TryHandleAsync("/find credential");
+
+        Assert.True(result.Handled);
+        Assert.False(result.IsError);
+        Assert.Contains("credential", result.Message, StringComparison.Ordinal);
+        Assert.Contains("internal AWS credential plan", result.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task TryHandleAsync_FindCommand_ReportsNoMatches()
     {
         var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
@@ -6312,6 +6409,50 @@ public class CodingAgentCommandRouterTests
             Assert.Contains("navigated tree to", result.Message, StringComparison.Ordinal);
             Assert.Equal("first task", ReadText(runner.Messages[0]));
             Assert.Equal("ack", ReadText(runner.Messages[1]));
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TryHandleAsync_TreeInteractiveCommand_ShowsCollapsedThinkingPreview()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-coding-agent-tree-thinking-preview-" + Guid.NewGuid().ToString("N"));
+        var treePath = Path.Combine(directory, "session.jsonl");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.MutableMessages.Add(new UserMessage("first task"));
+        runner.MutableMessages.Add(new AssistantMessage([new ThinkingContent("internal reasoning")]));
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+            var tree = CodingAgentTreeSessionController.OpenOrCreate(treePath);
+            tree.SyncFromRunner(runner);
+
+            IReadOnlyList<CodingAgentTreeViewItem>? capturedItems = null;
+            Func<IReadOnlyList<CodingAgentTreeViewItem>, string?, CancellationToken, Task<CodingAgentTreeInteractiveNavigator.Result>> navigator =
+                (items, _, _) =>
+                {
+                    capturedItems = items;
+                    var selected = items.Single(item => item.DisplayLine.Contains("Thinking...", StringComparison.Ordinal));
+                    return Task.FromResult(new CodingAgentTreeInteractiveNavigator.Result(selected.EntryId, 0, 1));
+                };
+
+            var router = new CodingAgentCommandRouter(runner, treeSessionController: tree, treeNavigator: navigator);
+            var result = await router.TryHandleAsync("/tree --interactive");
+
+            Assert.True(result.Handled);
+            Assert.False(result.IsError);
+            Assert.NotNull(capturedItems);
+            Assert.Contains(capturedItems, item =>
+                item.DisplayLine.Contains("message assistant Thinking...", StringComparison.Ordinal));
+            Assert.DoesNotContain(capturedItems, item =>
+                item.DisplayLine.Contains("internal reasoning", StringComparison.Ordinal));
         }
         finally
         {

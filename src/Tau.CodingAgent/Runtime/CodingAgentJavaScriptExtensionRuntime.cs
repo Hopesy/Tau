@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using Tau.AgentCore;
+using Tau.AgentCore.Harness;
 using Tau.Ai;
 
 namespace Tau.CodingAgent.Runtime;
@@ -33,6 +34,16 @@ public sealed record CodingAgentJavaScriptExtensionShortcut(
     string Description,
     bool HasHandler);
 
+public sealed record CodingAgentJavaScriptExtensionMessageRenderer(
+    string CustomType,
+    bool HasRenderer);
+
+public sealed record CodingAgentJavaScriptExtensionCustomMessage(
+    AgentCustomMessage Message,
+    IReadOnlyList<string> RenderedLines,
+    bool TriggerTurn,
+    string? DeliverAs);
+
 public sealed record CodingAgentJavaScriptExtensionUnsupportedRegistrations(
     int Tools,
     int Flags,
@@ -48,18 +59,21 @@ public sealed record CodingAgentJavaScriptExtensionLoadResult(
     IReadOnlyList<CodingAgentJavaScriptExtensionFlag> Flags,
     IReadOnlyList<CodingAgentJavaScriptExtensionShortcut> Shortcuts,
     IReadOnlyList<string> EventHandlerTypes,
+    IReadOnlyList<CodingAgentJavaScriptExtensionMessageRenderer> MessageRenderers,
     CodingAgentJavaScriptExtensionUnsupportedRegistrations Unsupported,
     string? Error);
 
 public sealed record CodingAgentJavaScriptExtensionInvokeResult(
     bool Success,
     IReadOnlyList<string> RunnerMessages,
+    IReadOnlyList<CodingAgentJavaScriptExtensionCustomMessage> CustomMessages,
     string? StatusMessage,
     string? Error);
 
 public sealed record CodingAgentJavaScriptExtensionShortcutInvokeResult(
     bool Success,
     IReadOnlyList<string> RunnerMessages,
+    IReadOnlyList<CodingAgentJavaScriptExtensionCustomMessage> CustomMessages,
     string? StatusMessage,
     string? Error);
 
@@ -77,6 +91,7 @@ public sealed record CodingAgentJavaScriptExtensionUiAction(
     string? WorkingMessage,
     IReadOnlyList<string>? WorkingIndicatorFrames,
     int? WorkingIndicatorIntervalMilliseconds,
+    string? HiddenThinkingLabel,
     string? Title,
     string? Text);
 
@@ -109,6 +124,12 @@ public sealed record CodingAgentJavaScriptExtensionToolResultEventResult(
 public sealed record CodingAgentJavaScriptExtensionEventEmitResult(
     bool Success,
     IReadOnlyList<string> HandlerErrors,
+    ChatMessage? ReplacementMessage,
+    string? Error);
+
+public sealed record CodingAgentJavaScriptExtensionMessageRenderResult(
+    bool Success,
+    IReadOnlyList<string> Lines,
     string? Error);
 
 public sealed class CodingAgentJavaScriptExtensionRuntime
@@ -116,6 +137,8 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
     public const string NodeExecutableEnvironmentVariable = "TAU_CODING_AGENT_NODE";
 
     private const string ResultPrefix = "__TAU_EXTENSION_RESULT__";
+    private const string UiRequestPrefix = "__TAU_EXTENSION_UI_REQUEST__";
+    private const string UiResponsePrefix = "__TAU_EXTENSION_UI_RESPONSE__";
 
     private static readonly TimeSpan DefaultTimeout = TimeSpan.FromSeconds(5);
 
@@ -163,7 +186,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
         var execution = Execute(BuildPayload("load", filePath, _cwd));
         if (!execution.Success)
         {
-            return new CodingAgentJavaScriptExtensionLoadResult(false, [], [], [], [], [], EmptyUnsupported, execution.Error);
+            return new CodingAgentJavaScriptExtensionLoadResult(false, [], [], [], [], [], [], EmptyUnsupported, execution.Error);
         }
 
         try
@@ -174,6 +197,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
             {
                 return new CodingAgentJavaScriptExtensionLoadResult(
                     false,
+                    [],
                     [],
                     [],
                     [],
@@ -190,6 +214,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
                 ReadFlags(root),
                 ReadShortcuts(root),
                 ReadStringArray(root, "eventHandlers"),
+                ReadMessageRenderers(root),
                 ReadUnsupported(root),
                 null);
         }
@@ -202,7 +227,65 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
                 [],
                 [],
                 [],
+                [],
                 EmptyUnsupported,
+                $"invalid node extension runtime output: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 使用扩展注册的 <c>MessageRenderer</c> 渲染自定义消息。
+    /// </summary>
+    /// <param name="filePath">注册 renderer 的扩展模块路径。</param>
+    /// <param name="customType">要渲染的自定义消息类型。</param>
+    /// <param name="message">包含内容、展示开关、详情与时间戳的自定义消息。</param>
+    /// <param name="expanded">是否按展开状态渲染消息。</param>
+    /// <returns>渲染成功时返回文本行；失败时返回错误信息。</returns>
+    public CodingAgentJavaScriptExtensionMessageRenderResult RenderMessage(
+        string filePath,
+        string customType,
+        AgentCustomMessage message,
+        bool expanded = true)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+
+        var execution = Execute(BuildPayload(
+            "renderMessage",
+            filePath,
+            _cwd,
+            customType: customType,
+            messageContent: message.Content,
+            messageDisplay: message.Display,
+            messageDetails: message.Details,
+            messageTimestamp: message.Timestamp,
+            expanded: expanded));
+        if (!execution.Success)
+        {
+            return new CodingAgentJavaScriptExtensionMessageRenderResult(false, [], execution.Error);
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(execution.ResultJson);
+            var root = document.RootElement;
+            if (!ReadBool(root, "ok"))
+            {
+                return new CodingAgentJavaScriptExtensionMessageRenderResult(
+                    false,
+                    [],
+                    ReadString(root, "error") ?? "javascript extension message renderer failed");
+            }
+
+            return new CodingAgentJavaScriptExtensionMessageRenderResult(
+                true,
+                ReadStringArray(root, "lines"),
+                null);
+        }
+        catch (JsonException ex)
+        {
+            return new CodingAgentJavaScriptExtensionMessageRenderResult(
+                false,
+                [],
                 $"invalid node extension runtime output: {ex.Message}");
         }
     }
@@ -215,7 +298,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
         var execution = Execute(BuildPayload("invoke", filePath, _cwd, commandName, args));
         if (!execution.Success)
         {
-            return new CodingAgentJavaScriptExtensionInvokeResult(false, [], null, execution.Error);
+            return new CodingAgentJavaScriptExtensionInvokeResult(false, [], [], null, execution.Error);
         }
 
         try
@@ -227,6 +310,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
                 return new CodingAgentJavaScriptExtensionInvokeResult(
                     false,
                     [],
+                    [],
                     null,
                     ReadString(root, "error") ?? "javascript extension command failed");
             }
@@ -235,6 +319,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
             return new CodingAgentJavaScriptExtensionInvokeResult(
                 true,
                 ReadRunnerMessages(root),
+                ReadCustomMessages(root),
                 ReadString(root, "returnText"),
                 null);
         }
@@ -242,6 +327,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
         {
             return new CodingAgentJavaScriptExtensionInvokeResult(
                 false,
+                [],
                 [],
                 null,
                 $"invalid node extension runtime output: {ex.Message}");
@@ -255,7 +341,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
         var execution = Execute(BuildPayload("invokeShortcut", filePath, _cwd, shortcut: shortcut));
         if (!execution.Success)
         {
-            return new CodingAgentJavaScriptExtensionShortcutInvokeResult(false, [], null, execution.Error);
+            return new CodingAgentJavaScriptExtensionShortcutInvokeResult(false, [], [], null, execution.Error);
         }
 
         try
@@ -267,6 +353,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
                 return new CodingAgentJavaScriptExtensionShortcutInvokeResult(
                     false,
                     [],
+                    [],
                     null,
                     ReadString(root, "error") ?? "javascript extension shortcut failed");
             }
@@ -275,6 +362,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
             return new CodingAgentJavaScriptExtensionShortcutInvokeResult(
                 true,
                 ReadRunnerMessages(root),
+                ReadCustomMessages(root),
                 ReadString(root, "returnText"),
                 null);
         }
@@ -282,6 +370,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
         {
             return new CodingAgentJavaScriptExtensionShortcutInvokeResult(
                 false,
+                [],
                 [],
                 null,
                 $"invalid node extension runtime output: {ex.Message}");
@@ -504,7 +593,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
             extensionEvent: extensionEvent));
         if (!execution.Success)
         {
-            return new CodingAgentJavaScriptExtensionEventEmitResult(false, [], execution.Error);
+            return new CodingAgentJavaScriptExtensionEventEmitResult(false, [], null, execution.Error);
         }
 
         try
@@ -516,6 +605,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
                 return new CodingAgentJavaScriptExtensionEventEmitResult(
                     false,
                     [],
+                    null,
                     ReadString(root, "error") ?? "javascript extension event handler failed");
             }
 
@@ -523,6 +613,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
             return new CodingAgentJavaScriptExtensionEventEmitResult(
                 true,
                 ReadStringArray(root, "handlerErrors"),
+                ReadReplacementMessage(root),
                 null);
         }
         catch (JsonException ex)
@@ -530,6 +621,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
             return new CodingAgentJavaScriptExtensionEventEmitResult(
                 false,
                 [],
+                null,
                 $"invalid node extension runtime output: {ex.Message}");
         }
     }
@@ -576,9 +668,10 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
             return ProcessExecutionResult.Failed($"node extension runtime unavailable: {ex.Message}");
         }
 
-        process.StandardInput.Write(payloadJson);
-        process.StandardInput.Close();
-        var stdoutTask = process.StandardOutput.ReadToEndAsync();
+        process.StandardInput.WriteLine(payloadJson);
+        process.StandardInput.Flush();
+        var resultCompletion = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var stdoutTask = PumpNodeStdoutAsync(process, resultCompletion);
         var stderrTask = process.StandardError.ReadToEndAsync();
         if (!process.WaitForExit((int)_timeout.TotalMilliseconds))
         {
@@ -588,10 +681,19 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
             return ProcessExecutionResult.Failed("node extension runtime timed out");
         }
 
-        Task.WaitAll(stdoutTask, stderrTask);
-        var stdout = stdoutTask.Result;
+        try
+        {
+            process.StandardInput.Close();
+        }
+        catch (InvalidOperationException)
+        {
+        }
+
+        Task.WaitAll([stdoutTask, stderrTask], TimeSpan.FromSeconds(1));
         var stderr = stderrTask.Result;
-        var resultJson = ExtractResultJson(stdout);
+        var resultJson = resultCompletion.Task.IsCompletedSuccessfully
+            ? resultCompletion.Task.Result
+            : null;
         TryDeleteDirectory(scriptDirectory);
         if (resultJson is null)
         {
@@ -607,6 +709,84 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
         }
 
         return ProcessExecutionResult.Succeeded(resultJson);
+    }
+
+    private async Task PumpNodeStdoutAsync(
+        Process process,
+        TaskCompletionSource<string?> resultCompletion)
+    {
+        try
+        {
+            while (await process.StandardOutput.ReadLineAsync().ConfigureAwait(false) is { } line)
+            {
+                if (line.StartsWith(ResultPrefix, StringComparison.Ordinal))
+                {
+                    resultCompletion.TrySetResult(line[ResultPrefix.Length..]);
+                    continue;
+                }
+
+                if (line.StartsWith(UiRequestPrefix, StringComparison.Ordinal))
+                {
+                    await HandleRuntimeUiRequestAsync(process, line[UiRequestPrefix.Length..]).ConfigureAwait(false);
+                }
+            }
+
+            resultCompletion.TrySetResult(null);
+        }
+        catch (Exception ex)
+        {
+            resultCompletion.TrySetException(ex);
+        }
+    }
+
+    private async Task HandleRuntimeUiRequestAsync(Process process, string requestJson)
+    {
+        string? response = null;
+        try
+        {
+            using var document = JsonDocument.Parse(requestJson);
+            var root = document.RootElement;
+            var id = ReadString(root, "id");
+            var method = ReadString(root, "method");
+            if (string.IsNullOrWhiteSpace(id))
+            {
+                return;
+            }
+
+            if (method == "editor" && _extensionUiBridge is not null)
+            {
+                var title = ReadString(root, "title");
+                var prefill = ReadString(root, "prefill");
+                var value = string.IsNullOrWhiteSpace(title)
+                    ? null
+                    : await _extensionUiBridge.EditorAsync(title, prefill, cancellationToken: CancellationToken.None)
+                        .ConfigureAwait(false);
+                response = JsonSerializer.Serialize(new
+                {
+                    id,
+                    cancelled = value is null,
+                    value
+                });
+            }
+            else
+            {
+                response = JsonSerializer.Serialize(new
+                {
+                    id,
+                    cancelled = true
+                });
+            }
+        }
+        catch (JsonException)
+        {
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(response))
+        {
+            await process.StandardInput.WriteLineAsync(UiResponsePrefix + response).ConfigureAwait(false);
+            await process.StandardInput.FlushAsync().ConfigureAwait(false);
+        }
     }
 
     private static void TryDeleteDirectory(string path)
@@ -635,7 +815,13 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
         string? toolCallId = null,
         JsonElement? toolArgs = null,
         ToolResult? toolResult = null,
-        JsonElement? extensionEvent = null)
+        JsonElement? extensionEvent = null,
+        string? customType = null,
+        IReadOnlyList<ContentBlock>? messageContent = null,
+        bool? messageDisplay = null,
+        object? messageDetails = null,
+        DateTimeOffset? messageTimestamp = null,
+        bool? expanded = null)
     {
         using var stream = new MemoryStream();
         using (var writer = new Utf8JsonWriter(stream))
@@ -686,6 +872,38 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
             {
                 writer.WritePropertyName("event");
                 extensionEvent.Value.WriteTo(writer);
+            }
+
+            if (customType is not null)
+            {
+                writer.WriteString("customType", customType);
+            }
+
+            if (messageContent is not null)
+            {
+                writer.WritePropertyName("messageContent");
+                WriteContentBlocks(writer, messageContent);
+            }
+
+            if (messageDisplay.HasValue)
+            {
+                writer.WriteBoolean("messageDisplay", messageDisplay.Value);
+            }
+
+            if (messageDetails is not null)
+            {
+                writer.WritePropertyName("messageDetails");
+                WriteObject(writer, messageDetails);
+            }
+
+            if (messageTimestamp.HasValue)
+            {
+                writer.WriteNumber("messageTimestamp", messageTimestamp.Value.ToUnixTimeMilliseconds());
+            }
+
+            if (expanded.HasValue)
+            {
+                writer.WriteBoolean("expanded", expanded.Value);
             }
 
             if (_flagValues.Count > 0)
@@ -945,6 +1163,107 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
         return shortcuts.ToArray();
     }
 
+    private static IReadOnlyList<CodingAgentJavaScriptExtensionMessageRenderer> ReadMessageRenderers(JsonElement root)
+    {
+        if (!root.TryGetProperty("messageRenderers", out var renderersElement) ||
+            renderersElement.ValueKind != JsonValueKind.Array)
+        {
+            return [];
+        }
+
+        var renderers = new List<CodingAgentJavaScriptExtensionMessageRenderer>();
+        foreach (var renderer in renderersElement.EnumerateArray())
+        {
+            if (renderer.ValueKind != JsonValueKind.Object)
+            {
+                continue;
+            }
+
+            renderers.Add(new CodingAgentJavaScriptExtensionMessageRenderer(
+                ReadString(renderer, "customType") ?? string.Empty,
+                ReadBool(renderer, "hasRenderer")));
+        }
+
+        return renderers.ToArray();
+    }
+
+    /// <summary>
+    /// 读取 JavaScript message_end handler 返回的替换消息。
+    /// </summary>
+    /// <param name="root">Node runtime 返回的根 JSON。</param>
+    /// <returns>可识别的会话消息；没有替换消息时返回 <see langword="null"/>。</returns>
+    private static ChatMessage? ReadReplacementMessage(JsonElement root)
+    {
+        if (!root.TryGetProperty("replacementMessage", out var message) ||
+            message.ValueKind is not JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        return ReadChatMessage(message);
+    }
+
+    /// <summary>
+    /// 将扩展返回的 JSON message 转换为 Tau 会话消息。
+    /// </summary>
+    /// <param name="message">扩展返回的消息 JSON。</param>
+    /// <returns>可识别的会话消息；role 缺失或不支持时返回 <see langword="null"/>。</returns>
+    private static ChatMessage? ReadChatMessage(JsonElement message)
+    {
+        var role = ReadString(message, "role");
+        if (string.IsNullOrWhiteSpace(role))
+        {
+            return null;
+        }
+
+        var content = message.TryGetProperty("content", out var contentElement)
+            ? ReadContentBlocks(contentElement)
+            : [new TextContent(string.Empty)];
+
+        return role switch
+        {
+            "user" => new UserMessage(content),
+            "assistant" => new AssistantMessage(content)
+            {
+                ErrorMessage = ReadString(message, "errorMessage"),
+                StopReason = ReadAssistantStopReason(message)
+            },
+            "toolResult" => new ToolResultMessage(
+                ReadString(message, "toolCallId") ?? string.Empty,
+                content,
+                ReadOptionalBool(message, "isError") ?? false)
+            {
+                ToolName = ReadString(message, "toolName")
+            },
+            "custom" when !string.IsNullOrWhiteSpace(ReadString(message, "customType")) =>
+                new AgentCustomMessage(
+                    ReadString(message, "customType")!,
+                    content,
+                    ReadOptionalBool(message, "display") ?? true,
+                    ReadOptionalJsonElement(message, "details"),
+                    ReadUnixMilliseconds(message, "timestamp")),
+            _ => null
+        };
+    }
+
+    /// <summary>
+    /// 读取 assistant message 的停止原因。
+    /// </summary>
+    /// <param name="message">扩展返回的 assistant message JSON。</param>
+    /// <returns>可识别的停止原因；缺失时返回 <see langword="null"/>。</returns>
+    private static StopReason? ReadAssistantStopReason(JsonElement message)
+    {
+        return ReadString(message, "stopReason") switch
+        {
+            "length" => StopReason.MaxTokens,
+            "toolUse" => StopReason.ToolUse,
+            "error" => StopReason.Error,
+            "aborted" => StopReason.Aborted,
+            "stop" => StopReason.EndTurn,
+            _ => null
+        };
+    }
+
     private static JsonElement? ReadFlagDefault(JsonElement flag)
     {
         if (!flag.TryGetProperty("default", out var value))
@@ -982,6 +1301,131 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
         }
 
         return messages.ToArray();
+    }
+
+    private static IReadOnlyList<CodingAgentJavaScriptExtensionCustomMessage> ReadCustomMessages(JsonElement root)
+    {
+        if (!root.TryGetProperty("actions", out var actionsElement) ||
+            actionsElement.ValueKind != JsonValueKind.Array)
+        {
+            return [];
+        }
+
+        var messages = new List<CodingAgentJavaScriptExtensionCustomMessage>();
+        foreach (var action in actionsElement.EnumerateArray())
+        {
+            if (action.ValueKind != JsonValueKind.Object ||
+                !string.Equals(ReadString(action, "type"), "customMessage", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var customType = ReadString(action, "customType");
+            if (string.IsNullOrWhiteSpace(customType) ||
+                !action.TryGetProperty("content", out var contentElement))
+            {
+                continue;
+            }
+
+            messages.Add(new CodingAgentJavaScriptExtensionCustomMessage(
+                new AgentCustomMessage(
+                    customType,
+                    ReadContentBlocks(contentElement),
+                    ReadOptionalBool(action, "display") ?? true,
+                    ReadOptionalJsonElement(action, "details"),
+                    ReadUnixMilliseconds(action, "timestamp")),
+                ReadOptionalStringArray(action, "renderedLines") ?? [],
+                ReadOptionalBool(action, "triggerTurn") ?? false,
+                ReadCustomMessageDeliverAs(action)));
+        }
+
+        return messages.ToArray();
+    }
+
+    private static string? ReadCustomMessageDeliverAs(JsonElement action)
+    {
+        var deliverAs = ReadString(action, "deliverAs");
+        return deliverAs is "steer" or "followUp" or "nextTurn"
+            ? deliverAs
+            : null;
+    }
+
+    private static IReadOnlyList<ContentBlock> ReadContentBlocks(JsonElement contentElement)
+    {
+        if (contentElement.ValueKind == JsonValueKind.String)
+        {
+            return [new TextContent(contentElement.GetString() ?? string.Empty)];
+        }
+
+        if (contentElement.ValueKind != JsonValueKind.Array)
+        {
+            return [new TextContent(contentElement.ToString())];
+        }
+
+        var blocks = new List<ContentBlock>();
+        foreach (var item in contentElement.EnumerateArray())
+        {
+            switch (item.ValueKind)
+            {
+                case JsonValueKind.String:
+                    blocks.Add(new TextContent(item.GetString() ?? string.Empty));
+                    break;
+                case JsonValueKind.Object:
+                    var type = ReadString(item, "type");
+                    if (string.Equals(type, "image", StringComparison.Ordinal))
+                    {
+                        var data = ReadString(item, "data");
+                        var mimeType = ReadString(item, "mimeType");
+                        if (!string.IsNullOrWhiteSpace(data) && !string.IsNullOrWhiteSpace(mimeType))
+                        {
+                            blocks.Add(new ImageContent(data, mimeType));
+                        }
+                    }
+                    else
+                    {
+                        blocks.Add(new TextContent(
+                            ReadString(item, "text") ??
+                            ReadString(item, "content") ??
+                            (string.IsNullOrWhiteSpace(type) ? item.ToString() : $"[{type}]")));
+                    }
+                    break;
+                default:
+                    blocks.Add(new TextContent(item.ToString()));
+                    break;
+            }
+        }
+
+        return blocks.Count == 0 ? [new TextContent(string.Empty)] : blocks.ToArray();
+    }
+
+    private static JsonElement? ReadOptionalJsonElement(JsonElement root, string propertyName)
+    {
+        if (!root.TryGetProperty(propertyName, out var property) ||
+            property.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+        {
+            return null;
+        }
+
+        return property.Clone();
+    }
+
+    private static DateTimeOffset? ReadUnixMilliseconds(JsonElement root, string propertyName)
+    {
+        if (!root.TryGetProperty(propertyName, out var property) ||
+            property.ValueKind != JsonValueKind.Number ||
+            !property.TryGetInt64(out var milliseconds))
+        {
+            return null;
+        }
+
+        try
+        {
+            return DateTimeOffset.FromUnixTimeMilliseconds(milliseconds);
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            return null;
+        }
     }
 
     private void DispatchUiActions(JsonElement root)
@@ -1043,6 +1487,11 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
                         .GetAwaiter()
                         .GetResult();
                     break;
+                case "setHiddenThinkingLabel":
+                    bridge.SetHiddenThinkingLabelAsync(action.HiddenThinkingLabel, CancellationToken.None)
+                        .GetAwaiter()
+                        .GetResult();
+                    break;
                 case "setTitle":
                     if (!string.IsNullOrWhiteSpace(action.Title))
                     {
@@ -1097,6 +1546,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
                 ReadString(action, "workingMessage"),
                 ReadOptionalStringArray(action, "workingIndicatorFrames"),
                 ReadOptionalInt32(action, "workingIndicatorIntervalMs"),
+                ReadString(action, "hiddenThinkingLabel"),
                 ReadString(action, "title"),
                 ReadString(action, "text")));
         }
@@ -1219,6 +1669,21 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
         };
     }
 
+    private static bool? ReadOptionalBool(JsonElement element, string propertyName)
+    {
+        if (!element.TryGetProperty(propertyName, out var property))
+        {
+            return null;
+        }
+
+        return property.ValueKind switch
+        {
+            JsonValueKind.True => true,
+            JsonValueKind.False => false,
+            _ => null
+        };
+    }
+
     private static int ReadInt(JsonElement element, string propertyName)
     {
         if (!element.TryGetProperty(propertyName, out var property))
@@ -1264,19 +1729,69 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
         const fs = require("node:fs");
         const path = require("node:path");
         const moduleApi = require("node:module");
+        const readline = require("node:readline");
         const { fileURLToPath, pathToFileURL } = require("node:url");
         const resultPrefix = "__TAU_EXTENSION_RESULT__";
+        const uiRequestPrefix = "__TAU_EXTENSION_UI_REQUEST__";
+        const uiResponsePrefix = "__TAU_EXTENSION_UI_RESPONSE__";
         let extensionImportHookInstalled = false;
-
         let input = "";
+        let mainStarted = false;
+        let uiRequestCounter = 0;
+        const pendingUiResponses = new Map();
+
         process.stdin.setEncoding("utf8");
-        process.stdin.on("data", chunk => { input += chunk; });
-        process.stdin.on("end", () => {
-          main().catch(error => write({ ok: false, error: formatError(error) }));
+        const inputLines = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+        inputLines.on("line", line => {
+          if (!mainStarted) {
+            mainStarted = true;
+            input = line;
+            main().catch(error => write({ ok: false, error: formatError(error) }));
+            return;
+          }
+
+          if (line.startsWith(uiResponsePrefix)) {
+            handleUiResponse(line.slice(uiResponsePrefix.length));
+          }
+        });
+        inputLines.on("close", () => {
+          if (!mainStarted) {
+            mainStarted = true;
+            input = "{}";
+            main().catch(error => write({ ok: false, error: formatError(error) }));
+          }
         });
 
         function write(result) {
           process.stdout.write(resultPrefix + JSON.stringify(result) + "\n");
+          process.stdout.write("", () => process.exit(result && result.ok === false ? 1 : 0));
+        }
+
+        function requestUi(request) {
+          if (!request || typeof request !== "object") {
+            return Promise.resolve(undefined);
+          }
+
+          const id = "ui-" + (++uiRequestCounter);
+          return new Promise(resolve => {
+            pendingUiResponses.set(id, resolve);
+            process.stdout.write(uiRequestPrefix + JSON.stringify({ id, ...request }) + "\n");
+          });
+        }
+
+        function handleUiResponse(responseJson) {
+          let response;
+          try {
+            response = JSON.parse(responseJson || "{}");
+          } catch {
+            return;
+          }
+
+          const id = response && typeof response.id === "string" ? response.id : "";
+          const resolve = pendingUiResponses.get(id);
+          if (!resolve) return;
+          pendingUiResponses.delete(id);
+          resolve(response);
         }
 
         function formatError(error) {
@@ -1625,6 +2140,43 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
           });
         }
 
+        function normalizeMessageContent(value) {
+          if (Array.isArray(value)) return normalizeContentBlocks(value);
+          if (value && typeof value === "object" && typeof value.type === "string") return normalizeContentBlocks([value]);
+          if (value === undefined || value === null) return [];
+          return [{ type: "text", text: toText(value) }];
+        }
+
+        function normalizeAgentMessage(value, fallbackRole = undefined) {
+          if (!value || typeof value !== "object") return undefined;
+          const role = String(value.role ?? fallbackRole ?? "");
+          if (!role) return undefined;
+          const message = {
+            role,
+            content: normalizeMessageContent(value.content)
+          };
+          if (role === "custom") {
+            message.customType = String(value.customType ?? "");
+            message.display = value.display !== false;
+            if (Object.prototype.hasOwnProperty.call(value, "details")) message.details = value.details;
+            message.timestamp = typeof value.timestamp === "number" ? value.timestamp : Date.now();
+          } else if (role === "toolResult") {
+            message.toolCallId = String(value.toolCallId ?? "");
+            message.isError = value.isError === true;
+            if (typeof value.toolName === "string") message.toolName = value.toolName;
+          } else if (role === "assistant") {
+            if (typeof value.stopReason === "string") message.stopReason = value.stopReason;
+            if (typeof value.errorMessage === "string") message.errorMessage = value.errorMessage;
+          }
+          return message;
+        }
+
+        function normalizeCustomMessageContent(value) {
+          if (typeof value === "string") return value;
+          if (Array.isArray(value)) return normalizeContentBlocks(value);
+          return toText(value);
+        }
+
         function normalizeToolResult(value) {
           if (value && typeof value === "object") {
             const content = Object.prototype.hasOwnProperty.call(value, "content")
@@ -1709,8 +2261,26 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
           };
         }
 
-        function createApi(commandMap, toolMap, flagMap, shortcutMap, flagValues, handlerMap, unsupported, actions, payload) {
-          const recordMessage = value => {
+        function createApi(commandMap, toolMap, flagMap, shortcutMap, flagValues, handlerMap, messageRendererMap, unsupported, actions, payload) {
+          const recordMessage = (value, options = undefined) => {
+            if (value && typeof value === "object" && !Array.isArray(value) && Object.prototype.hasOwnProperty.call(value, "customType")) {
+              const delivery = options && typeof options === "object" ? options : {};
+              const deliverAs = delivery.deliverAs === "steer" || delivery.deliverAs === "followUp" || delivery.deliverAs === "nextTurn"
+                ? delivery.deliverAs
+                : undefined;
+              actions.push({
+                type: "customMessage",
+                customType: String(value.customType ?? ""),
+                content: Object.prototype.hasOwnProperty.call(value, "content") ? normalizeCustomMessageContent(value.content) : "",
+                display: value.display !== false,
+                details: Object.prototype.hasOwnProperty.call(value, "details") ? value.details : undefined,
+                triggerTurn: delivery.triggerTurn === true,
+                deliverAs,
+                timestamp: Date.now()
+              });
+              return;
+            }
+
             const message = toText(value);
             if (message.trim().length > 0) actions.push({ type: "sendMessage", message });
           };
@@ -1738,7 +2308,10 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
               const key = String(shortcut ?? "");
               shortcutMap.set(key, { shortcut: key, options: options || {} });
             },
-            registerMessageRenderer() { unsupported.messageRenderers++; },
+            registerMessageRenderer(customType, renderer) {
+              const key = String(customType ?? "");
+              messageRendererMap.set(key, renderer);
+            },
             registerProvider() { unsupported.providers++; },
             unregisterProvider() { unsupported.providers++; },
             on(eventName, handler) { return addHandler(handlerMap, unsupported, eventName, handler); },
@@ -1781,7 +2354,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
           };
         }
 
-        function createUiContext(actions) {
+        function createUiContext(actions, payload) {
           const addUiAction = (method, fields = {}) => {
             actions.push({ type: "ui", method, ...fields });
           };
@@ -1808,7 +2381,9 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
                 workingIndicatorIntervalMs: indicator.intervalMs
               });
             },
-            setHiddenThinkingLabel: () => {},
+            setHiddenThinkingLabel: label => addUiAction("setHiddenThinkingLabel", {
+              hiddenThinkingLabel: label === undefined ? undefined : toText(label)
+            }),
             setWidget: (key, content, options = {}) => {
               const widgetLines = normalizeStringArray(content);
               if (content === undefined || widgetLines !== undefined) {
@@ -1830,13 +2405,22 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
             pasteToEditor(text) { this.setEditorText(text); },
             setEditorText: text => addUiAction("set_editor_text", { text: toText(text) }),
             getEditorText: () => "",
-            editor: async () => undefined
+            editor: async (title, prefill) => {
+              if (payload.hasExtensionUi !== true) return undefined;
+              const response = await requestUi({
+                method: "editor",
+                title: toText(title),
+                prefill: prefill === undefined ? undefined : toText(prefill)
+              });
+              if (!response || response.cancelled === true) return undefined;
+              return typeof response.value === "string" ? response.value : undefined;
+            }
           };
         }
 
         function createCommandContext(api, payload, actions) {
           return {
-            ui: createUiContext(actions),
+            ui: createUiContext(actions, payload),
             hasUI: payload.hasExtensionUi === true,
             mode: typeof payload.extensionMode === "string" ? payload.extensionMode : (payload.hasExtensionUi === true ? "tui" : "print"),
             cwd: payload.cwd,
@@ -1876,6 +2460,29 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
           return factory;
         }
 
+        async function renderCustomMessageActions(actions, messageRendererMap) {
+          for (const action of actions) {
+            if (!action || action.type !== "customMessage" || action.display === false) continue;
+            const key = String(action.customType ?? "");
+            const renderer = messageRendererMap.get(key);
+            if (typeof renderer !== "function") continue;
+            try {
+              const message = {
+                role: "custom",
+                customType: key,
+                content: Object.prototype.hasOwnProperty.call(action, "content") ? action.content : "",
+                display: action.display !== false,
+                details: Object.prototype.hasOwnProperty.call(action, "details") ? action.details : undefined,
+                timestamp: typeof action.timestamp === "number" ? action.timestamp : Date.now()
+              };
+              const rendered = await renderer(message, { expanded: true }, themeProxy);
+              const lines = normalizeComponentLines(rendered) ?? [];
+              if (lines.length > 0) action.renderedLines = lines;
+            } catch {
+            }
+          }
+        }
+
         async function main() {
           const payload = JSON.parse(input || "{}");
           const commandMap = new Map();
@@ -1892,9 +2499,10 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
             }
           }
           const handlerMap = new Map();
+          const messageRendererMap = new Map();
           const unsupported = { tools: 0, flags: 0, shortcuts: 0, handlers: 0, messageRenderers: 0, providers: 0 };
           const actions = [];
-          const api = createApi(commandMap, toolMap, flagMap, shortcutMap, flagValues, handlerMap, unsupported, actions, payload);
+          const api = createApi(commandMap, toolMap, flagMap, shortcutMap, flagValues, handlerMap, messageRendererMap, unsupported, actions, payload);
           const factory = await loadFactory(payload.filePath);
           await factory(api);
 
@@ -1937,8 +2545,35 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
             .filter(entry => entry[1].length > 0)
             .map(entry => entry[0]);
 
+          const messageRenderers = Array.from(messageRendererMap.entries()).map(([customType, renderer]) => ({
+            customType,
+            hasRenderer: typeof renderer === "function"
+          }));
+
           if (payload.mode === "load") {
-            write({ ok: true, commands, tools, flags, shortcuts, eventHandlers, unsupported });
+            write({ ok: true, commands, tools, flags, shortcuts, eventHandlers, messageRenderers, unsupported });
+            return;
+          }
+
+          if (payload.mode === "renderMessage") {
+            const key = String(payload.customType ?? "");
+            const renderer = messageRendererMap.get(key);
+            if (typeof renderer !== "function") {
+              write({ ok: false, error: "Extension message renderer was not registered: " + key });
+              return;
+            }
+
+            const message = {
+              role: "custom",
+              customType: key,
+              content: normalizeContentBlocks(payload.messageContent),
+              display: payload.messageDisplay !== false,
+              details: Object.prototype.hasOwnProperty.call(payload, "messageDetails") ? payload.messageDetails : undefined,
+              timestamp: typeof payload.messageTimestamp === "number" ? payload.messageTimestamp : Date.now()
+            };
+
+            const rendered = await renderer(message, { expanded: payload.expanded === true }, themeProxy);
+            write({ ok: true, lines: normalizeComponentLines(rendered) ?? [] });
             return;
           }
 
@@ -1955,6 +2590,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
 
             const returnValue = await shortcut.options.handler(createCommandContext(api, payload, actions));
             const returnText = returnValue === undefined || returnValue === null ? undefined : toText(returnValue);
+            await renderCustomMessageActions(actions, messageRendererMap);
             write({ ok: true, actions, returnText, unsupported });
             return;
           }
@@ -2033,6 +2669,33 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
             const eventType = String(event.type ?? "");
             const handlers = handlerMap.get(eventType) ?? [];
             const handlerErrors = [];
+            if (eventType === "message_end") {
+              let currentEvent = {
+                ...event,
+                message: normalizeAgentMessage(event.message)
+              };
+              let replacementMessage = undefined;
+              for (const handler of handlers) {
+                try {
+                  const handlerResult = await handler(currentEvent, createCommandContext(api, payload, actions));
+                  if (!handlerResult || !Object.prototype.hasOwnProperty.call(handlerResult, "message")) continue;
+                  const replacement = normalizeAgentMessage(handlerResult.message, currentEvent.message?.role);
+                  if (!replacement) continue;
+                  if (replacement.role !== currentEvent.message?.role) {
+                    handlerErrors.push("message_end handlers must return a message with the same role");
+                    continue;
+                  }
+                  currentEvent = { ...currentEvent, message: replacement };
+                  replacementMessage = replacement;
+                } catch (error) {
+                  handlerErrors.push(formatError(error));
+                }
+              }
+
+              write({ ok: true, handlerErrors, actions, unsupported, replacementMessage });
+              return;
+            }
+
             for (const handler of handlers) {
               try {
                 await handler(event, createCommandContext(api, payload, actions));
@@ -2100,6 +2763,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
 
           const returnValue = await command.options.handler(String(payload.args ?? ""), createCommandContext(api, payload, actions));
           const returnText = returnValue === undefined || returnValue === null ? undefined : toText(returnValue);
+          await renderCustomMessageActions(actions, messageRendererMap);
           write({ ok: true, actions, returnText, unsupported });
         }
         """;

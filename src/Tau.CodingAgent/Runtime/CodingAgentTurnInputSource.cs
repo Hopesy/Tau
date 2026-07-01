@@ -161,7 +161,10 @@ public sealed class CompositionCodingAgentTurnInputSource : ICodingAgentTurnInpu
             return new KeyBindingMap(keyBindingMap.Bindings.Where(static pair =>
                 pair.Value is not EditorAction.CycleModelForward
                     and not EditorAction.CycleModelBackward
-                    and not EditorAction.SelectModel));
+                    and not EditorAction.SelectModel
+                    and not EditorAction.ToggleThinkingBlock
+                    and not EditorAction.ToggleToolOutputExpansion
+                    and not EditorAction.OpenExternalEditor));
         }
 
         return KeyBindingMap.WithOverrides(
@@ -174,6 +177,15 @@ public sealed class CompositionCodingAgentTurnInputSource : ICodingAgentTurnInpu
                 EditorAction.None),
             new KeyValuePair<KeyBinding, EditorAction>(
                 new KeyBinding(ConsoleKey.L, ConsoleModifiers.Control),
+                EditorAction.None),
+            new KeyValuePair<KeyBinding, EditorAction>(
+                new KeyBinding(ConsoleKey.T, ConsoleModifiers.Control),
+                EditorAction.None),
+            new KeyValuePair<KeyBinding, EditorAction>(
+                new KeyBinding(ConsoleKey.O, ConsoleModifiers.Control),
+                EditorAction.None),
+            new KeyValuePair<KeyBinding, EditorAction>(
+                new KeyBinding(ConsoleKey.G, ConsoleModifiers.Control),
                 EditorAction.None)
         ]);
     }

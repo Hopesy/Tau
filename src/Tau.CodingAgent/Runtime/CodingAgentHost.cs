@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Tau.AgentCore;
+using Tau.AgentCore.Harness;
 using Tau.Ai;
 using Tau.Ai.Auth.OAuth;
 using Tau.Ai.Observability;
@@ -19,6 +20,7 @@ public sealed class CodingAgentHost
     private readonly ICodingAgentRunner _runner;
     private readonly TuiCompositionSession? _compositionSession;
     private readonly CodingAgentSessionStore? _sessionStore;
+    private readonly CodingAgentSettingsStore? _settingsStore;
     private readonly CodingAgentTreeSessionController? _treeSessionController;
     private readonly CodingAgentPromptTemplateStore? _promptTemplateStore;
     private readonly CodingAgentSkillStore? _skillStore;
@@ -30,6 +32,7 @@ public sealed class CodingAgentHost
     private CodingAgentAutoCompactionOptions _autoCompaction;
     private readonly CodingAgentCommandRouter _commandRouter;
     private readonly ICodingAgentClipboard _clipboard;
+    private readonly ICodingAgentExternalEditor _externalEditor;
     private readonly ICodingAgentTurnInputSource? _turnInputSource;
     private readonly CodingAgentInitialPrompt? _initialPrompt;
     private readonly IReadOnlyList<string> _initialMessages;
@@ -40,7 +43,11 @@ public sealed class CodingAgentHost
         new Dictionary<KeyBinding, CodingAgentExtensionShortcut>();
     private readonly Dictionary<string, TuiToolExecution> _activeToolExecutions = new(StringComparer.Ordinal);
     private readonly Dictionary<string, TuiBashExecution> _activeBashExecutions = new(StringComparer.Ordinal);
+    private readonly List<AgentCustomMessage> _pendingNextTurnCustomMessages = [];
     private CodingAgentRetryOptions _retryOptions;
+    private bool _hideThinkingBlock;
+    private bool _toolOutputExpanded;
+    private bool _hiddenThinkingLabelRendered;
     private bool _shutdownRendered;
 
     public CodingAgentHost(
@@ -49,6 +56,7 @@ public sealed class CodingAgentHost
         CodingAgentSessionStore? sessionStore = null,
         CodingAgentSettingsStore? settingsStore = null,
         ICodingAgentClipboard? clipboard = null,
+        ICodingAgentExternalEditor? externalEditor = null,
         CodingAgentTreeSessionController? treeSessionController = null,
         CodingAgentPromptTemplateStore? promptTemplateStore = null,
         CodingAgentSkillStore? skillStore = null,
@@ -82,12 +90,14 @@ public sealed class CodingAgentHost
         CodingAgentStartupNoticeService? startupNoticeService = null,
         IReadOnlyList<string>? scopedModelsOverride = null,
         CodingAgentFooterDataProvider? footerDataProvider = null,
-        Func<CancellationToken, Task<CodingAgentLatestRelease?>>? versionUpdateChecker = null)
+        Func<CancellationToken, Task<CodingAgentLatestRelease?>>? versionUpdateChecker = null,
+        bool hideThinkingBlock = false)
     {
         _ui = ui;
         _runner = runner;
         _compositionSession = compositionSession;
         _sessionStore = sessionStore;
+        _settingsStore = settingsStore;
         _treeSessionController = treeSessionController;
         _promptTemplateStore = promptTemplateStore;
         _skillStore = skillStore;
@@ -95,6 +105,7 @@ public sealed class CodingAgentHost
         _autoCompactionBase = autoCompaction ?? CodingAgentAutoCompactionOptions.Disabled;
         _autoCompaction = _autoCompactionBase.WithEnabledOverride(autoCompactionEnabled);
         _retryOptions = retryOptions ?? CodingAgentRetryOptions.Disabled;
+        _hideThinkingBlock = hideThinkingBlock;
         _turnInputSource = turnInputSource;
         _initialPrompt = initialPrompt;
         _initialMessages = initialMessages ?? [];
@@ -114,6 +125,7 @@ public sealed class CodingAgentHost
 
         RefreshCompositionStatus();
         _clipboard = clipboard ?? new SystemCodingAgentClipboard();
+        _externalEditor = externalEditor ?? new SystemCodingAgentExternalEditor();
         _commandRouter = new CodingAgentCommandRouter(
             runner,
             settingsStore: settingsStore,
@@ -132,6 +144,7 @@ public sealed class CodingAgentHost
             retryOptions: _retryOptions,
             retryOptionsChanged: options => _retryOptions = options,
             autoCompactionChanged: enabled => _autoCompaction = _autoCompactionBase.WithEnabledOverride(enabled),
+            hideThinkingBlockChanged: enabled => _hideThinkingBlock = enabled,
             historySnapshotProvider: historySnapshotProvider,
             clearScreenAction: () => _ui.ClearScreen(),
             inputDraftSetter: draft => _ui.SetDraft(draft),
@@ -199,22 +212,29 @@ public sealed class CodingAgentHost
                     continue;
                 }
 
-                var slashPreparation = TryPrepareSlashInvocation(input, out var preparedInput, out var handledSlashResult);
-                if (handledSlashResult is not null)
+                var slashPreparation = await TryPrepareSlashInvocationAsync(input, cancellationToken)
+                    .ConfigureAwait(false);
+                if (slashPreparation.AlreadyHandled)
                 {
-                    RenderCommandResult(handledSlashResult);
                     PersistSession();
                     continue;
                 }
 
-                if (slashPreparation == SlashInvocationPreparation.Expanded)
+                if (slashPreparation.HandledResult is not null)
                 {
-                    input = preparedInput;
+                    RenderCommandResult(slashPreparation.HandledResult);
+                    PersistSession();
+                    continue;
+                }
+
+                if (slashPreparation.Preparation == SlashInvocationPreparation.Expanded)
+                {
+                    input = slashPreparation.PreparedInput;
                 }
 
                 try
                 {
-                    if (slashPreparation != SlashInvocationPreparation.Expanded
+                    if (slashPreparation.Preparation != SlashInvocationPreparation.Expanded
                         && await TryHandleCommandAsync(input, cancellationToken).ConfigureAwait(false))
                     {
                         PersistSession();
@@ -319,10 +339,10 @@ public sealed class CodingAgentHost
                 continue;
             }
 
-            var slashPreparation = TryPrepareSlashInvocation(message, out var preparedInput, out var handledSlashResult);
-            if (handledSlashResult is not null)
+            var slashPreparation = await TryPrepareSlashInvocationAsync(message, cancellationToken)
+                .ConfigureAwait(false);
+            if (slashPreparation.AlreadyHandled)
             {
-                RenderCommandResult(handledSlashResult);
                 PersistSession();
                 if (_shutdownRendered)
                 {
@@ -332,7 +352,21 @@ public sealed class CodingAgentHost
                 continue;
             }
 
-            var input = slashPreparation == SlashInvocationPreparation.Expanded ? preparedInput : message;
+            if (slashPreparation.HandledResult is not null)
+            {
+                RenderCommandResult(slashPreparation.HandledResult);
+                PersistSession();
+                if (_shutdownRendered)
+                {
+                    return;
+                }
+
+                continue;
+            }
+
+            var input = slashPreparation.Preparation == SlashInvocationPreparation.Expanded
+                ? slashPreparation.PreparedInput
+                : message;
             await TryAutoCompactAsync(input, cancellationToken).ConfigureAwait(false);
             await RunTurnWithRetryAsync(input, cancellationToken).ConfigureAwait(false);
             PersistSession();
@@ -349,6 +383,11 @@ public sealed class CodingAgentHost
             EditorAction.CycleModelBackward => _commandRouter.CycleModel("backward"),
             EditorAction.SelectModel => await _commandRouter.SelectModelAsync(cancellationToken: cancellationToken).ConfigureAwait(false),
             EditorAction.PasteImage => await PasteClipboardImageAsync(cancellationToken).ConfigureAwait(false),
+            EditorAction.ToggleThinkingBlock => ToggleThinkingBlockVisibility(),
+            EditorAction.ToggleToolOutputExpansion => ToggleToolOutputExpansion(),
+            EditorAction.OpenExternalEditor => await OpenExternalEditorAsync(cancellationToken).ConfigureAwait(false),
+            EditorAction.QueueFollowUpMessage => await QueueFollowUpMessageAsync(cancellationToken).ConfigureAwait(false),
+            EditorAction.RestoreQueuedMessages => RestoreQueuedMessagesToDraft(),
             _ => CodingAgentCommandResult.NotCommand
         };
 
@@ -359,6 +398,41 @@ public sealed class CodingAgentHost
 
         RenderCommandResult(result);
         return true;
+    }
+
+    private string? ToolOutputExpandKeyHint() =>
+        CodingAgentKeyHintFormatter.KeyTextForAction(
+            _ui.InputKeyBindings,
+            EditorAction.ToggleToolOutputExpansion);
+
+    private CodingAgentCommandResult ToggleToolOutputExpansion()
+    {
+        _toolOutputExpanded = !_toolOutputExpanded;
+        foreach (var pair in _activeBashExecutions)
+        {
+            pair.Value.SetExpanded(_toolOutputExpanded);
+            _ui.WriteToolComponent(pair.Value, key: pair.Key);
+        }
+
+        foreach (var pair in _activeToolExecutions)
+        {
+            pair.Value.SetExpanded(_toolOutputExpanded);
+            _ui.WriteToolComponent(pair.Value, key: pair.Key);
+        }
+
+        return CodingAgentCommandResult.Status($"tool output: {(_toolOutputExpanded ? "expanded" : "collapsed")}");
+    }
+
+    private CodingAgentCommandResult ToggleThinkingBlockVisibility()
+    {
+        _hideThinkingBlock = !_hideThinkingBlock;
+        var current = _settingsStore?.Load();
+        if (current is not null)
+        {
+            _settingsStore?.Save(current with { HideThinkingBlock = _hideThinkingBlock });
+        }
+
+        return CodingAgentCommandResult.Status($"thinking blocks: {(_hideThinkingBlock ? "hidden" : "visible")}");
     }
 
     private async Task<CodingAgentCommandResult> PasteClipboardImageAsync(CancellationToken cancellationToken)
@@ -375,6 +449,78 @@ public sealed class CodingAgentHost
         await TryAutoCompactAsync(prompt.Text, cancellationToken).ConfigureAwait(false);
         await RunTurnWithRetryAsync(prompt, cancellationToken).ConfigureAwait(false);
         return CodingAgentCommandResult.Status("pasted clipboard image");
+    }
+
+    private async Task<CodingAgentCommandResult> OpenExternalEditorAsync(CancellationToken cancellationToken)
+    {
+        var wasCompositionStarted = _compositionSession?.IsStarted == true;
+        if (wasCompositionStarted)
+        {
+            _compositionSession?.Stop();
+        }
+
+        CodingAgentExternalEditorResult result;
+        try
+        {
+            result = await _externalEditor.EditAsync(_ui.GetDraft(), cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            if (wasCompositionStarted)
+            {
+                _compositionSession?.Start();
+                _compositionSession?.Render(force: true);
+            }
+        }
+
+        if (!result.EditorConfigured)
+        {
+            return CodingAgentCommandResult.Error("No editor configured. Set $VISUAL or $EDITOR environment variable.");
+        }
+
+        if (!result.Edited)
+        {
+            return string.IsNullOrWhiteSpace(result.ErrorMessage)
+                ? CodingAgentCommandResult.Status("external editor cancelled")
+                : CodingAgentCommandResult.Error(result.ErrorMessage);
+        }
+
+        _ui.SetDraft(result.Text ?? string.Empty);
+        return CodingAgentCommandResult.Status("external editor updated draft");
+    }
+
+    private async Task<CodingAgentCommandResult> QueueFollowUpMessageAsync(CancellationToken cancellationToken)
+    {
+        var draft = _ui.GetDraft();
+        if (string.IsNullOrWhiteSpace(draft))
+        {
+            return CodingAgentCommandResult.Status("follow-up: empty draft");
+        }
+
+        _ui.SetDraft(string.Empty);
+        await TryAutoCompactAsync(draft, cancellationToken).ConfigureAwait(false);
+        await RunTurnWithRetryAsync(draft, cancellationToken).ConfigureAwait(false);
+        return CodingAgentCommandResult.Status("follow-up sent");
+    }
+
+    private CodingAgentCommandResult RestoreQueuedMessagesToDraft()
+    {
+        var queued = _runner.DrainQueuedMessages();
+        var queuedText = queued.Steering.Concat(queued.FollowUp)
+            .Where(static text => !string.IsNullOrWhiteSpace(text))
+            .ToArray();
+        if (queuedText.Length == 0)
+        {
+            return CodingAgentCommandResult.Status("No queued messages to restore");
+        }
+
+        var currentDraft = _ui.GetDraft();
+        var restored = string.Join(
+            $"{Environment.NewLine}{Environment.NewLine}",
+            queuedText.Append(currentDraft).Where(static text => !string.IsNullOrWhiteSpace(text)));
+        _ui.SetDraft(restored);
+        return CodingAgentCommandResult.Status(
+            $"Restored {queuedText.Length} queued message{(queuedText.Length == 1 ? string.Empty : "s")} to editor");
     }
 
     private async Task<bool> TryHandleCommandAsync(string input, CancellationToken cancellationToken)
@@ -415,6 +561,15 @@ public sealed class CodingAgentHost
             return true;
         }
 
+        var handledByCustomMessage = await HandleExtensionCustomMessagesAsync(
+                invocation.CustomMessageDeliveries,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (!handledByCustomMessage)
+        {
+            RenderDisplayedMessages(invocation.DisplayMessages);
+        }
+
         if (invocation.SendToRunner)
         {
             await TryAutoCompactAsync(invocation.Message, cancellationToken).ConfigureAwait(false);
@@ -423,7 +578,11 @@ public sealed class CodingAgentHost
             return true;
         }
 
-        WriteStatus(invocation.Message);
+        if (!string.IsNullOrWhiteSpace(invocation.Message))
+        {
+            WriteStatus(invocation.Message);
+        }
+
         return true;
     }
 
@@ -515,6 +674,17 @@ public sealed class CodingAgentHost
 
     private async Task RunTurnWithRetryAsync(string input, CancellationToken cancellationToken)
     {
+        var turnMessages = CreateTurnMessagesWithPendingCustomMessages(input);
+        if (turnMessages is not null)
+        {
+            await RunTurnWithRetryAsync(
+                    input,
+                    (logContext, token) => RunSingleTurnAttemptAsync(turnMessages, logContext, token),
+                    cancellationToken)
+                .ConfigureAwait(false);
+            return;
+        }
+
         await RunTurnWithRetryAsync(
                 input,
                 (logContext, token) => RunSingleTurnAttemptAsync(input, logContext, token),
@@ -527,6 +697,17 @@ public sealed class CodingAgentHost
         CancellationToken cancellationToken)
     {
         var displayText = prompt.Text;
+        var turnMessages = CreateTurnMessagesWithPendingCustomMessages(prompt);
+        if (turnMessages is not null)
+        {
+            await RunTurnWithRetryAsync(
+                    displayText,
+                    (logContext, token) => RunSingleTurnAttemptAsync(turnMessages, logContext, token),
+                    cancellationToken)
+                .ConfigureAwait(false);
+            return;
+        }
+
         await RunTurnWithRetryAsync(
                 displayText,
                 (logContext, token) => RunSingleTurnAttemptAsync(prompt, logContext, token),
@@ -534,8 +715,84 @@ public sealed class CodingAgentHost
             .ConfigureAwait(false);
     }
 
+    private async Task RunTurnWithRetryAsync(AgentCustomMessage input, CancellationToken cancellationToken)
+    {
+        await RunTurnWithRetryAsync(
+                input.Display
+                    ? [CodingAgentMessageDisplayFormatter.FormatCustomMessage(input)]
+                    : [],
+                (logContext, token) => RunSingleTurnAttemptAsync(input, logContext, token),
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// 将延迟到下一轮的 custom message 注入到普通文本 prompt 后面。
+    /// </summary>
+    /// <param name="input">用户输入文本。</param>
+    /// <returns>存在待注入 custom message 时返回批量 prompt；否则返回 <see langword="null"/>。</returns>
+    private IReadOnlyList<ChatMessage>? CreateTurnMessagesWithPendingCustomMessages(string input)
+    {
+        if (_pendingNextTurnCustomMessages.Count == 0)
+        {
+            return null;
+        }
+
+        var messages = new List<ChatMessage> { new UserMessage(input) };
+        messages.AddRange(_pendingNextTurnCustomMessages);
+        _pendingNextTurnCustomMessages.Clear();
+        return messages.ToArray();
+    }
+
+    /// <summary>
+    /// 将延迟到下一轮的 custom message 注入到图片/文本 prompt 后面。
+    /// </summary>
+    /// <param name="prompt">初始 prompt。</param>
+    /// <returns>存在待注入 custom message 时返回批量 prompt；否则返回 <see langword="null"/>。</returns>
+    private IReadOnlyList<ChatMessage>? CreateTurnMessagesWithPendingCustomMessages(CodingAgentInitialPrompt prompt)
+    {
+        if (_pendingNextTurnCustomMessages.Count == 0)
+        {
+            return null;
+        }
+
+        var messages = new List<ChatMessage>
+        {
+            prompt.HasImages
+                ? new UserMessage(prompt.ToContentBlocks())
+                : new UserMessage(prompt.Text)
+        };
+        messages.AddRange(_pendingNextTurnCustomMessages);
+        _pendingNextTurnCustomMessages.Clear();
+        return messages.ToArray();
+    }
+
     private async Task RunTurnWithRetryAsync(
         string displayedInput,
+        Func<TauRuntimeLogContext, CancellationToken, Task<CodingAgentTurnAttemptResult>> runAttempt,
+        CancellationToken cancellationToken)
+    {
+        await RunTurnWithRetryAsync(
+                CodingAgentMessageDisplayFormatter.FormatUserMessage(displayedInput),
+                runAttempt,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private async Task RunTurnWithRetryAsync(
+        CodingAgentDisplayedMessage displayedInput,
+        Func<TauRuntimeLogContext, CancellationToken, Task<CodingAgentTurnAttemptResult>> runAttempt,
+        CancellationToken cancellationToken)
+    {
+        await RunTurnWithRetryAsync(
+                [displayedInput],
+                runAttempt,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private async Task RunTurnWithRetryAsync(
+        IReadOnlyList<CodingAgentDisplayedMessage> displayedInput,
         Func<TauRuntimeLogContext, CancellationToken, Task<CodingAgentTurnAttemptResult>> runAttempt,
         CancellationToken cancellationToken)
     {
@@ -543,7 +800,7 @@ public sealed class CodingAgentHost
         var logContext = CreateTurnLogContext();
         var retryAttempt = 0;
         var overflowRecoveryAttempted = false;
-        RenderDisplayedInput(displayedInput);
+        RenderDisplayedMessages(displayedInput);
 
         while (true)
         {
@@ -646,9 +903,254 @@ public sealed class CodingAgentHost
         }
     }
 
-    private void RenderDisplayedInput(string displayedInput)
+    private async Task<CodingAgentTurnAttemptResult> RunSingleTurnAttemptAsync(
+        AgentCustomMessage input,
+        TauRuntimeLogContext logContext,
+        CancellationToken cancellationToken)
     {
-        RenderDisplayedMessages(CodingAgentMessageDisplayFormatter.FormatUserMessage(displayedInput));
+        var errorAlreadyRendered = false;
+        using var turnInputCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        Task? turnInputTask = null;
+
+        try
+        {
+            RefreshCompositionStatus(GetRunningStatusText());
+            var events = _runner.RunAsync(input, logContext, cancellationToken);
+            turnInputTask = StartTurnInputListener(turnInputCts.Token);
+
+            await foreach (var evt in events.ConfigureAwait(false))
+            {
+                if (evt is AgentEndEvent { ErrorMessage: not null } end)
+                {
+                    HandleEvent(evt);
+                    errorAlreadyRendered = true;
+                    return CodingAgentTurnAttemptResult.Failed(end.ErrorMessage, errorAlreadyRendered);
+                }
+
+                HandleEvent(evt);
+            }
+
+            return CodingAgentTurnAttemptResult.Success();
+        }
+        catch (OperationCanceledException)
+        {
+            WriteCancelled();
+            return CodingAgentTurnAttemptResult.Cancelled();
+        }
+        catch (Exception ex)
+        {
+            return CodingAgentTurnAttemptResult.Failed(ex.Message, errorAlreadyRendered: false);
+        }
+        finally
+        {
+            turnInputCts.Cancel();
+            if (turnInputTask is not null)
+            {
+                try
+                {
+                    await turnInputTask.ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    // Expected when the turn finishes before the input listener does.
+                }
+            }
+        }
+    }
+
+    private async Task<CodingAgentTurnAttemptResult> RunSingleTurnAttemptAsync(
+        IReadOnlyList<ChatMessage> input,
+        TauRuntimeLogContext logContext,
+        CancellationToken cancellationToken)
+    {
+        var errorAlreadyRendered = false;
+        using var turnInputCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        Task? turnInputTask = null;
+
+        try
+        {
+            RefreshCompositionStatus(GetRunningStatusText());
+            var events = _runner.RunAsync(input, logContext, cancellationToken);
+            turnInputTask = StartTurnInputListener(turnInputCts.Token);
+
+            await foreach (var evt in events.ConfigureAwait(false))
+            {
+                if (evt is AgentEndEvent { ErrorMessage: not null } end)
+                {
+                    HandleEvent(evt);
+                    errorAlreadyRendered = true;
+                    return CodingAgentTurnAttemptResult.Failed(end.ErrorMessage, errorAlreadyRendered);
+                }
+
+                HandleEvent(evt);
+            }
+
+            return CodingAgentTurnAttemptResult.Success();
+        }
+        catch (OperationCanceledException)
+        {
+            WriteCancelled();
+            return CodingAgentTurnAttemptResult.Cancelled();
+        }
+        catch (Exception ex)
+        {
+            return CodingAgentTurnAttemptResult.Failed(ex.Message, errorAlreadyRendered: false);
+        }
+        finally
+        {
+            turnInputCts.Cancel();
+            if (turnInputTask is not null)
+            {
+                try
+                {
+                    await turnInputTask.ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    // Expected when the turn finishes before the input listener does.
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// 按扩展传入的投递选项处理 custom message。
+    /// </summary>
+    /// <param name="deliveries">扩展发送的 custom message 与投递选项。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>至少一条 custom message 已经触发 runner turn 时返回 <see langword="true"/>。</returns>
+    private async Task<bool> HandleExtensionCustomMessagesAsync(
+        IReadOnlyList<CodingAgentExtensionCustomMessageDelivery>? deliveries,
+        CancellationToken cancellationToken)
+    {
+        if (deliveries is not { Count: > 0 })
+        {
+            return false;
+        }
+
+        var triggeredTurn = false;
+        foreach (var delivery in deliveries)
+        {
+            if (await HandleExtensionCustomMessageAsync(delivery, cancellationToken).ConfigureAwait(false))
+            {
+                triggeredTurn = true;
+            }
+        }
+
+        return triggeredTurn;
+    }
+
+    /// <summary>
+    /// 在不能启动异步 turn 的预处理场景中处理不触发 turn 的 custom message。
+    /// </summary>
+    /// <param name="deliveries">扩展发送的 custom message 与投递选项。</param>
+    private void HandleExtensionCustomMessagesWithoutTurn(
+        IReadOnlyList<CodingAgentExtensionCustomMessageDelivery>? deliveries)
+    {
+        if (deliveries is not { Count: > 0 })
+        {
+            return;
+        }
+
+        foreach (var delivery in deliveries)
+        {
+            HandleExtensionCustomMessageWithoutTurn(delivery);
+        }
+    }
+
+    /// <summary>
+    /// 按单条 custom message 的投递选项执行 append、queue 或 trigger turn。
+    /// </summary>
+    /// <param name="delivery">custom message 与对应投递选项。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>当前消息已经触发 runner turn 时返回 <see langword="true"/>。</returns>
+    private async Task<bool> HandleExtensionCustomMessageAsync(
+        CodingAgentExtensionCustomMessageDelivery delivery,
+        CancellationToken cancellationToken)
+    {
+        if (delivery.DeliverAs == "nextTurn")
+        {
+            _pendingNextTurnCustomMessages.Add(delivery.Message);
+            return false;
+        }
+
+        if (_runner.IsStreaming)
+        {
+            QueueStreamingCustomMessage(delivery);
+            return false;
+        }
+
+        if (delivery.TriggerTurn)
+        {
+            await RunTurnWithRetryAsync(delivery.Message, cancellationToken).ConfigureAwait(false);
+            PersistSession();
+            return true;
+        }
+
+        if (HandleExtensionCustomMessageWithoutTurn(delivery))
+        {
+            return false;
+        }
+
+        _runner.AppendMessage(delivery.Message);
+        PersistSession();
+        await PublishCustomMessageLifecycleAsync(delivery.Message, cancellationToken).ConfigureAwait(false);
+        return false;
+    }
+
+    /// <summary>
+    /// 为 append-only custom message 发布上游兼容的 message_start/message_end lifecycle events。
+    /// </summary>
+    /// <param name="message">已经追加到会话状态的 custom message。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    private async Task PublishCustomMessageLifecycleAsync(
+        AgentCustomMessage message,
+        CancellationToken cancellationToken)
+    {
+        await _runner.PublishLifecycleEventAsync(new MessageStartEvent(message), cancellationToken)
+            .ConfigureAwait(false);
+        await _runner.PublishLifecycleEventAsync(new MessageEndEvent(message), cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// 处理无需立即运行模型的 custom message 投递模式。
+    /// </summary>
+    /// <param name="delivery">custom message 与对应投递选项。</param>
+    /// <returns>当前消息已经被处理且无需继续 append-only 逻辑时返回 <see langword="true"/>。</returns>
+    private bool HandleExtensionCustomMessageWithoutTurn(CodingAgentExtensionCustomMessageDelivery delivery)
+    {
+        switch (delivery.DeliverAs)
+        {
+            case "nextTurn":
+                _pendingNextTurnCustomMessages.Add(delivery.Message);
+                return true;
+            case "followUp":
+                _runner.FollowUp(delivery.Message);
+                return true;
+            case "steer":
+                _runner.Steer(delivery.Message);
+                return true;
+        }
+
+        if (_runner.IsStreaming)
+        {
+            _runner.Steer(delivery.Message);
+            return true;
+        }
+
+        return false;
+    }
+
+    private void QueueStreamingCustomMessage(CodingAgentExtensionCustomMessageDelivery delivery)
+    {
+        if (delivery.DeliverAs == "followUp")
+        {
+            _runner.FollowUp(delivery.Message);
+            return;
+        }
+
+        _runner.Steer(delivery.Message);
     }
 
     private void RenderDisplayedMessages(IReadOnlyList<CodingAgentDisplayedMessage>? messages)
@@ -922,49 +1424,63 @@ public sealed class CodingAgentHost
         }
     }
 
-    private SlashInvocationPreparation TryPrepareSlashInvocation(
+    private async Task<CodingAgentSlashInvocationResult> TryPrepareSlashInvocationAsync(
         string input,
-        out string preparedInput,
-        out CodingAgentCommandResult? handledResult)
+        CancellationToken cancellationToken)
     {
-        preparedInput = input;
-        handledResult = null;
         if (!input.StartsWith("/", StringComparison.Ordinal))
         {
-            return SlashInvocationPreparation.None;
+            return CodingAgentSlashInvocationResult.None(input);
         }
 
         var command = GetSlashCommandName(input);
         if (CodingAgentCommandCatalog.IsSupported(command))
         {
-            return SlashInvocationPreparation.None;
+            return CodingAgentSlashInvocationResult.None(input);
         }
 
         if (_extensionCommandStore?.TryInvoke(input, out var invocation) == true && invocation is not null)
         {
             if (invocation.SendToRunner)
             {
-                preparedInput = invocation.Message;
-                return SlashInvocationPreparation.Expanded;
+                var sendToRunnerCustomHandled = await HandleExtensionCustomMessagesAsync(
+                        invocation.CustomMessageDeliveries,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                if (!sendToRunnerCustomHandled)
+                {
+                    RenderDisplayedMessages(invocation.DisplayMessages);
+                }
+
+                return CodingAgentSlashInvocationResult.Expanded(invocation.Message);
             }
 
-            handledResult = invocation.IsError
+            var handledByCustomMessage = await HandleExtensionCustomMessagesAsync(
+                    invocation.CustomMessageDeliveries,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (handledByCustomMessage)
+            {
+                return CodingAgentSlashInvocationResult.Consumed(input);
+            }
+
+            var handledResult = invocation.IsError
                 ? CodingAgentCommandResult.Error(invocation.Message)
-                : CodingAgentCommandResult.Status(invocation.Message);
-            return SlashInvocationPreparation.Handled;
+                : CodingAgentCommandResult.Status(invocation.Message, invocation.DisplayMessages ?? []);
+            return CodingAgentSlashInvocationResult.Handled(input, handledResult);
         }
 
-        if (_skillStore?.TryExpand(input, out preparedInput, out _) == true)
+        if (_skillStore?.TryExpand(input, out var preparedInput, out _) == true)
         {
-            return SlashInvocationPreparation.Expanded;
+            return CodingAgentSlashInvocationResult.Expanded(preparedInput);
         }
 
         if (_promptTemplateStore?.TryExpand(input, out preparedInput, out _) != true)
         {
-            return SlashInvocationPreparation.None;
+            return CodingAgentSlashInvocationResult.None(input);
         }
 
-        return SlashInvocationPreparation.Expanded;
+        return CodingAgentSlashInvocationResult.Expanded(preparedInput);
     }
 
     private CodingAgentSessionSnapshot CreateRollbackSnapshot() =>
@@ -1245,11 +1761,12 @@ public sealed class CodingAgentHost
         switch (evt)
         {
             case MessageUpdateEvent { StreamEvent: TextDeltaEvent delta }:
+                _hiddenThinkingLabelRendered = false;
                 _ui.WriteAssistantText(delta.Delta);
                 break;
 
             case MessageUpdateEvent { StreamEvent: ThinkingDeltaEvent thinking }:
-                _ui.WriteAssistantThinking(thinking.Delta);
+                WriteAssistantThinking(thinking.Delta);
                 break;
 
             case ToolExecutionStartEvent toolStart:
@@ -1280,12 +1797,16 @@ public sealed class CodingAgentHost
         if (IsBashTool(toolStart.ToolName))
         {
             var bash = new TuiBashExecution(TryGetCommandFromArgs(toolStart.Args) ?? toolStart.ToolName);
+            bash.SetExpanded(_toolOutputExpanded);
+            bash.SetExpandKeyHint(ToolOutputExpandKeyHint());
             _activeBashExecutions[toolStart.ToolCallId] = bash;
             _ui.WriteToolComponent(bash, key: toolStart.ToolCallId);
             return;
         }
 
         var tool = new TuiToolExecution(toolStart.ToolName, toolStart.ToolCallId, toolStart.Args);
+        tool.SetExpanded(_toolOutputExpanded);
+        tool.SetExpandKeyHint(ToolOutputExpandKeyHint());
         tool.MarkExecutionStarted();
         tool.SetArgsComplete();
         _activeToolExecutions[toolStart.ToolCallId] = tool;
@@ -1310,6 +1831,7 @@ public sealed class CodingAgentHost
                 string.IsNullOrWhiteSpace(toolUpdate.ToolName) ? "tool" : toolUpdate.ToolName,
                 toolUpdate.ToolCallId,
                 toolUpdate.Args);
+            tool.SetExpanded(_toolOutputExpanded);
             tool.MarkExecutionStarted();
             _activeToolExecutions[toolUpdate.ToolCallId] = tool;
         }
@@ -1360,6 +1882,7 @@ public sealed class CodingAgentHost
             tool = new TuiToolExecution(
                 string.IsNullOrWhiteSpace(toolEnd.ToolName) ? "tool" : toolEnd.ToolName,
                 toolEnd.ToolCallId);
+            tool.SetExpanded(_toolOutputExpanded);
         }
 
         tool.UpdateResult(ToTuiToolExecutionResult(toolEnd.Result));
@@ -1489,6 +2012,28 @@ public sealed class CodingAgentHost
     private string GetRunningStatusText() =>
         CodingAgentFooterFormatter.FormatWorkingStatus("running", _footerDataProvider);
 
+    private string? GetHiddenThinkingLabel() =>
+        CodingAgentFooterFormatter.SanitizeStatusText(_footerDataProvider?.GetHiddenThinkingLabel());
+
+    private void WriteAssistantThinking(string delta)
+    {
+        if (!_hideThinkingBlock)
+        {
+            _ui.WriteAssistantThinking(delta, GetHiddenThinkingLabel());
+            return;
+        }
+
+        if (_hiddenThinkingLabelRendered)
+        {
+            return;
+        }
+
+        _hiddenThinkingLabelRendered = true;
+        _ui.WriteAssistantThinking(
+            CodingAgentMessageDisplayFormatter.DefaultHiddenThinkingLabel,
+            GetHiddenThinkingLabel());
+    }
+
     private CodingAgentSessionStats? GetFooterSessionStats()
     {
         try
@@ -1554,6 +2099,27 @@ public sealed class CodingAgentHost
         None,
         Expanded,
         Handled
+    }
+
+    private sealed record CodingAgentSlashInvocationResult(
+        SlashInvocationPreparation Preparation,
+        string PreparedInput,
+        CodingAgentCommandResult? HandledResult,
+        bool AlreadyHandled)
+    {
+        public static CodingAgentSlashInvocationResult None(string input) =>
+            new(SlashInvocationPreparation.None, input, null, false);
+
+        public static CodingAgentSlashInvocationResult Expanded(string input) =>
+            new(SlashInvocationPreparation.Expanded, input, null, false);
+
+        public static CodingAgentSlashInvocationResult Handled(
+            string input,
+            CodingAgentCommandResult result) =>
+            new(SlashInvocationPreparation.Handled, input, result, false);
+
+        public static CodingAgentSlashInvocationResult Consumed(string input) =>
+            new(SlashInvocationPreparation.Handled, input, null, true);
     }
 
     private sealed record CodingAgentTurnAttemptResult(

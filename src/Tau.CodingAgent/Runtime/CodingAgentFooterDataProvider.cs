@@ -14,6 +14,7 @@ public sealed class CodingAgentFooterDataProvider : IDisposable
     private string? _workingMessage;
     private IReadOnlyList<string>? _workingIndicatorFrames;
     private int? _workingIndicatorIntervalMilliseconds;
+    private string? _hiddenThinkingLabel;
     private string _cwd;
     private CodingAgentGitPaths? _gitPaths;
     private string? _cachedBranch;
@@ -98,6 +99,15 @@ public sealed class CodingAgentFooterDataProvider : IDisposable
         }
     }
 
+    public string? GetHiddenThinkingLabel()
+    {
+        lock (_sync)
+        {
+            ThrowIfDisposed();
+            return _hiddenThinkingLabel;
+        }
+    }
+
     public IDisposable OnBranchChange(Action callback)
     {
         ArgumentNullException.ThrowIfNull(callback);
@@ -174,6 +184,15 @@ public sealed class CodingAgentFooterDataProvider : IDisposable
             ThrowIfDisposed();
             _workingIndicatorFrames = frames?.ToArray();
             _workingIndicatorIntervalMilliseconds = intervalMilliseconds;
+        }
+    }
+
+    public void SetHiddenThinkingLabel(string? label)
+    {
+        lock (_sync)
+        {
+            ThrowIfDisposed();
+            _hiddenThinkingLabel = label;
         }
     }
 

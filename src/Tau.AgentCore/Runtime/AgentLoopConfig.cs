@@ -64,4 +64,10 @@ public record AgentLoopConfig
     /// Mirrors pi-main shouldStopAfterTurn.
     /// </summary>
     public Func<AgentLoopTurnContext, CancellationToken, Task<bool>>? ShouldStopAfterTurnAsync { get; init; }
+
+    /// <summary>
+    /// 消息结束时的转换钩子；用于在 message_end 事件发布后、消息写入会话状态前替换消息内容。
+    /// 镜像上游扩展 message_end handler 返回替换消息的语义。
+    /// </summary>
+    public Func<ChatMessage, CancellationToken, Task<ChatMessage>>? MessageEndTransformAsync { get; init; }
 }

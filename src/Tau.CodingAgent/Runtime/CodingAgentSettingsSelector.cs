@@ -22,6 +22,7 @@ public static class CodingAgentSettingsSelector
     public const string TerminalShowImagesAction = "show-images";
     public const string ImagesAutoResizeAction = "auto-resize-images";
     public const string ImagesBlockImagesAction = "block-images";
+    public const string HideThinkingBlockAction = "hide-thinking-block";
     public const string ShowHardwareCursorAction = "show-hardware-cursor";
     public const string EditorPaddingAction = "editor-padding";
     public const string AutocompleteMaxVisibleAction = "autocomplete-max-visible";
@@ -115,6 +116,12 @@ public static class CodingAgentSettingsSelector
                 "Block images",
                 FormatBooleanValue(settings.ImagesBlockImages ?? false),
                 "Prevent images from being sent to LLM providers.",
+                ["true", "false"]),
+            new TuiSettingItem(
+                HideThinkingBlockAction,
+                "Hide thinking blocks",
+                FormatBooleanValue(settings.HideThinkingBlock ?? false),
+                "Hide thinking blocks in assistant responses.",
                 ["true", "false"]),
             new TuiSettingItem(
                 ShowHardwareCursorAction,

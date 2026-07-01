@@ -148,6 +148,16 @@ public sealed class InteractiveInputEditor
                     _pasteCounter = 0;
                     ResetTransientEditAction();
                     return InputResult.Cancelled;
+                case EditorAction.NewLine:
+                {
+                    var undoState = CaptureUndoState(chars, cursor);
+                    InsertNewLine(chars, ref cursor);
+                    PushUndoIfChanged(undoStack, undoState, chars, cursor);
+                    historyOffset = -1;
+                    preferredVerticalColumn = null;
+                    ResetTransientEditAction();
+                    break;
+                }
                 case EditorAction.Submit:
                 {
                     if (key.Key == ConsoleKey.Enter &&
@@ -233,6 +243,11 @@ public sealed class InteractiveInputEditor
                 case EditorAction.CycleModelBackward:
                 case EditorAction.SelectModel:
                 case EditorAction.PasteImage:
+                case EditorAction.ToggleThinkingBlock:
+                case EditorAction.ToggleToolOutputExpansion:
+                case EditorAction.OpenExternalEditor:
+                case EditorAction.QueueFollowUpMessage:
+                case EditorAction.RestoreQueuedMessages:
                 {
                     var draft = new string(chars.ToArray());
                     _renderer.Commit();

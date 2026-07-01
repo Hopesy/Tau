@@ -687,6 +687,7 @@ public sealed class CodingAgentRpcHostTests
         await bridge.SetHeaderAsync(["custom header", "second"]);
         await bridge.SetWorkingMessageAsync("Working custom");
         await bridge.SetWorkingIndicatorAsync(["a", "b"], 120);
+        await bridge.SetHiddenThinkingLabelAsync("Pondering...");
         await bridge.NotifyAsync("Plain notice");
         await bridge.SetStatusAsync("idle", null);
         await bridge.SetWidgetAsync("empty", null);
@@ -694,6 +695,7 @@ public sealed class CodingAgentRpcHostTests
         await bridge.SetHeaderAsync(null);
         await bridge.SetWorkingMessageAsync(null);
         await bridge.SetWorkingIndicatorAsync(null);
+        await bridge.SetHiddenThinkingLabelAsync(null);
         await bridge.SetTitleAsync("Tau");
         await bridge.SetEditorTextAsync("draft");
 
@@ -791,6 +793,16 @@ public sealed class CodingAgentRpcHostTests
         Assert.Null(workingStatus.IndicatorFrames);
         Assert.Null(workingStatus.IndicatorIntervalMilliseconds);
 
+        var hiddenThinkingLabel = lines.Single(line =>
+            line.GetProperty("method").GetString() == "setHiddenThinkingLabel" &&
+            line.TryGetProperty("hiddenThinkingLabel", out _));
+        Assert.Equal("Pondering...", hiddenThinkingLabel.GetProperty("hiddenThinkingLabel").GetString());
+        var clearedHiddenThinkingLabel = lines.Single(line =>
+            line.GetProperty("method").GetString() == "setHiddenThinkingLabel" &&
+            !line.TryGetProperty("hiddenThinkingLabel", out _));
+        Assert.Equal("setHiddenThinkingLabel", clearedHiddenThinkingLabel.GetProperty("method").GetString());
+        Assert.Null(footerDataProvider.GetHiddenThinkingLabel());
+
         Assert.Equal("Tau", lines.Single(line => line.GetProperty("method").GetString() == "setTitle").GetProperty("title").GetString());
         Assert.Equal(
             "draft",
@@ -840,6 +852,7 @@ public sealed class CodingAgentRpcHostTests
                     ctx.ui.setHeader(() => ({ render: () => ["header one", "header two"] }));
                     ctx.ui.setWorkingMessage("Working custom");
                     ctx.ui.setWorkingIndicator({ frames: ["a", "b"], intervalMs: 120.8 });
+                    ctx.ui.setHiddenThinkingLabel("Pondering...");
                     ctx.ui.setTitle("Tau UI");
                     ctx.ui.setEditorText("draft text");
                     ctx.ui.pasteToEditor("pasted text");
@@ -895,6 +908,8 @@ public sealed class CodingAgentRpcHostTests
             ["a", "b"],
             workingIndicator.GetProperty("workingIndicatorFrames").EnumerateArray().Select(line => line.GetString()!).ToArray());
         Assert.Equal(120, workingIndicator.GetProperty("workingIndicatorIntervalMs").GetInt32());
+        var hiddenThinkingLabel = lines.Single(line => line.GetProperty("method").GetString() == "setHiddenThinkingLabel");
+        Assert.Equal("Pondering...", hiddenThinkingLabel.GetProperty("hiddenThinkingLabel").GetString());
         Assert.Equal("Tau UI", lines.Single(line => line.GetProperty("method").GetString() == "setTitle").GetProperty("title").GetString());
         Assert.Equal(
             ["draft text", "pasted text"],
@@ -902,6 +917,66 @@ public sealed class CodingAgentRpcHostTests
                 .Where(line => line.GetProperty("method").GetString() == "set_editor_text")
                 .Select(line => line.GetProperty("text").GetString()!)
                 .ToArray());
+    }
+
+    [Fact]
+    public async Task ExtensionCommandUiEditorAwaitsRpcResponse()
+    {
+        Assert.True(IsNodeAvailable(), "node is required for javascript extension runtime tests");
+        using var temp = TempDirectory.Create();
+        var extensionDirectory = System.IO.Path.Combine(temp.Path, ".tau", "extensions", "ui-editor-command");
+        Directory.CreateDirectory(extensionDirectory);
+        WriteJavaScriptExtension(
+            extensionDirectory,
+            """
+            export default function(pi) {
+              pi.registerCommand("edit-draft", {
+                description: "Edit draft through extension UI",
+                handler: async (_args, ctx) => {
+                  const value = await ctx.ui.editor("Edit prompt", "prefill text");
+                  return value ? `edited=${value}` : "cancelled";
+                }
+              });
+            }
+            """);
+        var store = new CodingAgentExtensionCommandStore(
+            cwd: temp.Path,
+            userExtensionsDirectory: System.IO.Path.Combine(temp.Path, "missing-user-extensions"),
+            javaScriptRuntime: new CodingAgentJavaScriptExtensionRuntime(temp.Path, nodeExecutable: "node"));
+        var input = new AsyncLineReader();
+        var output = new JsonLineWriter();
+        var bridge = new CodingAgentRpcExtensionUiBridge();
+        var host = new CodingAgentRpcHost(
+            new FakeCodingAgentRunner((_, _) => EmptyRun()),
+            input,
+            output,
+            extensionCommandStore: store,
+            extensionUi: bridge);
+        var runTask = host.RunAsync();
+        var status = store.LoadStatus();
+        var command = Assert.Single(status.Commands);
+
+        var invokeTask = Task.Run(() =>
+        {
+            Assert.True(store.TryInvoke($"/{command.InvocationName}", out var invocation));
+            return invocation!;
+        });
+        var editorRequest = await output.WaitForJsonLineAsync(
+            line => line.TryGetProperty("method", out var method) && method.GetString() == "editor",
+            TimeSpan.FromSeconds(5));
+
+        Assert.Equal("Edit prompt", editorRequest.GetProperty("title").GetString());
+        Assert.Equal("prefill text", editorRequest.GetProperty("prefill").GetString());
+        input.Enqueue($"{{\"type\":\"extension_ui_response\",\"id\":\"{editorRequest.GetProperty("id").GetString()}\",\"value\":\"edited text\"}}");
+
+        var invocationResult = await invokeTask.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.False(invocationResult.IsError);
+        Assert.False(invocationResult.SendToRunner);
+        Assert.Equal("edited=edited text", invocationResult.Message);
+
+        input.Complete();
+        await runTask.WaitAsync(TimeSpan.FromSeconds(5));
     }
 
     [Fact]

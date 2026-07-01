@@ -20,6 +20,16 @@ public class KeyBindingMapTests
     }
 
     [Fact]
+    public void Default_MapsShiftEnterAndControlJToNewLine()
+    {
+        var shiftEnter = new ConsoleKeyInfo('\0', ConsoleKey.Enter, shift: true, alt: false, control: false);
+        var controlJ = new ConsoleKeyInfo('\n', ConsoleKey.J, shift: false, alt: false, control: true);
+
+        Assert.Equal(EditorAction.NewLine, KeyBindingMap.Default.Resolve(shiftEnter));
+        Assert.Equal(EditorAction.NewLine, KeyBindingMap.Default.Resolve(controlJ));
+    }
+
+    [Fact]
     public void Default_MapsControlBackspaceToDeletePrevWord()
     {
         var info = new ConsoleKeyInfo('\b', ConsoleKey.Backspace, shift: false, alt: false, control: true);
@@ -50,6 +60,46 @@ public class KeyBindingMapTests
         var pasteImage = new ConsoleKeyInfo('\x16', ConsoleKey.V, shift: false, alt: false, control: true);
 
         Assert.Equal(EditorAction.PasteImage, KeyBindingMap.Default.Resolve(pasteImage));
+    }
+
+    [Fact]
+    public void Default_MapsToggleThinkingBlockKey()
+    {
+        var toggleThinking = new ConsoleKeyInfo('\x14', ConsoleKey.T, shift: false, alt: false, control: true);
+
+        Assert.Equal(EditorAction.ToggleThinkingBlock, KeyBindingMap.Default.Resolve(toggleThinking));
+    }
+
+    [Fact]
+    public void Default_MapsToggleToolOutputExpansionKey()
+    {
+        var toggleTools = new ConsoleKeyInfo('\x0F', ConsoleKey.O, shift: false, alt: false, control: true);
+
+        Assert.Equal(EditorAction.ToggleToolOutputExpansion, KeyBindingMap.Default.Resolve(toggleTools));
+    }
+
+    [Fact]
+    public void Default_MapsOpenExternalEditorKey()
+    {
+        var externalEditor = new ConsoleKeyInfo('\x07', ConsoleKey.G, shift: false, alt: false, control: true);
+
+        Assert.Equal(EditorAction.OpenExternalEditor, KeyBindingMap.Default.Resolve(externalEditor));
+    }
+
+    [Fact]
+    public void Default_MapsQueueFollowUpMessageKey()
+    {
+        var followUp = new ConsoleKeyInfo('\0', ConsoleKey.Enter, shift: false, alt: true, control: false);
+
+        Assert.Equal(EditorAction.QueueFollowUpMessage, KeyBindingMap.Default.Resolve(followUp));
+    }
+
+    [Fact]
+    public void Default_MapsRestoreQueuedMessagesKey()
+    {
+        var restoreQueued = new ConsoleKeyInfo('\0', ConsoleKey.UpArrow, shift: false, alt: true, control: false);
+
+        Assert.Equal(EditorAction.RestoreQueuedMessages, KeyBindingMap.Default.Resolve(restoreQueued));
     }
 
     [Fact]

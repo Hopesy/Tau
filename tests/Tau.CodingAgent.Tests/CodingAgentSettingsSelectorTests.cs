@@ -92,6 +92,7 @@ public class CodingAgentSettingsSelectorTests
                 TerminalClearOnShrink: true,
                 ImagesAutoResize: false,
                 ImagesBlockImages: true,
+                HideThinkingBlock: true,
                 ShowHardwareCursor: true,
                 EditorPaddingX: 2,
                 AutocompleteMaxVisible: 10),
@@ -109,7 +110,7 @@ public class CodingAgentSettingsSelectorTests
 
         var selector = CodingAgentSettingsSelector.CreateSettingsList(state);
 
-        Assert.Equal(17, selector.FilteredItems.Count);
+        Assert.Equal(18, selector.FilteredItems.Count);
         Assert.Collection(
             selector.FilteredItems,
             item =>
@@ -135,6 +136,11 @@ public class CodingAgentSettingsSelectorTests
             item =>
             {
                 Assert.Equal(CodingAgentSettingsSelector.ImagesBlockImagesAction, item.Id);
+                Assert.Equal("true", item.CurrentValue);
+            },
+            item =>
+            {
+                Assert.Equal(CodingAgentSettingsSelector.HideThinkingBlockAction, item.Id);
                 Assert.Equal("true", item.CurrentValue);
             },
             item =>

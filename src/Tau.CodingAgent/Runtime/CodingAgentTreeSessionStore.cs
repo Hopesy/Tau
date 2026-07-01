@@ -983,25 +983,17 @@ public sealed class CodingAgentTreeSessionStore
 
     private static string PreviewMessage(ChatMessage message)
     {
-        var content = message switch
+        var text = message switch
         {
-            UserMessage user => user.Content,
-            AssistantMessage assistant => assistant.Content,
-            ToolResultMessage toolResult => toolResult.Content,
-            _ => []
+            AssistantMessage assistant => CodingAgentMessageDisplayFormatter.FormatAssistantMessage(
+                assistant,
+                hideThinkingBlock: true),
+            UserMessage user => FormatContentPreview(user.Content),
+            ToolResultMessage toolResult => FormatContentPreview(toolResult.Content),
+            _ => string.Empty
         };
-        var text = string.Join(
-                " ",
-                content.Select(static block => block switch
-                {
-                    TextContent text => text.Text,
-                    ThinkingContent thinking => thinking.Thinking,
-                    ToolCallContent toolCall => $"tool call {toolCall.Name} {toolCall.Arguments}",
-                    ImageContent image => $"image {image.MimeType}",
-                    _ => block.Type
-                }))
-            .ReplaceLineEndings(" ")
-            .Trim();
+
+        text = text.ReplaceLineEndings(" ").Trim();
 
         if (string.IsNullOrWhiteSpace(text))
         {
@@ -2562,11 +2554,9 @@ public sealed class CodingAgentTreeSessionStore
 
     private static string PreviewMessage(CodingAgentSessionMessage message)
     {
-        var text = string.Join(
-            " ",
-            message.Content
-                .Where(static content => content.Type == "text" && !string.IsNullOrWhiteSpace(content.Text))
-                .Select(static content => content.Text!.Trim()));
+        var text = message.Role.Equals("assistant", StringComparison.OrdinalIgnoreCase)
+            ? FormatSessionContentPreview(message.Content, hideThinkingBlock: true)
+            : FormatSessionContentPreview(message.Content, hideThinkingBlock: false);
         if (string.IsNullOrWhiteSpace(text))
         {
             return string.Empty;
@@ -2574,6 +2564,43 @@ public sealed class CodingAgentTreeSessionStore
 
         return text.Length <= 72 ? text : text[..72] + "...";
     }
+
+    private static string FormatContentPreview(IReadOnlyList<ContentBlock> content) =>
+        string.Join(
+                " ",
+                content.Select(static block => block switch
+                {
+                    TextContent text => text.Text,
+                    ThinkingContent thinking => thinking.Thinking,
+                    ToolCallContent toolCall => $"tool call {toolCall.Name} {toolCall.Arguments}",
+                    ImageContent image => $"image {image.MimeType}",
+                    _ => block.Type
+                }))
+            .ReplaceLineEndings(" ")
+            .Trim();
+
+    private static string FormatSessionContentPreview(
+        IReadOnlyList<CodingAgentSessionContent> content,
+        bool hideThinkingBlock) =>
+        string.Join(
+                " ",
+                content.Select(item => FormatSessionContentBlock(item, hideThinkingBlock)))
+            .ReplaceLineEndings(" ")
+            .Trim();
+
+    private static string FormatSessionContentBlock(
+        CodingAgentSessionContent content,
+        bool hideThinkingBlock) =>
+        content.Type switch
+        {
+            "text" when content.Text is not null => content.Text.Trim(),
+            "thinking" when content.Thinking is not null => hideThinkingBlock
+                ? CodingAgentMessageDisplayFormatter.DefaultHiddenThinkingLabel
+                : content.Thinking.Trim(),
+            "image" when !string.IsNullOrWhiteSpace(content.MimeType) => $"image {content.MimeType}",
+            "toolCall" when !string.IsNullOrWhiteSpace(content.Name) => $"tool call {content.Name} {content.Arguments}",
+            _ => content.Type
+        };
 
     private static string ExtractUserMessageText(CodingAgentSessionMessage message)
     {

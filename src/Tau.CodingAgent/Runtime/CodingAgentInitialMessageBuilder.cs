@@ -899,63 +899,10 @@ internal static class CodingAgentInitialMessageBuilder
         return filePath;
     }
 
-    private static async Task<string?> DetectSupportedImageMimeTypeAsync(
+    private static Task<string?> DetectSupportedImageMimeTypeAsync(
         string path,
-        CancellationToken cancellationToken)
-    {
-        var buffer = new byte[16];
-        await using var stream = File.OpenRead(path);
-        var bytesRead = await stream.ReadAsync(buffer.AsMemory(0, buffer.Length), cancellationToken)
-            .ConfigureAwait(false);
-        if (bytesRead == 0)
-        {
-            return null;
-        }
-
-        if (bytesRead >= 8 &&
-            buffer[0] == 0x89 &&
-            buffer[1] == 0x50 &&
-            buffer[2] == 0x4e &&
-            buffer[3] == 0x47 &&
-            buffer[4] == 0x0d &&
-            buffer[5] == 0x0a &&
-            buffer[6] == 0x1a &&
-            buffer[7] == 0x0a)
-        {
-            return "image/png";
-        }
-
-        if (bytesRead >= 3 && buffer[0] == 0xff && buffer[1] == 0xd8 && buffer[2] == 0xff)
-        {
-            return "image/jpeg";
-        }
-
-        if (bytesRead >= 6 &&
-            buffer[0] == 'G' &&
-            buffer[1] == 'I' &&
-            buffer[2] == 'F' &&
-            buffer[3] == '8' &&
-            (buffer[4] == '7' || buffer[4] == '9') &&
-            buffer[5] == 'a')
-        {
-            return "image/gif";
-        }
-
-        if (bytesRead >= 12 &&
-            buffer[0] == 'R' &&
-            buffer[1] == 'I' &&
-            buffer[2] == 'F' &&
-            buffer[3] == 'F' &&
-            buffer[8] == 'W' &&
-            buffer[9] == 'E' &&
-            buffer[10] == 'B' &&
-            buffer[11] == 'P')
-        {
-            return "image/webp";
-        }
-
-        return null;
-    }
+        CancellationToken cancellationToken) =>
+        CodingAgentImageMimeDetector.DetectSupportedImageMimeTypeFromFileAsync(path, cancellationToken);
 
     private sealed record ProcessedFiles(string Text, IReadOnlyList<ImageContent> Images);
 }

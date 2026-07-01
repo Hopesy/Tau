@@ -5,6 +5,7 @@ public enum EditorAction
     None,
     Cancel,
     Submit,
+    NewLine,
     DeletePrevChar,
     DeletePrevWord,
     DeleteNextChar,
@@ -26,6 +27,11 @@ public enum EditorAction
     CycleModelBackward,
     SelectModel,
     PasteImage,
+    ToggleThinkingBlock,
+    ToggleToolOutputExpansion,
+    OpenExternalEditor,
+    QueueFollowUpMessage,
+    RestoreQueuedMessages,
 }
 
 public readonly record struct KeyBinding(ConsoleKey Key, ConsoleModifiers Modifiers)

@@ -120,6 +120,8 @@ public sealed class InteractiveConsoleSession
         _editor?.Buffer.SetDraft(value);
     }
 
+    public string GetDraft() => _editor?.Buffer.Draft ?? InputBuffer.Draft;
+
     public void SetInputShortcutHandler(Func<ConsoleKeyInfo, CancellationToken, Task<bool>>? shortcutHandler)
     {
         _editor?.SetShortcutHandler(shortcutHandler);
@@ -162,9 +164,10 @@ public sealed class InteractiveConsoleSession
         NotifyTranscriptChanged();
     }
 
-    public void WriteAssistantThinking(string delta)
+    public void WriteAssistantThinking(string delta, string? label = null)
     {
-        EnsureStreamingMode(TranscriptEntryKind.Thinking, "thinking> ", ConsoleColor.DarkGray);
+        var thinkingLabel = string.IsNullOrWhiteSpace(label) ? "thinking" : label.Trim();
+        EnsureStreamingMode(TranscriptEntryKind.Thinking, $"{thinkingLabel}> ", ConsoleColor.DarkGray);
         _terminal.Write(delta, ConsoleColor.DarkGray);
         _streamingBuffer += delta;
         NotifyTranscriptChanged();

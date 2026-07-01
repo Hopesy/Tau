@@ -114,6 +114,7 @@ public sealed class AgentRuntime
         {
             var turnIndex = 0;
             var skipInitialSteeringPoll = config.SkipInitialSteeringPoll;
+            IReadOnlyList<ChatMessage> pendingQueuedMessages = [];
 
             // Outer loop: follow-up messages
             do
@@ -128,12 +129,29 @@ public sealed class AgentRuntime
                     {
                         skipInitialSteeringPoll = false;
                     }
+                    else if (pendingQueuedMessages.Count > 0)
+                    {
+                        // 1. follow-up 消息已经由外层循环取出,本轮直接消费
+                    }
                     else
                     {
-                        DrainQueuedMessages(_steeringQueue, SteeringMode, ref _pendingSteeringMessageCount);
+                        pendingQueuedMessages = DrainQueuedMessagesToList(
+                            _steeringQueue,
+                            SteeringMode,
+                            ref _pendingSteeringMessageCount);
                     }
 
                     yield return new TurnStartEvent(turnIndex);
+
+                    foreach (var message in pendingQueuedMessages)
+                    {
+                        yield return new MessageStartEvent(message);
+                        var finalizedMessage = await TransformMessageEndAsync(currentConfig, message, token).ConfigureAwait(false);
+                        yield return new MessageEndEvent(finalizedMessage);
+                        State.AddMessage(finalizedMessage);
+                    }
+
+                    pendingQueuedMessages = [];
 
                     // Build context and stream LLM response
                     LlmContext context = default;
@@ -148,13 +166,17 @@ public sealed class AgentRuntime
                         var failureMessage = CreateFailureMessage(error, StopReason.Aborted, currentConfig.Model);
                         State.SetStreaming(false);
                         State.SetError(error);
-                        State.AddMessage(failureMessage);
                         contextFailureMessage = failureMessage;
                     }
 
                     if (contextFailureMessage is not null)
                     {
                         yield return new MessageStartEvent(contextFailureMessage);
+                        contextFailureMessage = (AssistantMessage)await TransformMessageEndAsync(
+                            currentConfig,
+                            contextFailureMessage,
+                            token).ConfigureAwait(false);
+                        State.AddMessage(contextFailureMessage);
                         yield return new MessageEndEvent(contextFailureMessage);
                         yield return new TurnEndEvent(turnIndex, contextFailureMessage, []);
                         yield return new AgentEndEvent(contextFailureMessage.ErrorMessage, State.Messages.ToArray());
@@ -217,6 +239,10 @@ public sealed class AgentRuntime
                             {
                                 yield return new MessageStartEvent(assistantMessage);
                             }
+                            assistantMessage = (AssistantMessage)await TransformMessageEndAsync(
+                                currentConfig,
+                                assistantMessage,
+                                token).ConfigureAwait(false);
                             State.AddMessage(assistantMessage);
                             yield return new MessageEndEvent(assistantMessage);
                             yield return new TurnEndEvent(turnIndex, assistantMessage, turnToolResults);
@@ -246,6 +272,10 @@ public sealed class AgentRuntime
                             {
                                 yield return new MessageStartEvent(assistantMessage);
                             }
+                            assistantMessage = (AssistantMessage)await TransformMessageEndAsync(
+                                currentConfig,
+                                assistantMessage,
+                                token).ConfigureAwait(false);
                             State.AddMessage(assistantMessage);
                             yield return new MessageEndEvent(assistantMessage);
                         }
@@ -264,6 +294,10 @@ public sealed class AgentRuntime
                             {
                                 yield return new MessageStartEvent(assistantMessage);
                             }
+                            assistantMessage = (AssistantMessage)await TransformMessageEndAsync(
+                                currentConfig,
+                                assistantMessage,
+                                token).ConfigureAwait(false);
                             State.AddMessage(assistantMessage);
                             yield return new MessageEndEvent(assistantMessage);
                             yield return new TurnEndEvent(turnIndex, assistantMessage, turnToolResults);
@@ -286,6 +320,10 @@ public sealed class AgentRuntime
                         {
                             yield return new MessageStartEvent(assistantMessage);
                         }
+                        assistantMessage = (AssistantMessage)await TransformMessageEndAsync(
+                            currentConfig,
+                            assistantMessage,
+                            token).ConfigureAwait(false);
                         State.AddMessage(assistantMessage);
                         yield return new MessageEndEvent(assistantMessage);
                         yield return new TurnEndEvent(turnIndex, assistantMessage, turnToolResults);
@@ -318,9 +356,13 @@ public sealed class AgentRuntime
                                         endEvt.ToolCallId,
                                         endEvt.Result.Content,
                                         endEvt.Result.IsError);
+                                    yield return new MessageStartEvent(toolResultMessage);
+                                    toolResultMessage = (ToolResultMessage)await TransformMessageEndAsync(
+                                        currentConfig,
+                                        toolResultMessage,
+                                        token).ConfigureAwait(false);
                                     State.AddMessage(toolResultMessage);
                                     turnToolResults.Add(toolResultMessage);
-                                    yield return new MessageStartEvent(toolResultMessage);
                                     yield return new MessageEndEvent(toolResultMessage);
                                 }
                             }
@@ -368,8 +410,11 @@ public sealed class AgentRuntime
 
                 } while (hasMoreWork && !token.IsCancellationRequested);
 
-            } while (!token.IsCancellationRequested &&
-                     DrainQueuedMessages(_followUpQueue, FollowUpMode, ref _pendingFollowUpMessageCount));
+                pendingQueuedMessages = token.IsCancellationRequested
+                    ? []
+                    : DrainQueuedMessagesToList(_followUpQueue, FollowUpMode, ref _pendingFollowUpMessageCount);
+
+            } while (!token.IsCancellationRequested && pendingQueuedMessages.Count > 0);
 
             yield return new AgentEndEvent(messages: State.Messages.ToArray());
         }
@@ -384,6 +429,38 @@ public sealed class AgentRuntime
         new(
             isComplete: static evt => evt is AgentEndEvent,
             extractResult: static evt => evt is AgentEndEvent end ? end.Messages.ToArray() : null);
+
+    /// <summary>
+    /// 执行 message_end 转换钩子，并拒绝 role 不一致或类型不兼容的替换结果。
+    /// </summary>
+    /// <param name="config">当前 agent 循环配置。</param>
+    /// <param name="message">已经完成、准备写入会话状态的消息。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>转换后的最终消息；无转换或转换非法时返回原消息。</returns>
+    private static async Task<ChatMessage> TransformMessageEndAsync(
+        AgentLoopConfig config,
+        ChatMessage message,
+        CancellationToken cancellationToken)
+    {
+        if (config.MessageEndTransformAsync is null)
+        {
+            return message;
+        }
+
+        var replacement = await config.MessageEndTransformAsync(message, cancellationToken).ConfigureAwait(false);
+        return IsCompatibleMessageReplacement(message, replacement) ? replacement : message;
+    }
+
+    /// <summary>
+    /// 判断 message_end 替换结果是否可以安全替代原消息。
+    /// </summary>
+    /// <param name="original">原始消息。</param>
+    /// <param name="replacement">扩展返回的替换消息。</param>
+    /// <returns>role 与运行时类型均兼容时返回 <see langword="true"/>。</returns>
+    private static bool IsCompatibleMessageReplacement(ChatMessage original, ChatMessage? replacement) =>
+        replacement is not null &&
+        replacement.Role.Equals(original.Role, StringComparison.Ordinal) &&
+        replacement.GetType() == original.GetType();
 
     private AgentLoopTurnContext CreateTurnContext(
         AssistantMessage message,
@@ -636,22 +713,6 @@ public sealed class AgentRuntime
             Usage = partial?.Usage ?? new Usage(0, 0, 0, 0)
         };
         return EnrichAssistantMessage(message, model);
-    }
-
-    private bool DrainQueuedMessages(Channel<ChatMessage> channel, AgentQueueMode mode, ref int pendingCount)
-    {
-        var messages = DrainQueuedMessagesToList(channel, mode, ref pendingCount);
-        if (messages.Count == 0)
-        {
-            return false;
-        }
-
-        foreach (var message in messages)
-        {
-            State.AddMessage(message);
-        }
-
-        return true;
     }
 
     private static IReadOnlyList<ChatMessage> DrainQueuedMessagesToList(
