@@ -53,7 +53,225 @@ public static class GeneratedBuiltInModels
             }
         }
 
+        AddCompatibilityProviders(catalog);
         return catalog;
+    }
+
+    /// <summary>
+    /// 为参考版本存在但当前 seed 缺少静态数据的 provider 建立可配置模型入口。
+    /// </summary>
+    /// <param name="catalog">正在构建的模型目录。</param>
+    private static void AddCompatibilityProviders(Dictionary<string, IReadOnlyDictionary<string, Model>> catalog)
+    {
+        static ModelCompatibility OpenAiCompat(
+            bool supportsReasoningEffort = false,
+            string? thinkingFormat = null,
+            bool supportsStrictMode = false) => new()
+            {
+                SupportsStore = false,
+                SupportsDeveloperRole = false,
+                SupportsReasoningEffort = supportsReasoningEffort,
+                SupportsUsageInStreaming = true,
+                MaxTokensField = "max_tokens",
+                SupportsStrictMode = supportsStrictMode,
+                SupportsLongCacheRetention = false,
+                ThinkingFormat = thinkingFormat
+            };
+
+        static IReadOnlyDictionary<string, string?> ThinkingMap(params (string Name, string? Value)[] values) =>
+            values.ToDictionary(item => item.Name, item => item.Value, StringComparer.OrdinalIgnoreCase);
+
+        void Add(
+            string provider,
+            string id,
+            string name,
+            string api,
+            string baseUrl,
+            bool reasoning = true,
+            IReadOnlyList<string>? input = null,
+            int contextWindow = 200_000,
+            int maxTokens = 32_768,
+            ModelCost? cost = null,
+            ModelCompatibility? compat = null,
+            IReadOnlyDictionary<string, string?>? thinkingLevelMap = null)
+        {
+            var bucket = catalog.TryGetValue(provider, out var existing)
+                ? new Dictionary<string, Model>(existing, StringComparer.OrdinalIgnoreCase)
+                : new Dictionary<string, Model>(StringComparer.OrdinalIgnoreCase);
+            if (!bucket.ContainsKey(id))
+            {
+                bucket[id] = new Model
+                {
+                    Id = id,
+                    Name = name,
+                    Api = api,
+                    Provider = provider,
+                    BaseUrl = baseUrl,
+                    Reasoning = reasoning,
+                    InputModalities = input ?? ["text"],
+                    Cost = cost ?? new ModelCost(0m, 0m, 0m, 0m),
+                    ContextWindow = contextWindow,
+                    MaxOutputTokens = maxTokens,
+                    ThinkingLevelMap = thinkingLevelMap,
+                    Compat = compat,
+                    Headers = provider.Equals("github-copilot", StringComparison.OrdinalIgnoreCase)
+                        ? Tau.Ai.Providers.GitHubCopilotHeaders.CreateStaticHeaders()
+                        : null
+                };
+            }
+
+            catalog[provider] = bucket;
+        }
+
+        // 1. xAI 主线已迁移到 Responses API；退休模型仍保留在底层目录，供旧配置兼容读取，
+        //    ModelCatalog.GetModels 会将它们从正常可选列表隐藏
+        var xaiCompat = new ModelCompatibility { SupportsLongCacheRetention = false };
+        Add("xai", "grok-4.3", "Grok 4.3", "openai-responses", "https://api.x.ai/v1",
+            input: ["text", "image"], contextWindow: 1_000_000, maxTokens: 30_000,
+            cost: new ModelCost(1.25m, 2.5m, 0.2m, 0m), compat: xaiCompat,
+            thinkingLevelMap: ThinkingMap(("off", "none"), ("minimal", null), ("low", "low"), ("medium", "medium"), ("high", "high"), ("xhigh", null), ("max", null)));
+        Add("xai", "grok-4.5", "Grok 4.5", "openai-responses", "https://api.x.ai/v1",
+            input: ["text", "image"], contextWindow: 1_000_000, maxTokens: 30_000,
+            cost: new ModelCost(3m, 15m, 0.75m, 0m), compat: xaiCompat,
+            thinkingLevelMap: ThinkingMap(("off", null), ("minimal", null), ("low", "low"), ("medium", "medium"), ("high", "high"), ("xhigh", null), ("max", null)));
+        Add("xai", "grok-4.6", "Grok 4.6", "openai-responses", "https://api.x.ai/v1",
+            input: ["text", "image"], contextWindow: 1_000_000, maxTokens: 30_000,
+            cost: new ModelCost(3m, 15m, 0.75m, 0m), compat: xaiCompat,
+            thinkingLevelMap: ThinkingMap(("off", null), ("minimal", null), ("low", "low"), ("medium", "medium"), ("high", "high"), ("xhigh", "xhigh"), ("max", null)));
+        Add("xai", "grok-build-0.1", "Grok Build 0.1", "openai-responses", "https://api.x.ai/v1",
+            input: ["text", "image"], contextWindow: 256_000, maxTokens: 256_000,
+            cost: new ModelCost(1m, 2m, 0.2m, 0m), compat: xaiCompat,
+            thinkingLevelMap: ThinkingMap(("off", null), ("minimal", null), ("low", "low"), ("medium", "medium"), ("high", "high"), ("xhigh", null), ("max", null)));
+
+        // 1. Provider-specific models added by the current pi 0.84.4 generator
+        Add("baseten", "zai-org/GLM-5.2", "GLM 5.2", "openai-chat-completions", "https://inference.baseten.co/v1",
+            input: ["text", "image"], contextWindow: 1_048_576, maxTokens: 262_144,
+            cost: new ModelCost(1.4m, 4.4m, 0.3m, 0m),
+            compat: OpenAiCompat(true, "baseten", true),
+            thinkingLevelMap: ThinkingMap(("off", "off"), ("minimal", null), ("low", null), ("medium", null), ("high", "high"), ("xhigh", null), ("max", "max")));
+        Add("baseten", "zai-org/GLM-5.2-Fast", "GLM 5.2 Fast", "openai-chat-completions", "https://inference.baseten.co/v1",
+            input: ["text", "image"], contextWindow: 1_048_576, maxTokens: 262_144,
+            cost: new ModelCost(1.4m, 4.4m, 0.3m, 0m),
+            compat: OpenAiCompat(true, "baseten", true),
+            thinkingLevelMap: ThinkingMap(("off", "off"), ("minimal", null), ("low", null), ("medium", null), ("high", "high"), ("xhigh", null), ("max", "max")));
+        Add("baseten", "moonshotai/Kimi-K2.6", "Kimi K2.6", "openai-chat-completions", "https://inference.baseten.co/v1",
+            input: ["text", "image"], contextWindow: 1_048_576, maxTokens: 131_072,
+            cost: new ModelCost(0.95m, 4m, 0.16m, 0m),
+            compat: OpenAiCompat(false, "baseten", false),
+            thinkingLevelMap: ThinkingMap(("off", "off"), ("minimal", null), ("low", null), ("medium", null), ("high", "high"), ("xhigh", null), ("max", null)));
+
+        var kimiCompat = new ModelCompatibility { ForceAdaptiveThinking = true, AllowEmptySignature = true };
+        Add("kimi-coding", "kimi-for-coding", "Kimi For Coding", "anthropic-messages", "https://api.kimi.com/coding",
+            input: ["text", "image"], contextWindow: 262_144, maxTokens: 131_072,
+            cost: new ModelCost(0.95m, 4m, 0.19m, 0m), compat: kimiCompat,
+            thinkingLevelMap: ThinkingMap(("off", "disabled"), ("minimal", "low"), ("low", "low"), ("medium", "medium"), ("high", "high"), ("xhigh", "xhigh"), ("max", "max")));
+        Add("kimi-coding", "kimi-for-coding-highspeed", "Kimi For Coding Highspeed", "anthropic-messages", "https://api.kimi.com/coding",
+            input: ["text", "image"], contextWindow: 262_144, maxTokens: 131_072,
+            cost: new ModelCost(1.9m, 8m, 0.38m, 0m), compat: kimiCompat,
+            thinkingLevelMap: ThinkingMap(("off", "disabled"), ("minimal", "low"), ("low", "low"), ("medium", "medium"), ("high", "high"), ("xhigh", "xhigh"), ("max", "max")));
+        Add("kimi-coding", "k3", "Kimi K3", "anthropic-messages", "https://api.kimi.com/coding",
+            input: ["text", "image"], contextWindow: 262_144, maxTokens: 131_072,
+            cost: new ModelCost(3m, 15m, 0.3m, 0m), compat: kimiCompat,
+            thinkingLevelMap: ThinkingMap(("off", "disabled"), ("minimal", "low"), ("low", "low"), ("medium", "medium"), ("high", "high"), ("xhigh", "xhigh"), ("max", "max")));
+
+        foreach (var provider in new[] { "minimax", "minimax-cn" })
+        {
+            var baseUrl = provider.Equals("minimax-cn", StringComparison.OrdinalIgnoreCase)
+                ? "https://api.minimaxi.com/anthropic"
+                : "https://api.minimax.io/anthropic";
+            Add(provider, "MiniMax-M2.7", "MiniMax-M2.7", "anthropic-messages", baseUrl, input: ["text", "image"], contextWindow: 1_000_000, maxTokens: 131_072, cost: new ModelCost(0.3m, 1.2m, 0.06m, 0.375m));
+            Add(provider, "MiniMax-M2.7-highspeed", "MiniMax-M2.7 Highspeed", "anthropic-messages", baseUrl, input: ["text", "image"], contextWindow: 1_000_000, maxTokens: 131_072, cost: new ModelCost(0.6m, 2.4m, 0.06m, 0.375m));
+            Add(provider, "MiniMax-M3", "MiniMax-M3", "anthropic-messages", baseUrl, input: ["text", "image"], contextWindow: 1_000_000, maxTokens: 131_072, cost: new ModelCost(0.3m, 1.2m, 0.06m, 0m));
+        }
+
+        Add("openai", "gpt-5.6-sol", "GPT-5.6 Sol", "openai-responses", "https://api.openai.com/v1", input: ["text", "image"], contextWindow: 272_000, maxTokens: 128_000, cost: new ModelCost(5m, 30m, 0.5m, 6.25m));
+        Add("openai", "gpt-5.6-terra", "GPT-5.6 Terra", "openai-responses", "https://api.openai.com/v1", input: ["text", "image"], contextWindow: 272_000, maxTokens: 128_000, cost: new ModelCost(2m, 12m, 0.2m, 2.5m));
+        Add("openai", "gpt-5.6-luna", "GPT-5.6 Luna", "openai-responses", "https://api.openai.com/v1", input: ["text", "image"], contextWindow: 272_000, maxTokens: 128_000, cost: new ModelCost(0.2m, 1.2m, 0.02m, 0.25m));
+        Add("openai", "gpt-5.5", "GPT-5.5", "openai-responses", "https://api.openai.com/v1", input: ["text", "image"], contextWindow: 272_000, maxTokens: 128_000, cost: new ModelCost(5m, 30m, 0.5m, 0m));
+        Add("openai", "gpt-5.5-pro", "GPT-5.5 Pro", "openai-responses", "https://api.openai.com/v1", input: ["text", "image"], contextWindow: 272_000, maxTokens: 128_000, cost: new ModelCost(30m, 180m, 30m, 0m));
+        Add("openai", "gpt-5-chat-latest", "GPT-5 Chat Latest", "openai-responses", "https://api.openai.com/v1", reasoning: false, input: ["text", "image"], contextWindow: 128_000, maxTokens: 16_384, cost: new ModelCost(1.25m, 10m, 0.125m, 0m));
+
+        foreach (var (id, name, contextWindow, maxTokens, input, cost) in new[]
+        {
+            ("claude-sonnet-4-6", "Claude Sonnet 4.6", 1_000_000, 64_000, new[] { "text", "image" }, new ModelCost(3m, 15m, 0.3m, 3.75m)),
+            ("claude-opus-4-7", "Claude Opus 4.7", 1_000_000, 64_000, new[] { "text", "image" }, new ModelCost(5m, 25m, 0.5m, 6.25m)),
+            ("claude-opus-4-8", "Claude Opus 4.8", 1_000_000, 64_000, new[] { "text", "image" }, new ModelCost(5m, 25m, 0.5m, 6.25m)),
+            ("claude-fable-5", "Claude Fable 5", 1_000_000, 64_000, new[] { "text", "image" }, new ModelCost(10m, 50m, 1m, 12.5m)),
+            ("claude-sonnet-5", "Claude Sonnet 5", 1_000_000, 64_000, new[] { "text", "image" }, new ModelCost(2m, 10m, 0.2m, 2.5m)),
+            ("claude-haiku-4-5", "Claude Haiku 4.5", 200_000, 32_000, new[] { "text", "image" }, new ModelCost(1m, 5m, 0.1m, 1.25m))
+        })
+        {
+            Add("anthropic", id, name, "anthropic-messages", "https://api.anthropic.com", input: input, contextWindow: contextWindow, maxTokens: maxTokens, cost: cost);
+        }
+
+        Add("mistral", "mistral-medium-3.5", "Mistral Medium 3.5", "mistral-conversations", "https://api.mistral.ai", input: ["text", "image"], contextWindow: 262_144, maxTokens: 262_144, cost: new ModelCost(1.5m, 7.5m, 0m, 0m));
+        Add("mistral", "mistral-large-latest", "Mistral Large", "mistral-conversations", "https://api.mistral.ai", input: ["text", "image"], contextWindow: 262_144, maxTokens: 32_768, reasoning: false, cost: new ModelCost(0.5m, 1.5m, 0m, 0m));
+        Add("google", "gemini-3-flash-preview", "Gemini 3 Flash Preview", "google-generative-language", "https://generativelanguage.googleapis.com", input: ["text", "image"], contextWindow: 1_048_576, maxTokens: 65_536, cost: new ModelCost(0.5m, 3m, 0.05m, 0m));
+        Add("google", "gemini-3.1-pro-preview", "Gemini 3.1 Pro Preview", "google-generative-language", "https://generativelanguage.googleapis.com", input: ["text", "image"], contextWindow: 1_048_576, maxTokens: 65_536, cost: new ModelCost(2m, 12m, 0.2m, 0m));
+        Add("deepseek", "deepseek-v4-flash-vision-exp", "DeepSeek V4 Flash Vision (Experimental)", "openai-chat-completions", "https://api.deepseek.com", input: ["text", "image"], contextWindow: 1_000_000, maxTokens: 64_000, cost: new ModelCost(0m, 0m, 0m, 0m), compat: OpenAiCompat(false, "deepseek", false), thinkingLevelMap: ThinkingMap(("off", "disabled"), ("minimal", null), ("low", null), ("medium", null), ("high", "high"), ("xhigh", null), ("max", null)));
+        Add("google-vertex", "gemini-3-flash-preview", "Gemini 3 Flash Preview (Vertex)", "google-vertex", string.Empty, input: ["text", "image"], contextWindow: 1_048_576, maxTokens: 65_536, cost: new ModelCost(0.5m, 3m, 0.05m, 0m));
+        Add("amazon-bedrock", "global.anthropic.claude-opus-4-6-v1", "Claude Opus 4.6 (Bedrock)", "bedrock-converse-stream", string.Empty, input: ["text", "image"], contextWindow: 200_000, maxTokens: 32_768, cost: new ModelCost(15m, 75m, 1.5m, 18.75m));
+        Add("amazon-bedrock", "us.anthropic.claude-opus-4-8", "Claude Opus 4.8 (Bedrock)", "bedrock-converse-stream", string.Empty, input: ["text", "image"], contextWindow: 200_000, maxTokens: 32_768, cost: new ModelCost(5m, 25m, 0.5m, 6.25m));
+
+        var copilotAnthropicMap = ThinkingMap(("off", "disabled"), ("minimal", "low"), ("low", "low"), ("medium", "medium"), ("high", "high"), ("xhigh", "xhigh"), ("max", "max"));
+        foreach (var (id, name, contextWindow) in new[]
+        {
+            ("claude-sonnet-4.6", "Claude Sonnet 4.6", 1_000_000),
+            ("claude-opus-4.7", "Claude Opus 4.7", 1_000_000),
+            ("claude-opus-4.8", "Claude Opus 4.8", 1_000_000),
+            ("claude-opus-5", "Claude Opus 5", 1_000_000),
+            ("claude-sonnet-5", "Claude Sonnet 5", 1_000_000),
+            ("claude-haiku-4.5", "Claude Haiku 4.5", 200_000)
+        })
+        {
+            var map = id.Equals("claude-sonnet-4.6", StringComparison.OrdinalIgnoreCase)
+                ? copilotAnthropicMap
+                : id.Contains("opus", StringComparison.OrdinalIgnoreCase)
+                    ? copilotAnthropicMap
+                    : ThinkingMap(("off", "disabled"), ("minimal", "low"), ("low", "low"), ("medium", "medium"), ("high", "high"), ("max", "max"));
+            Add("github-copilot", id, name, "anthropic-messages", "https://api.individual.githubcopilot.com", input: ["text", "image"], contextWindow: contextWindow, maxTokens: 64_000, cost: new ModelCost(0m, 0m, 0m, 0m), thinkingLevelMap: map);
+        }
+        foreach (var (id, name, contextWindow, maxTokens) in new[]
+        {
+            ("gpt-5.3-codex", "GPT-5.3 Codex", 1_000_000, 128_000),
+            ("gpt-5.4", "GPT-5.4", 1_000_000, 128_000),
+            ("gpt-5.5", "GPT-5.5", 1_000_000, 128_000)
+        })
+        {
+            Add("github-copilot", id, name, "openai-responses", "https://api.individual.githubcopilot.com", input: ["text", "image"], contextWindow: contextWindow, maxTokens: maxTokens, cost: new ModelCost(0m, 0m, 0m, 0m));
+        }
+
+        foreach (var (provider, baseUrl) in new[]
+        {
+            ("qwen-token-plan", "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"),
+            ("qwen-token-plan-individual", "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"),
+            ("qwen-token-plan-cn", "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1")
+        })
+        {
+            foreach (var id in new[] { "qwen3.7-max", "qwen3.7-plus", "qwen3.8-max", "deepseek-v4-pro", "deepseek-v4-flash" })
+            {
+                Add(provider, id, id, "openai-chat-completions", baseUrl, input: ["text", "image"], contextWindow: 1_000_000, maxTokens: 131_072,
+                    compat: OpenAiCompat(false, "qwen", false),
+                    thinkingLevelMap: ThinkingMap(("off", "off"), ("minimal", null), ("low", null), ("medium", null), ("high", "high"), ("xhigh", null), ("max", null)));
+            }
+        }
+
+        foreach (var id in new[] { "anthropic/claude-sonnet-4", "anthropic/claude-opus-4.5", "google/gemini-2.5-flash", "openai/gpt-5.1-codex-max" })
+        {
+            Add("vercel-ai-gateway", id, id, "openai-chat-completions", "https://ai-gateway.vercel.sh", input: ["text", "image"], contextWindow: 200_000, maxTokens: 131_072);
+        }
+
+        // 2. Built-in fallback entries retained when models.dev data is unavailable
+        Add("baseten", "deepseek-ai/DeepSeek-V3", "Baseten DeepSeek V3", "openai-chat-completions", "https://inference.baseten.co/v1");
+        Add("kimi-coding", "kimi-k2.5", "Kimi For Coding K2.5", "anthropic-messages", "https://api.kimi.com/coding");
+        Add("minimax", "MiniMax-M2.5", "MiniMax M2.5", "anthropic-messages", "https://api.minimax.io/anthropic");
+        Add("minimax-cn", "MiniMax-M2.5", "MiniMax M2.5 (CN)", "anthropic-messages", "https://api.minimaxi.com/anthropic");
+        Add("opencode-go", "kimi-k2.5", "OpenCode Go Kimi K2.5", "openai-chat-completions", "https://opencode.ai/zen/v1");
+        Add("qwen-token-plan", "qwen3-coder-plus", "Qwen Token Plan", "openai-chat-completions", "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1");
+        Add("qwen-token-plan-cn", "qwen3-coder-plus", "Qwen Token Plan (CN)", "openai-chat-completions", "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1");
+        Add("qwen-token-plan-individual", "qwen3-coder-plus", "Qwen Token Plan Individual", "openai-chat-completions", "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1");
+        Add("vercel-ai-gateway", "anthropic/claude-sonnet-4", "Vercel AI Gateway", "anthropic-messages", "https://ai-gateway.vercel.sh");
+        Add("radius", "default", "Radius", "pi-messages", "https://radius.gateway");
     }
 
     private static bool TryReadModel(string providerName, JsonElement element, out Model model)
@@ -66,18 +284,25 @@ public static class GeneratedBuiltInModels
         }
 
         var provider = GetString(element, "provider") ?? providerName;
+        var api = ModelApiNames.Normalize(GetString(element, "api")) ?? ModelApiNames.OpenAiChatCompletions;
+        if (provider.Equals("xai", StringComparison.OrdinalIgnoreCase))
+        {
+            api = "openai-responses";
+        }
         model = new Model
         {
             Id = id,
             Name = GetString(element, "name") ?? id,
-            Api = ModelApiNames.Normalize(GetString(element, "api")) ?? ModelApiNames.OpenAiChatCompletions,
+            Api = api,
             Provider = provider,
             BaseUrl = GetString(element, "baseUrl") ?? string.Empty,
             Reasoning = GetBool(element, "reasoning") ?? false,
+            ThinkingLevelMap = ParseThinkingLevelMap(element),
             InputModalities = ParseStringArray(element, "inputModalities") ?? ParseStringArray(element, "input") ?? ["text"],
             Cost = ParseCost(element),
             ContextWindow = GetInt(element, "contextWindow"),
             MaxOutputTokens = GetInt(element, "maxOutputTokens") ?? GetInt(element, "maxTokens"),
+            SamplingParams = ParseObjectDictionary(element, "samplingParams"),
             Headers = provider.Equals("github-copilot", StringComparison.OrdinalIgnoreCase)
                 ? GitHubCopilotHeaders.CreateStaticHeaders()
                 : null,
@@ -93,11 +318,41 @@ public static class GeneratedBuiltInModels
             return new ModelCost(0m, 0m, 0m, 0m);
         }
 
+        var tiers = ParseCostTiers(cost);
         return new ModelCost(
             GetDecimal(cost, "input") ?? 0m,
             GetDecimal(cost, "output") ?? 0m,
             GetDecimal(cost, "cacheRead") ?? 0m,
-            GetDecimal(cost, "cacheWrite") ?? 0m);
+            GetDecimal(cost, "cacheWrite") ?? 0m,
+            tiers);
+    }
+
+    private static IReadOnlyList<ModelCostTier>? ParseCostTiers(JsonElement cost)
+    {
+        if (!cost.TryGetProperty("tiers", out var tiers) || tiers.ValueKind != JsonValueKind.Array)
+        {
+            return null;
+        }
+
+        var result = new List<ModelCostTier>();
+        foreach (var tier in tiers.EnumerateArray())
+        {
+            if (tier.ValueKind != JsonValueKind.Object ||
+                !tier.TryGetProperty("inputTokensAbove", out var threshold) ||
+                !threshold.TryGetInt64(out var inputTokensAbove))
+            {
+                continue;
+            }
+
+            result.Add(new ModelCostTier(
+                GetDecimal(tier, "input") ?? 0m,
+                GetDecimal(tier, "output") ?? 0m,
+                GetDecimal(tier, "cacheRead"),
+                GetDecimal(tier, "cacheWrite"),
+                inputTokensAbove));
+        }
+
+        return result.Count == 0 ? null : result;
     }
 
     private static ModelCompatibility? ParseCompat(JsonElement element)
@@ -105,23 +360,26 @@ public static class GeneratedBuiltInModels
         if (!element.TryGetProperty("compat", out var compat) || compat.ValueKind != JsonValueKind.Object)
         {
             var map = ParseReasoningEffortMap(element);
+            var thinkingLevelMap = ParseThinkingLevelMap(element);
             var supportsDisabledThinking = ParseSupportsDisabledThinking(element);
-            return map is not null || supportsDisabledThinking.HasValue
+            return map is not null || thinkingLevelMap is not null || supportsDisabledThinking.HasValue
                 ? new ModelCompatibility
                 {
                     ReasoningEffortMap = map,
-                    SupportsDisabledThinking = supportsDisabledThinking
+                    SupportsDisabledThinking = supportsDisabledThinking,
                 }
                 : null;
         }
 
         var parsed = new ModelCompatibility
         {
+            AllowedFallbackModels = ParseFallbackModels(compat),
             SupportsStore = GetBool(compat, "supportsStore"),
             SupportsDeveloperRole = GetBool(compat, "supportsDeveloperRole"),
             SupportsReasoningEffort = GetBool(compat, "supportsReasoningEffort"),
             ReasoningEffortMap = ParseReasoningEffortMap(element),
             SupportsUsageInStreaming = GetBool(compat, "supportsUsageInStreaming"),
+            SupportsFinishReason = GetBool(compat, "supportsFinishReason"),
             MaxTokensField = GetString(compat, "maxTokensField"),
             RequiresToolResultName = GetBool(compat, "requiresToolResultName"),
             RequiresAssistantAfterToolResult = GetBool(compat, "requiresAssistantAfterToolResult"),
@@ -141,6 +399,16 @@ public static class GeneratedBuiltInModels
             SupportsCacheControlOnTools = GetBool(compat, "supportsCacheControlOnTools"),
             AllowEmptySignature = GetBool(compat, "allowEmptySignature"),
             SupportsDisabledThinking = ParseSupportsDisabledThinking(element)
+            ,SupportsOpenAiGrammarTools = GetBool(compat, "supportsOpenAIGrammarTools"),
+            SupportsAdditionalTools = GetBool(compat, "supportsAdditionalTools"),
+            SupportsToolSearch = GetBool(compat, "supportsToolSearch"),
+            SupportsExplicitPromptCacheMode = GetBool(compat, "supportsExplicitPromptCacheMode"),
+            SupportsMaxOutputTokens = GetBool(compat, "supportsMaxOutputTokens"),
+            SupportsToolReferences = GetBool(compat, "supportsToolReferences"),
+            SupportsStrictTools = GetBool(compat, "supportsStrictTools"),
+            SupportsDeferredTools = GetBool(compat, "supportsDeferredTools"),
+            ThinkingTokenBudgetField = GetString(compat, "thinkingTokenBudgetField"),
+            ChatTemplateArgs = ParseObjectDictionary(compat, "chatTemplateArgs")
         };
 
         return parsed;
@@ -148,6 +416,44 @@ public static class GeneratedBuiltInModels
 
     private static IReadOnlyDictionary<string, string>? ParseReasoningEffortMap(JsonElement element) =>
         ParseStringDictionary(element, "reasoningEffortMap") ?? ParseStringDictionary(element, "thinkingLevelMap");
+
+    private static IReadOnlyDictionary<string, string?>? ParseThinkingLevelMap(JsonElement element)
+    {
+        if (!element.TryGetProperty("thinkingLevelMap", out var map) || map.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        var result = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+        foreach (var property in map.EnumerateObject())
+        {
+            result[property.Name] = property.Value.ValueKind == JsonValueKind.Null
+                ? null
+                : property.Value.ValueKind == JsonValueKind.String ? property.Value.GetString() : property.Value.GetRawText();
+        }
+
+        return result.Count == 0 ? null : result;
+    }
+
+    private static IReadOnlyList<ModelFallback>? ParseFallbackModels(JsonElement element)
+    {
+        if (!element.TryGetProperty("allowedFallbackModels", out var value) || value.ValueKind != JsonValueKind.Array)
+            return null;
+
+        var result = new List<ModelFallback>();
+        foreach (var item in value.EnumerateArray())
+        {
+            if (item.ValueKind != JsonValueKind.Object)
+                continue;
+            var provider = GetString(item, "provider");
+            var model = GetString(item, "model");
+            if (string.IsNullOrWhiteSpace(provider) || string.IsNullOrWhiteSpace(model))
+                continue;
+            result.Add(new ModelFallback(provider!, model!, ParseCost(item)));
+        }
+
+        return result.Count == 0 ? null : result;
+    }
 
     private static bool? ParseSupportsDisabledThinking(JsonElement element)
     {

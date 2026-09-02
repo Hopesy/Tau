@@ -60,7 +60,10 @@ public sealed class AzureOpenAiResponsesProvider : IStreamProvider
             WebSocketConnectTimeout = options.WebSocketConnectTimeout,
             Metadata = options.Metadata,
             Env = options.Env,
-            ReasoningEffort = reasoningEffort
+            SamplingParams = options.SamplingParams,
+            Deferred = options.Deferred,
+            ReasoningEffort = reasoningEffort,
+            ToolChoice = options.ToolChoice
         };
         return Stream(model, context, azureOptions);
     }
@@ -171,10 +174,17 @@ public sealed class AzureOpenAiResponsesProvider : IStreamProvider
             body["tools"] = tools;
         }
 
+        if (options is AzureOpenAiResponsesOptions azureOptions && azureOptions.ToolChoice is not null)
+        {
+            body["tool_choice"] = azureOptions.ToolChoice;
+        }
+
         if (model.Reasoning)
         {
             AddReasoning(body, options as AzureOpenAiResponsesOptions);
         }
+
+        StreamOptionHelpers.ApplySamplingParams(body, model, options);
 
         return body;
     }

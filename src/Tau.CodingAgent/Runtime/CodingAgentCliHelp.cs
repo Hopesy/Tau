@@ -120,6 +120,7 @@ internal static partial class CodingAgentCliHelp
         builder.AppendLine();
         builder.AppendLine("Environment Variables:");
         builder.AppendLine("  ANTHROPIC_API_KEY              - Anthropic Claude API key");
+        builder.AppendLine("  ANTHROPIC_AUTH_TOKEN           - Anthropic bearer auth token");
         builder.AppendLine("  ANTHROPIC_OAUTH_TOKEN          - Anthropic OAuth token (alternative to API key)");
         builder.AppendLine("  OPENAI_API_KEY                 - OpenAI GPT API key");
         builder.AppendLine("  AZURE_OPENAI_API_KEY           - Azure OpenAI API key");
@@ -134,6 +135,10 @@ internal static partial class CodingAgentCliHelp
         builder.AppendLine("  MINIMAX_API_KEY                - MiniMax API key");
         builder.AppendLine("  OPENCODE_API_KEY               - OpenCode Zen/OpenCode Go API key");
         builder.AppendLine("  KIMI_API_KEY                   - Kimi For Coding API key");
+        builder.AppendLine("  BASETEN_API_KEY                - Baseten API key");
+        builder.AppendLine("  QWEN_TOKEN_PLAN_API_KEY       - Qwen Token Plan API key");
+        builder.AppendLine("  QWEN_TOKEN_PLAN_CN_API_KEY    - Qwen Token Plan China API key");
+        builder.AppendLine("  RADIUS_API_KEY                 - Radius gateway API key");
         builder.AppendLine("  COPILOT_GITHUB_TOKEN           - GitHub Copilot token (GH_TOKEN/GITHUB_TOKEN also accepted)");
         builder.AppendLine("  AWS_PROFILE                    - AWS profile for Amazon Bedrock");
         builder.AppendLine("  AWS_ACCESS_KEY_ID              - AWS access key for Amazon Bedrock");

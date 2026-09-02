@@ -180,6 +180,19 @@ internal static class BedrockMessageConverter
                     result.Add(ConvertThinkingContent(thinking, model));
                     break;
 
+                case ThinkingContent thinking when thinking.Redacted:
+                    if (TryDecodeRedactedContent(thinking.ThinkingSignature) is { Length: > 0 } redactedContent)
+                    {
+                        result.Add(new Dictionary<string, object>
+                        {
+                            ["reasoningContent"] = new Dictionary<string, object>
+                            {
+                                ["redactedContent"] = redactedContent
+                            }
+                        });
+                    }
+                    break;
+
                 case ToolCallContent toolCall:
                     var toolUseId = NormalizeToolCallId(toolCall.Id);
                     toolCallIds[toolCall.Id] = toolUseId;
@@ -404,6 +417,21 @@ internal static class BedrockMessageConverter
         catch (JsonException)
         {
             return new Dictionary<string, object>();
+        }
+    }
+
+    private static byte[]? TryDecodeRedactedContent(string? signature)
+    {
+        if (string.IsNullOrWhiteSpace(signature))
+            return null;
+
+        try
+        {
+            return Convert.FromBase64String(signature);
+        }
+        catch (FormatException)
+        {
+            return null;
         }
     }
 

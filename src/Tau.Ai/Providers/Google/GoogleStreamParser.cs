@@ -81,6 +81,8 @@ internal sealed class GoogleStreamParser
                     {
                         StopReason = stopReason,
                         ErrorMessage = errorMessage,
+                        RawStopReason = rawReason,
+                        EndTurn = stopReason == StopReason.EndTurn,
                         Timestamp = DateTimeOffset.UtcNow
                     };
                     if (stopReason == StopReason.Error)
@@ -236,7 +238,13 @@ internal sealed class GoogleStreamParser
             ? t.GetInt32() : 0;
         var output = usage.TryGetProperty("candidatesTokenCount", out var o) && o.ValueKind == JsonValueKind.Number
             ? o.GetInt32() : 0;
-        return new Usage(input - (cacheRead ?? 0), output + thoughts, cacheRead);
+        var normalizedInput = Math.Max(0, input - (cacheRead ?? 0));
+        var normalizedOutput = output + thoughts;
+        return new Usage(normalizedInput, normalizedOutput, cacheRead)
+        {
+            ReasoningTokens = thoughts == 0 ? null : thoughts,
+            TotalTokens = normalizedInput + normalizedOutput + cacheRead.GetValueOrDefault()
+        };
     }
 
     private static StopReason MapStopReason(string? reason) => reason switch

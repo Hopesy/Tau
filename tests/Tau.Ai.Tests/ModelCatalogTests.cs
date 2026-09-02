@@ -90,7 +90,7 @@ public sealed class ModelCatalogTests
         Assert.Equal("openai-chat-completions", together.Api);
         Assert.Equal("https://api.together.ai/v1", together.BaseUrl);
         Assert.Equal("together", together.Compat!.ThinkingFormat);
-        Assert.Equal("openai-chat-completions", xai.Api);
+        Assert.Equal("openai-responses", xai.Api);
         Assert.Equal("https://api.x.ai/v1", xai.BaseUrl);
         Assert.False(xai.Compat!.SupportsStore);
         Assert.Equal("openai-chat-completions", zai.Api);

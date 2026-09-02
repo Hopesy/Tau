@@ -27,6 +27,8 @@ public sealed record TuiImageRenderOptions
     public int? MaxHeightCells { get; init; }
     public bool PreserveAspectRatio { get; init; } = true;
     public long? ImageId { get; init; }
+    /// <summary>是否让 Kitty 在图片放置后执行默认光标移动。</summary>
+    public bool MoveCursor { get; init; } = true;
 }
 
 public sealed record TuiImageRenderResult(string Sequence, int Rows, long? ImageId = null);
@@ -39,6 +41,7 @@ public static class TuiTerminalImage
     private const int KittyChunkSize = 4096;
     private static readonly object Gate = new();
     private static TuiTerminalCapabilities? _cachedCapabilities;
+    private static TuiTerminalCapabilities? _capabilityOverrides;
     private static TuiCellDimensions _cellDimensions = new(9, 18);
 
     public static TuiCellDimensions GetCellDimensions() => _cellDimensions;
@@ -59,7 +62,14 @@ public static class TuiTerminalImage
             ? CaptureEnvironment()
             : NormalizeEnvironment(environment);
 
+        return ApplyEnvironmentOverrides(DetectCapabilitiesCore(environment), environment);
+    }
+
+    private static TuiTerminalCapabilities DetectCapabilitiesCore(IReadOnlyDictionary<string, string?> environment)
+    {
+
         var termProgram = Get(environment, "TERM_PROGRAM").ToLowerInvariant();
+        var terminalEmulator = Get(environment, "TERMINAL_EMULATOR").ToLowerInvariant();
         var term = Get(environment, "TERM").ToLowerInvariant();
         var colorTerm = Get(environment, "COLORTERM").ToLowerInvariant();
         var trueColor = colorTerm is "truecolor" or "24bit";
@@ -87,14 +97,29 @@ public static class TuiTerminalImage
             return new TuiTerminalCapabilities(TuiImageProtocol.Kitty, TrueColor: true, Hyperlinks: true);
         }
 
+        if (termProgram == "warpterminal" || Has(environment, "WARP_SESSION_ID") || Has(environment, "WARP_TERMINAL_SESSION_UUID"))
+        {
+            return new TuiTerminalCapabilities(TuiImageProtocol.Kitty, TrueColor: true, Hyperlinks: true);
+        }
+
         if (Has(environment, "ITERM_SESSION_ID") || termProgram == "iterm.app")
         {
             return new TuiTerminalCapabilities(TuiImageProtocol.ITerm2, TrueColor: true, Hyperlinks: true);
         }
 
-        if (termProgram is "vscode" or "alacritty")
+        if (Has(environment, "WT_SESSION"))
         {
             return new TuiTerminalCapabilities(TuiImageProtocol.None, TrueColor: true, Hyperlinks: true);
+        }
+
+        if (termProgram is "vscode" or "alacritty" or "zed")
+        {
+            return new TuiTerminalCapabilities(TuiImageProtocol.None, TrueColor: true, Hyperlinks: true);
+        }
+
+        if (terminalEmulator == "jetbrains-jediterm")
+        {
+            return new TuiTerminalCapabilities(TuiImageProtocol.None, TrueColor: true, Hyperlinks: false);
         }
 
         return new TuiTerminalCapabilities(TuiImageProtocol.None, trueColor, Hyperlinks: false);
@@ -104,7 +129,7 @@ public static class TuiTerminalImage
     {
         lock (Gate)
         {
-            _cachedCapabilities ??= DetectCapabilities();
+            _cachedCapabilities ??= ApplyCapabilityOverride(DetectCapabilities());
             return _cachedCapabilities.Value;
         }
     }
@@ -116,6 +141,20 @@ public static class TuiTerminalImage
             _cachedCapabilities = null;
         }
     }
+
+    /// <summary>设置程序级终端能力覆盖，便于宿主或测试显式指定协议。</summary>
+    /// <param name="capabilities">完整能力值；传 null 恢复自动探测。</param>
+    public static void SetCapabilityOverrides(TuiTerminalCapabilities? capabilities)
+    {
+        lock (Gate)
+        {
+            _capabilityOverrides = capabilities;
+            _cachedCapabilities = null;
+        }
+    }
+
+    /// <summary>清除程序级终端能力覆盖并重新探测。</summary>
+    public static void ResetCapabilityOverrides() => SetCapabilityOverrides(null);
 
     public static void SetCapabilities(TuiTerminalCapabilities capabilities)
     {
@@ -139,9 +178,14 @@ public static class TuiTerminalImage
         string base64Data,
         int? columns = null,
         int? rows = null,
-        long? imageId = null)
+        long? imageId = null,
+        bool moveCursor = true)
     {
         var parameters = new List<string> { "a=T", "f=100", "q=2" };
+        if (!moveCursor)
+        {
+            parameters.Add("C=1");
+        }
         if (columns is > 0)
         {
             parameters.Add($"c={columns.Value.ToString(CultureInfo.InvariantCulture)}");
@@ -403,7 +447,7 @@ public static class TuiTerminalImage
         var rows = CalculateImageRows(imageDimensions, maxWidth, _cellDimensions);
         if (capabilities.Images == TuiImageProtocol.Kitty)
         {
-            var sequence = EncodeKitty(base64Data, maxWidth, rows, options.ImageId);
+            var sequence = EncodeKitty(base64Data, maxWidth, rows, options.ImageId, options.MoveCursor);
             return new TuiImageRenderResult(sequence, rows, options.ImageId);
         }
 
@@ -479,4 +523,29 @@ public static class TuiTerminalImage
 
     private static bool Has(IReadOnlyDictionary<string, string?> environment, string name) =>
         environment.TryGetValue(name, out var value) && !string.IsNullOrEmpty(value);
+
+    private static TuiTerminalCapabilities ApplyCapabilityOverride(TuiTerminalCapabilities detected) =>
+        _capabilityOverrides ?? detected;
+
+    private static TuiTerminalCapabilities ApplyEnvironmentOverrides(
+        TuiTerminalCapabilities detected,
+        IReadOnlyDictionary<string, string?> environment)
+    {
+        var images = detected.Images;
+        var imageOverride = Get(environment, "PI_IMAGE_PROTOCOL").ToLowerInvariant();
+        if (imageOverride is "kitty") images = TuiImageProtocol.Kitty;
+        else if (imageOverride is "iterm2") images = TuiImageProtocol.ITerm2;
+        else if (imageOverride is "none" or "0") images = TuiImageProtocol.None;
+
+        var trueColor = ParseBooleanOverride(Get(environment, "PI_TRUE_COLOR")) ?? detected.TrueColor;
+        var hyperlinks = ParseBooleanOverride(Get(environment, "PI_HYPERLINKS")) ?? detected.Hyperlinks;
+        return new TuiTerminalCapabilities(images, trueColor, hyperlinks);
+    }
+
+    private static bool? ParseBooleanOverride(string value) => value switch
+    {
+        "1" => true,
+        "0" => false,
+        _ => null
+    };
 }

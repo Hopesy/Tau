@@ -37,7 +37,11 @@ public sealed class JsonlSessionRepoTests
         var assistant1 = await source.AppendMessageAsync(new AssistantMessage([new TextContent("two")]));
         var user2 = await source.AppendMessageAsync(new UserMessage("three"));
 
-        Assert.Equal(sourceMetadata, await (await repo.OpenAsync(sourceMetadata)).GetMetadataAsync());
+        var reopenedMetadata = await (await repo.OpenAsync(sourceMetadata)).GetMetadataAsync();
+        Assert.Equal(sourceMetadata.Id, reopenedMetadata.Id);
+        Assert.Equal(sourceMetadata.Cwd, reopenedMetadata.Cwd);
+        Assert.Equal(sourceMetadata.Path, reopenedMetadata.Path);
+        Assert.Equal(4, reopenedMetadata.SourceFormat);
 
         var fork = await repo.ForkAsync(
             sourceMetadata,

@@ -668,6 +668,35 @@ public sealed class CodingAgentRpcHostTests
     }
 
     [Fact]
+    public async Task ExtensionUiBridge_PublishesPromptLifecycleAroundRequest()
+    {
+        var bridge = new CodingAgentRpcExtensionUiBridge();
+        var lifecycle = new List<string>();
+        bridge.SetUiPromptEventPublisher(
+            (eventType, kind, title, _) =>
+            {
+                lifecycle.Add($"{eventType}:{kind}:{title}");
+                return Task.CompletedTask;
+            });
+        bridge.Attach(
+            (request, _) =>
+            {
+                var values = Assert.IsType<Dictionary<string, object?>>(request);
+                var id = Assert.IsType<string>(values["id"]);
+                using var response = JsonDocument.Parse($"{{\"id\":\"{id}\",\"value\":\"beta\"}}");
+                Assert.True(bridge.TryHandleResponse(response.RootElement));
+                return Task.CompletedTask;
+            });
+
+        var selected = await bridge.SelectAsync("Pick target", ["alpha", "beta"]);
+
+        Assert.Equal("beta", selected);
+        Assert.Equal(
+            ["ui_prompt_start:select:Pick target", "ui_prompt_end:select:Pick target"],
+            lifecycle);
+    }
+
+    [Fact]
     public async Task ExtensionUiBridge_FireAndForgetRequestsUseUpstreamRpcShape()
     {
         var output = new JsonLineWriter();
@@ -1772,6 +1801,7 @@ public sealed class CodingAgentRpcHostTests
             ImagesAutoResize: false,
             ImagesBlockImages: true,
             ShowHardwareCursor: true,
+            FullscreenCopyOnSelect: false,
             EditorPaddingX: 2,
             AutocompleteMaxVisible: 12,
             MarkdownCodeBlockIndent: "    "));
@@ -1817,6 +1847,7 @@ public sealed class CodingAgentRpcHostTests
         Assert.True(images.GetProperty("blockImages").GetBoolean());
         Assert.Equal("    ", data.GetProperty("markdown").GetProperty("codeBlockIndent").GetString());
         Assert.True(data.GetProperty("showHardwareCursor").GetBoolean());
+        Assert.False(data.GetProperty("fullscreenCopyOnSelect").GetBoolean());
         Assert.Equal(2, data.GetProperty("editorPaddingX").GetInt32());
         Assert.Equal(12, data.GetProperty("autocompleteMaxVisible").GetInt32());
     }
@@ -1844,7 +1875,7 @@ public sealed class CodingAgentRpcHostTests
         var output = new StringWriter();
         var updateJson = string.Join(
             "\n",
-            "{\"id\":\"us1\",\"type\":\"update_settings\",\"settings\":{\"model\":{\"provider\":\"google\",\"modelId\":\"gemini-2.5-pro\"},\"treeFilterMode\":\"labeled-only\",\"retry\":{\"enabled\":true,\"maxAttempts\":5,\"baseDelayMilliseconds\":250},\"defaultThinkingLevel\":\"xhigh\",\"enabledModels\":[\"google/gemini-2.5-pro\",\"openai/gpt-5.4\",\"google/gemini-2.5-pro\"],\"steeringMode\":\"all\",\"followUpMode\":\"all\",\"autoCompactionEnabled\":true,\"theme\":\"light\",\"shellPath\":\"C:\\\\tools\\\\bash.exe\",\"shellCommandPrefix\":\"source ~/.bashrc\",\"npmCommand\":[\"mise\",\"exec\",\"node@22\",\"--\",\"npm\",\"npm\"],\"quietStartup\":true,\"collapseChangelog\":true,\"enableInstallTelemetry\":false,\"lastChangelogVersion\":\"0.1.0\",\"terminal\":{\"showImages\":false,\"clearOnShrink\":true},\"images\":{\"autoResize\":false,\"blockImages\":true},\"markdown\":{\"codeBlockIndent\":\"    \"},\"showHardwareCursor\":true,\"editorPaddingX\":8,\"autocompleteMaxVisible\":1}}",
+            "{\"id\":\"us1\",\"type\":\"update_settings\",\"settings\":{\"model\":{\"provider\":\"google\",\"modelId\":\"gemini-2.5-pro\"},\"treeFilterMode\":\"labeled-only\",\"retry\":{\"enabled\":true,\"maxAttempts\":5,\"baseDelayMilliseconds\":250},\"defaultThinkingLevel\":\"xhigh\",\"enabledModels\":[\"google/gemini-2.5-pro\",\"openai/gpt-5.4\",\"google/gemini-2.5-pro\"],\"steeringMode\":\"all\",\"followUpMode\":\"all\",\"autoCompactionEnabled\":true,\"theme\":\"light\",\"shellPath\":\"C:\\\\tools\\\\bash.exe\",\"shellCommandPrefix\":\"source ~/.bashrc\",\"npmCommand\":[\"mise\",\"exec\",\"node@22\",\"--\",\"npm\",\"npm\"],\"quietStartup\":true,\"collapseChangelog\":true,\"enableInstallTelemetry\":false,\"lastChangelogVersion\":\"0.1.0\",\"terminal\":{\"showImages\":false,\"clearOnShrink\":true},\"images\":{\"autoResize\":false,\"blockImages\":true},\"markdown\":{\"codeBlockIndent\":\"    \"},\"showHardwareCursor\":true,\"fullscreenCopyOnSelect\":false,\"editorPaddingX\":8,\"autocompleteMaxVisible\":1}}",
             "{\"id\":\"state1\",\"type\":\"get_state\"}",
             string.Empty);
         var host = new CodingAgentRpcHost(
@@ -1896,6 +1927,7 @@ public sealed class CodingAgentRpcHostTests
         Assert.True(saved.ImagesBlockImages);
         Assert.Equal("    ", saved.MarkdownCodeBlockIndent);
         Assert.True(saved.ShowHardwareCursor);
+        Assert.False(saved.FullscreenCopyOnSelect);
         Assert.Equal(3, saved.EditorPaddingX);
         Assert.Equal(3, saved.AutocompleteMaxVisible);
     }

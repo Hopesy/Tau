@@ -94,6 +94,7 @@ public class CodingAgentSettingsSelectorTests
                 ImagesBlockImages: true,
                 HideThinkingBlock: true,
                 ShowHardwareCursor: true,
+                FullscreenCopyOnSelect: true,
                 EditorPaddingX: 2,
                 AutocompleteMaxVisible: 10),
             new Model
@@ -110,7 +111,7 @@ public class CodingAgentSettingsSelectorTests
 
         var selector = CodingAgentSettingsSelector.CreateSettingsList(state);
 
-        Assert.Equal(18, selector.FilteredItems.Count);
+        Assert.Equal(19, selector.FilteredItems.Count);
         Assert.Collection(
             selector.FilteredItems,
             item =>
@@ -147,6 +148,12 @@ public class CodingAgentSettingsSelectorTests
             {
                 Assert.Equal(CodingAgentSettingsSelector.ShowHardwareCursorAction, item.Id);
                 Assert.Equal("true", item.CurrentValue);
+            },
+            item =>
+            {
+                Assert.Equal(CodingAgentSettingsSelector.FullscreenCopyOnSelectAction, item.Id);
+                Assert.Equal("true", item.CurrentValue);
+                Assert.Equal(["true", "false"], item.Values);
             },
             item =>
             {

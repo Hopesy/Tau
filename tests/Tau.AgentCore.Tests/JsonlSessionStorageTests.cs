@@ -18,7 +18,9 @@ public sealed class JsonlSessionStorageTests
         Assert.True(File.Exists(filePath));
         var lines = File.ReadAllText(filePath).Trim().Split('\n');
         Assert.Single(lines);
-        Assert.Equal("session", JsonDocument.Parse(lines[0]).RootElement.GetProperty("type").GetString());
+        var header = JsonDocument.Parse(lines[0]).RootElement;
+        Assert.Equal("header", header.GetProperty("kind").GetString());
+        Assert.Equal(4, header.GetProperty("version").GetInt32());
         Assert.Null(await storage.GetLeafIdAsync());
 
         await storage.AppendEntryAsync(new MessageSessionEntry(
@@ -252,6 +254,81 @@ public sealed class JsonlSessionStorageTests
 
         Assert.Equal("README.md", details.GetProperty("readFiles")[0].GetString());
         Assert.Equal("src/Program.cs", details.GetProperty("modifiedFiles")[0].GetString());
+    }
+
+    [Fact]
+    public async Task AppendRecordAsync_PersistsRecordLogAcrossReload()
+    {
+        using var temp = TempDirectory.Create();
+        var filePath = Path.Combine(temp.Path, "session.jsonl");
+        var storage = await JsonlSessionStorage.CreateAsync(filePath, temp.Path, "session-1");
+        await storage.AppendRecordAsync(new OperationStartedRecord(
+            "run-1",
+            1,
+            "main",
+            DateTimeOffset.UtcNow,
+            "run"));
+        await storage.AppendRecordAsync(new QueueEnqueuedRecord(
+            "queue-1",
+            2,
+            "main",
+            DateTimeOffset.UtcNow,
+            "nextRun",
+            "entry-1"));
+
+        var loaded = await JsonlSessionStorage.OpenAsync(filePath);
+
+        var records = await loaded.FindRecordsAsync(new RecordQuery { Lane = "main", Order = EntryOrder.OldestFirst });
+        Assert.Collection(
+            records,
+            record => Assert.IsType<OperationStartedRecord>(record),
+            record => Assert.IsType<QueueEnqueuedRecord>(record));
+        Assert.Single(await loaded.FindOpenOperationsAsync("main"));
+        Assert.Contains("\"kind\":\"record\"", File.ReadAllText(filePath), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task OpenAsync_ReadsPiV4HeaderAndMutationLines()
+    {
+        using var temp = TempDirectory.Create();
+        var filePath = Path.Combine(temp.Path, "session-v4.jsonl");
+        await File.WriteAllTextAsync(
+            filePath,
+            ""
+            + "{\"kind\":\"header\",\"version\":4,\"id\":\"session-v4\",\"createdAt\":1767225600000,\"cwd\":\"" + temp.Path.Replace("\\", "\\\\") + "\"}\n"
+            + "{\"kind\":\"entry\",\"seq\":1,\"id\":\"entry-1\",\"parentId\":null,\"timestamp\":1767225600000,\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"hello\"}]}}\n"
+            + "{\"kind\":\"record\",\"seq\":2,\"id\":\"run-1\",\"lane\":\"main\",\"timestamp\":1767225600000,\"type\":\"operation_started\",\"operationKind\":\"run\"}\n");
+
+        var storage = await JsonlSessionStorage.OpenAsync(filePath);
+
+        Assert.Equal("session-v4", (await storage.GetMetadataAsync()).Id);
+        Assert.Equal("entry-1", (await storage.GetEntriesAsync()).Single().Id);
+        Assert.Equal("run-1", Assert.Single(await storage.FindOpenOperationsAsync("main")).Id);
+    }
+
+    [Fact]
+    public async Task V4LaneAndFactMutations_SurviveReloadAndPreserveLogOrder()
+    {
+        using var temp = TempDirectory.Create();
+        var filePath = Path.Combine(temp.Path, "session-v4-lanes.jsonl");
+        var storage = await JsonlSessionStorage.CreateAsync(filePath, temp.Path, "session-v4-lanes");
+        await storage.AppendEntryAsync(new MessageSessionEntry(
+            "root",
+            null,
+            DateTimeOffset.UtcNow,
+            new UserMessage("root")));
+        await storage.CreateLaneAsync("review", "root");
+        await storage.SetNameAsync("Review session");
+        await storage.SetLabelAsync("root", "checkpoint");
+
+        var loaded = await JsonlSessionStorage.OpenAsync(filePath);
+        Assert.Contains(await loaded.GetLanesAsync(), lane => lane == new LanePointer("review", "root"));
+        Assert.Equal("Review session", await loaded.GetNameAsync());
+        Assert.Equal("checkpoint", await loaded.GetLabelAsync("root"));
+
+        var log = await loaded.GetLogAsync();
+        Assert.Equal(["entry", "lane", "fact", "fact"], log.Select(item => item.Kind));
+        Assert.True(log.Zip(log.Skip(1), (left, right) => left.Sequence < right.Sequence).All(static result => result));
     }
 
     private sealed class TempDirectory : IDisposable

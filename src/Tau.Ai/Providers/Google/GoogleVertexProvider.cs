@@ -235,11 +235,10 @@ public sealed class GoogleVertexProvider : IStreamProvider
         }
         else if (reasoning.HasValue && model.Reasoning)
         {
-            generationConfig["thinkingConfig"] = new Dictionary<string, object>
-            {
-                ["includeThoughts"] = true,
-                ["thinkingBudget"] = GetGoogleThinkingBudget(model, (options as SimpleStreamOptions)?.ThinkingBudgets, reasoning.Value)
-            };
+            generationConfig["thinkingConfig"] = BuildSimpleThinkingConfig(
+                model,
+                (options as SimpleStreamOptions)?.ThinkingBudgets,
+                reasoning.Value);
         }
 
         if (generationConfig.Count > 0)
@@ -280,7 +279,7 @@ public sealed class GoogleVertexProvider : IStreamProvider
 
         if (!string.IsNullOrWhiteSpace(thinking.Level))
         {
-            config["thinkingLevel"] = thinking.Level!;
+            config["thinkingLevel"] = NormalizeGoogleThinkingLevel(model, thinking.Level!);
         }
         else if (thinking.BudgetTokens.HasValue)
         {
@@ -288,6 +287,56 @@ public sealed class GoogleVertexProvider : IStreamProvider
         }
 
         return config;
+    }
+
+    /// <summary>将 simple stream 推理级别转换为 Vertex Gemini thinkingConfig。</summary>
+    /// <param name="model">包含模型级 thinkingLevelMap 的模型。</param>
+    /// <param name="budgets">调用方自定义预算。</param>
+    /// <param name="reasoning">通用推理级别。</param>
+    /// <returns>Vertex API 可接受的 thinkingConfig。</returns>
+    private static Dictionary<string, object> BuildSimpleThinkingConfig(Model model, ThinkingBudgets? budgets, ThinkingLevel reasoning)
+    {
+        if (reasoning == ThinkingLevel.Off)
+        {
+            return GetDisabledThinkingConfig(model);
+        }
+
+        var key = StreamOptionHelpers.ToReasoningEffortName(reasoning, allowExtraHigh: false);
+        if (model.ThinkingLevelMap?.TryGetValue(key, out var mapped) == true &&
+            !string.IsNullOrWhiteSpace(mapped) &&
+            mapped!.Trim().ToLowerInvariant() is "minimal" or "low" or "medium" or "high")
+        {
+            return new Dictionary<string, object>
+            {
+                ["includeThoughts"] = true,
+                ["thinkingLevel"] = mapped.Trim().ToUpperInvariant()
+            };
+        }
+
+        return new Dictionary<string, object>
+        {
+            ["includeThoughts"] = true,
+            ["thinkingBudget"] = GetGoogleThinkingBudget(model, budgets, reasoning)
+        };
+    }
+
+    /// <summary>将 Google 专用 Thinking level 选项映射为模型声明的值。</summary>
+    /// <param name="model">目标模型。</param>
+    /// <param name="level">调用方传入的级别。</param>
+    /// <returns>大写 API 级别。</returns>
+    private static string NormalizeGoogleThinkingLevel(Model model, string level)
+    {
+        var normalized = level.Trim().ToLowerInvariant();
+        if (model.ThinkingLevelMap is not null)
+        {
+            var pair = model.ThinkingLevelMap.FirstOrDefault(item => item.Key.Equals(normalized, StringComparison.OrdinalIgnoreCase));
+            if (!string.IsNullOrWhiteSpace(pair.Value))
+            {
+                normalized = pair.Value!;
+            }
+        }
+
+        return normalized.ToUpperInvariant();
     }
 
     private static Dictionary<string, object> GetDisabledThinkingConfig(Model model)

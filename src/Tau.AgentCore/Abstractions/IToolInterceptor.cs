@@ -22,11 +22,15 @@ public record ToolCallContext(
 public record struct ToolCallDecision(
     bool Blocked,
     string? Reason = null,
-    System.Text.Json.JsonElement? Arguments = null)
+    System.Text.Json.JsonElement? Arguments = null,
+    bool Terminate = false)
 {
     public static ToolCallDecision Allow => new(false);
     public static ToolCallDecision AllowWithArguments(System.Text.Json.JsonElement arguments) =>
         new(false, null, arguments.Clone());
 
-    public static ToolCallDecision Block(string reason) => new(true, reason);
+    /// <summary>构造一个阻止工具执行的决定，并可要求本批工具调用终止后续模型轮次。</summary>
+    /// <param name="reason">阻止原因。</param>
+    /// <param name="terminate">是否将该阻止结果标记为终止本批处理。</param>
+    public static ToolCallDecision Block(string reason, bool terminate = false) => new(true, reason, null, terminate);
 }

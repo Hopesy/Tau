@@ -160,7 +160,8 @@ public sealed class AgentPublicApiCompileSampleTests
         var lowLevelResult = await lowLevelStream.ResultAsync.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.IsType<AgentEndEvent>(lowLevelEvents.Last());
         Assert.Equal("done", ReadText(Assert.IsType<AssistantMessage>(lowLevelResult.Last()).Content));
-        Assert.Equal("low-level system", lowLevelRuntime.State.SystemPrompt);
+        // 0.84.4 breaking change：最终回合不再执行 prepareNextTurn，因此不会更新最终回合的系统提示词
+        Assert.Equal(string.Empty, lowLevelRuntime.State.SystemPrompt);
 
         var proxyProvider = new ProxyStreamProvider();
         var proxyOptions = new ProxyStreamOptions

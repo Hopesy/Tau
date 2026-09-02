@@ -89,6 +89,8 @@ public sealed class OpenAiCodexResponsesProvider : IStreamProvider, IDisposable
             WebSocketConnectTimeout = options.WebSocketConnectTimeout,
             Metadata = options.Metadata,
             Env = options.Env,
+            SamplingParams = options.SamplingParams,
+            Deferred = options.Deferred,
             Transport = options.Transport,
             ReasoningEffort = reasoningEffort
         };
@@ -276,6 +278,8 @@ public sealed class OpenAiCodexResponsesProvider : IStreamProvider, IDisposable
         {
             AddCodexOptions(body, model, codexOptions);
         }
+
+        StreamOptionHelpers.ApplySamplingParams(body, model, options);
 
         return body;
     }

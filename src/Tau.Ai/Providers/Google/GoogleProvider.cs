@@ -198,12 +198,10 @@ public sealed class GoogleProvider : IStreamProvider
         }
         else if (reasoning.HasValue && model.Reasoning)
         {
-            var budget = GetGoogleThinkingBudget(model, (options as SimpleStreamOptions)?.ThinkingBudgets, reasoning.Value);
-            generationConfig["thinkingConfig"] = new Dictionary<string, object>
-            {
-                ["includeThoughts"] = true,
-                ["thinkingBudget"] = budget
-            };
+            generationConfig["thinkingConfig"] = BuildSimpleThinkingConfig(
+                model,
+                (options as SimpleStreamOptions)?.ThinkingBudgets,
+                reasoning.Value);
         }
 
         if (generationConfig.Count > 0)
@@ -242,7 +240,7 @@ public sealed class GoogleProvider : IStreamProvider
 
         if (!string.IsNullOrWhiteSpace(thinking.Level))
         {
-            config["thinkingLevel"] = thinking.Level!;
+            config["thinkingLevel"] = NormalizeGoogleThinkingLevel(model, thinking.Level!);
         }
         else if (thinking.BudgetTokens.HasValue)
         {
@@ -250,6 +248,81 @@ public sealed class GoogleProvider : IStreamProvider
         }
 
         return config;
+    }
+
+    /// <summary>
+    /// 将通用 simple stream 推理级别转换为 Gemini API 的 thinkingConfig。
+    /// </summary>
+    /// <param name="model">包含可选 thinkingLevelMap 的模型。</param>
+    /// <param name="budgets">调用方自定义 token 预算。</param>
+    /// <param name="reasoning">通用推理级别。</param>
+    /// <returns>包含 includeThoughts 以及级别或预算的配置。</returns>
+    private static Dictionary<string, object> BuildSimpleThinkingConfig(
+        Model model,
+        ThinkingBudgets? budgets,
+        ThinkingLevel reasoning)
+    {
+        if (reasoning == ThinkingLevel.Off)
+        {
+            return GetDisabledThinkingConfig(model);
+        }
+
+        var mapped = TryGetMappedGoogleThinkingLevel(model, reasoning);
+        if (mapped is not null)
+        {
+            return new Dictionary<string, object>
+            {
+                ["includeThoughts"] = true,
+                ["thinkingLevel"] = mapped
+            };
+        }
+
+        var budget = GetGoogleThinkingBudget(model, budgets, reasoning);
+        return new Dictionary<string, object>
+        {
+            ["includeThoughts"] = true,
+            ["thinkingBudget"] = budget
+        };
+    }
+
+    /// <summary>解析模型映射后的 Gemini thinking level，返回 API 所需的大写枚举值。</summary>
+    /// <param name="model">目标模型。</param>
+    /// <param name="level">模型专用或通用级别文本。</param>
+    /// <returns>Gemini 支持的 MINIMAL、LOW、MEDIUM、HIGH；不支持时返回原值。</returns>
+    private static string NormalizeGoogleThinkingLevel(Model model, string level)
+    {
+        var normalized = level.Trim().ToLowerInvariant();
+        if (model.ThinkingLevelMap is not null)
+        {
+            var mapped = model.ThinkingLevelMap
+                .FirstOrDefault(pair => pair.Key.Equals(normalized, StringComparison.OrdinalIgnoreCase));
+            if (!string.IsNullOrWhiteSpace(mapped.Value))
+            {
+                normalized = mapped.Value!;
+            }
+        }
+
+        return normalized.ToUpperInvariant();
+    }
+
+    /// <summary>读取通用推理级别对应的 Google level 映射。</summary>
+    /// <param name="model">目标模型。</param>
+    /// <param name="reasoning">通用推理级别。</param>
+    /// <returns>映射后的大写 Google level；未映射时返回 null。</returns>
+    private static string? TryGetMappedGoogleThinkingLevel(Model model, ThinkingLevel reasoning)
+    {
+        var key = StreamOptionHelpers.ToReasoningEffortName(reasoning, allowExtraHigh: false);
+        if (model.ThinkingLevelMap is null ||
+            !model.ThinkingLevelMap.TryGetValue(key, out var mapped) ||
+            string.IsNullOrWhiteSpace(mapped))
+        {
+            return null;
+        }
+
+        var normalized = mapped.Trim().ToLowerInvariant();
+        return normalized is "minimal" or "low" or "medium" or "high"
+            ? normalized.ToUpperInvariant()
+            : null;
     }
 
     private static Dictionary<string, object> GetDisabledThinkingConfig(Model model)

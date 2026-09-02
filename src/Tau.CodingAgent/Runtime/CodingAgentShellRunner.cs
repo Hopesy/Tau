@@ -215,5 +215,8 @@ public sealed class SystemCodingAgentShellRunner : ICodingAgentShellRunner
         catch (InvalidOperationException)
         {
         }
+        catch (System.ComponentModel.Win32Exception)
+        {
+        }
     }
 }

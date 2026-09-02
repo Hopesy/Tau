@@ -105,6 +105,7 @@ public class CodingAgentSettingsStoreTests
                 ImagesAutoResize: false,
                 ImagesBlockImages: true,
                 ShowHardwareCursor: true,
+                FullscreenCopyOnSelect: false,
                 EditorPaddingX: 99,
                 AutocompleteMaxVisible: 1,
                 MarkdownCodeBlockIndent: "    "));
@@ -141,6 +142,7 @@ public class CodingAgentSettingsStoreTests
             Assert.False(loaded.ImagesAutoResize);
             Assert.True(loaded.ImagesBlockImages);
             Assert.True(loaded.ShowHardwareCursor);
+            Assert.False(loaded.FullscreenCopyOnSelect);
             Assert.Equal(3, loaded.EditorPaddingX);
             Assert.Equal(3, loaded.AutocompleteMaxVisible);
             Assert.Equal("    ", loaded.MarkdownCodeBlockIndent);
@@ -282,6 +284,7 @@ public class CodingAgentSettingsStoreTests
             Assert.Null(loaded.ImagesAutoResize);
             Assert.Null(loaded.ImagesBlockImages);
             Assert.Null(loaded.ShowHardwareCursor);
+            Assert.Null(loaded.FullscreenCopyOnSelect);
             Assert.Null(loaded.EditorPaddingX);
             Assert.Null(loaded.AutocompleteMaxVisible);
             Assert.Null(loaded.MarkdownCodeBlockIndent);

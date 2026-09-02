@@ -109,17 +109,28 @@ public sealed class OpenAiProvider : IStreamProvider
 
             var toolCallAccumulators = new Dictionary<int, OpenAiStreamParser.ToolCallAccumulator>();
             var contentIndex = 0;
+            var completed = false;
 
             await foreach (var sse in SseParser.ParseAsync(responseStream, requestTimeout.Token))
             {
                 if (sse.Data == "[DONE]")
                     break;
 
-                if (OpenAiStreamParser.ParseChunk(
-                    sse.Data, stream, ref partial, ref toolCallAccumulators, ref contentIndex))
+                completed = OpenAiStreamParser.ParseChunk(
+                    sse.Data, stream, ref partial, ref toolCallAccumulators, ref contentIndex);
+                if (completed)
                 {
                     break;
                 }
+            }
+
+            if (!completed)
+            {
+                OpenAiStreamParser.Complete(
+                    stream,
+                    ref partial,
+                    toolCallAccumulators,
+                    ResolveCompatibility(model).SupportsFinishReason);
             }
         }
         catch (OperationCanceledException ex) when (requestTimeout.IsTimeoutCancellation)
@@ -207,6 +218,7 @@ public sealed class OpenAiProvider : IStreamProvider
         AddToolChoice(options, body);
         AddReasoning(model, options, compatibility, body);
         AddRouting(model, compatibility, body);
+        StreamOptionHelpers.ApplySamplingParams(body, model, options);
 
         return body;
     }
@@ -560,6 +572,7 @@ public sealed class OpenAiProvider : IStreamProvider
             SupportsReasoningEffort = compat?.SupportsReasoningEffort ?? false,
             ReasoningEffortMap = compat?.ReasoningEffortMap ?? EmptyReasoningEffortMap,
             SupportsUsageInStreaming = compat?.SupportsUsageInStreaming ?? true,
+            SupportsFinishReason = compat?.SupportsFinishReason ?? true,
             MaxTokensField = string.Equals(compat?.MaxTokensField, "max_completion_tokens", StringComparison.OrdinalIgnoreCase)
                 ? "max_completion_tokens"
                 : "max_tokens",
@@ -599,6 +612,7 @@ public sealed class OpenAiProvider : IStreamProvider
         public bool SupportsReasoningEffort { get; init; }
         public IReadOnlyDictionary<string, string> ReasoningEffortMap { get; init; } = EmptyReasoningEffortMap;
         public bool SupportsUsageInStreaming { get; init; }
+        public bool SupportsFinishReason { get; init; } = true;
         public string MaxTokensField { get; init; } = "max_tokens";
         public bool RequiresToolResultName { get; init; }
         public bool RequiresAssistantAfterToolResult { get; init; }

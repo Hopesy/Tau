@@ -9,6 +9,8 @@ public sealed class InMemorySessionRepo
         CancellationToken cancellationToken = default)
     {
         var metadata = new SessionMetadata(id ?? SessionRepoUtilities.CreateSessionId(), SessionRepoUtilities.CreateTimestamp());
+        if (_sessions.ContainsKey(metadata.Id))
+            throw new SessionException("already_exists", $"Session already exists: {metadata.Id}");
         var session = new AgentHarnessSession<SessionMetadata>(
             new InMemorySessionStorage<SessionMetadata>(metadata));
         _sessions[metadata.Id] = session;

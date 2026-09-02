@@ -205,6 +205,14 @@ public sealed class CodingAgentRpcClient : IAsyncDisposable
     public Task AbortAsync(CancellationToken cancellationToken = default) =>
         SendAndRequireSuccessAsync("abort", cancellationToken: cancellationToken);
 
+    /// <summary>
+    /// 清空远程 agent 的 steering 与 follow-up 队列，并返回其中的纯文本消息。
+    /// </summary>
+    /// <param name="cancellationToken">请求取消令牌。</param>
+    /// <returns>包含 steering 和 follow-up 文本数组的 JSON 数据。</returns>
+    public Task<JsonElement?> ClearQueueAsync(CancellationToken cancellationToken = default) =>
+        SendForDataAsync("clear_queue", cancellationToken: cancellationToken);
+
     public Task<JsonElement?> NewSessionAsync(
         string? parentSession = null,
         CancellationToken cancellationToken = default) =>

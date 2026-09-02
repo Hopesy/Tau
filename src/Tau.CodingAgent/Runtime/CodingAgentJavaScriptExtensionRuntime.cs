@@ -110,6 +110,7 @@ public sealed record CodingAgentJavaScriptExtensionToolPrepareResult(
 public sealed record CodingAgentJavaScriptExtensionToolCallEventResult(
     bool Success,
     bool Blocked,
+    bool Terminate,
     string? Reason,
     JsonElement? Arguments,
     string? Error);
@@ -493,7 +494,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
             toolArgs: args));
         if (!execution.Success)
         {
-            return new CodingAgentJavaScriptExtensionToolCallEventResult(false, false, null, null, execution.Error);
+            return new CodingAgentJavaScriptExtensionToolCallEventResult(false, false, false, null, null, execution.Error);
         }
 
         try
@@ -505,6 +506,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
                 return new CodingAgentJavaScriptExtensionToolCallEventResult(
                     false,
                     false,
+                    false,
                     null,
                     null,
                     ReadString(root, "error") ?? "javascript extension tool_call handler failed");
@@ -514,6 +516,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
             return new CodingAgentJavaScriptExtensionToolCallEventResult(
                 true,
                 ReadBool(root, "block"),
+                ReadBool(root, "terminate"),
                 ReadString(root, "reason"),
                 root.TryGetProperty("input", out var inputElement) ? inputElement.Clone() : null,
                 null);
@@ -521,6 +524,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
         catch (JsonException ex)
         {
             return new CodingAgentJavaScriptExtensionToolCallEventResult(
+                false,
                 false,
                 false,
                 null,
@@ -2241,7 +2245,9 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
           "message_end",
           "tool_execution_start",
           "tool_execution_update",
-          "tool_execution_end"
+          "tool_execution_end",
+          "ui_prompt_start",
+          "ui_prompt_end"
         ]);
 
         function addHandler(handlerMap, unsupported, eventName, handler) {
@@ -2617,6 +2623,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
               ok: true,
               block: result && result.block === true,
               reason: result && typeof result.reason === "string" ? result.reason : undefined,
+              terminate: result && result.terminate === true,
               input: event.input,
               actions
             });

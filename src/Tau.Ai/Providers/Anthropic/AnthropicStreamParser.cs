@@ -84,6 +84,19 @@ internal sealed class AnthropicStreamParser
             if (msg.TryGetProperty("id", out var id) && id.ValueKind == JsonValueKind.String)
                 _partial = _partial with { ResponseId = id.GetString() };
 
+            if (msg.TryGetProperty("model", out var model) && model.ValueKind == JsonValueKind.String)
+            {
+                var responseModel = model.GetString();
+                if (!string.IsNullOrWhiteSpace(responseModel))
+                {
+                    _partial = _partial with
+                    {
+                        Model = responseModel,
+                        ResponseModel = responseModel.Equals(_partial.Model, StringComparison.Ordinal) ? _partial.ResponseModel : responseModel
+                    };
+                }
+            }
+
             if (msg.TryGetProperty("usage", out var usage))
                 _partial = _partial with { Usage = ExtractUsage(usage) };
         }
@@ -223,7 +236,12 @@ internal sealed class AnthropicStreamParser
             if (delta.TryGetProperty("stop_reason", out var sr) && sr.ValueKind == JsonValueKind.String)
             {
                 var (stopReason, errorMessage) = MapStopReason(sr.GetString());
-                _partial = _partial with { StopReason = stopReason };
+                _partial = _partial with
+                {
+                    StopReason = stopReason,
+                    RawStopReason = sr.GetString(),
+                    EndTurn = stopReason == StopReason.EndTurn
+                };
                 if (stopReason == StopReason.Error)
                 {
                     PushError(errorMessage ?? "Provider stop_reason mapped to error");
@@ -243,6 +261,11 @@ internal sealed class AnthropicStreamParser
                     merged.OutputTokens == 0 ? existing.OutputTokens : merged.OutputTokens,
                     merged.CacheReadTokens ?? existing.CacheReadTokens,
                     merged.CacheWriteTokens ?? existing.CacheWriteTokens)
+                {
+                    CacheWrite1hTokens = merged.CacheWrite1hTokens ?? existing.CacheWrite1hTokens,
+                    ReasoningTokens = merged.ReasoningTokens ?? existing.ReasoningTokens,
+                    TotalTokens = merged.TotalTokens ?? existing.TotalTokens
+                }
             };
         }
 
@@ -290,7 +313,28 @@ internal sealed class AnthropicStreamParser
             ? cr.GetInt32() : null;
         int? cacheWrite = usage.TryGetProperty("cache_creation_input_tokens", out var cw) && cw.ValueKind == JsonValueKind.Number
             ? cw.GetInt32() : null;
-        return new Usage(input, output, cacheRead, cacheWrite);
+        int? cacheWrite1h = null;
+        if (usage.TryGetProperty("cache_creation", out var cacheCreation) && cacheCreation.ValueKind == JsonValueKind.Object)
+        {
+            cacheWrite1h = cacheCreation.TryGetProperty("ephemeral_1h_input_tokens", out var oneHour) && oneHour.ValueKind == JsonValueKind.Number
+                ? oneHour.GetInt32()
+                : null;
+        }
+
+        int? reasoning = null;
+        if (usage.TryGetProperty("output_tokens_details", out var outputDetails) && outputDetails.ValueKind == JsonValueKind.Object &&
+            outputDetails.TryGetProperty("thinking_tokens", out var thinking) && thinking.ValueKind == JsonValueKind.Number)
+        {
+            reasoning = thinking.GetInt32();
+        }
+
+        var total = input + output + cacheRead.GetValueOrDefault() + cacheWrite.GetValueOrDefault();
+        return new Usage(input, output, cacheRead, cacheWrite)
+        {
+            CacheWrite1hTokens = cacheWrite1h,
+            ReasoningTokens = reasoning,
+            TotalTokens = total
+        };
     }
 
     private void PushError(string message)

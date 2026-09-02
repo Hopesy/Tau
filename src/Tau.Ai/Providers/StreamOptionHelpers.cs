@@ -9,6 +9,24 @@ internal static class StreamOptionHelpers
 
     public static StreamRequestTimeout CreateRequestTimeout(StreamOptions options) => new(options);
 
+    /// <summary>
+    /// 将模型和请求中的额外采样参数合并到兼容 provider 请求体。
+    /// </summary>
+    /// <param name="body">已经组装好的请求体。</param>
+    /// <param name="model">当前模型，提供默认采样参数。</param>
+    /// <param name="options">当前请求，显式参数优先于模型默认值。</param>
+    public static void ApplySamplingParams(Dictionary<string, object> body, Model model, StreamOptions options)
+    {
+        if (model.SamplingParams is not null)
+        {
+            foreach (var pair in model.SamplingParams) body[pair.Key] = pair.Value;
+        }
+        if (options.SamplingParams is not null)
+        {
+            foreach (var pair in options.SamplingParams) body[pair.Key] = pair.Value;
+        }
+    }
+
     public static void PushAborted(
         AssistantMessageStream stream,
         Model model,

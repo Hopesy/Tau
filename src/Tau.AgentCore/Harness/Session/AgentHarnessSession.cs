@@ -27,6 +27,99 @@ public sealed class AgentHarnessSession<TMetadata>
     public Task<IReadOnlyList<SessionTreeEntry>> GetEntriesAsync(CancellationToken cancellationToken = default) =>
         _storage.GetEntriesAsync(cancellationToken);
 
+    /// <summary>按 entry 查询条件读取 session 范围内的 entries。</summary>
+    /// <param name="query">类型、顺序、游标和数量过滤。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>匹配的 entries。</returns>
+    public Task<IReadOnlyList<SessionTreeEntry>> FindEntriesAsync(
+        EntryQuery? query = null,
+        CancellationToken cancellationToken = default) =>
+        _storage.FindEntriesAsync(query, cancellationToken);
+
+    /// <summary>读取指定分支上的 entries，支持 stopAt 边界。</summary>
+    /// <param name="query">entry 过滤和顺序。</param>
+    /// <param name="bounds">起点、类型边界和 id 边界。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>分支 entries。</returns>
+    public Task<IReadOnlyList<SessionTreeEntry>> FindEntriesOnBranchAsync(
+        EntryQuery? query = null,
+        BranchBounds? bounds = null,
+        CancellationToken cancellationToken = default) =>
+        _storage.FindEntriesOnBranchAsync(query, bounds, cancellationToken);
+
+    /// <summary>查询 session 中的 lane records。</summary>
+    /// <param name="query">record 查询条件。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>匹配的 lane records。</returns>
+    public Task<IReadOnlyList<LaneRecord>> FindRecordsAsync(
+        RecordQuery? query = null,
+        CancellationToken cancellationToken = default) =>
+        _storage.FindRecordsAsync(query, cancellationToken);
+
+    /// <summary>读取 session 当前 lane 指针。</summary>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>lane 指针列表。</returns>
+    public Task<IReadOnlyList<LanePointer>> GetLanesAsync(CancellationToken cancellationToken = default) =>
+        _storage.GetLanesAsync(cancellationToken);
+
+    /// <summary>创建一个新的 session lane。</summary>
+    /// <param name="lane">lane 名称。</param>
+    /// <param name="at">初始叶节点。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    public Task CreateLaneAsync(string lane, string? at = null, CancellationToken cancellationToken = default) =>
+        _storage.CreateLaneAsync(lane, at, cancellationToken);
+
+    /// <summary>移动 session lane 的叶节点。</summary>
+    /// <param name="lane">lane 名称。</param>
+    /// <param name="to">目标叶节点。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    public Task MoveLaneAsync(string lane, string? to, CancellationToken cancellationToken = default) =>
+        _storage.MoveLaneAsync(lane, to, cancellationToken);
+
+    /// <summary>读取全局 session 名称。</summary>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>当前名称。</returns>
+    public Task<string?> GetNameAsync(CancellationToken cancellationToken = default) =>
+        _storage.GetNameAsync(cancellationToken);
+
+    /// <summary>设置全局 session 名称。</summary>
+    /// <param name="name">名称；空值清除。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    public Task SetNameAsync(string? name, CancellationToken cancellationToken = default) =>
+        _storage.SetNameAsync(name, cancellationToken);
+
+    /// <summary>读取 session 统计。</summary>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>统计快照。</returns>
+    public Task<SessionStats> GetStatsAsync(CancellationToken cancellationToken = default) =>
+        _storage.GetStatsAsync(cancellationToken);
+
+    /// <summary>设置或清除 entry 的全局 label。</summary>
+    /// <param name="id">目标 entry id。</param>
+    /// <param name="label">label 文本；空值清除。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    public Task SetLabelAsync(string id, string? label, CancellationToken cancellationToken = default) =>
+        _storage.SetLabelAsync(id, label, cancellationToken);
+
+    /// <summary>读取 entry、record、lane 和 fact 的合并顺序日志。</summary>
+    /// <param name="afterSequence">独占序号游标。</param>
+    /// <param name="limit">最多返回数量。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>顺序日志项。</returns>
+    public Task<IReadOnlyList<SessionLogItem>> GetLogAsync(long? afterSequence = null, int? limit = null, CancellationToken cancellationToken = default) =>
+        _storage.GetLogAsync(afterSequence, limit, cancellationToken);
+
+    /// <summary>查询尚未结束的 lane 操作。</summary>
+    /// <param name="lane">lane 名称。</param>
+    /// <param name="limit">最多返回数量。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>未结束操作。</returns>
+    public Task<IReadOnlyList<OperationStartedRecord>> FindOpenOperationsAsync(
+        string lane,
+        int? limit = null,
+        CancellationToken cancellationToken = default) =>
+        _storage.FindOpenOperationsAsync(lane, limit, cancellationToken);
+
     public async Task<IReadOnlyList<SessionTreeEntry>> GetBranchAsync(
         string? fromId = null,
         CancellationToken cancellationToken = default)

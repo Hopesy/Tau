@@ -16,9 +16,12 @@ public sealed class JsonlSessionRepo
         CancellationToken cancellationToken = default)
     {
         var sessionId = id ?? SessionRepoUtilities.CreateSessionId();
+        ValidateSessionId(sessionId);
         var createdAt = SessionRepoUtilities.CreateTimestamp();
         var sessionDirectory = GetSessionDirectory(cwd);
         Directory.CreateDirectory(sessionDirectory);
+        if (Directory.EnumerateFiles(sessionDirectory, $"*_{sessionId}.jsonl").Any())
+            throw new SessionException("already_exists", $"Session already exists: {sessionId}");
         var filePath = CreateSessionFilePath(sessionDirectory, sessionId, createdAt);
         var storage = await JsonlSessionStorage.CreateAsync(
             filePath,
@@ -124,5 +127,18 @@ public sealed class JsonlSessionRepo
             .Select(static character => character is '/' or '\\' or ':' ? '-' : character)
             .ToArray());
         return $"--{encoded}--";
+    }
+
+    /// <summary>校验 v4 session id 是否可安全用于 JSONL 文件名。</summary>
+    /// <param name="id">待校验的 session id。</param>
+    private static void ValidateSessionId(string id)
+    {
+        if (string.IsNullOrWhiteSpace(id) ||
+            id[0] is not (>= 'A' and <= 'Z') and not (>= 'a' and <= 'z') and not (>= '0' and <= '9') ||
+            id[^1] is not (>= 'A' and <= 'Z') and not (>= 'a' and <= 'z') and not (>= '0' and <= '9') ||
+            id.Any(static character => !char.IsLetterOrDigit(character) && character is not ('.' or '_' or '-')))
+        {
+            throw new SessionException("invalid_payload", "Session id must start and end with an alphanumeric character and contain only alphanumeric characters, '-', '_', and '.'.");
+        }
     }
 }

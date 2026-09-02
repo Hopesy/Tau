@@ -60,7 +60,10 @@ public sealed class OpenAiResponsesProvider : IStreamProvider
             WebSocketConnectTimeout = options.WebSocketConnectTimeout,
             Metadata = options.Metadata,
             Env = options.Env,
-            ReasoningEffort = reasoningEffort
+            SamplingParams = options.SamplingParams,
+            Deferred = options.Deferred,
+            ReasoningEffort = reasoningEffort,
+            ToolChoice = options.ToolChoice
         };
         return Stream(model, context, responseOptions);
     }
@@ -151,17 +154,34 @@ public sealed class OpenAiResponsesProvider : IStreamProvider
             body["parallel_tool_calls"] = true;
         }
 
+        if (options is OpenAiResponsesOptions responseOptionsWithToolChoice && responseOptionsWithToolChoice.ToolChoice is not null)
+        {
+            body["tool_choice"] = responseOptionsWithToolChoice.ToolChoice;
+        }
+
         OpenAiResponsesShared.AddBaseParameters(body, model, options);
+        // xAI Responses 要求显式声明加密 reasoning 内容，否则 reasoning item 可能不会出现在流中
+        if (model.Provider.Equals("xai", StringComparison.OrdinalIgnoreCase) && model.Reasoning)
+        {
+            body["include"] = new[] { "reasoning.encrypted_content" };
+        }
         if (options is OpenAiResponsesOptions responseOptions)
         {
             AddResponsesOptions(body, responseOptions);
         }
+
+        StreamOptionHelpers.ApplySamplingParams(body, model, options);
 
         return body;
     }
 
     private static void AddResponsesOptions(Dictionary<string, object> body, OpenAiResponsesOptions options)
     {
+        if (options.ToolChoice is not null)
+        {
+            body["tool_choice"] = options.ToolChoice;
+        }
+
         if (!string.IsNullOrWhiteSpace(options.ReasoningEffort) ||
             !string.IsNullOrWhiteSpace(options.ReasoningSummary))
         {

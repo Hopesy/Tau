@@ -55,7 +55,8 @@ public sealed class CodingAgentExtensionToolEventInterceptor : IToolInterceptor
                 return Task.FromResult(ToolCallDecision.Block(
                     string.IsNullOrWhiteSpace(result.Reason)
                         ? "blocked by extension"
-                        : result.Reason));
+                        : result.Reason,
+                    result.Terminate));
             }
 
             if (result.Arguments.HasValue)
@@ -102,7 +103,8 @@ public sealed class CodingAgentExtensionToolEventInterceptor : IToolInterceptor
             current = new ToolResult(
                 eventResult.Content.Select(static text => new TextContent(text)).ToArray(),
                 eventResult.IsError,
-                eventResult.Details.HasValue ? eventResult.Details.Value.Clone() : null);
+                eventResult.Details.HasValue ? eventResult.Details.Value.Clone() : null,
+                current.Terminate);
         }
 
         return Task.FromResult(current);

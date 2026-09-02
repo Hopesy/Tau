@@ -598,6 +598,7 @@ public class CodingAgentCommandRouterTests
             CodingAgentSettingsSelector.FormatSelection(CodingAgentSettingsSelector.ImagesBlockImagesAction, "true"),
             CodingAgentSettingsSelector.FormatSelection(CodingAgentSettingsSelector.HideThinkingBlockAction, "true"),
             CodingAgentSettingsSelector.FormatSelection(CodingAgentSettingsSelector.ShowHardwareCursorAction, "true"),
+            CodingAgentSettingsSelector.FormatSelection(CodingAgentSettingsSelector.FullscreenCopyOnSelectAction, "false"),
             CodingAgentSettingsSelector.FormatSelection(CodingAgentSettingsSelector.EditorPaddingAction, "3"),
             CodingAgentSettingsSelector.FormatSelection(CodingAgentSettingsSelector.AutocompleteMaxVisibleAction, "15"),
             CodingAgentSettingsSelector.FormatSelection(CodingAgentSettingsSelector.TerminalClearOnShrinkAction, "true"),
@@ -648,6 +649,7 @@ public class CodingAgentCommandRouterTests
             Assert.Contains(results, result => result.Message == "block images: enabled");
             Assert.Contains(results, result => result.Message == "hide thinking blocks: enabled");
             Assert.Contains(results, result => result.Message == "show hardware cursor: enabled");
+            Assert.Contains(results, result => result.Message == "copy fullscreen selection: disabled");
             Assert.Contains(results, result => result.Message == "editor padding: 3");
             Assert.Contains(results, result => result.Message == "autocomplete max items: 15");
             Assert.Contains(results, result => result.Message == "clear on shrink: enabled");
@@ -665,6 +667,7 @@ public class CodingAgentCommandRouterTests
             Assert.True(saved.ImagesBlockImages);
             Assert.True(saved.HideThinkingBlock);
             Assert.True(saved.ShowHardwareCursor);
+            Assert.False(saved.FullscreenCopyOnSelect);
             Assert.Equal(3, saved.EditorPaddingX);
             Assert.Equal(15, saved.AutocompleteMaxVisible);
             Assert.True(saved.TerminalClearOnShrink);

@@ -16,7 +16,7 @@ public readonly record struct TuiFuzzyMatch(bool Matches, double Score);
 /// </summary>
 public static class TuiFuzzyMatcher
 {
-    private static readonly char[] TokenSeparators = [' ', '\t', '\r', '\n'];
+    private static readonly char[] TokenSeparators = [' ', '\t', '\r', '\n', '/'];
 
     public static TuiFuzzyMatch Match(string? query, string? text)
     {
@@ -139,9 +139,18 @@ public static class TuiFuzzyMatcher
             queryIndex++;
         }
 
-        return queryIndex < query.Length
-            ? new TuiFuzzyMatch(false, 0)
-            : new TuiFuzzyMatch(true, score);
+        if (queryIndex < query.Length)
+        {
+            return new TuiFuzzyMatch(false, 0);
+        }
+
+        // 完全相等时使用参考实现的强奖励，确保精确命中排在前面
+        if (query.Equals(text, StringComparison.Ordinal))
+        {
+            score -= 100;
+        }
+
+        return new TuiFuzzyMatch(true, score);
     }
 
     private static string TrySwapAlphaNumericToken(string query)

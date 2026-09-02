@@ -35,7 +35,10 @@ internal sealed class ConsoleOAuthLoginCallbacks : IOAuthLoginCallbacks
         Console.WriteLine(message);
     }
 
-    public Task<string>? OnManualCodeInputAsync() => null;
+    /// <summary>在无法接收本地回调时读取用户粘贴的授权码或重定向地址。</summary>
+    /// <returns>用户输入的授权码或完整 redirect URL。</returns>
+    public Task<string>? OnManualCodeInputAsync() =>
+        Task.Run(() => OnPromptAsync("Paste the authorization code or full redirect URL:", allowEmpty: false));
 
     private static void TryOpenBrowser(string url)
     {

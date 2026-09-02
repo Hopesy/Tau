@@ -230,7 +230,7 @@ internal static class ToolExecutor
                 var blockedMessage = string.IsNullOrWhiteSpace(decision.Reason)
                     ? "Tool call blocked."
                     : $"Tool call blocked: {decision.Reason}";
-                terminalResult = CreateErrorToolResult(blockedMessage);
+                terminalResult = CreateErrorToolResult(blockedMessage) with { Terminate = decision.Terminate };
                 terminalFailureKind = "blocked";
                 terminalReason = decision.Reason;
                 break;
@@ -439,7 +439,7 @@ internal static class ToolExecutor
                 var blockedMessage = string.IsNullOrWhiteSpace(decision.Reason)
                     ? "Tool call blocked."
                     : $"Tool call blocked: {decision.Reason}";
-                terminalResult = CreateErrorToolResult(blockedMessage);
+                terminalResult = CreateErrorToolResult(blockedMessage) with { Terminate = decision.Terminate };
                 terminalFailureKind = "blocked";
                 terminalReason = decision.Reason;
                 break;
@@ -539,6 +539,7 @@ internal static class ToolExecutor
             ["toolName"] = toolCall.Name,
             ["argumentBytes"] = System.Text.Encoding.UTF8.GetByteCount(toolCall.Arguments).ToString(System.Globalization.CultureInfo.InvariantCulture)
         };
+        fields["logMessage"] = "【AgentCore】【ToolExecution】开始执行工具";
         if (executionMode is not null)
         {
             fields["executionMode"] = executionMode.Value.ToString().ToLowerInvariant();
@@ -567,6 +568,7 @@ internal static class ToolExecutor
             ["failureKind"] = failureKind,
             ["durationMs"] = Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds.ToString("F0", System.Globalization.CultureInfo.InvariantCulture)
         };
+        fields["logMessage"] = "【AgentCore】【ToolExecution】工具执行结束";
 
         if (result is not null)
         {

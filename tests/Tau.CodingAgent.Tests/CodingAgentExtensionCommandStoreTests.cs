@@ -1682,6 +1682,47 @@ public class CodingAgentExtensionCommandStoreTests
     }
 
     [Fact]
+    public async Task LoadLifecycleEventSink_EmitsUiPromptLifecycleEvents()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-js-ui-prompt-" + Guid.NewGuid().ToString("N"));
+        var extensionDirectory = Path.Combine(directory, ".tau", "extensions", "ui-prompt");
+        Directory.CreateDirectory(extensionDirectory);
+        WriteJavaScriptExtension(
+            extensionDirectory,
+            """
+            import fs from "node:fs";
+
+            export default function(pi) {
+              pi.on("ui_prompt_start", (event) => {
+                fs.appendFileSync("events.log", `${event.type}:${event.reason}:${event.kind}:${event.title ?? ""}\n`);
+              });
+              pi.on("ui_prompt_end", (event) => {
+                fs.appendFileSync("events.log", `${event.type}:${event.reason}:${event.kind}:${event.title ?? ""}\n`);
+              });
+            }
+            """);
+
+        try
+        {
+            var store = CreateJavaScriptStore(directory);
+            var sink = store.LoadLifecycleEventSink();
+            Assert.NotNull(sink);
+
+            await sink!.PublishUiPromptAsync("ui_prompt_start", "select", "Pick target");
+            await sink.PublishUiPromptAsync("ui_prompt_end", "select", "Pick target");
+
+            var logPath = Path.Combine(directory, "events.log");
+            Assert.Equal(
+                "ui_prompt_start:ui_prompt:select:Pick target\nui_prompt_end:ui_prompt:select:Pick target\n",
+                File.ReadAllText(logPath).ReplaceLineEndings("\n"));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public void LoadStatus_LoadsTypescriptRegisteredTools()
     {
         var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-ts-tool-load-" + Guid.NewGuid().ToString("N"));

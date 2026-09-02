@@ -25,6 +25,7 @@ internal sealed class BedrockStreamParser
     private readonly AssistantMessageStream _stream;
     private readonly Dictionary<int, int> _contentIndexByBedrockIndex = new();
     private readonly Dictionary<int, string> _toolUseInputsByLocalIndex = new();
+    private readonly Dictionary<int, List<byte>> _redactedReasoningByLocalIndex = new();
     private bool _started;
 
     public BedrockStreamParser(AssistantMessage initial, AssistantMessageStream stream)
@@ -171,11 +172,36 @@ internal sealed class BedrockStreamParser
 
         if (delta.TryGetProperty("reasoningContent", out var reasoningContent))
         {
-            var (thinking, signature) = GetReasoningDelta(reasoningContent);
+            var (thinking, signature, redactedContent) = GetReasoningDelta(reasoningContent);
             var localIndex = EnsureThinkingBlock(bedrockIndex);
             if (_partial.Content[localIndex] is ThinkingContent current)
             {
                 var updated = current;
+                var emittedRedactedPlaceholder = false;
+                if (redactedContent is { Length: > 0 })
+                {
+                    if (!_redactedReasoningByLocalIndex.TryGetValue(localIndex, out var bytes))
+                    {
+                        bytes = [];
+                        _redactedReasoningByLocalIndex[localIndex] = bytes;
+                    }
+
+                    bytes.AddRange(redactedContent);
+                    updated = updated with
+                    {
+                        Redacted = true,
+                        Thinking = string.IsNullOrEmpty(updated.Thinking) ? "[Reasoning redacted]" : updated.Thinking,
+                        ThinkingSignature = Convert.ToBase64String(bytes.ToArray())
+                    };
+                    emittedRedactedPlaceholder = string.IsNullOrEmpty(current.Thinking);
+                }
+
+                if (updated.Redacted)
+                {
+                    thinking = null;
+                    signature = null;
+                }
+
                 if (!string.IsNullOrEmpty(thinking))
                 {
                     updated = updated with { Thinking = updated.Thinking + thinking };
@@ -187,9 +213,9 @@ internal sealed class BedrockStreamParser
                 }
 
                 ReplaceContent(localIndex, updated);
-                if (!string.IsNullOrEmpty(thinking))
+                if (!string.IsNullOrEmpty(thinking) || emittedRedactedPlaceholder)
                 {
-                    _stream.Push(new ThinkingDeltaEvent(localIndex, thinking, _partial));
+                    _stream.Push(new ThinkingDeltaEvent(localIndex, thinking ?? "[Reasoning redacted]", _partial));
                 }
             }
         }
@@ -228,7 +254,9 @@ internal sealed class BedrockStreamParser
     {
         _partial = _partial with
         {
-            StopReason = MapStopReason(GetString(root, "stopReason"))
+            StopReason = MapStopReason(GetString(root, "stopReason")),
+            RawStopReason = GetString(root, "stopReason"),
+            EndTurn = MapStopReason(GetString(root, "stopReason")) == StopReason.EndTurn
         };
     }
 
@@ -239,13 +267,16 @@ internal sealed class BedrockStreamParser
             return;
         }
 
+        var input = GetInt(usage, "inputTokens") ?? 0;
+        var output = GetInt(usage, "outputTokens") ?? 0;
+        var cacheRead = GetInt(usage, "cacheReadInputTokens");
+        var cacheWrite = GetInt(usage, "cacheWriteInputTokens");
         _partial = _partial with
         {
-            Usage = new Usage(
-                GetInt(usage, "inputTokens") ?? 0,
-                GetInt(usage, "outputTokens") ?? 0,
-                GetInt(usage, "cacheReadInputTokens"),
-                GetInt(usage, "cacheWriteInputTokens"))
+            Usage = new Usage(input, output, cacheRead, cacheWrite)
+            {
+                TotalTokens = input + output + cacheRead.GetValueOrDefault() + cacheWrite.GetValueOrDefault()
+            }
         };
     }
 
@@ -336,17 +367,41 @@ internal sealed class BedrockStreamParser
         return (headerEventType, root);
     }
 
-    private static (string? Thinking, string? Signature) GetReasoningDelta(JsonElement reasoningContent)
+    private static (string? Thinking, string? Signature, byte[]? RedactedContent) GetReasoningDelta(JsonElement reasoningContent)
     {
         var thinking = GetString(reasoningContent, "text");
         var signature = GetString(reasoningContent, "signature");
+        var redactedContent = GetRedactedContent(reasoningContent);
         if (reasoningContent.TryGetProperty("reasoningText", out var reasoningText))
         {
             thinking ??= GetString(reasoningText, "text");
             signature ??= GetString(reasoningText, "signature");
         }
 
-        return (thinking, signature);
+        return (thinking, signature, redactedContent);
+    }
+
+    private static byte[]? GetRedactedContent(JsonElement reasoningContent)
+    {
+        if (!reasoningContent.TryGetProperty("redactedContent", out var value))
+            return null;
+
+        var encoded = value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : value.ValueKind == JsonValueKind.Object && value.TryGetProperty("bytes", out var bytes) && bytes.ValueKind == JsonValueKind.String
+                ? bytes.GetString()
+                : null;
+        if (string.IsNullOrWhiteSpace(encoded))
+            return null;
+
+        try
+        {
+            return Convert.FromBase64String(encoded);
+        }
+        catch (FormatException)
+        {
+            return null;
+        }
     }
 
     private static StopReason MapStopReason(string? reason) => reason switch

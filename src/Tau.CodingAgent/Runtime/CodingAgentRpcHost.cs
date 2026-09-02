@@ -204,6 +204,9 @@ public sealed class CodingAgentRpcHost
                     AbortActivePrompt();
                     await WriteSuccessAsync(id, "abort", cancellationToken: cancellationToken).ConfigureAwait(false);
                     break;
+                case "clear_queue":
+                    await HandleClearQueueAsync(id, cancellationToken).ConfigureAwait(false);
+                    break;
                 case "new_session":
                     await HandleNewSessionAsync(id, command, cancellationToken).ConfigureAwait(false);
                     break;
@@ -418,6 +421,22 @@ public sealed class CodingAgentRpcHost
         }
 
         await WriteSuccessAsync(id, "follow_up", cancellationToken: cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// 清空当前 agent 的 steering 与 follow-up 队列，并返回可恢复到编辑器的文本。
+    /// </summary>
+    /// <param name="id">RPC 请求标识。</param>
+    /// <param name="cancellationToken">请求取消令牌。</param>
+    private async Task HandleClearQueueAsync(string? id, CancellationToken cancellationToken)
+    {
+        var queued = _runner.DrainQueuedMessages();
+        await WriteSuccessAsync(
+                id,
+                "clear_queue",
+                new { steering = queued.Steering.ToArray(), followUp = queued.FollowUp.ToArray() },
+                cancellationToken)
+            .ConfigureAwait(false);
     }
 
     private async Task HandleNewSessionAsync(string? id, JsonElement command, CancellationToken cancellationToken)
@@ -1394,6 +1413,7 @@ public sealed class CodingAgentRpcHost
                 codeBlockIndent = settings.MarkdownCodeBlockIndent ?? "  "
             },
             showHardwareCursor = settings.ShowHardwareCursor ?? false,
+            fullscreenCopyOnSelect = settings.FullscreenCopyOnSelect ?? true,
             editorPaddingX = settings.EditorPaddingX ?? 0,
             autocompleteMaxVisible = settings.AutocompleteMaxVisible ?? 5
         };
@@ -1525,6 +1545,11 @@ public sealed class CodingAgentRpcHost
         if (settingsElement.TryGetProperty("showHardwareCursor", out var showHardwareCursor))
         {
             updated = updated with { ShowHardwareCursor = ReadNullableBoolean(showHardwareCursor) };
+        }
+
+        if (settingsElement.TryGetProperty("fullscreenCopyOnSelect", out var fullscreenCopyOnSelect))
+        {
+            updated = updated with { FullscreenCopyOnSelect = ReadNullableBoolean(fullscreenCopyOnSelect) };
         }
 
         if (settingsElement.TryGetProperty("editorPaddingX", out var editorPaddingX))

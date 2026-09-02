@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Tau.Ai.Streaming;
 using Tau.Ai.Auth;
 using Tau.Ai.Providers.Anthropic;
@@ -175,7 +176,8 @@ public static class StreamFunctions
             MaxRetries = options.MaxRetries ?? requestConfig.Options.MaxRetries,
             WebSocketConnectTimeout = options.WebSocketConnectTimeout ?? requestConfig.Options.WebSocketConnectTimeout,
             Metadata = metadata,
-            Env = env
+            Env = env,
+            SamplingParams = MergeSamplingParams(requestConfig.Options.SamplingParams, options.SamplingParams)
         };
 
         if (!options.HasExplicitTransport && requestConfig.Options.Transport is { } transport)
@@ -260,7 +262,9 @@ public static class StreamFunctions
             WebSocketConnectTimeout = resolvedOptions.WebSocketConnectTimeout,
             Metadata = resolvedOptions.Metadata,
             Env = resolvedOptions.Env,
-            ToolChoice = ToOpenAiToolChoice(configured.ToolChoice),
+            SamplingParams = resolvedOptions.SamplingParams,
+            Deferred = resolvedOptions.Deferred,
+            ToolChoice = ToOpenAiToolChoice(explicitOptions.ToolChoice) ?? ToOpenAiToolChoice(configured.ToolChoice),
             ReasoningEffort = ResolveOpenAiReasoningEffort(model, resolvedOptions, explicitOptions, configured)
         };
 
@@ -288,6 +292,8 @@ public static class StreamFunctions
             WebSocketConnectTimeout = resolvedOptions.WebSocketConnectTimeout,
             Metadata = resolvedOptions.Metadata,
             Env = resolvedOptions.Env,
+            SamplingParams = resolvedOptions.SamplingParams,
+            Deferred = resolvedOptions.Deferred,
             ReasoningEffort = ResolveReasoningEffort(model, resolvedOptions, explicitOptions, configured),
             ReasoningSummary = configured.ReasoningSummary,
             ServiceTier = configured.ServiceTier
@@ -317,6 +323,8 @@ public static class StreamFunctions
             WebSocketConnectTimeout = resolvedOptions.WebSocketConnectTimeout,
             Metadata = resolvedOptions.Metadata,
             Env = resolvedOptions.Env,
+            SamplingParams = resolvedOptions.SamplingParams,
+            Deferred = resolvedOptions.Deferred,
             ReasoningEffort = ResolveReasoningEffort(model, resolvedOptions, explicitOptions, configured),
             ReasoningSummary = configured.ReasoningSummary,
             ServiceTier = configured.ServiceTier,
@@ -347,6 +355,8 @@ public static class StreamFunctions
             WebSocketConnectTimeout = resolvedOptions.WebSocketConnectTimeout,
             Metadata = resolvedOptions.Metadata,
             Env = resolvedOptions.Env,
+            SamplingParams = resolvedOptions.SamplingParams,
+            Deferred = resolvedOptions.Deferred,
             ReasoningEffort = ResolveReasoningEffort(model, resolvedOptions, explicitOptions, configured),
             ReasoningSummary = configured.ReasoningSummary,
             AzureApiVersion = configured.AzureApiVersion,
@@ -379,7 +389,9 @@ public static class StreamFunctions
             WebSocketConnectTimeout = resolvedOptions.WebSocketConnectTimeout,
             Metadata = resolvedOptions.Metadata,
             Env = resolvedOptions.Env,
-            ToolChoice = ToMistralToolChoice(configured.ToolChoice),
+            SamplingParams = resolvedOptions.SamplingParams,
+            Deferred = resolvedOptions.Deferred,
+            ToolChoice = ToMistralToolChoice(explicitOptions.ToolChoice) ?? ToMistralToolChoice(configured.ToolChoice),
             PromptMode = ResolveMistralPromptMode(model, resolvedOptions, explicitOptions, configured),
             ReasoningEffort = ResolveMistralReasoningEffort(model, resolvedOptions, explicitOptions, configured)
         };
@@ -519,6 +531,8 @@ public static class StreamFunctions
             WebSocketConnectTimeout = options.WebSocketConnectTimeout,
             Metadata = options.Metadata,
             Env = options.Env,
+            SamplingParams = options.SamplingParams,
+            Deferred = options.Deferred,
             ToolChoice = typed?.ToolChoice ?? ToOpenAiToolChoice(configured.ToolChoice),
             ReasoningEffort = typed?.ReasoningEffort ?? configured.ReasoningEffort
         };
@@ -548,6 +562,8 @@ public static class StreamFunctions
             WebSocketConnectTimeout = options.WebSocketConnectTimeout,
             Metadata = options.Metadata,
             Env = options.Env,
+            SamplingParams = options.SamplingParams,
+            Deferred = options.Deferred,
             ReasoningEffort = typed?.ReasoningEffort ?? configured.ReasoningEffort,
             ReasoningSummary = typed?.ReasoningSummary ?? configured.ReasoningSummary,
             ServiceTier = typed?.ServiceTier ?? configured.ServiceTier
@@ -578,6 +594,8 @@ public static class StreamFunctions
             WebSocketConnectTimeout = options.WebSocketConnectTimeout,
             Metadata = options.Metadata,
             Env = options.Env,
+            SamplingParams = options.SamplingParams,
+            Deferred = options.Deferred,
             ReasoningEffort = typed?.ReasoningEffort ?? configured.ReasoningEffort,
             ReasoningSummary = typed?.ReasoningSummary ?? configured.ReasoningSummary,
             ServiceTier = typed?.ServiceTier ?? configured.ServiceTier,
@@ -609,6 +627,8 @@ public static class StreamFunctions
             WebSocketConnectTimeout = options.WebSocketConnectTimeout,
             Metadata = options.Metadata,
             Env = options.Env,
+            SamplingParams = options.SamplingParams,
+            Deferred = options.Deferred,
             ReasoningEffort = typed?.ReasoningEffort ?? configured.ReasoningEffort,
             ReasoningSummary = typed?.ReasoningSummary ?? configured.ReasoningSummary,
             AzureApiVersion = typed?.AzureApiVersion ?? configured.AzureApiVersion,
@@ -643,12 +663,13 @@ public static class StreamFunctions
             WebSocketConnectTimeout = resolvedOptions.WebSocketConnectTimeout,
             Metadata = resolvedOptions.Metadata,
             Env = resolvedOptions.Env,
+            SamplingParams = resolvedOptions.SamplingParams,
             ThinkingEnabled = ResolveAnthropicThinkingEnabled(resolvedOptions, explicitOptions, configured),
             ThinkingBudgetTokens = ResolveAnthropicThinkingBudget(model, resolvedOptions, explicitOptions, configured),
             Effort = ResolveAnthropicEffort(model, resolvedOptions, explicitOptions, configured),
             ThinkingDisplay = configured.ThinkingDisplay,
             InterleavedThinking = configured.InterleavedThinking,
-            ToolChoice = ToAnthropicToolChoice(configured.ToolChoice)
+            ToolChoice = ToAnthropicToolChoice(explicitOptions.ToolChoice) ?? ToAnthropicToolChoice(configured.ToolChoice)
         };
 
         return typed;
@@ -679,6 +700,8 @@ public static class StreamFunctions
             WebSocketConnectTimeout = options.WebSocketConnectTimeout,
             Metadata = options.Metadata,
             Env = options.Env,
+            SamplingParams = options.SamplingParams,
+            Deferred = options.Deferred,
             ThinkingEnabled = typed?.ThinkingEnabled ?? configured.ThinkingEnabled,
             ThinkingBudgetTokens = typed?.ThinkingBudgetTokens ?? configured.ThinkingBudgetTokens,
             Effort = typed?.Effort ?? configured.Effort,
@@ -774,6 +797,8 @@ public static class StreamFunctions
             WebSocketConnectTimeout = options.WebSocketConnectTimeout,
             Metadata = options.Metadata,
             Env = options.Env,
+            SamplingParams = options.SamplingParams,
+            Deferred = options.Deferred,
             ToolChoice = typed?.ToolChoice ?? ToMistralToolChoice(configured.ToolChoice),
             PromptMode = typed?.PromptMode ?? configured.PromptMode,
             ReasoningEffort = typed?.ReasoningEffort ?? configured.ReasoningEffort
@@ -804,7 +829,8 @@ public static class StreamFunctions
             WebSocketConnectTimeout = resolvedOptions.WebSocketConnectTimeout,
             Metadata = resolvedOptions.Metadata,
             Env = resolvedOptions.Env,
-            ToolChoice = configured.ToolChoice?.Kind,
+            SamplingParams = resolvedOptions.SamplingParams,
+            ToolChoice = explicitOptions.ToolChoice as string ?? configured.ToolChoice?.Kind,
             Thinking = CreateGoogleThinking(model, resolvedOptions, explicitOptions, configured)
         };
 
@@ -832,9 +858,10 @@ public static class StreamFunctions
             WebSocketConnectTimeout = resolvedOptions.WebSocketConnectTimeout,
             Metadata = resolvedOptions.Metadata,
             Env = resolvedOptions.Env,
+            SamplingParams = resolvedOptions.SamplingParams,
             Project = configured.Project,
             Location = configured.Location,
-            ToolChoice = configured.ToolChoice?.Kind,
+            ToolChoice = explicitOptions.ToolChoice as string ?? configured.ToolChoice?.Kind,
             Thinking = CreateGoogleThinking(model, resolvedOptions, explicitOptions, configured)
         };
 
@@ -862,8 +889,9 @@ public static class StreamFunctions
             WebSocketConnectTimeout = resolvedOptions.WebSocketConnectTimeout,
             Metadata = resolvedOptions.Metadata,
             Env = resolvedOptions.Env,
+            SamplingParams = resolvedOptions.SamplingParams,
             ProjectId = configured.ProjectId,
-            ToolChoice = configured.ToolChoice?.Kind,
+            ToolChoice = explicitOptions.ToolChoice as string ?? configured.ToolChoice?.Kind,
             Thinking = CreateGoogleThinking(model, resolvedOptions, explicitOptions, configured)
         };
 
@@ -892,6 +920,8 @@ public static class StreamFunctions
             WebSocketConnectTimeout = options.WebSocketConnectTimeout,
             Metadata = options.Metadata,
             Env = options.Env,
+            SamplingParams = options.SamplingParams,
+            Deferred = options.Deferred,
             ToolChoice = typed?.ToolChoice ?? configured.ToolChoice?.Kind,
             Thinking = typed?.Thinking ?? CreateGoogleThinking(model, null, null, configured)
         };
@@ -922,6 +952,8 @@ public static class StreamFunctions
             WebSocketConnectTimeout = options.WebSocketConnectTimeout,
             Metadata = options.Metadata,
             Env = options.Env,
+            SamplingParams = options.SamplingParams,
+            Deferred = options.Deferred,
             AccessToken = typed?.AccessToken,
             CredentialsFile = typed?.CredentialsFile,
             Project = typed?.Project ?? configured.Project,
@@ -956,6 +988,8 @@ public static class StreamFunctions
             WebSocketConnectTimeout = options.WebSocketConnectTimeout,
             Metadata = options.Metadata,
             Env = options.Env,
+            SamplingParams = options.SamplingParams,
+            Deferred = options.Deferred,
             ProjectId = typed?.ProjectId ?? configured.ProjectId,
             ToolChoice = typed?.ToolChoice ?? configured.ToolChoice?.Kind,
             Thinking = typed?.Thinking ?? CreateGoogleThinking(model, null, null, configured)
@@ -968,7 +1002,7 @@ public static class StreamFunctions
         SimpleStreamOptions explicitOptions,
         ModelProviderSpecificOptionsConfiguration configured)
     {
-        var (toolChoice, toolName) = ToBedrockToolChoice(configured.ToolChoice);
+        var (toolChoice, toolName) = ToBedrockToolChoice(explicitOptions.ToolChoice) ?? ToBedrockToolChoice(configured.ToolChoice);
         return new BedrockOptions
         {
             Temperature = resolvedOptions.Temperature,
@@ -988,6 +1022,8 @@ public static class StreamFunctions
             WebSocketConnectTimeout = resolvedOptions.WebSocketConnectTimeout,
             Metadata = resolvedOptions.Metadata,
             Env = resolvedOptions.Env,
+            SamplingParams = resolvedOptions.SamplingParams,
+            Deferred = resolvedOptions.Deferred,
             Region = configured.Region,
             Profile = configured.Profile,
             BearerToken = configured.BearerToken,
@@ -1028,6 +1064,8 @@ public static class StreamFunctions
             WebSocketConnectTimeout = options.WebSocketConnectTimeout,
             Metadata = options.Metadata,
             Env = options.Env,
+            SamplingParams = options.SamplingParams,
+            Deferred = options.Deferred,
             Region = typed?.Region ?? configured.Region,
             BearerToken = typed?.BearerToken ?? configured.BearerToken,
             AccessKeyId = typed?.AccessKeyId,
@@ -1188,6 +1226,52 @@ public static class StreamFunctions
         return StreamOptionHelpers.GetCustomThinkingBudget(budgets, reasoning) ?? -1;
     }
 
+    /// <summary>把 provider 无关工具选择值转换为 Mistral 形式。</summary>
+    /// <param name="choice">字符串、已有 provider 对象或 JSON 值。</param>
+    /// <returns>转换后的选择策略；无法转换时返回 null。</returns>
+    private static MistralToolChoice? ToMistralToolChoice(object? choice) => choice switch
+    {
+        null => null,
+        MistralToolChoice typed => typed,
+        string value when !string.IsNullOrWhiteSpace(value) => MistralToolChoice.FromString(value),
+        JsonElement element when element.ValueKind == JsonValueKind.String => MistralToolChoice.FromString(element.GetString()!),
+        _ => null
+    };
+
+    /// <summary>把 provider 无关工具选择值转换为 OpenAI 形式。</summary>
+    /// <param name="choice">字符串、已有 provider 对象或 JSON 值。</param>
+    /// <returns>转换后的选择策略；无法转换时返回 null。</returns>
+    private static OpenAiToolChoice? ToOpenAiToolChoice(object? choice) => choice switch
+    {
+        null => null,
+        OpenAiToolChoice typed => typed,
+        string value when !string.IsNullOrWhiteSpace(value) => OpenAiToolChoice.FromString(value),
+        JsonElement element when element.ValueKind == JsonValueKind.String => OpenAiToolChoice.FromString(element.GetString()!),
+        _ => null
+    };
+
+    /// <summary>把 provider 无关工具选择值转换为 Anthropic 形式。</summary>
+    /// <param name="choice">字符串、已有 provider 对象或 JSON 值。</param>
+    /// <returns>转换后的选择策略；无法转换时返回 null。</returns>
+    private static AnthropicToolChoice? ToAnthropicToolChoice(object? choice) => choice switch
+    {
+        null => null,
+        AnthropicToolChoice typed => typed,
+        string value when !string.IsNullOrWhiteSpace(value) => AnthropicToolChoice.FromString(value),
+        JsonElement element when element.ValueKind == JsonValueKind.String => AnthropicToolChoice.FromString(element.GetString()!),
+        _ => null
+    };
+
+    /// <summary>把 provider 无关工具选择值转换为 Bedrock 形式。</summary>
+    /// <param name="choice">字符串或 JSON 字符串。</param>
+    /// <returns>Bedrock 的选择类型和工具名称。</returns>
+    private static (string? ToolChoice, string? ToolName)? ToBedrockToolChoice(object? choice) => choice switch
+    {
+        string value when !string.IsNullOrWhiteSpace(value) => (value, null),
+        JsonElement element when element.ValueKind == JsonValueKind.String => (element.GetString(), null),
+        _ => null
+    };
+
     private static MistralToolChoice? ToMistralToolChoice(ModelToolChoiceConfiguration? configured)
     {
         if (configured is null)
@@ -1280,6 +1364,41 @@ public static class StreamFunctions
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// 合并模型配置与请求级采样参数，请求级键覆盖配置级键。
+    /// </summary>
+    /// <param name="configured">配置文件中的默认采样参数。</param>
+    /// <param name="explicitValues">当前请求显式采样参数。</param>
+    /// <returns>合并后的只读字典；两者均为空时返回 null。</returns>
+    private static IReadOnlyDictionary<string, object>? MergeSamplingParams(
+        IDictionary<string, object>? configured,
+        IReadOnlyDictionary<string, object>? explicitValues)
+    {
+        if (configured is null && explicitValues is null)
+        {
+            return null;
+        }
+
+        var merged = new Dictionary<string, object>(StringComparer.Ordinal);
+        if (configured is not null)
+        {
+            foreach (var pair in configured)
+            {
+                merged[pair.Key] = pair.Value;
+            }
+        }
+
+        if (explicitValues is not null)
+        {
+            foreach (var pair in explicitValues)
+            {
+                merged[pair.Key] = pair.Value;
+            }
+        }
+
+        return merged;
     }
 
     private static IDictionary<string, object>? MergeMetadata(

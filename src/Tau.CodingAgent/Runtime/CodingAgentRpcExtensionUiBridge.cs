@@ -7,7 +7,11 @@ public sealed class CodingAgentRpcExtensionUiBridge
     private readonly object _gate = new();
     private readonly Dictionary<string, IPendingExtensionUiRequest> _pending = new(StringComparer.Ordinal);
     private Func<object, CancellationToken, Task>? _writeRequestAsync;
+    private Func<string, string, string?, CancellationToken, Task>? _uiPromptEventPublisher;
     private CodingAgentFooterDataProvider? _footerDataProvider;
+    private int _uiPromptDepth;
+    private string? _activeUiPromptKind;
+    private string? _activeUiPromptTitle;
 
     internal void Attach(Func<object, CancellationToken, Task> writeRequestAsync)
     {
@@ -16,6 +20,18 @@ public sealed class CodingAgentRpcExtensionUiBridge
         lock (_gate)
         {
             _writeRequestAsync = writeRequestAsync;
+        }
+    }
+
+    /// <summary>
+    /// 设置 UI 提示生命周期事件发布器，供扩展宿主观察最外层提示的开始和结束。
+    /// </summary>
+    /// <param name="publisher">事件发布回调；传入空值表示停用。</param>
+    internal void SetUiPromptEventPublisher(Func<string, string, string?, CancellationToken, Task>? publisher)
+    {
+        lock (_gate)
+        {
+            _uiPromptEventPublisher = publisher;
         }
     }
 
@@ -316,6 +332,7 @@ public sealed class CodingAgentRpcExtensionUiBridge
         }
 
         var writeRequestAsync = GetWriter();
+        var promptScope = await BeginUiPromptAsync(request, cancellationToken).ConfigureAwait(false);
         var id = CreateRequestId();
         request["type"] = "extension_ui_request";
         request["id"] = id;
@@ -361,8 +378,94 @@ public sealed class CodingAgentRpcExtensionUiBridge
         {
             await cancellationRegistration.DisposeAsync().ConfigureAwait(false);
             RemovePending(id);
+            await EndUiPromptAsync(promptScope).ConfigureAwait(false);
         }
     }
+
+    private async Task<UiPromptScope?> BeginUiPromptAsync(
+        IReadOnlyDictionary<string, object?> request,
+        CancellationToken cancellationToken)
+    {
+        var kind = request.TryGetValue("method", out var method) && method is string methodText
+            ? methodText
+            : "custom";
+        var title = request.TryGetValue("title", out var rawTitle) ? rawTitle as string : null;
+        Func<string, string, string?, CancellationToken, Task>? publisher;
+        var outer = false;
+        lock (_gate)
+        {
+            _uiPromptDepth++;
+            if (_uiPromptDepth == 1)
+            {
+                outer = true;
+                _activeUiPromptKind = kind;
+                _activeUiPromptTitle = title;
+            }
+
+            publisher = _uiPromptEventPublisher;
+        }
+
+        if (outer && publisher is not null)
+        {
+            try
+            {
+                await publisher("ui_prompt_start", kind, title, cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                // 生命周期通知失败不能阻止 UI 请求本身继续执行
+            }
+        }
+
+        return new UiPromptScope(kind, title, publisher);
+    }
+
+    private async Task EndUiPromptAsync(UiPromptScope? scope)
+    {
+        if (scope is null)
+        {
+            return;
+        }
+
+        var outer = false;
+        var kind = scope.Kind;
+        var title = scope.Title;
+        Func<string, string, string?, CancellationToken, Task>? publisher = scope.Publisher;
+        lock (_gate)
+        {
+            if (_uiPromptDepth > 0)
+            {
+                _uiPromptDepth--;
+            }
+
+            if (_uiPromptDepth == 0)
+            {
+                outer = true;
+                kind = _activeUiPromptKind ?? kind;
+                title = _activeUiPromptTitle ?? title;
+                publisher ??= _uiPromptEventPublisher;
+                _activeUiPromptKind = null;
+                _activeUiPromptTitle = null;
+            }
+        }
+
+        if (outer && publisher is not null)
+        {
+            try
+            {
+                await publisher("ui_prompt_end", kind, title, CancellationToken.None).ConfigureAwait(false);
+            }
+            catch
+            {
+                // 生命周期通知失败不能改变 UI 请求结果
+            }
+        }
+    }
+
+    private sealed record UiPromptScope(
+        string Kind,
+        string? Title,
+        Func<string, string, string?, CancellationToken, Task>? Publisher);
 
     private async Task SendFireAndForgetAsync(
         Dictionary<string, object?> request,

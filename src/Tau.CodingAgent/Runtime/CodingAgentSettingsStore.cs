@@ -31,6 +31,7 @@ public sealed record CodingAgentSettingsSnapshot(
     bool? ImagesAutoResize = null,
     bool? ImagesBlockImages = null,
     bool? ShowHardwareCursor = null,
+    bool? FullscreenCopyOnSelect = null,
     int? EditorPaddingX = null,
     int? AutocompleteMaxVisible = null,
     string? MarkdownCodeBlockIndent = null,
@@ -96,6 +97,7 @@ public sealed class CodingAgentSettingsStore
                 document?.Images?.AutoResize,
                 document?.Images?.BlockImages,
                 document?.ShowHardwareCursor,
+                document?.FullscreenCopyOnSelect,
                 NormalizeEditorPaddingX(document?.EditorPaddingX),
                 NormalizeAutocompleteMaxVisible(document?.AutocompleteMaxVisible),
                 document?.Markdown?.CodeBlockIndent,
@@ -148,6 +150,7 @@ public sealed class CodingAgentSettingsStore
             HideThinkingBlock = snapshot.HideThinkingBlock,
             Images = CreateImageSettingsDocument(snapshot),
             ShowHardwareCursor = snapshot.ShowHardwareCursor,
+            FullscreenCopyOnSelect = snapshot.FullscreenCopyOnSelect,
             EditorPaddingX = NormalizeEditorPaddingX(snapshot.EditorPaddingX),
             AutocompleteMaxVisible = NormalizeAutocompleteMaxVisible(snapshot.AutocompleteMaxVisible),
             Markdown = CreateMarkdownSettingsDocument(snapshot),
@@ -322,6 +325,7 @@ internal sealed class CodingAgentSettingsDocument
     public CodingAgentImageSettingsDocument? Images { get; init; }
     public bool? HideThinkingBlock { get; init; }
     public bool? ShowHardwareCursor { get; init; }
+    public bool? FullscreenCopyOnSelect { get; init; }
     public int? EditorPaddingX { get; init; }
     public int? AutocompleteMaxVisible { get; init; }
     public CodingAgentMarkdownSettingsDocument? Markdown { get; init; }

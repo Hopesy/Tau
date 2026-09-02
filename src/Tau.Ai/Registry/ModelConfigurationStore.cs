@@ -371,11 +371,13 @@ public sealed class ModelConfigurationStore
                 Provider = providerName,
                 BaseUrl = GetString(configuredModel, "baseUrl") ?? providerBaseUrl ?? string.Empty,
                 Reasoning = GetBool(configuredModel, "reasoning") ?? false,
+                ThinkingLevelMap = ParseThinkingLevelMap(configuredModel),
                 InputModalities = ParseInputModalities(configuredModel),
                 Cost = ParseCost(configuredModel, fallback: null) ?? new ModelCost(0m, 0m, 0m, 0m),
                 ContextWindow = GetInt(configuredModel, "contextWindow") ?? 128_000,
                 MaxOutputTokens = GetInt(configuredModel, "maxTokens") ?? GetInt(configuredModel, "maxOutputTokens") ?? 16_384,
                 Headers = MergeHeaders(providerHeaders, ParseStringDictionary(configuredModel, "headers")),
+                SamplingParams = ParseObjectDictionary(configuredModel, "samplingParams"),
                 Compat = MergeCompat(providerCompat, ParseCompat(configuredModel, "compat"))
             };
 
@@ -389,11 +391,13 @@ public sealed class ModelConfigurationStore
         {
             Name = GetString(overrideConfig, "name") ?? model.Name,
             Reasoning = GetBool(overrideConfig, "reasoning") ?? model.Reasoning,
+            ThinkingLevelMap = ParseThinkingLevelMap(overrideConfig) ?? model.ThinkingLevelMap,
             InputModalities = TryGetInputModalities(overrideConfig, out var input) ? input : model.InputModalities,
             Cost = ParseCost(overrideConfig, model.Cost) ?? model.Cost,
             ContextWindow = GetInt(overrideConfig, "contextWindow") ?? model.ContextWindow,
             MaxOutputTokens = GetInt(overrideConfig, "maxTokens") ?? GetInt(overrideConfig, "maxOutputTokens") ?? model.MaxOutputTokens,
             Headers = MergeHeaders(model.Headers, ParseStringDictionary(overrideConfig, "headers")),
+            SamplingParams = ParseObjectDictionary(overrideConfig, "samplingParams") ?? model.SamplingParams,
             Compat = MergeCompat(model.Compat, ParseCompat(overrideConfig, "compat"))
         };
     }
@@ -429,11 +433,13 @@ public sealed class ModelConfigurationStore
 
         return new ModelCompatibility
         {
+            AllowedFallbackModels = ParseFallbackModels(compat),
             SupportsStore = GetBool(compat, "supportsStore"),
             SupportsDeveloperRole = GetBool(compat, "supportsDeveloperRole"),
             SupportsReasoningEffort = GetBool(compat, "supportsReasoningEffort"),
             ReasoningEffortMap = ParseStringDictionary(compat, "reasoningEffortMap") ?? ParseStringDictionary(element, "thinkingLevelMap"),
             SupportsUsageInStreaming = GetBool(compat, "supportsUsageInStreaming"),
+            SupportsFinishReason = GetBool(compat, "supportsFinishReason"),
             MaxTokensField = GetString(compat, "maxTokensField"),
             RequiresToolResultName = GetBool(compat, "requiresToolResultName"),
             RequiresAssistantAfterToolResult = GetBool(compat, "requiresAssistantAfterToolResult"),
@@ -470,11 +476,13 @@ public sealed class ModelConfigurationStore
 
         return new ModelCompatibility
         {
+            AllowedFallbackModels = MergeFallbackModels(baseCompat.AllowedFallbackModels, overrideCompat.AllowedFallbackModels),
             SupportsStore = overrideCompat.SupportsStore ?? baseCompat.SupportsStore,
             SupportsDeveloperRole = overrideCompat.SupportsDeveloperRole ?? baseCompat.SupportsDeveloperRole,
             SupportsReasoningEffort = overrideCompat.SupportsReasoningEffort ?? baseCompat.SupportsReasoningEffort,
             ReasoningEffortMap = MergeStringDictionaries(baseCompat.ReasoningEffortMap, overrideCompat.ReasoningEffortMap),
             SupportsUsageInStreaming = overrideCompat.SupportsUsageInStreaming ?? baseCompat.SupportsUsageInStreaming,
+            SupportsFinishReason = overrideCompat.SupportsFinishReason ?? baseCompat.SupportsFinishReason,
             MaxTokensField = overrideCompat.MaxTokensField ?? baseCompat.MaxTokensField,
             RequiresToolResultName = overrideCompat.RequiresToolResultName ?? baseCompat.RequiresToolResultName,
             RequiresAssistantAfterToolResult = overrideCompat.RequiresAssistantAfterToolResult ?? baseCompat.RequiresAssistantAfterToolResult,
@@ -493,8 +501,47 @@ public sealed class ModelConfigurationStore
             SupportsEagerToolInputStreaming = overrideCompat.SupportsEagerToolInputStreaming ?? baseCompat.SupportsEagerToolInputStreaming,
             SupportsCacheControlOnTools = overrideCompat.SupportsCacheControlOnTools ?? baseCompat.SupportsCacheControlOnTools,
             AllowEmptySignature = overrideCompat.AllowEmptySignature ?? baseCompat.AllowEmptySignature,
-            SupportsDisabledThinking = overrideCompat.SupportsDisabledThinking ?? baseCompat.SupportsDisabledThinking
+            SupportsDisabledThinking = overrideCompat.SupportsDisabledThinking ?? baseCompat.SupportsDisabledThinking,
+            SupportsOpenAiGrammarTools = overrideCompat.SupportsOpenAiGrammarTools ?? baseCompat.SupportsOpenAiGrammarTools,
+            SupportsAdditionalTools = overrideCompat.SupportsAdditionalTools ?? baseCompat.SupportsAdditionalTools,
+            SupportsToolSearch = overrideCompat.SupportsToolSearch ?? baseCompat.SupportsToolSearch,
+            SupportsExplicitPromptCacheMode = overrideCompat.SupportsExplicitPromptCacheMode ?? baseCompat.SupportsExplicitPromptCacheMode,
+            SupportsMaxOutputTokens = overrideCompat.SupportsMaxOutputTokens ?? baseCompat.SupportsMaxOutputTokens,
+            SupportsToolReferences = overrideCompat.SupportsToolReferences ?? baseCompat.SupportsToolReferences,
+            SupportsStrictTools = overrideCompat.SupportsStrictTools ?? baseCompat.SupportsStrictTools,
+            SupportsDeferredTools = overrideCompat.SupportsDeferredTools ?? baseCompat.SupportsDeferredTools,
+            ThinkingTokenBudgetField = overrideCompat.ThinkingTokenBudgetField ?? baseCompat.ThinkingTokenBudgetField,
+            ChatTemplateArgs = MergeObjectDictionaries(baseCompat.ChatTemplateArgs, overrideCompat.ChatTemplateArgs)
         };
+    }
+
+    private static IReadOnlyList<ModelFallback>? ParseFallbackModels(JsonElement element)
+    {
+        if (!element.TryGetProperty("allowedFallbackModels", out var value) || value.ValueKind != JsonValueKind.Array)
+            return null;
+
+        var result = new List<ModelFallback>();
+        foreach (var item in value.EnumerateArray())
+        {
+            if (item.ValueKind != JsonValueKind.Object)
+                continue;
+            var provider = GetString(item, "provider");
+            var model = GetString(item, "model");
+            if (string.IsNullOrWhiteSpace(provider) || string.IsNullOrWhiteSpace(model))
+                continue;
+            result.Add(new ModelFallback(provider!, model!, ParseCost(item, fallback: null)));
+        }
+
+        return result.Count == 0 ? null : result;
+    }
+
+    private static IReadOnlyList<ModelFallback>? MergeFallbackModels(
+        IReadOnlyList<ModelFallback>? baseModels,
+        IReadOnlyList<ModelFallback>? overrideModels)
+    {
+        if (baseModels is null) return overrideModels;
+        if (overrideModels is null) return baseModels;
+        return overrideModels.ToArray();
     }
 
     private static bool? ParseSupportsDisabledThinking(JsonElement element)
@@ -507,6 +554,24 @@ public sealed class ModelConfigurationStore
         }
 
         return off.ValueKind == JsonValueKind.Null ? false : true;
+    }
+
+    private static IReadOnlyDictionary<string, string?>? ParseThinkingLevelMap(JsonElement element)
+    {
+        if (!element.TryGetProperty("thinkingLevelMap", out var map) || map.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        var result = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+        foreach (var property in map.EnumerateObject())
+        {
+            result[property.Name] = property.Value.ValueKind == JsonValueKind.Null
+                ? null
+                : property.Value.ValueKind == JsonValueKind.String ? property.Value.GetString() : property.Value.GetRawText();
+        }
+
+        return result.Count == 0 ? null : result;
     }
 
     private static VercelGatewayRouting? ParseVercelGatewayRouting(JsonElement element, string propertyName)
@@ -602,6 +667,7 @@ public sealed class ModelConfigurationStore
             Headers: ResolveHeaders(ParseRequestOptionHeaders(element), env),
             Metadata: ParseObjectDictionary(options, "metadata"),
             Env: ParseStringDictionary(options, "env"),
+            SamplingParams: ParseObjectDictionary(options, "samplingParams"),
             Reasoning: ParseEnum<ThinkingLevel>(GetString(options, "reasoning")),
             ThinkingBudgets: ParseThinkingBudgets(options),
             ProviderSpecific: ParseProviderSpecificOptions(options));
@@ -642,6 +708,7 @@ public sealed class ModelConfigurationStore
             Headers: MergeHeaders(baseOptions.Headers, overrideOptions.Headers),
             Metadata: MergeObjectDictionaries(baseOptions.Metadata, overrideOptions.Metadata),
             Env: ProviderEnvironment.Merge(baseOptions.Env, overrideOptions.Env),
+            SamplingParams: MergeObjectDictionaries(baseOptions.SamplingParams, overrideOptions.SamplingParams),
             Reasoning: overrideOptions.Reasoning ?? baseOptions.Reasoning,
             ThinkingBudgets: MergeThinkingBudgets(baseOptions.ThinkingBudgets, overrideOptions.ThinkingBudgets),
             ProviderSpecific: MergeProviderSpecificOptions(baseOptions.ProviderSpecific, overrideOptions.ProviderSpecific));
@@ -1312,11 +1379,13 @@ internal sealed record ModelRequestOptionsConfiguration(
     IDictionary<string, string>? Headers,
     IDictionary<string, object>? Metadata,
     IReadOnlyDictionary<string, string>? Env,
+    IDictionary<string, object>? SamplingParams,
     ThinkingLevel? Reasoning,
     ThinkingBudgets? ThinkingBudgets,
     ModelProviderSpecificOptionsConfiguration? ProviderSpecific)
 {
     public static ModelRequestOptionsConfiguration Empty { get; } = new(
+        null,
         null,
         null,
         null,

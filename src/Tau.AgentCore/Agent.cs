@@ -249,8 +249,13 @@ public sealed class Agent
         }
     }
 
+    /// <summary>
+    /// 清空当前 agent 的消息和运行时状态。
+    /// </summary>
+    /// <exception cref="InvalidOperationException">agent 仍在运行时抛出。</exception>
     public void Reset()
     {
+        ThrowIfActive("Cannot reset an agent while it is running.");
         _runtime.Reset();
         SyncStateConfiguration();
     }

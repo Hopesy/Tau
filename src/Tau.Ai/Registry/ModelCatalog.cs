@@ -10,6 +10,14 @@ public readonly record struct ResolvedModelSelection(string Provider, string Mod
 public sealed class ModelCatalog
 {
     private const string DefaultProviderId = "openai";
+    private static readonly IReadOnlySet<string> RetiredXaiModelIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        "grok-3",
+        "grok-3-fast",
+        "grok-4.20-0309-non-reasoning",
+        "grok-4.20-0309-reasoning",
+        "grok-code-fast-1"
+    };
     private static readonly IReadOnlyDictionary<string, string> DefaultModelIds = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
     {
         ["anthropic"] = "claude-opus-4-6",
@@ -44,6 +52,16 @@ public sealed class ModelCatalog
         ["zai-coding-cn"] = "glm-4.7",
         ["groq"] = "openai/gpt-oss-120b",
         ["cerebras"] = "gpt-oss-120b"
+        , ["baseten"] = "deepseek-ai/DeepSeek-V3"
+        , ["kimi-coding"] = "kimi-k2.5"
+        , ["minimax"] = "MiniMax-M2.5"
+        , ["minimax-cn"] = "MiniMax-M2.5"
+        , ["opencode-go"] = "kimi-k2.5"
+        , ["qwen-token-plan"] = "qwen3-coder-plus"
+        , ["qwen-token-plan-cn"] = "qwen3-coder-plus"
+        , ["qwen-token-plan-individual"] = "qwen3-coder-plus"
+        , ["vercel-ai-gateway"] = "anthropic/claude-sonnet-4"
+        , ["radius"] = "default"
     };
 
     private readonly Dictionary<string, Dictionary<string, Model>> _models = new(StringComparer.OrdinalIgnoreCase);
@@ -77,7 +95,9 @@ public sealed class ModelCatalog
 
     public IReadOnlyList<Model> GetModels(string provider) =>
         _models.TryGetValue(provider, out var models)
-            ? [.. models.Values.Select(_authResolver.ResolveModel)]
+            ? [.. models.Values
+                .Where(model => !IsRetiredModel(model))
+                .Select(_authResolver.ResolveModel)]
             : [];
 
     public Model GetModel(string provider, string modelId)
@@ -188,6 +208,15 @@ public sealed class ModelCatalog
         return DefaultModelIds[DefaultProviderId];
     }
 
+    /// <summary>
+    /// 判断模型是否只用于兼容旧配置，不应出现在正常的模型选择列表中。
+    /// </summary>
+    /// <param name="model">待判断的模型。</param>
+    /// <returns>模型属于已退休 xAI 模型时返回 true，否则返回 false。</returns>
+    private static bool IsRetiredModel(Model model) =>
+        model.Provider.Equals("xai", StringComparison.OrdinalIgnoreCase) &&
+        RetiredXaiModelIds.Contains(model.Id);
+
     public static Model CreateOpenAiCompatibleModel(
         string provider,
         string id,
@@ -220,12 +249,114 @@ public sealed class ModelCatalog
             return default;
         }
 
+        // 1. 按本次请求的输入总量选择最高匹配的计费层
+        var baseCost = model.Cost.Value;
+        var inputTotal = (long)usage.InputTokens + usage.CacheReadTokens.GetValueOrDefault() + usage.CacheWriteTokens.GetValueOrDefault();
+        var inputRate = baseCost.InputPerMillion;
+        var outputRate = baseCost.OutputPerMillion;
+        var cacheReadRate = baseCost.CacheReadPerMillion.GetValueOrDefault();
+        var cacheWriteRate = baseCost.CacheWritePerMillion.GetValueOrDefault();
+        var matchedThreshold = -1L;
+        foreach (var tier in baseCost.Tiers ?? [])
+        {
+            if (inputTotal > tier.InputTokensAbove && tier.InputTokensAbove > matchedThreshold)
+            {
+                inputRate = tier.InputPerMillion;
+                outputRate = tier.OutputPerMillion;
+                cacheReadRate = tier.CacheReadPerMillion.GetValueOrDefault();
+                cacheWriteRate = tier.CacheWritePerMillion.GetValueOrDefault();
+                matchedThreshold = tier.InputTokensAbove;
+            }
+        }
+
+        // 2. Anthropic 1h cache 写入按基础输入价格的两倍计费，其余写入使用缓存写入价格
+        var longCacheWrite = usage.CacheWrite1hTokens.GetValueOrDefault();
+        var shortCacheWrite = Math.Max(0, usage.CacheWriteTokens.GetValueOrDefault() - longCacheWrite);
         var cost = new UsageCost(
-            Input: usage.InputTokens / 1_000_000m * model.Cost.Value.InputPerMillion,
-            Output: usage.OutputTokens / 1_000_000m * model.Cost.Value.OutputPerMillion,
-            CacheRead: usage.CacheReadTokens.GetValueOrDefault() / 1_000_000m * model.Cost.Value.CacheReadPerMillion.GetValueOrDefault(),
-            CacheWrite: usage.CacheWriteTokens.GetValueOrDefault() / 1_000_000m * model.Cost.Value.CacheWritePerMillion.GetValueOrDefault());
+            Input: usage.InputTokens / 1_000_000m * inputRate,
+            Output: usage.OutputTokens / 1_000_000m * outputRate,
+            CacheRead: usage.CacheReadTokens.GetValueOrDefault() / 1_000_000m * cacheReadRate,
+            CacheWrite: (shortCacheWrite * cacheWriteRate + longCacheWrite * inputRate * 2m) / 1_000_000m);
         return ApplyServiceTierMultiplier(cost, usage.ServiceTier);
+    }
+
+    /// <summary>
+    /// 返回模型支持的 thinking level 列表，始终包含 off（不支持推理的模型只返回 off）。
+    /// </summary>
+    /// <param name="model">待检查的模型。</param>
+    /// <returns>按从低到高排列的 level 名称。</returns>
+    public static IReadOnlyList<string> GetSupportedThinkingLevels(Model model)
+    {
+        ArgumentNullException.ThrowIfNull(model);
+        if (!model.Reasoning)
+        {
+            return ["off"];
+        }
+
+        var levels = new[] { "off", "minimal", "low", "medium", "high", "xhigh", "max" };
+        var result = new List<string>(levels.Length);
+        foreach (var level in levels)
+        {
+            if (model.ThinkingLevelMap is not null &&
+                model.ThinkingLevelMap.TryGetValue(level, out var mapped) &&
+                mapped is null)
+            {
+                continue;
+            }
+
+            if ((level is "xhigh" or "max") &&
+                (model.ThinkingLevelMap is null || !model.ThinkingLevelMap.ContainsKey(level)))
+            {
+                continue;
+            }
+
+            result.Add(level);
+        }
+
+        return result.Count == 0 ? ["off"] : result;
+    }
+
+    /// <summary>
+    /// 将不受模型支持的 thinking level 钳制到最接近的可用级别。
+    /// </summary>
+    /// <param name="model">待匹配的模型。</param>
+    /// <param name="level">请求的 thinking level。</param>
+    /// <returns>模型支持的 level；没有可用值时返回 off。</returns>
+    public static string ClampThinkingLevel(Model model, string level)
+    {
+        ArgumentNullException.ThrowIfNull(model);
+        var available = GetSupportedThinkingLevels(model);
+        if (available.Contains(level, StringComparer.OrdinalIgnoreCase))
+        {
+            return available.First(candidate => candidate.Equals(level, StringComparison.OrdinalIgnoreCase));
+        }
+
+        var ordered = new[] { "off", "minimal", "low", "medium", "high", "xhigh", "max" };
+        var requested = Array.FindIndex(ordered, candidate => candidate.Equals(level, StringComparison.OrdinalIgnoreCase));
+        if (requested < 0)
+        {
+            return available[0];
+        }
+
+        for (var index = requested; index < ordered.Length; index++)
+        {
+            var candidate = available.FirstOrDefault(item => item.Equals(ordered[index], StringComparison.OrdinalIgnoreCase));
+            if (candidate is not null)
+            {
+                return candidate;
+            }
+        }
+
+        for (var index = requested - 1; index >= 0; index--)
+        {
+            var candidate = available.FirstOrDefault(item => item.Equals(ordered[index], StringComparison.OrdinalIgnoreCase));
+            if (candidate is not null)
+            {
+                return candidate;
+            }
+        }
+
+        return available[0];
     }
 
     public static UsageCost CalculateCost(Model model, Usage usage, string? serviceTier) =>

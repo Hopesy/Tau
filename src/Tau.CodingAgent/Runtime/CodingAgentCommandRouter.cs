@@ -446,6 +446,8 @@ public sealed class CodingAgentCommandRouter
                 SaveHideThinkingBlockValue(current, settingValue),
             CodingAgentSettingsSelector.ShowHardwareCursorAction =>
                 SaveBooleanSetting(current, settingValue, "show hardware cursor", value => current with { ShowHardwareCursor = value }),
+            CodingAgentSettingsSelector.FullscreenCopyOnSelectAction =>
+                SaveBooleanSetting(current, settingValue, "copy fullscreen selection", value => current with { FullscreenCopyOnSelect = value }),
             CodingAgentSettingsSelector.EditorPaddingAction =>
                 SaveBoundedIntSetting(current, settingValue, "editor padding", 0, 3, value => current with { EditorPaddingX = value }),
             CodingAgentSettingsSelector.AutocompleteMaxVisibleAction =>

@@ -10,6 +10,7 @@ public static class BuiltInOAuthProviders
         new GitHubCopilotOAuthProvider(),
         new GeminiCliOAuthProvider(),
         new AntigravityOAuthProvider(),
-        new OpenAICodexOAuthProvider()
+        new OpenAICodexOAuthProvider(),
+        new XaiOAuthProvider()
     ];
 }

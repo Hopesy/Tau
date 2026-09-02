@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using Tau.Ai.Auth;
 using Tau.Ai.Streaming;
 using Tau.Ai.Utilities;
 
@@ -94,12 +95,33 @@ public sealed class AnthropicProvider : IStreamProvider
         request.Content = new StringContent(json, Encoding.UTF8, "application/json");
 
         var apiKey = options.ApiKey ?? ProviderEnvironment.GetValue("ANTHROPIC_API_KEY", options.Env);
-        if (!string.IsNullOrEmpty(apiKey))
+        var authToken = ProviderEnvironment.GetValue("ANTHROPIC_AUTH_TOKEN", options.Env);
+        var isGitHubCopilot = model.Provider.Equals("github-copilot", StringComparison.OrdinalIgnoreCase);
+        if (isGitHubCopilot && !string.IsNullOrWhiteSpace(apiKey) && !EnvironmentApiKeyResolver.IsAuthenticatedMarker(apiKey))
+        {
+            request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", apiKey);
+        }
+        else if (!string.IsNullOrEmpty(apiKey) && !string.Equals(apiKey, authToken, StringComparison.Ordinal))
+        {
             request.Headers.TryAddWithoutValidation("x-api-key", apiKey);
+        }
+        else if (!string.IsNullOrEmpty(authToken))
+        {
+            request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", authToken);
+        }
 
         request.Headers.TryAddWithoutValidation("anthropic-version", DefaultAnthropicVersion);
         if (BuildAnthropicBetaHeader(model, context, options as AnthropicOptions) is { } betaHeader)
             request.Headers.TryAddWithoutValidation("anthropic-beta", betaHeader);
+
+        if (isGitHubCopilot)
+        {
+            foreach (var (key, value) in GitHubCopilotHeaders.BuildDynamicHeaders(context.Messages))
+            {
+                request.Headers.Remove(key);
+                request.Headers.TryAddWithoutValidation(key, value);
+            }
+        }
 
         ApplySessionAffinityHeader(request, model, options);
         ApplyHeaders(request, model.Headers);
@@ -188,6 +210,13 @@ public sealed class AnthropicProvider : IStreamProvider
 
         if (thinking is not null)
             body["thinking"] = thinking;
+
+        if (model.Compat?.AllowedFallbackModels is { Count: > 0 } fallbacks)
+        {
+            body["fallbacks"] = fallbacks
+                .Select(fallback => (object)new Dictionary<string, object> { ["model"] = fallback.Model })
+                .ToArray();
+        }
 
         if (thinking is not null &&
             IsAdaptiveThinking(thinking) &&
@@ -397,6 +426,11 @@ public sealed class AnthropicProvider : IStreamProvider
         if (options?.InterleavedThinking == true && !UsesAdaptiveThinking(model))
         {
             betaFeatures.Add(InterleavedThinkingBeta);
+        }
+
+        if (model.Compat?.AllowedFallbackModels is { Count: > 0 })
+        {
+            betaFeatures.Add("server-side-fallback-2026-07-01");
         }
 
         return betaFeatures.Count == 0 ? null : string.Join(",", betaFeatures);

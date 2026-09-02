@@ -91,6 +91,39 @@ public sealed class TuiAutocompleteProviderTests
     }
 
     [Fact]
+    public async Task GetSuggestionsAsync_FileAttachmentSearchesNestedPaths()
+    {
+        using var temp = new TempDirectory();
+        Directory.CreateDirectory(Path.Combine(temp.Path, "src"));
+        await File.WriteAllTextAsync(Path.Combine(temp.Path, "src", "index.ts"), "export {};");
+
+        var provider = new TuiCombinedAutocompleteProvider(basePath: temp.Path);
+
+        var suggestions = await provider.GetSuggestionsAsync("@index", cursorIndex: 6);
+
+        Assert.NotNull(suggestions);
+        Assert.Contains(suggestions!.Items, item => item.Value == "@src/index.ts");
+    }
+
+    [Fact]
+    public async Task GetSuggestionsAsync_FileAttachmentScopesExistingDirectory()
+    {
+        using var temp = new TempDirectory();
+        Directory.CreateDirectory(Path.Combine(temp.Path, "packages", "tui", "src"));
+        Directory.CreateDirectory(Path.Combine(temp.Path, "packages", "ai", "src"));
+        await File.WriteAllTextAsync(Path.Combine(temp.Path, "packages", "tui", "src", "autocomplete.ts"), "export {};");
+        await File.WriteAllTextAsync(Path.Combine(temp.Path, "packages", "ai", "src", "autocomplete.ts"), "export {};");
+
+        var provider = new TuiCombinedAutocompleteProvider(basePath: temp.Path);
+
+        var suggestions = await provider.GetSuggestionsAsync("@packages/tui/src/auto", cursorIndex: 22);
+
+        Assert.NotNull(suggestions);
+        Assert.Contains(suggestions!.Items, item => item.Value == "@packages/tui/src/autocomplete.ts");
+        Assert.DoesNotContain(suggestions.Items, item => item.Value == "@packages/ai/src/autocomplete.ts");
+    }
+
+    [Fact]
     public async Task GetSuggestionsAsync_ForceReturnsRootPathSuggestions()
     {
         using var temp = new TempDirectory();

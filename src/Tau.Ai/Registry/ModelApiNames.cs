@@ -4,6 +4,7 @@ internal static class ModelApiNames
 {
     public const string OpenAiChatCompletions = "openai-chat-completions";
     public const string GoogleGenerativeLanguage = "google-generative-language";
+    public const string PiMessages = "pi-messages";
 
     public static string? Normalize(string? api)
     {

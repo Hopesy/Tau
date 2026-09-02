@@ -30,12 +30,43 @@ internal static class OpenAiStreamParser
             delta.ValueKind == JsonValueKind.Object;
         var finishReason = choice.TryGetProperty("finish_reason", out var fr) && fr.ValueKind != JsonValueKind.Null
             ? fr.GetString() : null;
+        if (root.TryGetProperty("model", out var modelElement) && modelElement.ValueKind == JsonValueKind.String)
+        {
+            var responseModel = modelElement.GetString();
+            if (!string.IsNullOrWhiteSpace(responseModel) && !responseModel.Equals(partial.Model, StringComparison.Ordinal))
+            {
+                partial = partial with { ResponseModel = responseModel };
+            }
+        }
+
+        // 推理文本和结构化 reasoning_details 必须先于普通文本处理,避免跨块顺序丢失
+        if (hasDelta && delta.TryGetProperty("reasoning_content", out var reasoningContent) &&
+            reasoningContent.ValueKind == JsonValueKind.String)
+        {
+            AppendThinkingDelta(stream, ref partial, reasoningContent.GetString() ?? "", ref contentIndex);
+        }
+
+        if (hasDelta && delta.TryGetProperty("reasoning", out var reasoning) &&
+            reasoning.ValueKind == JsonValueKind.String)
+        {
+            AppendThinkingDelta(stream, ref partial, reasoning.GetString() ?? "", ref contentIndex);
+        }
+
+        if (hasDelta && delta.TryGetProperty("reasoning_details", out var reasoningDetails) &&
+            reasoningDetails.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var detail in reasoningDetails.EnumerateArray())
+            {
+                AppendReasoningDetail(stream, ref partial, detail, ref contentIndex);
+            }
+        }
 
         // Text content
         if (hasDelta &&
             delta.TryGetProperty("content", out var contentProp) &&
             contentProp.ValueKind == JsonValueKind.String)
         {
+            CloseOpenThinking(stream, partial);
             var text = contentProp.GetString()!;
             if (partial.Content.Count == 0 || partial.Content[^1] is not TextContent)
             {
@@ -64,6 +95,7 @@ internal static class OpenAiStreamParser
 
                 if (!toolCallAccumulators.TryGetValue(index, out var acc))
                 {
+                    CloseOpenThinking(stream, partial);
                     CloseOpenText(stream, partial);
 
                     var id = tc.TryGetProperty("id", out var idProp) ? idProp.GetString()! : "";
@@ -77,7 +109,15 @@ internal static class OpenAiStreamParser
                     var tcList = partial.Content.ToList();
                     tcList.Add(tcContent);
                     partial = partial with { Content = tcList };
-                    stream.Push(new ToolCallStartEvent(contentIndex, partial));
+                    stream.Push(new ToolCallStartEvent(contentIndex, partial, acc.Id, acc.Name));
+                }
+
+                if (tc.TryGetProperty("id", out var idUpdate) &&
+                    idUpdate.ValueKind == JsonValueKind.String &&
+                    string.IsNullOrWhiteSpace(acc.Id))
+                {
+                    acc = acc with { Id = idUpdate.GetString() ?? acc.Id };
+                    toolCallAccumulators[index] = acc;
                 }
 
                 if (tc.TryGetProperty("function", out var func))
@@ -134,6 +174,8 @@ internal static class OpenAiStreamParser
             {
                 StopReason = stopReason,
                 ErrorMessage = errorMessage,
+                RawStopReason = finishReason,
+                EndTurn = stopReason == StopReason.EndTurn,
                 Timestamp = DateTimeOffset.UtcNow
             };
 
@@ -150,6 +192,149 @@ internal static class OpenAiStreamParser
         contentIndex = partial.Content.Count;
         return false;
     }
+
+    /// <summary>
+    /// 在 SSE 流结束但没有 finish_reason 时完成消息。
+    /// </summary>
+    /// <param name="stream">事件输出流。</param>
+    /// <param name="partial">当前部分消息。</param>
+    /// <param name="toolCallAccumulators">工具调用累计状态。</param>
+    /// <param name="supportsFinishReason">provider 是否声明会发送 finish_reason。</param>
+    /// <returns>是否已经发出终止事件。</returns>
+    public static bool Complete(
+        AssistantMessageStream stream,
+        ref AssistantMessage partial,
+        Dictionary<int, ToolCallAccumulator> toolCallAccumulators,
+        bool supportsFinishReason)
+    {
+        if (partial.StopReason is not null)
+        {
+            return true;
+        }
+
+        CloseOpenThinking(stream, partial);
+        CloseOpenText(stream, partial);
+        CloseOpenToolCalls(stream, partial, toolCallAccumulators);
+        if (supportsFinishReason)
+        {
+            partial = partial with
+            {
+                StopReason = StopReason.Error,
+                ErrorMessage = "Stream ended without finish_reason",
+                RawStopReason = null,
+                Timestamp = DateTimeOffset.UtcNow
+            };
+            stream.Push(new ErrorEvent(partial.ErrorMessage, partial, partial));
+            return true;
+        }
+
+        partial = partial with
+        {
+            StopReason = toolCallAccumulators.Count > 0 ? StopReason.ToolUse : StopReason.EndTurn,
+            EndTurn = toolCallAccumulators.Count == 0,
+            Timestamp = DateTimeOffset.UtcNow
+        };
+        stream.Push(new DoneEvent(partial));
+        return true;
+    }
+
+    /// <summary>追加普通推理文本并发出 thinking 生命周期事件。</summary>
+    private static void AppendThinkingDelta(
+        AssistantMessageStream stream,
+        ref AssistantMessage partial,
+        string delta,
+        ref int contentIndex)
+    {
+        if (partial.Content.Count == 0 || partial.Content[^1] is not ThinkingContent)
+        {
+            CloseOpenText(stream, partial);
+            var content = partial.Content.ToList();
+            contentIndex = content.Count;
+            content.Add(new ThinkingContent(string.Empty));
+            partial = partial with { Content = content };
+            stream.Push(new ThinkingStartEvent(contentIndex, partial));
+        }
+
+        var existing = (ThinkingContent)partial.Content[^1];
+        var updated = existing with { Thinking = existing.Thinking + delta };
+        var next = partial.Content.ToList();
+        next[^1] = updated;
+        partial = partial with { Content = next };
+        stream.Push(new ThinkingDeltaEvent(contentIndex, delta, partial));
+    }
+
+    /// <summary>保存结构化 reasoning_details,并合并连续的同类文本项。</summary>
+    private static void AppendReasoningDetail(
+        AssistantMessageStream stream,
+        ref AssistantMessage partial,
+        JsonElement detail,
+        ref int contentIndex)
+    {
+        if (detail.ValueKind != JsonValueKind.Object)
+        {
+            return;
+        }
+
+        if (partial.Content.Count == 0 || partial.Content[^1] is not ThinkingContent)
+        {
+            CloseOpenText(stream, partial);
+            var content = partial.Content.ToList();
+            contentIndex = content.Count;
+            content.Add(new ThinkingContent(string.Empty));
+            partial = partial with { Content = content };
+            stream.Push(new ThinkingStartEvent(contentIndex, partial));
+        }
+
+        var current = (ThinkingContent)partial.Content[^1];
+        var details = new List<JsonElement>();
+        if (!string.IsNullOrWhiteSpace(current.ThinkingSignature))
+        {
+            try
+            {
+                using var existing = JsonDocument.Parse(current.ThinkingSignature);
+                if (existing.RootElement.ValueKind == JsonValueKind.Array)
+                {
+                    details.AddRange(existing.RootElement.EnumerateArray().Select(static item => item.Clone()));
+                }
+            }
+            catch (JsonException)
+            {
+                details.Clear();
+            }
+        }
+
+        var incoming = detail.Clone();
+        if (details.Count > 0 && details[^1].ValueKind == JsonValueKind.Object &&
+            TryGetString(details[^1], "type") == TryGetString(incoming, "type") &&
+            TryGetString(details[^1], "text") is { } previousText &&
+            TryGetString(incoming, "text") is { } incomingText)
+        {
+            var merged = new Dictionary<string, object?>();
+            foreach (var property in details[^1].EnumerateObject())
+            {
+                merged[property.Name] = property.NameEquals("text") ? previousText + incomingText : property.Value.Clone();
+            }
+
+            details[^1] = JsonSerializer.SerializeToElement(merged, OpenAiJsonContext.Default.DictionaryStringObject);
+        }
+        else
+        {
+            details.Add(incoming);
+        }
+
+        var updated = current with
+        {
+            ThinkingSignature = JsonSerializer.Serialize(details, OpenAiJsonContext.Default.ListJsonElement)
+        };
+        var next = partial.Content.ToList();
+        next[^1] = updated;
+        partial = partial with { Content = next };
+    }
+
+    private static string? TryGetString(JsonElement element, string propertyName) =>
+        element.TryGetProperty(propertyName, out var value) && value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : null;
 
     private static void ApplyChunkMetadata(JsonElement root, JsonElement? choice, ref AssistantMessage partial)
     {
@@ -184,16 +369,22 @@ internal static class OpenAiStreamParser
         var hasCompletionDetails = usageElement.TryGetProperty("completion_tokens_details", out var outputDetails) &&
             outputDetails.ValueKind == JsonValueKind.Object;
         var completionDetails = hasCompletionDetails ? outputDetails : default;
-        var reportedCacheRead = GetInt(promptDetails, "cached_tokens") ?? 0;
+        // 1. 不同 OpenAI-compatible provider 会把缓存命中数放在不同层级
+        var reportedCacheRead = GetInt(promptDetails, "cached_tokens") ??
+            GetInt(usageElement, "prompt_cache_hit_tokens") ??
+            GetInt(usageElement, "cached_tokens") ??
+            0;
         var cacheWrite = GetInt(promptDetails, "cache_write_tokens") ?? 0;
-        var cacheRead = cacheWrite > 0 ? Math.Max(0, reportedCacheRead - cacheWrite) : reportedCacheRead;
-        var reasoningTokens = GetInt(completionDetails, "reasoning_tokens") ?? 0;
+        // 2. cache_write_tokens 是独立的写入量，不能从 cacheRead 中再次扣除
+        var cacheRead = reportedCacheRead;
+        var reasoningTokens = GetInt(completionDetails, "reasoning_tokens");
         var input = Math.Max(0, promptTokens - cacheRead - cacheWrite);
-        var output = completionTokens + reasoningTokens;
+        // OpenAI completion_tokens 已包含 reasoning_tokens，不能重复累加
+        var output = completionTokens;
 
-        usage = hasPromptDetails
-            ? new Usage(input, output, cacheRead, cacheWrite)
-            : new Usage(input, output);
+        usage = hasPromptDetails || cacheRead > 0 || cacheWrite > 0
+            ? new Usage(input, output, cacheRead, cacheWrite) { ReasoningTokens = reasoningTokens, TotalTokens = GetInt(usageElement, "total_tokens") }
+            : new Usage(input, output) { ReasoningTokens = reasoningTokens, TotalTokens = GetInt(usageElement, "total_tokens") };
         return true;
     }
 
@@ -209,6 +400,14 @@ internal static class OpenAiStreamParser
         if (partial.Content.Count > 0 && partial.Content[^1] is TextContent)
         {
             stream.Push(new TextEndEvent(partial.Content.Count - 1, partial));
+        }
+    }
+
+    private static void CloseOpenThinking(AssistantMessageStream stream, AssistantMessage partial)
+    {
+        if (partial.Content.Count > 0 && partial.Content[^1] is ThinkingContent thinking)
+        {
+            stream.Push(new ThinkingEndEvent(partial.Content.Count - 1, partial, thinking.Thinking, thinking.ThinkingSignature));
         }
     }
 

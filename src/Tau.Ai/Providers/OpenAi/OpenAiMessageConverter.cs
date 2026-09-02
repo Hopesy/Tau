@@ -126,8 +126,9 @@ internal static class OpenAiMessageConverter
 
         var toolCalls = msg.Content.OfType<ToolCallContent>().ToList();
         var textParts = msg.Content.OfType<TextContent>().ToList();
+        var allThinkingParts = msg.Content.OfType<ThinkingContent>().ToList();
         var thinkingParts = requiresThinkingAsText
-            ? msg.Content.OfType<ThinkingContent>().Where(t => !string.IsNullOrWhiteSpace(t.Thinking)).ToList()
+            ? allThinkingParts.Where(t => !string.IsNullOrWhiteSpace(t.Thinking)).ToList()
             : [];
 
         if (textParts.Count > 0 || thinkingParts.Count > 0)
@@ -154,12 +155,53 @@ internal static class OpenAiMessageConverter
             result["tool_calls"] = serializedToolCalls;
         }
 
+        // reasoning_details 是 provider 回放所需的结构化元数据,不能随着 Thinking 文本丢失
+        var reasoningDetails = allThinkingParts
+            .Select(static thinking => ParseReasoningDetails(thinking.ThinkingSignature))
+            .FirstOrDefault(static details => details is not null);
+        if (reasoningDetails is { } details)
+        {
+            result["reasoning_details"] = details;
+        }
+
         if (requiresReasoningContentOnAssistantMessages && modelReasoning)
         {
             result["reasoning_content"] = string.Empty;
         }
 
         return result;
+    }
+
+    /// <summary>从 thinking signature 中读取 OpenAI reasoning_details 数组。</summary>
+    /// <param name="signature">provider 返回的签名或序列化元数据。</param>
+    /// <returns>可直接写入请求 JSON 的数组；不匹配时返回 null。</returns>
+    private static JsonElement? ParseReasoningDetails(string? signature)
+    {
+        if (string.IsNullOrWhiteSpace(signature))
+        {
+            return null;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(signature);
+            if (document.RootElement.ValueKind == JsonValueKind.Array)
+            {
+                return document.RootElement.Clone();
+            }
+
+            if (document.RootElement.ValueKind == JsonValueKind.Object)
+            {
+                using var wrapper = JsonDocument.Parse($"[{document.RootElement.GetRawText()}]");
+                return wrapper.RootElement.Clone();
+            }
+        }
+        catch (JsonException)
+        {
+            // 非 JSON signature 可能是 reasoning_content 等旧协议字段,保持原有回放逻辑
+        }
+
+        return null;
     }
 
     private static object ConvertToolResultMessage(ToolResultMessage msg, bool requiresToolResultName)
@@ -221,4 +263,5 @@ internal static class OpenAiMessageConverter
 [JsonSerializable(typeof(Dictionary<string, string>))]
 [JsonSerializable(typeof(bool))]
 [JsonSerializable(typeof(JsonElement))]
+[JsonSerializable(typeof(List<JsonElement>))]
 internal partial class OpenAiJsonContext : JsonSerializerContext;

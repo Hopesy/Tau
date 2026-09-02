@@ -10,6 +10,7 @@ namespace Tau.Ai.Serialization;
 [JsonSerializable(typeof(ChatMessage))]
 [JsonSerializable(typeof(UserMessage))]
 [JsonSerializable(typeof(AssistantMessage))]
+[JsonSerializable(typeof(DeferredHandle))]
 [JsonSerializable(typeof(AssistantMessageDiagnostic))]
 [JsonSerializable(typeof(DiagnosticErrorInfo))]
 [JsonSerializable(typeof(ToolResultMessage))]

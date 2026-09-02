@@ -35,7 +35,9 @@ public sealed class CodingAgentExtensionLifecycleEventSink
         "message_end",
         "tool_execution_start",
         "tool_execution_update",
-        "tool_execution_end"
+        "tool_execution_end",
+        "ui_prompt_start",
+        "ui_prompt_end"
     };
 
     private readonly IReadOnlyList<CodingAgentExtensionLifecycleEventModule> _modules;
@@ -90,6 +92,63 @@ public sealed class CodingAgentExtensionLifecycleEventSink
                     module.Scope,
                     module.Runtime,
                     agentEvent.Type,
+                    handlerError));
+            }
+        }
+
+        return Task.FromResult<IReadOnlyList<CodingAgentExtensionLifecycleEventError>>(errors);
+    }
+
+    /// <summary>
+    /// 发布扩展 UI 提示开始或结束事件。
+    /// </summary>
+    /// <param name="eventType">事件类型，只允许 <c>ui_prompt_start</c> 或 <c>ui_prompt_end</c>。</param>
+    /// <param name="kind">提示种类，例如 <c>select</c>、<c>confirm</c>、<c>input</c> 或 <c>editor</c>。</param>
+    /// <param name="title">提示标题；没有标题时传入空值。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>各扩展处理器产生的错误列表。</returns>
+    public Task<IReadOnlyList<CodingAgentExtensionLifecycleEventError>> PublishUiPromptAsync(
+        string eventType,
+        string kind,
+        string? title = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (!eventType.Equals("ui_prompt_start", StringComparison.Ordinal) &&
+            !eventType.Equals("ui_prompt_end", StringComparison.Ordinal))
+        {
+            throw new ArgumentException("eventType must be ui_prompt_start or ui_prompt_end.", nameof(eventType));
+        }
+
+        ArgumentException.ThrowIfNullOrWhiteSpace(kind);
+        var errors = new List<CodingAgentExtensionLifecycleEventError>();
+        using var payload = CodingAgentExtensionLifecycleEventJson.CreateUiPromptDocument(eventType, kind, title);
+        foreach (var module in _modules)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!module.EventTypes.Any(type => type.Equals(eventType, StringComparison.Ordinal)))
+            {
+                continue;
+            }
+
+            var result = _runtime.EmitEvent(module.FilePath, payload.RootElement);
+            if (!result.Success)
+            {
+                errors.Add(new CodingAgentExtensionLifecycleEventError(
+                    module.FilePath,
+                    module.Scope,
+                    module.Runtime,
+                    eventType,
+                    result.Error ?? $"javascript extension event emit failed for '{eventType}'"));
+                continue;
+            }
+
+            foreach (var handlerError in result.HandlerErrors)
+            {
+                errors.Add(new CodingAgentExtensionLifecycleEventError(
+                    module.FilePath,
+                    module.Scope,
+                    module.Runtime,
+                    eventType,
                     handlerError));
             }
         }
@@ -176,6 +235,27 @@ public sealed class CodingAgentExtensionLifecycleEventSink
 
 file static class CodingAgentExtensionLifecycleEventJson
 {
+    public static JsonDocument CreateUiPromptDocument(string eventType, string kind, string? title)
+    {
+        using var stream = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(stream))
+        {
+            writer.WriteStartObject();
+            writer.WriteString("type", eventType);
+            writer.WriteString("reason", "ui_prompt");
+            writer.WriteString("kind", kind);
+            if (!string.IsNullOrWhiteSpace(title))
+            {
+                writer.WriteString("title", title);
+            }
+
+            writer.WriteEndObject();
+        }
+
+        stream.Position = 0;
+        return JsonDocument.Parse(stream);
+    }
+
     public static JsonDocument CreateDocument(AgentEvent agentEvent)
     {
         using var stream = new MemoryStream();

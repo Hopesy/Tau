@@ -62,6 +62,8 @@ public sealed class MistralProvider : IStreamProvider
             WebSocketConnectTimeout = options.WebSocketConnectTimeout,
             Metadata = options.Metadata,
             Env = options.Env,
+            SamplingParams = options.SamplingParams,
+            Deferred = options.Deferred,
             PromptMode = model.Reasoning && options.Reasoning is not null && !UsesReasoningEffort(model)
                 ? "reasoning"
                 : null,
@@ -132,6 +134,7 @@ public sealed class MistralProvider : IStreamProvider
 
             var toolCallAccumulators = new Dictionary<int, OpenAiStreamParser.ToolCallAccumulator>();
             var contentIndex = 0;
+            var completed = false;
             await foreach (var sse in SseParser.ParseAsync(responseStream, requestTimeout.Token))
             {
                 if (sse.Data == "[DONE]")
@@ -140,15 +143,25 @@ public sealed class MistralProvider : IStreamProvider
                 }
 
                 ApplyMistralMetadata(sse.Data, ref partial);
-                if (OpenAiStreamParser.ParseChunk(
+                completed = OpenAiStreamParser.ParseChunk(
                     sse.Data,
                     stream,
                     ref partial,
                     ref toolCallAccumulators,
-                    ref contentIndex))
+                    ref contentIndex);
+                if (completed)
                 {
                     break;
                 }
+            }
+
+            if (!completed)
+            {
+                OpenAiStreamParser.Complete(
+                    stream,
+                    ref partial,
+                    toolCallAccumulators,
+                    model.Compat?.SupportsFinishReason == true);
             }
         }
         catch (OperationCanceledException ex) when (requestTimeout.IsTimeoutCancellation)
@@ -205,6 +218,8 @@ public sealed class MistralProvider : IStreamProvider
         {
             body["top_p"] = options.TopP.Value;
         }
+
+        StreamOptionHelpers.ApplySamplingParams(body, model, options);
 
         if (options is MistralOptions mistralOptions)
         {

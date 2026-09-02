@@ -23,11 +23,24 @@ public sealed record FauxProviderOptions
     public IReadOnlyList<FauxModelDefinition>? Models { get; init; }
     public double? TokensPerSecond { get; init; }
     public FauxTokenSize? TokenSize { get; init; }
+    /// <summary>deferred 响应测试配置。</summary>
+    public FauxDeferredOptions? Deferred { get; init; }
 }
+
+/// <summary>
+/// Faux provider 的 deferred 响应行为配置。
+/// </summary>
+/// <param name="PendingFetches">在最终结果就绪前返回句柄的轮询次数。</param>
+/// <param name="PollAfterMs">返回句柄时建议等待的毫秒数。</param>
+public sealed record FauxDeferredOptions(int PendingFetches = 0, int? PollAfterMs = null);
 
 public sealed class FauxProviderState
 {
     public int CallCount { get; internal set; }
+    /// <summary>已执行 deferred 拉取次数。</summary>
+    public int DeferredFetchCount { get; internal set; }
+    /// <summary>已取消的 deferred 句柄。</summary>
+    public IList<DeferredHandle> CancelledDeferred { get; } = new List<DeferredHandle>();
 }
 
 public delegate ValueTask<AssistantMessage> FauxResponseFactory(
@@ -198,7 +211,8 @@ public static class Faux
             models,
             options.TokensPerSecond,
             minTokenSize,
-            maxTokenSize);
+            maxTokenSize,
+            options.Deferred);
 
         registry.Register(api, streamProvider, sourceId);
         return new FauxProviderRegistration(registry, sourceId, streamProvider, models);
@@ -252,7 +266,9 @@ internal sealed class FauxStreamProvider : IStreamProvider
     private readonly double? _tokensPerSecond;
     private readonly int _minTokenSize;
     private readonly int _maxTokenSize;
+    private readonly FauxDeferredOptions? _deferredOptions;
     private readonly Dictionary<string, string> _promptCache = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, DeferredResponse> _deferredResponses = new(StringComparer.Ordinal);
 
     public FauxStreamProvider(
         string api,
@@ -260,7 +276,8 @@ internal sealed class FauxStreamProvider : IStreamProvider
         IReadOnlyList<Model> models,
         double? tokensPerSecond,
         int minTokenSize,
-        int maxTokenSize)
+        int maxTokenSize,
+        FauxDeferredOptions? deferredOptions)
     {
         Api = api;
         _provider = provider;
@@ -268,6 +285,7 @@ internal sealed class FauxStreamProvider : IStreamProvider
         _tokensPerSecond = tokensPerSecond;
         _minTokenSize = minTokenSize;
         _maxTokenSize = maxTokenSize;
+        _deferredOptions = deferredOptions;
     }
 
     public string Api { get; }
@@ -296,6 +314,42 @@ internal sealed class FauxStreamProvider : IStreamProvider
 
     public AssistantMessageStream StreamSimple(Model model, LlmContext context, SimpleStreamOptions options) =>
         Stream(model, context, options);
+
+    /// <summary>
+    /// 拉取 Faux provider 已提交的 deferred 响应。
+    /// </summary>
+    /// <param name="model">请求使用的模型。</param>
+    /// <param name="handle">提交时返回的句柄。</param>
+    /// <param name="options">拉取选项。</param>
+    /// <returns>包含 pending 句柄或最终结果的事件流。</returns>
+    public AssistantMessageStream FetchDeferred(Model model, DeferredHandle handle, DeferredFetchOptions options)
+    {
+        var stream = new AssistantMessageStream();
+        lock (_gate) State.DeferredFetchCount++;
+        _ = FetchDeferredAsync(stream, model, handle, options);
+        return stream;
+    }
+
+    /// <summary>
+    /// 取消 Faux provider 已提交的 deferred 响应。
+    /// </summary>
+    /// <param name="model">请求使用的模型。</param>
+    /// <param name="handle">提交时返回的句柄。</param>
+    /// <param name="options">取消选项。</param>
+    /// <returns>取消完成任务。</returns>
+    public async Task CancelDeferred(Model model, DeferredHandle handle, DeferredCancelOptions options)
+    {
+        lock (_gate)
+        {
+            State.CancelledDeferred.Add(handle with { Data = CloneDeferredData(handle.Data) });
+            if (_deferredResponses.TryGetValue(handle.Id, out var response)) response.Cancelled = true;
+        }
+
+        if (options.OnResponse is not null)
+        {
+            await options.OnResponse(new ProviderResponse(200, new Dictionary<string, string>()), model).ConfigureAwait(false);
+        }
+    }
 
     public void SetResponses(IEnumerable<FauxResponseStep> responses)
     {
@@ -355,6 +409,37 @@ internal sealed class FauxStreamProvider : IStreamProvider
                 return;
             }
 
+            if (options.Deferred is not null && IsDeferredRequested(options.Deferred))
+            {
+                var handle = new DeferredHandle(Api, requestModel.Id, requestModel.Api, Faux.RandomId("deferred"))
+                {
+                    PollAfterMs = GetDeferredPollAfterMs(options.Deferred) ?? _deferredOptions?.PollAfterMs
+                };
+                lock (_gate)
+                {
+                    _deferredResponses[handle.Id] = new DeferredResponse(
+                        handle,
+                        step.Value,
+                        context,
+                        options,
+                        requestModel,
+                        Math.Max(0, GetDeferredPendingFetches(options.Deferred) ?? _deferredOptions?.PendingFetches ?? 0));
+                }
+
+                var deferred = new AssistantMessage
+                {
+                    Api = Api,
+                    Provider = _provider,
+                    Model = requestModel.Id,
+                    Content = [],
+                    Usage = new Usage(0, 0, 0, 0),
+                    StopReason = StopReason.Deferred,
+                    Deferred = handle,
+                    Timestamp = DateTimeOffset.UtcNow
+                };
+                await StreamWithDeltasAsync(stream, deferred, options.Signal).ConfigureAwait(false);
+                return;
+            }
             var resolved = await step.Value.ResolveAsync(context, options, State, requestModel).ConfigureAwait(false);
             var message = WithUsageEstimate(CloneMessage(resolved, requestModel), context, options);
             await StreamWithDeltasAsync(stream, message, options.Signal).ConfigureAwait(false);
@@ -364,6 +449,150 @@ internal sealed class FauxStreamProvider : IStreamProvider
             var message = CreateErrorMessage(ex.Message, requestModel);
             stream.Push(new ErrorEvent(message.ErrorMessage ?? ex.Message, Message: message));
         }
+    }
+
+    private async Task FetchDeferredAsync(
+        AssistantMessageStream stream,
+        Model requestModel,
+        DeferredHandle handle,
+        DeferredFetchOptions fetchOptions)
+    {
+        try
+        {
+            if (fetchOptions.OnResponse is not null)
+            {
+                await fetchOptions.OnResponse(new ProviderResponse(200, new Dictionary<string, string>()), requestModel).ConfigureAwait(false);
+            }
+
+            DeferredResponse response;
+            lock (_gate)
+            {
+                if (!_deferredResponses.TryGetValue(handle.Id, out response!) ||
+                    response.Handle.Provider != handle.Provider ||
+                    response.Handle.ModelId != handle.ModelId ||
+                    response.Handle.Api != handle.Api)
+                {
+                    throw new InvalidOperationException($"Unknown faux deferred response: {handle.Id}");
+                }
+
+                if (response.Cancelled)
+                {
+                    throw new InvalidOperationException($"Faux deferred response was cancelled: {handle.Id}");
+                }
+
+                if (response.PendingFetches > 0)
+                {
+                    response.PendingFetches--;
+                }
+            }
+
+            if (response.PendingFetches > 0 && response.Final is null)
+            {
+                // Pending polls return the same durable handle and do not consume the submission step.
+                var pending = new AssistantMessage
+                {
+                    Api = Api,
+                    Provider = _provider,
+                    Model = requestModel.Id,
+                    Content = [],
+                    Usage = new Usage(0, 0, 0, 0),
+                    StopReason = StopReason.Deferred,
+                    Deferred = response.Handle,
+                    Timestamp = DateTimeOffset.UtcNow
+                };
+                await StreamWithDeltasAsync(stream, pending, fetchOptions.Signal).ConfigureAwait(false);
+                return;
+            }
+
+            AssistantMessage? final;
+            lock (_gate) final = response.Final;
+            if (final is null)
+            {
+                var submissionOptions = response.Options with
+                {
+                    Deferred = null,
+                    Signal = default,
+                    OnResponse = null
+                };
+                try
+                {
+                    final = await response.Step.ResolveAsync(response.Context, submissionOptions, State, response.Model).ConfigureAwait(false);
+                    final = WithUsageEstimate(CloneMessage(final, response.Model), response.Context, submissionOptions);
+                }
+                catch (Exception ex)
+                {
+                    final = CreateErrorMessage(ex.Message, response.Model);
+                }
+
+                lock (_gate)
+                {
+                    response.Final = final;
+                    response.FinalReady = true;
+                }
+            }
+
+            await StreamWithDeltasAsync(stream, final, fetchOptions.Signal).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            var message = CreateErrorMessage(ex.Message, requestModel);
+            stream.Push(new ErrorEvent(message.ErrorMessage ?? ex.Message, Message: message));
+        }
+    }
+
+    private static bool IsDeferredRequested(object value) => value switch
+    {
+        bool boolean => boolean,
+        IDictionary<string, object?> dictionary => !dictionary.TryGetValue("enabled", out var enabled) || enabled is not false,
+        IReadOnlyDictionary<string, object?> dictionary => !dictionary.TryGetValue("enabled", out var enabled) || enabled is not false,
+        _ => true
+    };
+
+    private static int? GetDeferredPendingFetches(object value) => ReadDeferredInt(value, "pendingFetches");
+    private static int? GetDeferredPollAfterMs(object value) => ReadDeferredInt(value, "pollAfterMs");
+
+    private static int? ReadDeferredInt(object value, string key)
+    {
+        if (value is IDictionary<string, object?> dictionary && dictionary.TryGetValue(key, out var raw)) return ConvertToInt(raw);
+        if (value is IReadOnlyDictionary<string, object?> readOnly && readOnly.TryGetValue(key, out var readOnlyRaw)) return ConvertToInt(readOnlyRaw);
+        return null;
+    }
+
+    private static int? ConvertToInt(object? value) => value switch
+    {
+        byte number => number,
+        short number => number,
+        int number => number,
+        long number => checked((int)number),
+        double number => checked((int)number),
+        decimal number => checked((int)number),
+        _ => null
+    };
+
+    private static object? CloneDeferredData(object? data) => data switch
+    {
+        null => null,
+        ICloneable cloneable => cloneable.Clone(),
+        _ => data
+    };
+
+    private sealed class DeferredResponse(
+        DeferredHandle handle,
+        FauxResponseStep step,
+        LlmContext context,
+        StreamOptions options,
+        Model model,
+        int pendingFetches)
+    {
+        public DeferredHandle Handle { get; } = handle;
+        public FauxResponseStep Step { get; } = step;
+        public LlmContext Context { get; } = context;
+        public StreamOptions Options { get; } = options;
+        public Model Model { get; } = model;
+        public int PendingFetches { get; set; } = pendingFetches;
+        public bool Cancelled { get; set; }
+        public bool FinalReady { get; set; }
+        public AssistantMessage? Final { get; set; }
     }
 
     private AssistantMessage CloneMessage(AssistantMessage message, Model requestModel) =>

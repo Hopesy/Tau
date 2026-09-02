@@ -30,6 +30,12 @@ public interface IAgentExecutionEnv
 
     Task WriteFileAsync(string path, byte[] content, CancellationToken cancellationToken = default);
 
+    /// <summary>以原子重命名方式发布文件，目标存在时覆盖目标文件。</summary>
+    /// <param name="sourcePath">源文件路径。</param>
+    /// <param name="destinationPath">目标文件路径。</param>
+    /// <param name="cancellationToken">取消信号。</param>
+    Task RenameFileAsync(string sourcePath, string destinationPath, CancellationToken cancellationToken = default);
+
     Task AppendFileAsync(string path, string content, CancellationToken cancellationToken = default);
 
     Task<AgentFileInfo> GetFileInfoAsync(string path, CancellationToken cancellationToken = default);
@@ -264,6 +270,9 @@ public sealed class SystemAgentExecutionEnv : IAgentExecutionEnv
         catch (InvalidOperationException)
         {
         }
+        catch (System.ComponentModel.Win32Exception)
+        {
+        }
 
         if (callbackError is not null)
             throw callbackError;
@@ -348,6 +357,29 @@ public sealed class SystemAgentExecutionEnv : IAgentExecutionEnv
         catch (Exception ex) when (ShouldWrapFileException(ex))
         {
             throw ToFileException(ex, resolved);
+        }
+    }
+
+    /// <summary>
+    /// 在同一文件系统内原子重命名文件，用于 JSONL 临时文件的可靠发布。
+    /// </summary>
+    /// <param name="sourcePath">源文件路径。</param>
+    /// <param name="destinationPath">目标文件路径。</param>
+    /// <param name="cancellationToken">取消信号。</param>
+    public Task RenameFileAsync(string sourcePath, string destinationPath, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var source = GetAbsolutePath(sourcePath);
+        var destination = GetAbsolutePath(destinationPath);
+        EnsureParentDirectory(destination);
+        try
+        {
+            File.Move(source, destination, overwrite: true);
+            return Task.CompletedTask;
+        }
+        catch (Exception ex) when (ShouldWrapFileException(ex))
+        {
+            throw ToFileException(ex, destination);
         }
     }
 
@@ -786,6 +818,9 @@ public sealed class SystemAgentExecutionEnv : IAgentExecutionEnv
                 process.Kill(entireProcessTree: true);
         }
         catch (InvalidOperationException)
+        {
+        }
+        catch (System.ComponentModel.Win32Exception)
         {
         }
     }

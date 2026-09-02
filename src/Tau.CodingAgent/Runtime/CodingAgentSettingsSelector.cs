@@ -24,6 +24,7 @@ public static class CodingAgentSettingsSelector
     public const string ImagesBlockImagesAction = "block-images";
     public const string HideThinkingBlockAction = "hide-thinking-block";
     public const string ShowHardwareCursorAction = "show-hardware-cursor";
+    public const string FullscreenCopyOnSelectAction = "fullscreen-copy-on-select";
     public const string EditorPaddingAction = "editor-padding";
     public const string AutocompleteMaxVisibleAction = "autocomplete-max-visible";
     public const string TerminalClearOnShrinkAction = "clear-on-shrink";
@@ -128,6 +129,12 @@ public static class CodingAgentSettingsSelector
                 "Show hardware cursor",
                 FormatBooleanValue(settings.ShowHardwareCursor ?? false),
                 "Show the terminal cursor while still positioning it for IME support.",
+                ["true", "false"]),
+            new TuiSettingItem(
+                FullscreenCopyOnSelectAction,
+                "Copy fullscreen selection",
+                FormatBooleanValue(settings.FullscreenCopyOnSelect ?? true),
+                "Copy selected fullscreen text automatically when selection ends.",
                 ["true", "false"]),
             new TuiSettingItem(
                 EditorPaddingAction,

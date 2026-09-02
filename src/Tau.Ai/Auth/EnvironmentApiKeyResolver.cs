@@ -39,7 +39,12 @@ public static class EnvironmentApiKeyResolver
             ["xiaomi-token-plan-ams"] = ["XIAOMI_TOKEN_PLAN_AMS_API_KEY"],
             ["xiaomi-token-plan-sgp"] = ["XIAOMI_TOKEN_PLAN_SGP_API_KEY"],
             ["github-copilot"] = ["COPILOT_GITHUB_TOKEN"],
-            ["anthropic"] = ["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"]
+            ["anthropic"] = ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"],
+            ["qwen-token-plan"] = ["QWEN_TOKEN_PLAN_API_KEY"],
+            ["qwen-token-plan-cn"] = ["QWEN_TOKEN_PLAN_CN_API_KEY"],
+            ["qwen-token-plan-individual"] = ["QWEN_TOKEN_PLAN_API_KEY"],
+            ["radius"] = ["RADIUS_API_KEY"],
+            ["baseten"] = ["BASETEN_API_KEY"]
         };
 
     public static IReadOnlyList<string> FindEnvKeys(

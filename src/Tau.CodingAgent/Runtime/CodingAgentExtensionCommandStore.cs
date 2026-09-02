@@ -211,7 +211,31 @@ public sealed class CodingAgentExtensionCommandStore
 
     public void SetExtensionUiBridge(CodingAgentRpcExtensionUiBridge? extensionUiBridge, string mode = "tui")
     {
+        extensionUiBridge?.SetUiPromptEventPublisher(PublishUiPromptEventAsync);
         _javaScriptRuntime.SetExtensionUiBridge(extensionUiBridge, mode);
+    }
+
+    /// <summary>
+    /// 将扩展 UI 提示生命周期事件转发给当前已加载的扩展处理器。
+    /// </summary>
+    /// <param name="eventType">事件类型，必须是 <c>ui_prompt_start</c> 或 <c>ui_prompt_end</c>。</param>
+    /// <param name="kind">提示种类。</param>
+    /// <param name="title">提示标题。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>扩展处理器错误列表。</returns>
+    public async Task PublishUiPromptEventAsync(
+        string eventType,
+        string kind,
+        string? title,
+        CancellationToken cancellationToken = default)
+    {
+        var sink = LoadLifecycleEventSink();
+        if (sink is null)
+        {
+            return;
+        }
+
+        _ = await sink.PublishUiPromptAsync(eventType, kind, title, cancellationToken).ConfigureAwait(false);
     }
 
     public IReadOnlyList<CodingAgentExtensionTool> LoadToolDefinitions()

@@ -21,6 +21,10 @@ public sealed class AssistantMessageStream : EventStream<StreamEvent, AssistantM
                 Provider = err.Partial?.Provider,
                 Model = err.Partial?.Model,
                 ResponseId = err.Partial?.ResponseId,
+                ResponseModel = err.Partial?.ResponseModel,
+                RawStopReason = err.Partial?.RawStopReason,
+                EndTurn = err.Partial?.EndTurn,
+                Deferred = err.Partial?.Deferred,
                 Timestamp = err.Partial?.Timestamp
             },
             _ => null

@@ -67,7 +67,7 @@ public sealed class TuiCombinedAutocompleteProvider : ITuiAutocompleteProvider
         var atPrefix = ExtractAtPrefix(currentLine);
         if (atPrefix is not null)
         {
-            var suggestions = GetFileSuggestions(atPrefix);
+            var suggestions = GetFuzzyFileSuggestions(atPrefix);
             return suggestions.Count == 0 ? null : new TuiAutocompleteSuggestions(suggestions, atPrefix);
         }
 
@@ -197,7 +197,24 @@ public sealed class TuiCombinedAutocompleteProvider : ITuiAutocompleteProvider
         }
 
         var items = new List<TuiAutocompleteItem>();
-        foreach (var path in Directory.EnumerateFileSystemEntries(searchDirectory))
+        IEnumerable<string> candidates;
+        try
+        {
+            candidates = Directory.EnumerateFileSystemEntries(
+                searchDirectory,
+                "*",
+                SearchOption.TopDirectoryOnly).ToArray();
+        }
+        catch (IOException)
+        {
+            return [];
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return [];
+        }
+
+        foreach (var path in candidates)
         {
             var name = Path.GetFileName(path);
             if (string.Equals(name, ".git", StringComparison.OrdinalIgnoreCase))
@@ -211,7 +228,8 @@ public sealed class TuiCombinedAutocompleteProvider : ITuiAutocompleteProvider
             }
 
             var isDirectory = Directory.Exists(path);
-            var displayPath = BuildDisplayPath(rawPrefix, name);
+            var displayName = name;
+            var displayPath = BuildDisplayPath(rawPrefix, displayName);
             if (isDirectory)
             {
                 displayPath = EnsureForwardSlash(displayPath.TrimEnd('/', '\\') + "/");
@@ -227,14 +245,147 @@ public sealed class TuiCombinedAutocompleteProvider : ITuiAutocompleteProvider
                 parsed.IsQuotedPrefix);
             items.Add(new TuiAutocompleteItem(
                 value,
-                name + (isDirectory ? "/" : string.Empty),
+                displayName + (isDirectory ? "/" : string.Empty),
                 EnsureForwardSlash(displayPath)));
+
+            if (items.Count >= 200)
+            {
+                break;
+            }
         }
 
         return items
             .OrderByDescending(static item => item.Label.EndsWith("/", StringComparison.Ordinal))
             .ThenBy(static item => item.Label, StringComparer.OrdinalIgnoreCase)
             .ToArray();
+    }
+
+    /// <summary>
+    /// 为 @ 文件附件执行递归模糊搜索。
+    /// 参数 prefix 是包含 @、可选引号和路径片段的当前补全前缀，返回值是按匹配分数排序的补全项。
+    /// </summary>
+    private IReadOnlyList<TuiAutocompleteItem> GetFuzzyFileSuggestions(string prefix)
+    {
+        var parsed = ParsePathPrefix(prefix);
+        var rawPrefix = EnsureForwardSlash(parsed.RawPrefix);
+        var searchDirectory = _basePath;
+        var query = rawPrefix;
+        string? displayBase = null;
+
+        // 1. 路径包含目录段且目录存在时，把搜索范围限定在该目录
+        var slashIndex = rawPrefix.LastIndexOf('/');
+        if (slashIndex >= 0)
+        {
+            var candidateDisplayBase = rawPrefix[..(slashIndex + 1)];
+            var candidateDirectory = ResolveSearchDirectory(ExpandHomePath(candidateDisplayBase));
+            if (Directory.Exists(candidateDirectory))
+            {
+                searchDirectory = candidateDirectory;
+                query = rawPrefix[(slashIndex + 1)..];
+                displayBase = candidateDisplayBase;
+            }
+        }
+
+        IEnumerable<string> candidates;
+        try
+        {
+            // 2. 一次性物化枚举，确保遍历期间的 IO 异常也能被统一处理
+            candidates = Directory.EnumerateFileSystemEntries(
+                searchDirectory,
+                "*",
+                SearchOption.AllDirectories).ToArray();
+        }
+        catch (IOException)
+        {
+            return [];
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return [];
+        }
+
+        var scored = new List<(string Path, bool IsDirectory, int Score)>();
+        foreach (var candidate in candidates)
+        {
+            var relativePath = EnsureForwardSlash(Path.GetRelativePath(searchDirectory, candidate));
+            if (IsGitPath(relativePath))
+            {
+                continue;
+            }
+
+            var isDirectory = Directory.Exists(candidate);
+            var score = ScoreFuzzyPath(relativePath, query, isDirectory);
+            if (score > 0)
+            {
+                scored.Add((relativePath, isDirectory, score));
+            }
+        }
+
+        // 3. 先按匹配质量排序，再按路径深度和名称稳定排序
+        var topEntries = scored
+            .OrderByDescending(static item => item.Score)
+            .ThenBy(static item => item.Path.Count(static character => character == '/'))
+            .ThenBy(static item => item.Path.Length)
+            .ThenBy(static item => item.Path, StringComparer.OrdinalIgnoreCase)
+            .Take(20);
+
+        var items = new List<TuiAutocompleteItem>();
+        foreach (var entry in topEntries)
+        {
+            var displayPath = displayBase is null
+                ? entry.Path
+                : displayBase + entry.Path;
+            displayPath = EnsureForwardSlash(displayPath);
+            var completionPath = entry.IsDirectory
+                ? displayPath.TrimEnd('/') + "/"
+                : displayPath;
+            var value = BuildCompletionValue(
+                completionPath,
+                parsed.IsAtPrefix,
+                parsed.IsQuotedPrefix);
+            var label = Path.GetFileName(entry.Path) + (entry.IsDirectory ? "/" : string.Empty);
+            items.Add(new TuiAutocompleteItem(value, label, displayPath));
+        }
+
+        return items;
+    }
+
+    /// <summary>
+    /// 计算文件附件路径与查询文本的匹配分数。
+    /// 参数 relativePath 是相对搜索目录的路径，query 是用户输入的查询，isDirectory 表示是否为目录；返回值越大表示匹配越优。
+    /// </summary>
+    private static int ScoreFuzzyPath(string relativePath, string query, bool isDirectory)
+    {
+        if (string.IsNullOrEmpty(query))
+        {
+            return 1;
+        }
+
+        var fileName = Path.GetFileName(relativePath);
+        var lowerFileName = fileName.ToLowerInvariant();
+        var lowerQuery = query.ToLowerInvariant();
+        var score = lowerFileName == lowerQuery
+            ? 100
+            : lowerFileName.StartsWith(lowerQuery, StringComparison.Ordinal)
+                ? 80
+                : lowerFileName.Contains(lowerQuery, StringComparison.Ordinal)
+                    ? 50
+                    : relativePath.ToLowerInvariant().Contains(lowerQuery, StringComparison.Ordinal)
+                        ? 30
+                        : 0;
+
+        return isDirectory && score > 0 ? score + 10 : score;
+    }
+
+    /// <summary>
+    /// 判断相对路径是否位于 .git 目录中。
+    /// 参数 relativePath 是待检查的相对路径；返回值表示是否应从补全结果中排除。
+    /// </summary>
+    private static bool IsGitPath(string relativePath)
+    {
+        return string.Equals(relativePath, ".git", StringComparison.OrdinalIgnoreCase) ||
+            relativePath.StartsWith(".git/", StringComparison.OrdinalIgnoreCase) ||
+            relativePath.Contains("/.git/", StringComparison.OrdinalIgnoreCase);
     }
 
     private string ResolveSearchDirectory(string path)

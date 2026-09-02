@@ -20,7 +20,8 @@ public sealed class AgentRuntime
     private readonly Channel<ChatMessage> _steeringQueue = Channel.CreateUnbounded<ChatMessage>();
     private readonly Channel<ChatMessage> _followUpQueue = Channel.CreateUnbounded<ChatMessage>();
     private CancellationTokenSource? _runCts;
-    private readonly TaskCompletionSource _idleTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly object _idleGate = new();
+    private TaskCompletionSource _idleTcs = CompletedIdleSource();
     private int _pendingSteeringMessageCount;
     private int _pendingFollowUpMessageCount;
 
@@ -56,7 +57,13 @@ public sealed class AgentRuntime
         DrainQueuedMessagesToList(_followUpQueue, FollowUpMode, ref _pendingFollowUpMessageCount);
 
     public void Abort() => _runCts?.Cancel();
-    public Task WaitForIdleAsync() => _idleTcs.Task;
+    public Task WaitForIdleAsync()
+    {
+        lock (_idleGate)
+        {
+            return _idleTcs.Task;
+        }
+    }
 
     public void Reset()
     {
@@ -69,6 +76,7 @@ public sealed class AgentRuntime
         AgentLoopConfig config,
         CancellationToken ct = default)
     {
+        BeginIdleWait();
         var stream = CreateEventStream();
 
         _ = Task.Run(async () =>
@@ -103,6 +111,7 @@ public sealed class AgentRuntime
         AgentLoopConfig config,
         [EnumeratorCancellation] CancellationToken ct = default)
     {
+        BeginIdleWait();
         _runCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         var token = _runCts.Token;
         var currentConfig = config;
@@ -115,6 +124,7 @@ public sealed class AgentRuntime
             var turnIndex = 0;
             var skipInitialSteeringPoll = config.SkipInitialSteeringPoll;
             IReadOnlyList<ChatMessage> pendingQueuedMessages = [];
+            AgentLoopTurnContext? lastCompletedTurn = null;
 
             // Outer loop: follow-up messages
             do
@@ -124,6 +134,27 @@ public sealed class AgentRuntime
                 do
                 {
                     hasMoreWork = false;
+
+                    // 1. 只有确认上一轮之后仍会进入新的 assistant 回合时才执行准备钩子
+                    if (lastCompletedTurn is not null)
+                    {
+                        if (currentConfig.PrepareNextTurnAsync is not null)
+                        {
+                            var update = await currentConfig.PrepareNextTurnAsync(lastCompletedTurn, token).ConfigureAwait(false);
+                            if (update is not null)
+                            {
+                                currentConfig = ApplyTurnUpdate(currentConfig, update);
+                                if (update.Context is not null)
+                                {
+                                    State.SetMessages(update.Context.ToList());
+                                }
+
+                                State.Configure(currentConfig.SystemPrompt, currentConfig.Model, currentConfig.Tools);
+                            }
+                        }
+
+                        lastCompletedTurn = null;
+                    }
 
                     if (skipInitialSteeringPoll)
                     {
@@ -379,24 +410,10 @@ public sealed class AgentRuntime
 
                     yield return new TurnEndEvent(turnIndex, assistantMessage, turnToolResults);
 
+                    // 1. 先让停止钩子和 steering 队列决定是否会开始下一轮
                     var turnContext = CreateTurnContext(assistantMessage, turnToolResults);
-                    if (currentConfig.PrepareNextTurnAsync is not null)
-                    {
-                        var update = await currentConfig.PrepareNextTurnAsync(turnContext, token).ConfigureAwait(false);
-                        if (update is not null)
-                        {
-                            currentConfig = ApplyTurnUpdate(currentConfig, update);
-                            if (update.Context is not null)
-                            {
-                                State.SetMessages(update.Context.ToList());
-                            }
-
-                            State.Configure(currentConfig.SystemPrompt, currentConfig.Model, currentConfig.Tools);
-                        }
-                    }
-
                     if (currentConfig.ShouldStopAfterTurnAsync is not null &&
-                        await currentConfig.ShouldStopAfterTurnAsync(CreateTurnContext(assistantMessage, turnToolResults), token).ConfigureAwait(false))
+                        await currentConfig.ShouldStopAfterTurnAsync(turnContext, token).ConfigureAwait(false))
                     {
                         yield return new AgentEndEvent(messages: State.Messages.ToArray());
                         yield break;
@@ -405,6 +422,10 @@ public sealed class AgentRuntime
                     // Check for new steering messages after turn hooks have had a chance to stop.
                     if (_steeringQueue.Reader.TryPeek(out _))
                         hasMoreWork = true;
+
+                    // 2. 只记录已完成回合；下一次确实进入循环时在入口执行 prepare 钩子
+                    //    本轮结束时不会再次调用 prepare，避免 final/terminating turn 产生副作用
+                    lastCompletedTurn = turnContext;
 
                     turnIndex++;
 
@@ -421,8 +442,29 @@ public sealed class AgentRuntime
         finally
         {
             State.SetStreaming(false);
-            _idleTcs.TrySetResult();
+            lock (_idleGate)
+            {
+                _idleTcs.TrySetResult();
+            }
         }
+    }
+
+    private void BeginIdleWait()
+    {
+        lock (_idleGate)
+        {
+            if (_idleTcs.Task.IsCompleted)
+            {
+                _idleTcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            }
+        }
+    }
+
+    private static TaskCompletionSource CompletedIdleSource()
+    {
+        var source = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        source.TrySetResult();
+        return source;
     }
 
     private static EventStream<AgentEvent, ChatMessage[]> CreateEventStream() =>
@@ -541,6 +583,7 @@ public sealed class AgentRuntime
     {
         var startedAt = Stopwatch.GetTimestamp();
         var fields = CreateProviderRunFields(config, context, streamOptions);
+        fields["logMessage"] = "【AgentCore】【ProviderRun】开始执行模型流";
         config.LogContext?.AddTo(fields);
         config.LogSink.Log(new TauLogEvent("provider", "run.start", DateTimeOffset.UtcNow, fields));
         return startedAt;
@@ -685,19 +728,39 @@ public sealed class AgentRuntime
             Provider = string.IsNullOrWhiteSpace(message.Provider) ? model.Provider : message.Provider,
             Model = string.IsNullOrWhiteSpace(message.Model) ? model.Id : message.Model,
             Timestamp = message.Timestamp ?? DateTimeOffset.UtcNow,
-            Usage = EnrichUsageCost(message.Usage, model)
+            Usage = EnrichUsageCost(message, model)
         };
 
-    private static Usage? EnrichUsageCost(Usage? usage, Model model)
+    private static Usage? EnrichUsageCost(AssistantMessage message, Model model)
     {
-        if (usage is not { } value ||
-            value.Cost is not null ||
-            model.Cost is null)
+        var usage = message.Usage;
+        if (usage is not { } value || value.Cost is not null)
         {
             return usage;
         }
 
-        return value with { Cost = ModelCatalog.CalculateCost(model, value) };
+        // Anthropic server-side fallback 会在 message_start 返回实际模型，计费必须使用该模型的成本
+        var usageModel = model;
+        var responseModel = message.ResponseModel ?? message.Model;
+        if (!string.IsNullOrWhiteSpace(responseModel) &&
+            !responseModel.Equals(model.Id, StringComparison.OrdinalIgnoreCase) &&
+            model.Compat?.AllowedFallbackModels is { Count: > 0 } fallbacks)
+        {
+            var fallback = fallbacks.FirstOrDefault(candidate =>
+                candidate.Provider.Equals(model.Provider, StringComparison.OrdinalIgnoreCase) &&
+                candidate.Model.Equals(responseModel, StringComparison.OrdinalIgnoreCase));
+            if (fallback?.Cost is { } cost)
+            {
+                usageModel = model with { Id = responseModel, Cost = cost };
+            }
+        }
+
+        if (usageModel.Cost is null)
+        {
+            return usage;
+        }
+
+        return value with { Cost = ModelCatalog.CalculateCost(usageModel, value) };
     }
 
     private static AssistantMessage CreateFailureMessage(

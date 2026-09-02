@@ -63,7 +63,7 @@ public sealed class ShellTool : IAgentTool
         }
         catch (OperationCanceledException)
         {
-            process.Kill(entireProcessTree: true);
+            TryKillProcessTree(process);
             return new ToolResult([new TextContent("Command timed out.")], IsError: true);
         }
 
@@ -82,5 +82,22 @@ public sealed class ShellTool : IAgentTool
         return new ToolResult(
             [new TextContent(output.ToString())],
             IsError: process.ExitCode != 0);
+    }
+
+    /// <summary>尝试终止 shell 及其子进程；目标已退出或系统缺少终止工具时保持原错误结果。</summary>
+    /// <param name="process">待终止的 shell 进程。</param>
+    private static void TryKillProcessTree(Process process)
+    {
+        try
+        {
+            if (!process.HasExited)
+                process.Kill(entireProcessTree: true);
+        }
+        catch (InvalidOperationException)
+        {
+        }
+        catch (System.ComponentModel.Win32Exception)
+        {
+        }
     }
 }
