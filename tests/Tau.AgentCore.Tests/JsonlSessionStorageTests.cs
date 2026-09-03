@@ -8,6 +8,27 @@ namespace Tau.AgentCore.Tests;
 public sealed class JsonlSessionStorageTests
 {
     [Fact]
+    public async Task ForkAsync_WritesV4ParentSessionIdByDefault()
+    {
+        using var temp = TempDirectory.Create();
+        var sourceRoot = Path.Combine(temp.Path, "sessions");
+        var repo = new JsonlSessionRepo(sourceRoot);
+        var source = await repo.CreateAsync(temp.Path, id: "source-1");
+        await source.GetStorage().AppendEntryAsync(new MessageSessionEntry(
+            "entry-1",
+            null,
+            DateTimeOffset.Parse("2026-01-01T00:00:00.000Z", System.Globalization.CultureInfo.InvariantCulture),
+            new UserMessage("one")));
+        var sourceMetadata = await source.GetMetadataAsync();
+
+        var fork = await repo.ForkAsync(sourceMetadata, temp.Path, new SessionForkOptions(Id: "fork-1"));
+        var header = JsonDocument.Parse(File.ReadAllLines((await fork.GetMetadataAsync()).Path)[0]).RootElement;
+
+        Assert.Equal("source-1", header.GetProperty("parentSessionId").GetString());
+        Assert.False(header.TryGetProperty("legacyParentSessionPath", out _));
+    }
+
+    [Fact]
     public async Task CreateAsync_WritesHeaderAndAppendsEntries()
     {
         using var temp = TempDirectory.Create();
@@ -88,6 +109,31 @@ public sealed class JsonlSessionStorageTests
         Assert.Equal(temp.Path, metadata.Cwd);
         Assert.Equal(Path.GetFullPath(filePath), metadata.Path);
         Assert.Equal("/tmp/parent.jsonl", metadata.ParentSessionPath);
+    }
+
+    [Fact]
+    public async Task CreateAsync_PersistsResolvedParentAndMetadataInV4Header()
+    {
+        using var temp = TempDirectory.Create();
+        var filePath = Path.Combine(temp.Path, "metadata-session.jsonl");
+        using var metadataDocument = JsonDocument.Parse("{\"owner\":\"agent\",\"version\":1}");
+
+        await JsonlSessionStorage.CreateAsync(
+            filePath,
+            temp.Path,
+            "session-1",
+            parentSessionId: "parent-1",
+            metadata: metadataDocument.RootElement.Clone());
+
+        var header = JsonDocument.Parse(File.ReadAllLines(filePath)[0]).RootElement;
+        Assert.Equal("parent-1", header.GetProperty("parentSessionId").GetString());
+        Assert.False(header.TryGetProperty("legacyParentSessionPath", out _));
+        Assert.Equal("agent", header.GetProperty("metadata").GetProperty("owner").GetString());
+
+        var loaded = await JsonlSessionStorage.LoadMetadataAsync(filePath);
+        Assert.Equal("parent-1", loaded.ParentSessionId);
+        Assert.Null(loaded.ParentSessionPath);
+        Assert.Equal("agent", loaded.Metadata?.GetProperty("owner").GetString());
     }
 
     [Fact]
@@ -182,6 +228,11 @@ public sealed class JsonlSessionStorageTests
         var loaded = await JsonlSessionStorage.OpenAsync(filePath);
         var entries = await loaded.GetEntriesAsync();
 
+        var compactionJson = File.ReadAllLines(filePath)
+            .Single(line => line.Contains("\"type\":\"compaction\"", StringComparison.Ordinal));
+        using var compactionDocument = JsonDocument.Parse(compactionJson);
+        Assert.Equal(JsonValueKind.Array, compactionDocument.RootElement.GetProperty("retainedTail").ValueKind);
+
         var custom = Assert.IsType<CustomSessionEntry>(entries[1]);
         var customData = Assert.IsType<JsonElement>(custom.Data);
         Assert.Equal("ok", customData.GetProperty("status").GetString());
@@ -257,6 +308,142 @@ public sealed class JsonlSessionStorageTests
     }
 
     [Fact]
+    public async Task OpenAsync_RoundTripsAllHarnessAgentMessageVariants()
+    {
+        using var temp = TempDirectory.Create();
+        var filePath = Path.Combine(temp.Path, "agent-messages.jsonl");
+        var storage = await JsonlSessionStorage.CreateAsync(filePath, temp.Path, "session-1");
+        var timestamp = DateTimeOffset.Parse("2026-01-01T00:00:00.000Z", System.Globalization.CultureInfo.InvariantCulture);
+
+        await storage.AppendEntryAsync(new MessageSessionEntry("bash", null, timestamp,
+            new AgentBashExecutionMessage("echo hi", "hi", 0, false, false, Timestamp: timestamp)));
+        await storage.AppendEntryAsync(new MessageSessionEntry("custom", "bash", timestamp,
+            new AgentCustomMessage("notice", [new TextContent("custom")], true, JsonDocument.Parse("{\"source\":\"test\"}").RootElement.Clone(), timestamp)));
+        await storage.AppendEntryAsync(new MessageSessionEntry("branch", "custom", timestamp,
+            new AgentBranchSummaryMessage("branch summary", "bash", timestamp)));
+        await storage.AppendEntryAsync(new MessageSessionEntry("compact", "branch", timestamp,
+            new AgentCompactionSummaryMessage("compaction summary", 12, timestamp)));
+
+        var loaded = await JsonlSessionStorage.OpenAsync(filePath);
+        var messages = (await loaded.GetEntriesAsync()).OfType<MessageSessionEntry>().Select(static entry => entry.Message).ToArray();
+
+        Assert.IsType<AgentBashExecutionMessage>(messages[0]);
+        Assert.IsType<AgentCustomMessage>(messages[1]);
+        Assert.IsType<AgentBranchSummaryMessage>(messages[2]);
+        Assert.IsType<AgentCompactionSummaryMessage>(messages[3]);
+        Assert.Contains("bashExecution", File.ReadAllText(filePath), StringComparison.Ordinal);
+        Assert.Contains("branchSummary", File.ReadAllText(filePath), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task OpenAsync_PreservesV4NestedMessageTimestampsAndUsageDiagnostics()
+    {
+        using var temp = TempDirectory.Create();
+        var filePath = Path.Combine(temp.Path, "message-fields.jsonl");
+        var storage = await JsonlSessionStorage.CreateAsync(filePath, temp.Path, "session-1");
+        var timestamp = DateTimeOffset.Parse("2026-01-01T00:00:00.000Z", System.Globalization.CultureInfo.InvariantCulture);
+        var usage = new Usage(10, 20, 3, 4, "standard", new UsageCost(1, 2, 3, 4))
+        {
+            CacheWrite1hTokens = 2,
+            ReasoningTokens = 5,
+            TotalTokens = 37
+        };
+        var assistant = new AssistantMessage([new TextContent("answer")])
+        {
+            Api = "test-api",
+            Provider = "test-provider",
+            Model = "test-model",
+            ResponseModel = "resolved-model",
+            ResponseId = "response-1",
+            StopReason = StopReason.EndTurn,
+            RawStopReason = "completed",
+            EndTurn = true,
+            Usage = usage,
+            Timestamp = timestamp,
+            Diagnostics = [new AssistantMessageDiagnostic { Type = "test", Timestamp = timestamp }]
+        };
+        await storage.AppendEntryAsync(new MessageSessionEntry("assistant", null, timestamp, assistant));
+
+        var raw = File.ReadAllText(filePath);
+        Assert.Contains("\"timestamp\":1767225600000", raw, StringComparison.Ordinal);
+        Assert.Contains("\"cacheWrite1h\":2", raw, StringComparison.Ordinal);
+        Assert.Contains("\"reasoning\":5", raw, StringComparison.Ordinal);
+
+        var loaded = await JsonlSessionStorage.OpenAsync(filePath);
+        var roundTripped = Assert.IsType<AssistantMessage>(Assert.IsType<MessageSessionEntry>((await loaded.GetEntriesAsync()).Single()).Message);
+        Assert.Equal(timestamp, roundTripped.Timestamp);
+        Assert.Equal(2, roundTripped.Usage?.CacheWrite1hTokens);
+        Assert.Equal(5, roundTripped.Usage?.ReasoningTokens);
+        Assert.Equal(37, roundTripped.Usage?.TotalTokens);
+        Assert.Equal("resolved-model", roundTripped.ResponseModel);
+        Assert.Equal("completed", roundTripped.RawStopReason);
+        Assert.True(roundTripped.EndTurn);
+        Assert.Single(roundTripped.Diagnostics!);
+    }
+
+    [Fact]
+    public async Task OpenAsync_RoundTripsToolCallArgumentsAsJsonObject()
+    {
+        using var temp = TempDirectory.Create();
+        var filePath = Path.Combine(temp.Path, "tool-call-arguments.jsonl");
+        var storage = await JsonlSessionStorage.CreateAsync(filePath, temp.Path, "session-1");
+        var timestamp = DateTimeOffset.Parse("2026-01-01T00:00:00.000Z", System.Globalization.CultureInfo.InvariantCulture);
+        var assistant = new AssistantMessage([
+            new ToolCallContent("call-1", "read", "{\"path\":\"README.md\"}")
+        ])
+        {
+            Api = "test-api",
+            Provider = "test-provider",
+            Model = "test-model",
+            Usage = new Usage(0, 0, 0, 0),
+            StopReason = StopReason.ToolUse,
+            Timestamp = timestamp
+        };
+
+        await storage.AppendEntryAsync(new MessageSessionEntry("assistant", null, timestamp, assistant));
+
+        var raw = File.ReadAllText(filePath);
+        Assert.Contains("\"arguments\":{\"path\":\"README.md\"}", raw, StringComparison.Ordinal);
+
+        var loaded = await JsonlSessionStorage.OpenAsync(filePath);
+        var message = Assert.IsType<AssistantMessage>(Assert.IsType<MessageSessionEntry>(
+            (await loaded.GetEntriesAsync()).Single()).Message);
+        var toolCall = Assert.IsType<ToolCallContent>(Assert.Single(message.Content));
+        Assert.Equal("{\"path\":\"README.md\"}", toolCall.Arguments);
+    }
+
+    [Fact]
+    public async Task OpenAsync_RoundTripsToolCallArgumentsAsJsonValue()
+    {
+        using var temp = TempDirectory.Create();
+        var filePath = Path.Combine(temp.Path, "tool-call-arguments-value.jsonl");
+        var storage = await JsonlSessionStorage.CreateAsync(filePath, temp.Path, "session-1");
+        var timestamp = DateTimeOffset.Parse("2026-01-01T00:00:00.000Z", System.Globalization.CultureInfo.InvariantCulture);
+        var assistant = new AssistantMessage([
+            new ToolCallContent("call-1", "read", "[1,true,{\"path\":\"README.md\"}]")
+        ])
+        {
+            Api = "test-api",
+            Provider = "test-provider",
+            Model = "test-model",
+            Usage = new Usage(0, 0, 0, 0),
+            StopReason = StopReason.ToolUse,
+            Timestamp = timestamp
+        };
+
+        await storage.AppendEntryAsync(new MessageSessionEntry("assistant", null, timestamp, assistant));
+
+        var raw = File.ReadAllText(filePath);
+        Assert.Contains("\"arguments\":[1,true,{\"path\":\"README.md\"}]", raw, StringComparison.Ordinal);
+
+        var loaded = await JsonlSessionStorage.OpenAsync(filePath);
+        var message = Assert.IsType<AssistantMessage>(Assert.IsType<MessageSessionEntry>(
+            (await loaded.GetEntriesAsync()).Single()).Message);
+        var toolCall = Assert.IsType<ToolCallContent>(Assert.Single(message.Content));
+        Assert.Equal("[1,true,{\"path\":\"README.md\"}]", toolCall.Arguments);
+    }
+
+    [Fact]
     public async Task AppendRecordAsync_PersistsRecordLogAcrossReload()
     {
         using var temp = TempDirectory.Create();
@@ -307,6 +494,26 @@ public sealed class JsonlSessionStorageTests
     }
 
     [Fact]
+    public async Task OpenAsync_ReplaysSecondaryLaneMutationsInFileOrder()
+    {
+        using var temp = TempDirectory.Create();
+        var filePath = Path.Combine(temp.Path, "session-v4-secondary-lane.jsonl");
+        var cwd = temp.Path.Replace("\\", "\\\\", StringComparison.Ordinal);
+        await File.WriteAllTextAsync(
+            filePath,
+            $"{{\"kind\":\"header\",\"version\":4,\"id\":\"session-1\",\"createdAt\":1,\"cwd\":\"{cwd}\"}}\n" +
+            "{\"kind\":\"lane\",\"seq\":1,\"lane\":\"review\",\"leafId\":null}\n" +
+            "{\"kind\":\"entry\",\"seq\":2,\"lane\":\"review\",\"id\":\"review-root\",\"parentId\":null,\"timestamp\":1,\"type\":\"custom\",\"customType\":\"note\"}\n" +
+            "{\"kind\":\"entry\",\"seq\":3,\"lane\":\"main\",\"id\":\"main-root\",\"parentId\":null,\"timestamp\":1,\"type\":\"custom\",\"customType\":\"note\"}\n");
+
+        var storage = await JsonlSessionStorage.OpenAsync(filePath);
+
+        Assert.Contains(await storage.GetLanesAsync(), lane => lane == new LanePointer("review", "review-root"));
+        Assert.Contains(await storage.GetLanesAsync(), lane => lane == new LanePointer("main", "main-root"));
+        Assert.Equal(["review-root", "main-root"], (await storage.GetLogAsync()).OfType<SessionEntryLogItem>().Select(item => item.Entry.Id));
+    }
+
+    [Fact]
     public async Task V4LaneAndFactMutations_SurviveReloadAndPreserveLogOrder()
     {
         using var temp = TempDirectory.Create();
@@ -329,6 +536,43 @@ public sealed class JsonlSessionStorageTests
         var log = await loaded.GetLogAsync();
         Assert.Equal(["entry", "lane", "fact", "fact"], log.Select(item => item.Kind));
         Assert.True(log.Zip(log.Skip(1), (left, right) => left.Sequence < right.Sequence).All(static result => result));
+    }
+
+    [Fact]
+    public async Task QueueCancellation_OmitsOptionalNullRunId()
+    {
+        using var temp = TempDirectory.Create();
+        var filePath = Path.Combine(temp.Path, "queue-cancelled.jsonl");
+        var storage = await JsonlSessionStorage.CreateAsync(filePath, temp.Path, "session-1");
+
+        await storage.AppendRecordAsync(new QueueCancelledRecord(
+            "cancel-1",
+            1,
+            "main",
+            DateTimeOffset.UnixEpoch.AddMilliseconds(1),
+            "entry-1"));
+
+        var raw = File.ReadAllText(filePath);
+        Assert.DoesNotContain("runId", raw, StringComparison.Ordinal);
+        var loaded = await JsonlSessionStorage.OpenAsync(filePath);
+        Assert.Single(await loaded.FindRecordsAsync());
+    }
+
+    [Fact]
+    public async Task OpenAsync_RejectsNegativeOptionalUsageToken()
+    {
+        using var temp = TempDirectory.Create();
+        var filePath = Path.Combine(temp.Path, "invalid-usage.jsonl");
+        var cwd = temp.Path.Replace("\\", "\\\\", StringComparison.Ordinal);
+        await File.WriteAllTextAsync(
+            filePath,
+            $"{{\"kind\":\"header\",\"version\":4,\"id\":\"session-1\",\"createdAt\":1,\"cwd\":\"{cwd}\"}}\n" +
+            "{\"kind\":\"record\",\"seq\":1,\"id\":\"usage-1\",\"lane\":\"main\",\"timestamp\":1,\"type\":\"usage\",\"cause\":\"adjustment\",\"usage\":{\"input\":0,\"output\":0,\"cacheRead\":0,\"cacheWrite\":0,\"cacheWrite1h\":-1,\"totalTokens\":0,\"cost\":{\"input\":0,\"output\":0,\"cacheRead\":0,\"cacheWrite\":0,\"total\":0}}}\n");
+
+        var exception = await Assert.ThrowsAsync<SessionException>(() => JsonlSessionStorage.OpenAsync(filePath));
+
+        Assert.Equal("invalid_entry", exception.Code);
+        Assert.Contains("usage.cacheWrite1h", exception.Message, StringComparison.Ordinal);
     }
 
     private sealed class TempDirectory : IDisposable

@@ -1,3 +1,5 @@
+using System.Text.Json;
+
 namespace Tau.AgentCore.Harness.Session;
 
 public sealed class JsonlSessionRepo
@@ -13,6 +15,8 @@ public sealed class JsonlSessionRepo
         string cwd,
         string? id = null,
         string? parentSessionPath = null,
+        string? parentSessionId = null,
+        JsonElement? metadata = null,
         CancellationToken cancellationToken = default)
     {
         var sessionId = id ?? SessionRepoUtilities.CreateSessionId();
@@ -28,9 +32,32 @@ public sealed class JsonlSessionRepo
             cwd,
             sessionId,
             parentSessionPath,
+            parentSessionId,
+            metadata,
             cancellationToken).ConfigureAwait(false);
         return new AgentHarnessSession<JsonlSessionMetadata>(storage);
     }
+
+    /// <summary>
+    /// 保留旧版参数顺序的 session 创建入口，避免旧调用把取消令牌误解析为 parentSessionId。
+    /// </summary>
+    /// <param name="cwd">session 工作目录。</param>
+    /// <param name="id">可选的 session id。</param>
+    /// <param name="parentSessionPath">旧版父 session 文件路径。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>已创建的 JSONL harness session。</returns>
+    public Task<AgentHarnessSession<JsonlSessionMetadata>> CreateAsync(
+        string cwd,
+        string? id,
+        string? parentSessionPath,
+        CancellationToken cancellationToken) =>
+        CreateAsync(
+            cwd,
+            id,
+            parentSessionPath,
+            parentSessionId: null,
+            metadata: null,
+            cancellationToken: cancellationToken);
 
     public async Task<AgentHarnessSession<JsonlSessionMetadata>> OpenAsync(
         JsonlSessionMetadata metadata,
@@ -99,8 +126,9 @@ public sealed class JsonlSessionRepo
         var session = await CreateAsync(
             cwd,
             options.Id,
-            parentSessionPath ?? sourceMetadata.Path,
-            cancellationToken).ConfigureAwait(false);
+            parentSessionPath,
+            parentSessionId: parentSessionPath is null ? sourceMetadata.Id : null,
+            cancellationToken: cancellationToken).ConfigureAwait(false);
         foreach (var entry in forkedEntries)
         {
             await session.GetStorage().AppendEntryAsync(entry, cancellationToken).ConfigureAwait(false);

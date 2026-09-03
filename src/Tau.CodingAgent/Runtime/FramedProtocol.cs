@@ -221,6 +221,7 @@ public sealed class ServerMessageDecoder
     }
 }
 
+#if false
 /// <summary>远程 session 的连接生命周期。</summary>
 public enum RemoteSessionLifecycle { Unbound, Ready, Busy, Disposed }
 
@@ -416,3 +417,4 @@ public sealed class RemoteSession : IAsyncDisposable
     }
     private sealed class DelegateSubscription(Action action) : IDisposable { public void Dispose() => action(); }
 }
+#endif

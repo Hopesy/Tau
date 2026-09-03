@@ -73,7 +73,7 @@ internal static class ProtocolMessages
                 ExactKeys(command, ["command"]);
                 break;
             case "create":
-                ExactKeys(command, ["command", "cwd", "name", "model", "thinkingLevel"], optional: ["cwd", "name", "model", "thinkingLevel"]);
+                ExactKeys(command, ["command"], optional: ["cwd", "name", "model", "thinkingLevel"]);
                 OptionalNonEmptyString(command, "cwd");
                 OptionalString(command, "name");
                 if (command.TryGetValue("model", out var createModel)) ValidateModelRef(RequireMap(createModel, "create model"));
@@ -128,7 +128,8 @@ internal static class ProtocolMessages
     /// <summary>校验 response envelope 的成功和失败分支。</summary>
     private static void ValidateResponseEnvelope(IReadOnlyDictionary<string, object?> map)
     {
-        ExactKeys(map, ["type", "id", "ok", "result", "error"] , optional: ["result", "error"]);
+        // result 与 error 按 ok 分支二选一，不能同时要求存在
+        ExactKeys(map, ["type", "id", "ok"], optional: ["result", "error"]);
         RequireString(map, "id", "response id");
         var ok = RequireBoolean(map, "ok");
         if (ok)
@@ -217,7 +218,7 @@ internal static class ProtocolMessages
     /// <summary>校验 session metadata。</summary>
     private static void ValidateSessionMetadata(IReadOnlyDictionary<string, object?> metadata)
     {
-        ExactKeys(metadata, ["id", "createdAt", "updatedAt", "parentSessionId", "sessionName", "cwd"], optional: ["updatedAt", "parentSessionId", "sessionName", "cwd"]);
+        ExactKeys(metadata, ["id", "createdAt"], optional: ["updatedAt", "parentSessionId", "sessionName", "cwd"]);
         RequireString(metadata, "id", "session id");
         RequireInteger(metadata, "createdAt", minimum: 0);
         OptionalInteger(metadata, "updatedAt", minimum: 0);
@@ -229,7 +230,7 @@ internal static class ProtocolMessages
     /// <summary>校验完整 session snapshot。</summary>
     private static void ValidateSessionSnapshot(IReadOnlyDictionary<string, object?> snapshot)
     {
-        ExactKeys(snapshot, ["id", "name", "cwd", "createdAt", "updatedAt", "phase", "model", "thinkingLevel", "attached", "locked", "revision", "transcript", "queuedSteer", "queuedSteerCount"], optional: ["name"]);
+        ExactKeys(snapshot, ["id", "cwd", "createdAt", "updatedAt", "phase", "model", "thinkingLevel", "attached", "locked", "revision", "transcript", "queuedSteer", "queuedSteerCount"], optional: ["name"]);
         RequireString(snapshot, "id", "session id");
         OptionalString(snapshot, "name");
         RequireString(snapshot, "cwd", "working directory");
@@ -286,7 +287,7 @@ internal static class ProtocolMessages
     /// <summary>校验协议错误。</summary>
     private static void ValidateProtocolError(IReadOnlyDictionary<string, object?> error)
     {
-        ExactKeys(error, ["code", "message", "details"], optional: ["details"]);
+        ExactKeys(error, ["code", "message"], optional: ["details"]);
         RequireStringIn(error, "code", ["version", "busy", "session_locked", "not_found", "invalid_request", "not_implemented", "internal_error"]);
         RequireString(error, "message", "error message", allowEmpty: true);
         if (error.TryGetValue("details", out var details)) ValidateJsonValue(details);
@@ -350,7 +351,7 @@ internal static class ProtocolMessages
     /// <summary>校验 assistant transcript item。</summary>
     private static void ValidateAssistantTranscriptItem(IReadOnlyDictionary<string, object?> item)
     {
-        ExactKeys(item, ["id", "role", "content", "model", "responseModel", "usage", "timestamp", "status", "stopReason", "errorMessage"], optional: ["responseModel", "usage", "stopReason", "errorMessage"]);
+        ExactKeys(item, ["id", "role", "content", "model", "timestamp", "status"], optional: ["responseModel", "usage", "stopReason", "errorMessage"]);
         RequireString(item, "id", "assistant item id");
         if (!string.Equals(RequireString(item, "role", "assistant role"), "assistant", StringComparison.Ordinal)) throw Invalid("Invalid assistant role");
         foreach (var content in RequireArray(item, "content")) ValidateContent(RequireMap(content, "assistant content"), assistant: true, tool: false);
@@ -369,7 +370,7 @@ internal static class ProtocolMessages
     /// <summary>校验 tool transcript item。</summary>
     private static void ValidateToolTranscriptItem(IReadOnlyDictionary<string, object?> item)
     {
-        ExactKeys(item, ["id", "role", "toolCallId", "toolName", "input", "content", "details", "usage", "timestamp", "status", "isError"], optional: ["details", "usage"]);
+        ExactKeys(item, ["id", "role", "toolCallId", "toolName", "input", "content", "timestamp", "status", "isError"], optional: ["details", "usage"]);
         RequireString(item, "id", "tool item id");
         if (RequireString(item, "role", "tool role") != "tool") throw Invalid("Invalid tool role");
         RequireString(item, "toolCallId", "tool call id");
@@ -395,7 +396,7 @@ internal static class ProtocolMessages
                 RequireString(content, "text", "text content", allowEmpty: true);
                 break;
             case "thinking" when assistant:
-                ExactKeys(content, ["type", "thinking", "redacted"], optional: ["redacted"]);
+                ExactKeys(content, ["type", "thinking"], optional: ["redacted"]);
                 RequireString(content, "thinking", "thinking content", allowEmpty: true);
                 if (content.TryGetValue("redacted", out var redacted) && redacted is not bool) throw Invalid("Invalid thinking redacted flag");
                 break;
@@ -418,7 +419,7 @@ internal static class ProtocolMessages
     /// <summary>校验用量结构。</summary>
     private static void ValidateUsage(IReadOnlyDictionary<string, object?> usage)
     {
-        ExactKeys(usage, ["input", "output", "cacheRead", "cacheWrite", "reasoning", "totalTokens", "cost"], optional: ["reasoning"]);
+        ExactKeys(usage, ["input", "output", "cacheRead", "cacheWrite", "totalTokens", "cost"], optional: ["reasoning"]);
         RequireInteger(usage, "input", minimum: 0);
         RequireInteger(usage, "output", minimum: 0);
         RequireInteger(usage, "cacheRead", minimum: 0);

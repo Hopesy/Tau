@@ -13,20 +13,53 @@ public sealed class JsonlSessionStorage : ISessionStorage<JsonlSessionMetadata>
         JsonlSessionMetadata metadata,
         IEnumerable<SessionTreeEntry> entries,
         IEnumerable<LaneRecord>? records = null,
-        IEnumerable<SessionLogItem>? mutations = null)
+        IEnumerable<SessionLogItem>? mutations = null,
+        bool laneLessEntriesMoveMain = true)
     {
         _filePath = filePath;
-        _storage = new InMemorySessionStorage<JsonlSessionMetadata>(metadata, entries, records);
-        foreach (var mutation in mutations ?? [])
+        if (metadata.SourceFormat == 4)
         {
-            switch (mutation)
+            // v4 必须按文件共享序号回放，lane mutation 可能出现在 secondary lane entry 之前
+            _storage = new InMemorySessionStorage<JsonlSessionMetadata>(metadata, laneLessEntriesMoveMain: false);
+            var ordered = entries
+                .Select(static entry => new SessionEntryLogItem(entry.Sequence, entry) as SessionLogItem)
+                .Concat((records ?? []).Select(static record => new SessionRecordLogItem(record.Sequence, record)))
+                .Concat(mutations ?? [])
+                .OrderBy(static item => item.Sequence)
+                .ToArray();
+            foreach (var mutation in ordered)
             {
-                case SessionLaneLogItem lane:
-                    _storage.ApplyLaneMutation(lane.Sequence, lane.Lane, lane.LeafId);
-                    break;
-                case SessionFactLogItem fact:
-                    _storage.ApplyFactMutation(fact.Sequence, fact.Fact, fact.TargetId, fact.Value);
-                    break;
+                switch (mutation)
+                {
+                    case SessionEntryLogItem entry:
+                        _storage.ApplyEntryMutation(entry.Sequence, entry.Entry);
+                        break;
+                    case SessionRecordLogItem record:
+                        _storage.ApplyRecordMutation(record.Sequence, record.Record);
+                        break;
+                    case SessionLaneLogItem lane:
+                        _storage.ApplyLaneMutation(lane.Sequence, lane.Lane, lane.LeafId, requireConsecutiveSequence: true);
+                        break;
+                    case SessionFactLogItem fact:
+                        _storage.ApplyFactMutation(fact.Sequence, fact.Fact, fact.TargetId, fact.Value, requireConsecutiveSequence: true);
+                        break;
+                }
+            }
+        }
+        else
+        {
+            _storage = new InMemorySessionStorage<JsonlSessionMetadata>(metadata, entries, records, laneLessEntriesMoveMain);
+            foreach (var mutation in mutations ?? [])
+            {
+                switch (mutation)
+                {
+                    case SessionLaneLogItem lane:
+                        _storage.ApplyLaneMutation(lane.Sequence, lane.Lane, lane.LeafId);
+                        break;
+                    case SessionFactLogItem fact:
+                        _storage.ApplyFactMutation(fact.Sequence, fact.Fact, fact.TargetId, fact.Value);
+                        break;
+                }
             }
         }
     }
@@ -36,6 +69,8 @@ public sealed class JsonlSessionStorage : ISessionStorage<JsonlSessionMetadata>
         string cwd,
         string sessionId,
         string? parentSessionPath = null,
+        string? parentSessionId = null,
+        JsonElement? metadata = null,
         CancellationToken cancellationToken = default)
     {
         var fullPath = System.IO.Path.GetFullPath(filePath);
@@ -54,25 +89,56 @@ public sealed class JsonlSessionStorage : ISessionStorage<JsonlSessionMetadata>
             cwd,
             parentSessionPath)
         {
+            ParentSessionId = parentSessionId,
             LegacyParentSessionPath = parentSessionPath
         };
+        if (parentSessionId is not null && parentSessionPath is not null)
+            throw new ArgumentException("v4 header cannot contain both parentSessionId and parentSessionPath.", nameof(parentSessionPath));
+        if (metadata is { } metadataValue && metadataValue.ValueKind != JsonValueKind.Object)
+            throw new ArgumentException("v4 header metadata must be a JSON object.", nameof(metadata));
+        header = header with { Metadata = metadata };
         await File.WriteAllTextAsync(
             fullPath,
             JsonlSessionSerialization.SerializeV4Header(
                 sessionId,
                 createdAt,
                 cwd,
-                legacyParentSessionPath: parentSessionPath),
+                parentSessionId: parentSessionId,
+                legacyParentSessionPath: parentSessionPath,
+                metadata: metadata),
             cancellationToken).ConfigureAwait(false);
         return new JsonlSessionStorage(fullPath, ToMetadata(header, fullPath), []);
     }
+
+    /// <summary>
+    /// 保留旧版参数顺序的 JSONL session 创建入口，避免把取消令牌误当作 parentSessionId。
+    /// </summary>
+    /// <param name="filePath">session 文件路径。</param>
+    /// <param name="cwd">session 工作目录。</param>
+    /// <param name="sessionId">session id。</param>
+    /// <param name="parentSessionPath">旧版父 session 路径。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>已创建的 JSONL session storage。</returns>
+    public static Task<JsonlSessionStorage> CreateAsync(
+        string filePath,
+        string cwd,
+        string sessionId,
+        string? parentSessionPath,
+        CancellationToken cancellationToken) =>
+        CreateAsync(filePath, cwd, sessionId, parentSessionPath, null, null, cancellationToken);
 
     public static async Task<JsonlSessionStorage> OpenAsync(
         string filePath,
         CancellationToken cancellationToken = default)
     {
         var loaded = await LoadAsync(filePath, cancellationToken).ConfigureAwait(false);
-        return new JsonlSessionStorage(loaded.FilePath, ToMetadata(loaded.Header, loaded.FilePath), loaded.Entries, loaded.Records, loaded.Mutations);
+        return new JsonlSessionStorage(
+            loaded.FilePath,
+            ToMetadata(loaded.Header, loaded.FilePath),
+            loaded.Entries,
+            loaded.Records,
+            loaded.Mutations,
+            laneLessEntriesMoveMain: loaded.Header.Version != 4);
     }
 
     public static async Task<JsonlSessionMetadata> LoadMetadataAsync(
@@ -127,8 +193,13 @@ public sealed class JsonlSessionStorage : ISessionStorage<JsonlSessionMetadata>
         await _writeGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            var persistedEntry = entry with { Sequence = _storage.PeekNextSequence() };
-            var line = JsonlSessionSerialization.SerializeEntry(persistedEntry) + "\n";
+            // v4 本地追加属于 main lane；只有导入 entry 才省略 lane 字段
+            var persistedEntry = entry with
+            {
+                Sequence = _storage.PeekNextSequence(),
+                Lane = entry.Lane ?? "main"
+            };
+            var line = JsonlSessionSerialization.SerializeV4Entry(persistedEntry);
             await using var stream = new FileStream(
                 _filePath,
                 FileMode.Append,
@@ -366,6 +437,7 @@ public sealed class JsonlSessionStorage : ISessionStorage<JsonlSessionMetadata>
         var entries = new List<SessionTreeEntry>();
         var records = new List<LaneRecord>();
         var mutations = new List<SessionLogItem>();
+        var replay = header.Version == 4 ? new ReplayValidationState() : null;
         for (var i = 1; i < nonEmptyLines.Length; i++)
         {
             try
@@ -383,37 +455,60 @@ public sealed class JsonlSessionStorage : ISessionStorage<JsonlSessionMetadata>
                 using (lineDocument)
                 {
                     var root = lineDocument?.RootElement;
+                    if (header.Version == 4 &&
+                        (root is not { ValueKind: JsonValueKind.Object } ||
+                         !root.Value.TryGetProperty("kind", out var mutationKind) ||
+                         mutationKind.ValueKind != JsonValueKind.String ||
+                         mutationKind.GetString() is not ("entry" or "record" or "lane" or "fact")))
+                        throw InvalidMutation(fullPath, i + 1, "has unknown mutation kind");
                     if (root is { ValueKind: JsonValueKind.Object } &&
                         root.Value.TryGetProperty("kind", out var kind) &&
                         kind.ValueKind == JsonValueKind.String &&
                         kind.GetString() == "record")
                     {
-                        records.Add(JsonlSessionSerialization.ParseRecord(nonEmptyLines[i], fullPath, i + 1));
+                        var record = JsonlSessionSerialization.ParseRecord(nonEmptyLines[i], fullPath, i + 1);
+                        records.Add(record);
+                        replay?.ApplyRecord(record, fullPath, i + 1);
                     }
                     else if (root is { ValueKind: JsonValueKind.Object } &&
                              root.Value.TryGetProperty("kind", out kind) &&
                              kind.ValueKind == JsonValueKind.String &&
                              kind.GetString() == "lane")
                     {
-                        var sequence = root.Value.GetProperty("seq").GetInt64();
-                        var lane = root.Value.GetProperty("lane").GetString() ?? throw new SessionException("invalid_entry", $"line {i + 1} is missing lane");
-                        var leafId = root.Value.TryGetProperty("leafId", out var leaf) && leaf.ValueKind != JsonValueKind.Null ? leaf.GetString() : null;
+                        var sequence = RequiredMutationSequence(root.Value, fullPath, i + 1);
+                        var lane = RequiredMutationString(root.Value, "lane", fullPath, i + 1);
+                        var leafId = RequiredNullableMutationString(root.Value, "leafId", fullPath, i + 1);
                         mutations.Add(new SessionLaneLogItem(sequence, lane, leafId));
+                        replay?.ApplyLane(sequence, lane, leafId, fullPath, i + 1);
                     }
                     else if (root is { ValueKind: JsonValueKind.Object } &&
                              root.Value.TryGetProperty("kind", out kind) &&
                              kind.ValueKind == JsonValueKind.String &&
                              kind.GetString() == "fact")
                     {
-                        var sequence = root.Value.GetProperty("seq").GetInt64();
-                        var fact = root.Value.GetProperty("fact").GetString() ?? throw new SessionException("invalid_entry", $"line {i + 1} is missing fact");
-                        var targetId = root.Value.TryGetProperty("targetId", out var target) && target.ValueKind != JsonValueKind.Null ? target.GetString() : null;
-                        var value = root.Value.TryGetProperty(fact.Equals("name", StringComparison.Ordinal) ? "name" : "label", out var factValue) && factValue.ValueKind != JsonValueKind.Null ? factValue.GetString() : null;
+                        var sequence = RequiredMutationSequence(root.Value, fullPath, i + 1);
+                        var fact = RequiredMutationString(root.Value, "fact", fullPath, i + 1);
+                        if (fact is not ("name" or "label"))
+                            throw InvalidMutation(fullPath, i + 1, "has unsupported fact type");
+                        var targetId = fact == "label"
+                            ? RequiredMutationString(root.Value, "targetId", fullPath, i + 1)
+                            : null;
+                        var value = OptionalMutationString(root.Value, fact, fullPath, i + 1);
                         mutations.Add(new SessionFactLogItem(sequence, fact, targetId, value));
+                        replay?.ApplyFact(sequence, fact, targetId, value, fullPath, i + 1);
                     }
                     else
                     {
-                        entries.Add(JsonlSessionSerialization.ParseEntry(nonEmptyLines[i], fullPath, i + 1));
+                        if (header.Version == 4 &&
+                            root!.Value.TryGetProperty("lane", out var laneValue) &&
+                            laneValue.ValueKind != JsonValueKind.String)
+                        {
+                            // v4 imported entries may omit lane, but an explicit null or non-string is invalid
+                            throw InvalidMutation(fullPath, i + 1, "has invalid lane");
+                        }
+                        var entry = JsonlSessionSerialization.ParseEntry(nonEmptyLines[i], fullPath, i + 1);
+                        entries.Add(entry);
+                        replay?.ApplyEntry(entry, root!.Value.TryGetProperty("lane", out var explicitLane), fullPath, i + 1);
                     }
                 }
             }
@@ -434,6 +529,151 @@ public sealed class JsonlSessionStorage : ISessionStorage<JsonlSessionMetadata>
 
         return (fullPath, header, entries, records, mutations);
     }
+
+    /// <summary>按文件顺序校验 v4 mutation 的共享序号、引用关系和 lane 约束。</summary>
+    private sealed class ReplayValidationState
+    {
+        private long _nextSequence;
+        private readonly HashSet<string> _usedIds = new(StringComparer.Ordinal);
+        private readonly HashSet<string> _entryIds = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, string?> _lanes = new(StringComparer.Ordinal) { ["main"] = null };
+
+        /// <summary>校验并登记一条 entry mutation。</summary>
+        /// <param name="entry">entry 数据。</param>
+        /// <param name="hasLane">原始 JSON 是否包含 lane 字段。</param>
+        /// <param name="filePath">文件路径。</param>
+        /// <param name="lineNumber">行号。</param>
+        public void ApplyEntry(SessionTreeEntry entry, bool hasLane, string filePath, int lineNumber)
+        {
+            EnsureSequence(entry.Sequence, filePath, lineNumber);
+            if (!_usedIds.Add(entry.Id)) throw InvalidMutation(filePath, lineNumber, $"contains duplicate id {entry.Id}");
+            if (entry.ParentId is not null && !_entryIds.Contains(entry.ParentId))
+                throw InvalidMutation(filePath, lineNumber, $"references missing parent {entry.ParentId}");
+            if (hasLane)
+            {
+                if (entry.Lane is null || !_lanes.TryGetValue(entry.Lane, out var leafId))
+                    throw InvalidMutation(filePath, lineNumber, $"references missing lane {entry.Lane}");
+                if (!string.Equals(entry.ParentId, leafId, StringComparison.Ordinal))
+                    throw InvalidMutation(filePath, lineNumber, "does not chain to the lane leaf");
+                _lanes[entry.Lane] = entry.Id;
+            }
+            _entryIds.Add(entry.Id);
+        }
+
+        /// <summary>校验并登记一条 record mutation。</summary>
+        /// <param name="record">record 数据。</param>
+        /// <param name="filePath">文件路径。</param>
+        /// <param name="lineNumber">行号。</param>
+        public void ApplyRecord(LaneRecord record, string filePath, int lineNumber)
+        {
+            EnsureSequence(record.Sequence, filePath, lineNumber);
+            if (!_lanes.ContainsKey(record.Lane))
+                throw InvalidMutation(filePath, lineNumber, $"references missing lane {record.Lane}");
+            if (!_usedIds.Add(record.Id)) throw InvalidMutation(filePath, lineNumber, $"contains duplicate id {record.Id}");
+        }
+
+        /// <summary>校验并登记一条 lane mutation。</summary>
+        /// <param name="sequence">共享序号。</param>
+        /// <param name="lane">lane 名称。</param>
+        /// <param name="leafId">目标叶节点。</param>
+        /// <param name="filePath">文件路径。</param>
+        /// <param name="lineNumber">行号。</param>
+        public void ApplyLane(long sequence, string lane, string? leafId, string filePath, int lineNumber)
+        {
+            EnsureSequence(sequence, filePath, lineNumber);
+            if (leafId is not null && !_entryIds.Contains(leafId))
+                throw InvalidMutation(filePath, lineNumber, $"references missing lane target {leafId}");
+            _lanes[lane] = leafId;
+        }
+
+        /// <summary>校验并登记一条 fact mutation。</summary>
+        /// <param name="sequence">共享序号。</param>
+        /// <param name="fact">fact 类型。</param>
+        /// <param name="targetId">label 目标。</param>
+        /// <param name="value">fact 值。</param>
+        /// <param name="filePath">文件路径。</param>
+        /// <param name="lineNumber">行号。</param>
+        public void ApplyFact(long sequence, string fact, string? targetId, string? value, string filePath, int lineNumber)
+        {
+            EnsureSequence(sequence, filePath, lineNumber);
+            if (fact == "label" && (targetId is null || !_entryIds.Contains(targetId)))
+                throw InvalidMutation(filePath, lineNumber, $"references missing label target {targetId}");
+        }
+
+        /// <summary>校验 v4 mutation 是否使用连续正整数序号。</summary>
+        /// <param name="sequence">待校验序号。</param>
+        /// <param name="filePath">文件路径。</param>
+        /// <param name="lineNumber">行号。</param>
+        private void EnsureSequence(long sequence, string filePath, int lineNumber)
+        {
+            if (sequence <= 0 || sequence != _nextSequence + 1)
+                throw InvalidMutation(filePath, lineNumber, $"has non-consecutive seq {sequence}");
+            _nextSequence = sequence;
+        }
+    }
+
+    /// <summary>校验 lane/fact mutation 的正整数序列号。</summary>
+    /// <param name="root">mutation JSON 对象。</param>
+    /// <param name="filePath">源文件路径。</param>
+    /// <param name="lineNumber">源文件行号。</param>
+    /// <returns>合法的共享序列号。</returns>
+    private static long RequiredMutationSequence(JsonElement root, string filePath, int lineNumber)
+    {
+        if (!root.TryGetProperty("seq", out var value) || !value.TryGetInt64(out var sequence) || sequence <= 0)
+            throw InvalidMutation(filePath, lineNumber, "has invalid seq");
+        return sequence;
+    }
+
+    /// <summary>读取 mutation 中的非空字符串字段。</summary>
+    /// <param name="root">mutation JSON 对象。</param>
+    /// <param name="name">字段名称。</param>
+    /// <param name="filePath">源文件路径。</param>
+    /// <param name="lineNumber">源文件行号。</param>
+    /// <returns>字段字符串。</returns>
+    private static string RequiredMutationString(JsonElement root, string name, string filePath, int lineNumber)
+    {
+        if (!root.TryGetProperty(name, out var value) || value.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(value.GetString()))
+            throw InvalidMutation(filePath, lineNumber, $"is missing or invalid {name}");
+        return value.GetString()!;
+    }
+
+    /// <summary>读取允许为 null 的 mutation 字符串字段。</summary>
+    /// <param name="root">mutation JSON 对象。</param>
+    /// <param name="name">字段名称。</param>
+    /// <param name="filePath">源文件路径。</param>
+    /// <param name="lineNumber">源文件行号。</param>
+    /// <returns>字段字符串或 null。</returns>
+    private static string? OptionalMutationString(JsonElement root, string name, string filePath, int lineNumber)
+    {
+        if (!root.TryGetProperty(name, out var value) || value.ValueKind == JsonValueKind.Null) return null;
+        if (value.ValueKind != JsonValueKind.String)
+            throw InvalidMutation(filePath, lineNumber, $"has invalid {name}");
+        return value.GetString();
+    }
+
+    /// <summary>读取必须出现但允许为 null 的 mutation 字符串字段。</summary>
+    /// <param name="root">mutation JSON 对象。</param>
+    /// <param name="name">字段名称。</param>
+    /// <param name="filePath">源文件路径。</param>
+    /// <param name="lineNumber">源文件行号。</param>
+    /// <returns>字段字符串或 null。</returns>
+    private static string? RequiredNullableMutationString(JsonElement root, string name, string filePath, int lineNumber)
+    {
+        if (!root.TryGetProperty(name, out var value))
+            throw InvalidMutation(filePath, lineNumber, $"is missing {name}");
+        if (value.ValueKind == JsonValueKind.Null) return null;
+        if (value.ValueKind != JsonValueKind.String)
+            throw InvalidMutation(filePath, lineNumber, $"has invalid {name}");
+        return value.GetString();
+    }
+
+    /// <summary>生成统一的 mutation 格式错误。</summary>
+    /// <param name="filePath">源文件路径。</param>
+    /// <param name="lineNumber">源文件行号。</param>
+    /// <param name="message">错误描述。</param>
+    /// <returns>invalid_entry 异常。</returns>
+    private static SessionException InvalidMutation(string filePath, int lineNumber, string message) =>
+        new("invalid_entry", $"Invalid JSONL session file {filePath}: line {lineNumber} {message}");
 
     /// <summary>向 JSONL 文件追加一行并确保写入落盘。</summary>
     /// <param name="line">包含换行符的 JSON 行。</param>
@@ -472,7 +712,8 @@ public sealed class JsonlSessionStorage : ISessionStorage<JsonlSessionMetadata>
             header.Timestamp,
             header.Cwd,
             filePath,
-            header.ParentSession)
+            // v4 的 ParentSession 是兼容性投影，不能把 parentSessionId 当成旧路径
+            header.Version == 4 ? header.LegacyParentSessionPath : header.ParentSession)
         {
             SourceFormat = header.Version,
             ParentSessionId = header.ParentSessionId,

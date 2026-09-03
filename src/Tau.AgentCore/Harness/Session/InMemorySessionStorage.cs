@@ -19,7 +19,8 @@ public sealed class InMemorySessionStorage<TMetadata> : ISessionStorage<TMetadat
     public InMemorySessionStorage(
         TMetadata? metadata = null,
         IEnumerable<SessionTreeEntry>? entries = null,
-        IEnumerable<LaneRecord>? records = null)
+        IEnumerable<LaneRecord>? records = null,
+        bool laneLessEntriesMoveMain = true)
     {
         _metadata = metadata ?? (TMetadata)(object)new SessionMetadata(UuidV7.Create(), CreateTimestamp());
         _entries = entries?.ToList() ?? [];
@@ -36,11 +37,17 @@ public sealed class InMemorySessionStorage<TMetadata> : ISessionStorage<TMetadat
             _entrySequences[entry.Id] = sequence;
             _nextSequence = Math.Max(_nextSequence, sequence);
             UpdateLabelCache(_labelsById, entry);
-            _leafId = LeafIdAfterEntry(entry);
             if (entry.Lane is not null)
+            {
                 _lanes[entry.Lane] = entry.Id;
-            else
+                if (entry.Lane.Equals("main", StringComparison.Ordinal))
+                    _leafId = LeafIdAfterEntry(entry);
+            }
+            else if (laneLessEntriesMoveMain)
+            {
+                _leafId = LeafIdAfterEntry(entry);
                 _lanes["main"] = _leafId;
+            }
             _log.Add(new SessionEntryLogItem(sequence, entry));
         }
 
@@ -513,8 +520,13 @@ public sealed class InMemorySessionStorage<TMetadata> : ISessionStorage<TMetadat
             throw new SessionException("already_exists", $"Session id already exists: {entry.Id}");
         if (entry.ParentId is not null && !_byId.ContainsKey(entry.ParentId))
             throw new SessionException("not_found", $"Entry {entry.ParentId} not found");
-        if (entry.Lane is not null && !_lanes.ContainsKey(entry.Lane))
-            throw new SessionException("invalid_lane", $"Lane not found: {entry.Lane}");
+        if (entry.Lane is not null)
+        {
+            if (!_lanes.TryGetValue(entry.Lane, out var laneLeaf))
+                throw new SessionException("invalid_lane", $"Lane not found: {entry.Lane}");
+            if (!string.Equals(entry.ParentId, laneLeaf, StringComparison.Ordinal))
+                throw new SessionException("invalid_entry", $"Entry {entry.Id} does not chain to the lane leaf");
+        }
         var sequence = entry.Sequence > _nextSequence ? entry.Sequence : _nextSequence + 1;
         entry = entry with { Sequence = sequence };
         _nextSequence = sequence;
@@ -522,13 +534,15 @@ public sealed class InMemorySessionStorage<TMetadata> : ISessionStorage<TMetadat
         _byId[entry.Id] = entry;
         _entrySequences[entry.Id] = sequence;
         UpdateLabelCache(_labelsById, entry);
-        _leafId = LeafIdAfterEntry(entry);
         if (entry.Lane is not null)
         {
             _lanes[entry.Lane] = entry.Id;
+            if (entry.Lane.Equals("main", StringComparison.Ordinal))
+                _leafId = LeafIdAfterEntry(entry);
         }
         else
         {
+            _leafId = LeafIdAfterEntry(entry);
             _lanes["main"] = _leafId;
         }
         _log.Add(new SessionEntryLogItem(sequence, entry));
@@ -601,10 +615,12 @@ public sealed class InMemorySessionStorage<TMetadata> : ISessionStorage<TMetadat
     /// <param name="sequence">mutation 共享序号。</param>
     /// <param name="lane">lane 名称。</param>
     /// <param name="leafId">lane 叶节点。</param>
-    internal void ApplyLaneMutation(long sequence, string lane, string? leafId)
+    internal void ApplyLaneMutation(long sequence, string lane, string? leafId, bool requireConsecutiveSequence = false)
     {
         lock (_gate)
         {
+            if (requireConsecutiveSequence)
+                EnsureReplaySequence(sequence);
             ValidateTargetCore(leafId);
             _lanes[lane] = leafId;
             if (lane.Equals("main", StringComparison.Ordinal))
@@ -615,15 +631,85 @@ public sealed class InMemorySessionStorage<TMetadata> : ISessionStorage<TMetadat
         }
     }
 
+    /// <summary>
+    /// 按 v4 文件顺序回放一条 entry mutation，并严格校验共享序号、父链和 lane 叶节点。
+    /// </summary>
+    /// <param name="sequence">文件中的共享序号。</param>
+    /// <param name="entry">entry 数据。</param>
+    internal void ApplyEntryMutation(long sequence, SessionTreeEntry entry)
+    {
+        ArgumentNullException.ThrowIfNull(entry);
+        lock (_gate)
+        {
+            EnsureReplaySequence(sequence);
+            if (string.IsNullOrWhiteSpace(entry.Id) || _byId.ContainsKey(entry.Id) || _records.Any(record => record.Id.Equals(entry.Id, StringComparison.Ordinal)))
+                throw new SessionException("invalid_entry", $"Session id already exists: {entry.Id}");
+            if (entry.ParentId is not null && !_byId.ContainsKey(entry.ParentId))
+                throw new SessionException("invalid_entry", $"Entry {entry.ParentId} not found");
+            if (entry.Lane is not null)
+            {
+                if (!_lanes.TryGetValue(entry.Lane, out var laneLeaf))
+                    throw new SessionException("invalid_entry", $"Lane not found: {entry.Lane}");
+                if (!string.Equals(entry.ParentId, laneLeaf, StringComparison.Ordinal))
+                    throw new SessionException("invalid_entry", $"Entry {entry.Id} does not chain to the lane leaf");
+            }
+
+            var persisted = entry with { Sequence = sequence };
+            _nextSequence = sequence;
+            _entries.Add(persisted);
+            _byId[persisted.Id] = persisted;
+            _entrySequences[persisted.Id] = sequence;
+            UpdateLabelCache(_labelsById, persisted);
+            if (persisted.Lane is not null)
+            {
+                _lanes[persisted.Lane] = persisted.Id;
+                if (persisted.Lane.Equals("main", StringComparison.Ordinal))
+                    _leafId = LeafIdAfterEntry(persisted);
+            }
+            _log.Add(new SessionEntryLogItem(sequence, persisted));
+        }
+    }
+
+    /// <summary>
+    /// 按 v4 文件顺序回放一条 record mutation，并严格校验共享序号和 lane。
+    /// </summary>
+    /// <param name="sequence">文件中的共享序号。</param>
+    /// <param name="record">record 数据。</param>
+    internal void ApplyRecordMutation(long sequence, LaneRecord record)
+    {
+        ArgumentNullException.ThrowIfNull(record);
+        lock (_gate)
+        {
+            EnsureReplaySequence(sequence);
+            if (!_lanes.ContainsKey(record.Lane))
+                throw new SessionException("invalid_entry", $"Lane not found: {record.Lane}");
+            if (string.IsNullOrWhiteSpace(record.Id) || _byId.ContainsKey(record.Id) || _records.Any(item => item.Id.Equals(record.Id, StringComparison.Ordinal)))
+                throw new SessionException("invalid_entry", $"Session id already exists: {record.Id}");
+
+            var persisted = record with { Sequence = sequence };
+            _nextSequence = sequence;
+            _records.Add(persisted);
+            _log.Add(new SessionRecordLogItem(sequence, persisted));
+        }
+    }
+
+    private void EnsureReplaySequence(long sequence)
+    {
+        if (sequence <= 0 || sequence != _nextSequence + 1)
+            throw new SessionException("invalid_entry", $"non-consecutive seq {sequence}");
+    }
+
     /// <summary>应用从 JSONL 恢复的全局 fact mutation，并保留原始共享序号。</summary>
     /// <param name="sequence">mutation 共享序号。</param>
     /// <param name="fact">fact 类型。</param>
     /// <param name="targetId">label 目标 entry id。</param>
     /// <param name="value">名称或 label 值。</param>
-    internal void ApplyFactMutation(long sequence, string fact, string? targetId, string? value)
+    internal void ApplyFactMutation(long sequence, string fact, string? targetId, string? value, bool requireConsecutiveSequence = false)
     {
         lock (_gate)
         {
+            if (requireConsecutiveSequence)
+                EnsureReplaySequence(sequence);
             if (fact.Equals("label", StringComparison.Ordinal))
             {
                 if (targetId is null || !_byId.ContainsKey(targetId))

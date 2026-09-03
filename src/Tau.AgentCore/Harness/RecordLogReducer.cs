@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Tau.Ai;
 using Tau.AgentCore.Harness.Session;
 
@@ -60,11 +61,11 @@ public sealed record HarnessRecord(string Id, string Type, string? RunId = null,
 public abstract record LaneRecord(string Id, long Sequence, string Lane, DateTimeOffset Timestamp, string Type);
 
 /// <summary>操作开始记录。</summary>
-public sealed record OperationStartedRecord(string Id, long Sequence, string Lane, DateTimeOffset Timestamp, string OperationKind, string? SourceLeafId = null)
+public sealed record OperationStartedRecord(string Id, long Sequence, string Lane, DateTimeOffset Timestamp, string OperationKind, string? SourceLeafId = null, JsonElement? Intent = null)
     : LaneRecord(Id, Sequence, Lane, Timestamp, "operation_started");
 
 /// <summary>操作结束记录。</summary>
-public sealed record OperationFinishedRecord(string Id, long Sequence, string Lane, DateTimeOffset Timestamp, string RunId, string Outcome)
+public sealed record OperationFinishedRecord(string Id, long Sequence, string Lane, DateTimeOffset Timestamp, string RunId, string Outcome, JsonElement? Error = null)
     : LaneRecord(Id, Sequence, Lane, Timestamp, "operation_finished");
 
 /// <summary>操作中止请求记录。</summary>
@@ -76,11 +77,11 @@ public sealed record StepAttemptRecord(string Id, long Sequence, string Lane, Da
     : LaneRecord(Id, Sequence, Lane, Timestamp, "step_attempt");
 
 /// <summary>工具调用开始记录。</summary>
-public sealed record ToolStartedRecord(string Id, long Sequence, string Lane, DateTimeOffset Timestamp, string RunId, string AssistantEntryId, int ToolIndex, string ToolCallId, string ToolName, string ResultEntryId)
+public sealed record ToolStartedRecord(string Id, long Sequence, string Lane, DateTimeOffset Timestamp, string RunId, string AssistantEntryId, int ToolIndex, string ToolCallId, string ToolName, string ResultEntryId, JsonElement? EffectiveArgs = null, string? Replay = null)
     : LaneRecord(Id, Sequence, Lane, Timestamp, "tool_started");
 
 /// <summary>队列入队记录。</summary>
-public sealed record QueueEnqueuedRecord(string Id, long Sequence, string Lane, DateTimeOffset Timestamp, string Queue, string EntryId, string? RunId = null)
+public sealed record QueueEnqueuedRecord(string Id, long Sequence, string Lane, DateTimeOffset Timestamp, string Queue, string EntryId, string? RunId = null, JsonElement? Target = null)
     : LaneRecord(Id, Sequence, Lane, Timestamp, "queue_enqueued");
 
 /// <summary>队列取消记录。</summary>
@@ -88,11 +89,11 @@ public sealed record QueueCancelledRecord(string Id, long Sequence, string Lane,
     : LaneRecord(Id, Sequence, Lane, Timestamp, "queue_cancelled");
 
 /// <summary>延迟写入记录。</summary>
-public sealed record WriteDeferredRecord(string Id, long Sequence, string Lane, DateTimeOffset Timestamp, string RunId, string EntryId)
+public sealed record WriteDeferredRecord(string Id, long Sequence, string Lane, DateTimeOffset Timestamp, string RunId, string EntryId, JsonElement? Target = null)
     : LaneRecord(Id, Sequence, Lane, Timestamp, "write_deferred");
 
 /// <summary>用量记录。</summary>
-public sealed record UsageRecord(string Id, long Sequence, string Lane, DateTimeOffset Timestamp, string Cause, string? RunId, string? EntryId, int Attempt = 0, Usage? Usage = null)
+public sealed record UsageRecord(string Id, long Sequence, string Lane, DateTimeOffset Timestamp, string Cause, string? RunId, string? EntryId, int Attempt = 0, Usage? Usage = null, string? StopReason = null, string? ToolCallId = null, JsonElement? Details = null)
     : LaneRecord(Id, Sequence, Lane, Timestamp, "usage");
 
 /// <summary>用于恢复 lane 状态的有界输入。</summary>
@@ -289,6 +290,10 @@ public static class HarnessRecordReducer
             switch (record)
             {
                 case OperationStartedRecord operation:
+                    if (operation.OperationKind is not ("run" or "compaction" or "navigation"))
+                        throw new RecordLogCorruptionException(RecordLogCorruptionReason.UnknownOperation, $"Unknown operation kind '{operation.OperationKind}'.");
+                    if (operation.Intent is { } intent && intent.ValueKind != JsonValueKind.Object)
+                        throw new RecordLogCorruptionException(RecordLogCorruptionReason.InvalidRecord, $"Operation '{operation.Id}' has an invalid intent.");
                     started.Add(operation.Id);
                     break;
                 case StepAttemptRecord attempt:
@@ -306,9 +311,13 @@ public static class HarnessRecordReducer
                     throw new RecordLogCorruptionException(RecordLogCorruptionReason.DuplicateToolInvocation, $"Tool invocation '{tool.AssistantEntryId}:{tool.ToolIndex}' was started more than once.");
                 case ToolStartedRecord tool when !started.Contains(tool.RunId):
                     throw new RecordLogCorruptionException(RecordLogCorruptionReason.UnknownOperation, $"Unknown operation '{tool.RunId}'.");
+                case ToolStartedRecord tool when tool.Replay is not null && tool.Replay is not ("never" or "safe"):
+                    throw new RecordLogCorruptionException(RecordLogCorruptionReason.InvalidRecord, $"Tool invocation '{tool.Id}' has an invalid replay policy.");
                 case QueueEnqueuedRecord queue when queue.RunId is not null && aborted.Contains(queue.RunId):
                     throw new RecordLogCorruptionException(RecordLogCorruptionReason.QueueAfterAbort, $"Queue entry '{queue.EntryId}' follows abort.");
                 case QueueEnqueuedRecord queue:
+                    if (queue.Queue is not ("steer" or "followUp" or "nextRun"))
+                        throw new RecordLogCorruptionException(RecordLogCorruptionReason.InvalidRecord, $"Queue entry '{queue.Id}' has an invalid queue kind.");
                     if (string.IsNullOrWhiteSpace(queue.EntryId))
                         throw new RecordLogCorruptionException(RecordLogCorruptionReason.InvalidRecord, "Queue enqueue requires an entry id.");
                     enqueues[queue.EntryId] = queue;
@@ -328,6 +337,8 @@ public static class HarnessRecordReducer
             if (record is LaneRecord typed && typed.Type == "operation_finished") finished.Add(typed.Id);
             if (record is WriteDeferredRecord deferred && string.IsNullOrWhiteSpace(deferred.EntryId))
                 throw new RecordLogCorruptionException(RecordLogCorruptionReason.InvalidDeferredHandle, "Deferred write requires an entry id.");
+            if (record is UsageRecord usage && usage.Cause is not ("assistant" or "compaction" or "branch_summary" or "deferred_fetch" or "tool" or "hook" or "adjustment"))
+                throw new RecordLogCorruptionException(RecordLogCorruptionReason.InvalidRecord, $"Usage record '{usage.Id}' has an invalid cause.");
         }
     }
 

@@ -50,7 +50,8 @@ public sealed class JsonlSessionRepoTests
         var forkMetadata = await fork.GetMetadataAsync();
 
         Assert.Equal("/tmp/target", forkMetadata.Cwd);
-        Assert.Equal(sourceMetadata.Path, forkMetadata.ParentSessionPath);
+        Assert.Equal(sourceMetadata.Id, forkMetadata.ParentSessionId);
+        Assert.Null(forkMetadata.ParentSessionPath);
         Assert.Equal([user1, assistant1], (await fork.GetEntriesAsync()).Select(static entry => entry.Id));
 
         var fullFork = await repo.ForkAsync(

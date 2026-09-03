@@ -113,7 +113,8 @@ public sealed record MessageSessionEntry(
     string Id,
     string? ParentId,
     DateTimeOffset Timestamp,
-    ChatMessage Message) : SessionTreeEntry("message", Id, ParentId, Timestamp);
+    ChatMessage Message,
+    bool Terminate = false) : SessionTreeEntry("message", Id, ParentId, Timestamp);
 
 public sealed record ThinkingLevelChangeSessionEntry(
     string Id,
@@ -142,7 +143,9 @@ public sealed record CompactionSessionEntry(
     string FirstKeptEntryId,
     int TokensBefore,
     object? Details = null,
-    bool FromHook = false) : SessionTreeEntry("compaction", Id, ParentId, Timestamp);
+    bool FromHook = false,
+    IReadOnlyList<ChatMessage>? RetainedTail = null,
+    Usage? Usage = null) : SessionTreeEntry("compaction", Id, ParentId, Timestamp);
 
 public sealed record CustomSessionEntry(
     string Id,
@@ -186,7 +189,8 @@ public sealed record BranchSummarySessionEntry(
     string FromId,
     string Summary,
     object? Details = null,
-    bool FromHook = false) : SessionTreeEntry("branch_summary", Id, ParentId, Timestamp);
+    bool FromHook = false,
+    Usage? Usage = null) : SessionTreeEntry("branch_summary", Id, ParentId, Timestamp);
 
 public sealed record SessionBranchSummary(
     string Summary,
