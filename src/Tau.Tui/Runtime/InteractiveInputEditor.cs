@@ -497,15 +497,23 @@ public sealed class InteractiveInputEditor
     {
         var collapsed = new string(chars.ToArray());
         _buffer.SetDraft(collapsed);
-        if (_renderer is IInteractiveAutocompleteRenderer autocompleteRenderer)
+        var batch = (_renderer as IInteractiveRenderBatch)?.BeginRenderBatch();
+        try
         {
-            var session = _autocompleteSession;
-            autocompleteRenderer.RenderAutocomplete(
-                session?.Items ?? [],
-                session?.SelectedIndex ?? -1);
-        }
+            if (_renderer is IInteractiveAutocompleteRenderer autocompleteRenderer)
+            {
+                var session = _autocompleteSession;
+                autocompleteRenderer.RenderAutocomplete(
+                    session?.Items ?? [],
+                    session?.SelectedIndex ?? -1);
+            }
 
-        _renderer.Render(collapsed, Math.Clamp(cursor, 0, chars.Count));
+            _renderer.Render(collapsed, Math.Clamp(cursor, 0, chars.Count));
+        }
+        finally
+        {
+            batch?.Dispose();
+        }
     }
 
     private static bool TryHandleUndoShortcut(

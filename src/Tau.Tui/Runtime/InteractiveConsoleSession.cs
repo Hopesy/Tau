@@ -44,12 +44,24 @@ public sealed class InteractiveConsoleSession
         _clearScreenAction = clearScreenAction;
     }
 
+    /// <summary>
+    /// 【终端启动】【欢迎界面】显示默认品牌 banner、标题和输入提示，或显示扩展提供的自定义头部。
+    /// </summary>
+    /// <param name="title">欢迎界面标题。</param>
+    /// <param name="promptHint">输入区上方的操作提示。</param>
+    /// <param name="customHeaderLines">扩展提供的自定义头部；非空时替换默认品牌和标题头部。</param>
     public void ShowWelcome(string title, string promptHint, IReadOnlyList<string>? customHeaderLines = null)
     {
         lock (_stateSync)
         {
             if (customHeaderLines is null)
             {
+                foreach (var bannerLine in TuiWelcomeBanner.Lines)
+                {
+                    _terminal.WriteLine(bannerLine, ConsoleColor.Cyan);
+                    _transcript.Add(new TranscriptEntry(TranscriptEntryKind.System, bannerLine));
+                }
+
                 _terminal.WriteLine(title, ConsoleColor.Cyan);
                 _terminal.WriteLine(promptHint);
                 _transcript.Add(new TranscriptEntry(TranscriptEntryKind.System, title));

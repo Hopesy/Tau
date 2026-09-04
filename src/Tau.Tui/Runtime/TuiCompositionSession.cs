@@ -68,6 +68,11 @@ public sealed class TuiCompositionSession
 
     public TuiTranscriptRenderResult Render(bool force = false) => Host.Render(force);
 
+    /// <summary>
+    /// 【终端布局】【尺寸同步】同步当前终端尺寸而不产生中间绘制，用于输入覆盖层重新计算位置。
+    /// </summary>
+    public void RefreshViewportSize() => Host.RefreshViewportSize();
+
     public TuiTranscriptRenderResult? SetMessages(IEnumerable<TuiMessage> messages) =>
         Host.SetMessages(messages);
 

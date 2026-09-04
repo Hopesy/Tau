@@ -84,4 +84,18 @@ public sealed class TuiAnsiRenderSurfaceTests
             "\u001b[?7h\u001b[?2026l",
             writer.ToString());
     }
+
+    [Fact]
+    public void SetCursorVisible_WritesOnlyWhenVisibilityChanges()
+    {
+        using var writer = new StringWriter();
+        var surface = new TuiAnsiRenderSurface(writer, () => 80, () => 24);
+
+        surface.SetCursorVisible(false);
+        surface.SetCursorVisible(false);
+        surface.SetCursorVisible(true);
+        surface.SetCursorVisible(true);
+
+        Assert.Equal("\u001b[?25l\u001b[?25h", writer.ToString());
+    }
 }

@@ -5,6 +5,7 @@ using Tau.AgentCore.Runtime;
 using Tau.Ai;
 using Tau.CodingAgent.Runtime;
 using Tau.Tui.Abstractions;
+using Tau.Tui.Components;
 using Tau.Tui.Rendering;
 using Tau.Tui.Runtime;
 
@@ -2063,6 +2064,38 @@ public class CodingAgentHostTests
         {
             footerDataProvider.Dispose();
             Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RunAsync_CompositionRuntimeErrorStaysInTranscriptAndNotFooter()
+    {
+        var terminal = new FakeTerminal();
+        terminal.QueueInput("boom");
+        terminal.QueueInput("exit");
+        var runner = new FakeCodingAgentRunner((_, _) => ThrowingEvents());
+        var surface = new CapturingRenderSurface(width: 120, height: 8);
+        var compositionSession = new TuiCompositionSession(
+            surface,
+            displayOptions: TuiMessageDisplayOptions.Agent,
+            statusTheme: TuiStatusBarTheme.Agent);
+        var host = new CodingAgentHost(
+            new InteractiveConsoleSession(terminal),
+            runner,
+            compositionSession: compositionSession);
+
+        await host.RunAsync();
+
+        Assert.DoesNotContain("error:", compositionSession.Viewport.StatusLeft, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(
+            compositionSession.Viewport.Messages,
+            message => message.Role == TuiMessageRole.Error &&
+                message.Text.Contains("provider unavailable", StringComparison.Ordinal));
+
+        static async IAsyncEnumerable<AgentEvent> ThrowingEvents()
+        {
+            yield return new AgentEndEvent("provider unavailable");
+            await Task.CompletedTask;
         }
     }
 

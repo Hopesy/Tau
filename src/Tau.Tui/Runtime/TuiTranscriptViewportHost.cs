@@ -159,9 +159,38 @@ public sealed class TuiTranscriptViewportHost
 
     public void ResetFrame() => _previousFrame = null;
 
-    public void ShowCursor() => CursorVisible = true;
+    /// <summary>
+    /// 【终端布局】【尺寸同步】仅同步底层终端尺寸，不执行绘制，用于 overlay 在 resize 后重新测量布局。
+    /// </summary>
+    public void RefreshViewportSize() => Viewport.Resize(_surface.Width, _surface.Height);
 
-    public void HideCursor() => CursorVisible = false;
+    /// <summary>
+    /// 【终端渲染】【光标控制】显示终端硬件光标，并同步支持该能力的 ANSI 渲染表面。
+    /// </summary>
+    public void ShowCursor()
+    {
+        if (CursorVisible)
+        {
+            return;
+        }
+
+        CursorVisible = true;
+        (_surface as ITuiCursorVisibilitySurface)?.SetCursorVisible(true);
+    }
+
+    /// <summary>
+    /// 【终端渲染】【光标控制】隐藏终端硬件光标，输入 overlay 使用自身的反色字符表示逻辑光标。
+    /// </summary>
+    public void HideCursor()
+    {
+        if (!CursorVisible)
+        {
+            return;
+        }
+
+        CursorVisible = false;
+        (_surface as ITuiCursorVisibilitySurface)?.SetCursorVisible(false);
+    }
 
     public TuiTranscriptOverlayHandle OpenOverlay(
         ITuiComponent component,

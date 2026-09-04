@@ -83,6 +83,8 @@ public sealed class TuiMessageDisplayOptions
         {
             TuiMessageRole.User => $"\u001b[1m{line}\u001b[22m",
             TuiMessageRole.Thinking => $"\u001b[3;90m{line}\u001b[23;39m",
+            TuiMessageRole.System when TuiWelcomeBanner.IsBannerLine(line)
+                => $"\u001b[1;38;5;215m{line}\u001b[22;39m",
             TuiMessageRole.System when line.TrimStart().StartsWith("Tau — Coding Agent", StringComparison.Ordinal)
                 => $"\u001b[1;38;5;215m{line}\u001b[22;39m",
             TuiMessageRole.System => $"\u001b[2;90m{line}\u001b[22;39m",

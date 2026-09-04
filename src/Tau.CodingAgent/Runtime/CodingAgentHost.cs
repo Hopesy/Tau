@@ -2095,7 +2095,8 @@ public sealed class CodingAgentHost
     private void WriteRuntimeError(string message)
     {
         _ui.WriteRuntimeError(message);
-        RefreshCompositionStatus($"error: {message}");
+        // 【终端错误】【消息区展示】错误已经由 transcript 渲染到输入区上方，底部状态栏只保留稳定的会话信息
+        RefreshCompositionStatus();
     }
 
     private void WriteShutdown(string message)

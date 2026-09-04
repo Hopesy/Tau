@@ -205,6 +205,13 @@ public static class TuiConsoleKeyInfoMapper
             return true;
         }
 
+        // 【终端输入】【Unicode 映射】非控制字符（包括中文）不是键盘协议序列，直接作为普通字符交给输入编辑器
+        if (input.Length == 1 && !char.IsControl(input[0]))
+        {
+            key = CreatePrintableKey(input[0], ConsoleModifiers.None);
+            return true;
+        }
+
         var keyId = TuiKeyDecoder.ParseKey(input);
         return TryMapKeyId(keyId, input, out key);
     }

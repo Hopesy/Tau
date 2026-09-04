@@ -5,12 +5,14 @@ using Tau.Tui.Rendering;
 
 namespace Tau.Tui.Runtime;
 
-public sealed class TuiCompositionInteractiveRenderer : IInteractiveRenderer, IInteractiveAutocompleteRenderer
+public sealed class TuiCompositionInteractiveRenderer : IInteractiveRenderer, IInteractiveAutocompleteRenderer, IInteractiveRenderBatch
 {
     private readonly TuiCompositionSession _session;
     private readonly InputOverlayComponent _component = new();
     private readonly object _stateSync = new();
     private TuiTranscriptOverlayHandle? _handle;
+    private int _renderBatchDepth;
+    private bool _renderPending;
 
     public TuiCompositionInteractiveRenderer(TuiCompositionSession session)
     {
@@ -18,6 +20,19 @@ public sealed class TuiCompositionInteractiveRenderer : IInteractiveRenderer, II
     }
 
     public int WindowWidth => Math.Max(1, _session.Viewport.Width);
+
+    /// <summary>
+    /// 【终端渲染】【批量更新】开始批量提交输入状态，批量范围内的多次状态更新只在结束时绘制一次。
+    /// </summary>
+    /// <returns>释放后提交完整终端帧的批量令牌。</returns>
+    public IDisposable BeginRenderBatch()
+    {
+        lock (_stateSync)
+        {
+            _renderBatchDepth++;
+            return new RenderBatch(this);
+        }
+    }
 
     public void WritePrompt(string prompt, ConsoleColor? color = null)
     {
@@ -28,7 +43,7 @@ public sealed class TuiCompositionInteractiveRenderer : IInteractiveRenderer, II
             _component.SetLine(string.Empty, 0);
             _component.SetSearch(null, null, 0);
             EnsureOverlay();
-            _session.Render();
+            RequestRender();
         }
     }
 
@@ -40,7 +55,7 @@ public sealed class TuiCompositionInteractiveRenderer : IInteractiveRenderer, II
             _component.SetLine(buffer, cursorIndex);
             _component.SetSearch(null, null, 0);
             EnsureOverlay();
-            _session.Render();
+            RequestRender();
         }
     }
 
@@ -51,7 +66,7 @@ public sealed class TuiCompositionInteractiveRenderer : IInteractiveRenderer, II
             EnsureStarted();
             _component.SetSearch(pattern, match, cursorInMatch);
             EnsureOverlay();
-            _session.Render();
+            RequestRender();
         }
     }
 
@@ -69,7 +84,7 @@ public sealed class TuiCompositionInteractiveRenderer : IInteractiveRenderer, II
             EnsureStarted();
             _component.SetAutocomplete(items, selectedIndex);
             EnsureOverlay();
-            _session.Render();
+            RequestRender();
         }
     }
 
@@ -77,9 +92,12 @@ public sealed class TuiCompositionInteractiveRenderer : IInteractiveRenderer, II
     {
         lock (_stateSync)
         {
-            CloseOverlay();
-            _session.SetReservedBottomLines(0);
-            _session.Render();
+            MutateSessionWithoutIntermediateRender(() =>
+            {
+                CloseOverlay();
+                _session.SetReservedBottomLines(0);
+            });
+            RequestRender();
         }
     }
 
@@ -87,9 +105,12 @@ public sealed class TuiCompositionInteractiveRenderer : IInteractiveRenderer, II
     {
         lock (_stateSync)
         {
-            CloseOverlay();
-            _session.SetReservedBottomLines(0);
-            _session.Render();
+            MutateSessionWithoutIntermediateRender(() =>
+            {
+                CloseOverlay();
+                _session.SetReservedBottomLines(0);
+            });
+            RequestRender();
         }
     }
 
@@ -101,34 +122,86 @@ public sealed class TuiCompositionInteractiveRenderer : IInteractiveRenderer, II
         }
     }
 
+    /// <summary>
+    /// 【终端渲染】【批量更新】根据当前批量深度提交绘制请求，批量期间只记录待绘制标记。
+    /// </summary>
+    private void RequestRender()
+    {
+        if (_renderBatchDepth > 0)
+        {
+            _renderPending = true;
+            return;
+        }
+
+        _session.Render();
+    }
+
+    /// <summary>
+    /// 【终端渲染】【批量更新】结束当前批量更新，并在最外层批次有待提交状态时绘制一个完整终端帧。
+    /// </summary>
+    private void EndRenderBatch()
+    {
+        lock (_stateSync)
+        {
+            if (_renderBatchDepth == 0)
+            {
+                return;
+            }
+
+            _renderBatchDepth--;
+            if (_renderBatchDepth == 0 && _renderPending)
+            {
+                _renderPending = false;
+                _session.Render();
+            }
+        }
+    }
+
     private void EnsureOverlay()
     {
-        // 1. 先同步 surface 尺寸，确保 resize 后使用最新的视口边界
-        _session.Render();
+        // 【终端布局】【尺寸同步】1. 先同步 surface 尺寸，确保 resize 后使用最新的视口边界
+        _session.RefreshViewportSize();
         var width = Math.Max(1, _session.Viewport.Width);
-        // 输入框先按完整消息区测量，再把实际高度登记为底部占位，避免覆盖 transcript
+        // 【终端布局】【输入区测量】输入框先按完整消息区测量，再把实际高度登记为底部占位，避免覆盖 transcript
         _component.SetAvailableHeight(Math.Max(1, _session.Viewport.MessageHeight));
         var overlayHeight = _component.GetRenderedLineCount(width);
         var previousReservedLines = _session.Viewport.ReservedBottomLines;
-        _session.SetReservedBottomLines(overlayHeight);
-        var row = _session.Viewport.TranscriptHeight;
-        if (_handle is not null &&
-            !_handle.IsClosed &&
-            _component.Row == row &&
-            _component.Width == width &&
-            _component.Height == overlayHeight &&
-            previousReservedLines == overlayHeight)
+        var needsRebuild = _handle is null ||
+            _handle.IsClosed ||
+            _component.Row != _session.Viewport.TranscriptHeight ||
+            _component.Width != width ||
+            _component.Height != overlayHeight ||
+            previousReservedLines != overlayHeight;
+        if (!needsRebuild)
         {
             return;
         }
 
-        CloseOverlay();
-        _component.Row = row;
-        _component.Width = width;
-        _component.Height = overlayHeight;
-        _handle = _session.OpenOverlay(
-            _component,
-            new TuiTranscriptOverlayOptions(Width: width, Row: row, Column: 0));
+        MutateSessionWithoutIntermediateRender(() =>
+        {
+            // 【终端布局】【overlay 重建】2. 先移除旧 overlay，再调整占位高度，避免旧位置短暂覆盖状态栏
+            CloseOverlay();
+            _session.SetReservedBottomLines(overlayHeight);
+            var row = _session.Viewport.TranscriptHeight;
+
+            // 【终端布局】【overlay 重建】3. 按新视口位置创建输入 overlay
+            _component.Row = row;
+            _component.Width = width;
+            _component.Height = overlayHeight;
+            _handle = _session.OpenOverlay(
+                _component,
+                new TuiTranscriptOverlayOptions(Width: width, Row: row, Column: 0));
+        });
+    }
+
+    /// <summary>
+    /// 批量修改会话状态并暂时禁止自动绘制，避免一次交互输出多个中间帧。
+    /// </summary>
+    /// <param name="mutation">需要在单个终端帧内完成的会话状态修改。</param>
+    private void MutateSessionWithoutIntermediateRender(Action mutation)
+    {
+        ArgumentNullException.ThrowIfNull(mutation);
+        _session.Host.RunWithoutAutoRender(mutation);
     }
 
     private void CloseOverlay()
@@ -141,6 +214,25 @@ public sealed class TuiCompositionInteractiveRenderer : IInteractiveRenderer, II
 
         _session.CloseOverlay(_handle);
         _handle = null;
+    }
+
+    private sealed class RenderBatch(TuiCompositionInteractiveRenderer renderer) : IDisposable
+    {
+        private bool _disposed;
+
+        /// <summary>
+        /// 【终端渲染】【批量更新】释放批量令牌并提交待绘制的最终输入状态。
+        /// </summary>
+        public void Dispose()
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            _disposed = true;
+            renderer.EndRenderBatch();
+        }
     }
 
     private sealed class InputOverlayComponent : ITuiComponent

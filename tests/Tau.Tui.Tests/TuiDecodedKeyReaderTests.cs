@@ -39,6 +39,34 @@ public sealed class TuiDecodedKeyReaderTests : IDisposable
     }
 
     [Fact]
+    public void TryMapInput_MapsUnicodePrintableCharacterToInputKey()
+    {
+        TuiKeyDecoder.SetKittyProtocolActive(true);
+
+        Assert.True(TuiConsoleKeyInfoMapper.TryMapInput("中", out var chinese));
+        Assert.Equal('中', chinese.KeyChar);
+        Assert.Equal(ConsoleKey.NoName, chinese.Key);
+        Assert.Equal(ConsoleModifiers.None, chinese.Modifiers);
+    }
+
+    [Fact]
+    public async Task DecodedKeyReader_FeedsUnicodeCharactersIntoInteractiveInputEditor()
+    {
+        var rawReader = new FakeRawInputReader();
+        rawReader.Enqueue("中");
+        rawReader.Enqueue("文");
+        rawReader.Enqueue("\r");
+
+        var renderer = new FakeRenderer();
+        var editor = new InteractiveInputEditor(new TuiDecodedKeyReader(rawReader), renderer);
+
+        var result = await editor.ReadLineAsync(">> ");
+
+        Assert.Equal(InputResultKind.Submitted, result.Kind);
+        Assert.Equal("中文", result.Text);
+    }
+
+    [Fact]
     public void TryMapInput_IgnoresKittyReleaseEvents()
     {
         TuiKeyDecoder.SetKittyProtocolActive(true);

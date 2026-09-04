@@ -130,6 +130,40 @@ public sealed class TuiCompositionHost
         }
     }
 
+    /// <summary>
+    /// 【终端布局】【尺寸同步】在不输出中间帧的情况下同步终端尺寸和视口边界。
+    /// </summary>
+    public void RefreshViewportSize()
+    {
+        lock (_sync)
+        {
+            TranscriptHost.RefreshViewportSize();
+        }
+    }
+
+    /// <summary>
+    /// 【终端布局】【批量重绘】在会话锁内批量修改状态，并暂时禁止状态变更触发自动绘制。
+    /// </summary>
+    /// <param name="mutation">需要在单个终端帧内完成的状态修改。</param>
+    internal void RunWithoutAutoRender(Action mutation)
+    {
+        ArgumentNullException.ThrowIfNull(mutation);
+
+        lock (_sync)
+        {
+            var autoRender = AutoRender;
+            AutoRender = false;
+            try
+            {
+                mutation();
+            }
+            finally
+            {
+                AutoRender = autoRender;
+            }
+        }
+    }
+
     public TuiTranscriptRenderResult Render(bool force = false)
     {
         lock (_sync)

@@ -495,6 +495,57 @@ public sealed class TuiTranscriptViewportHostTests
     }
 
     [Fact]
+    public void RuntimeError_IsRenderedAboveFocusedInputOverlay()
+    {
+        var surface = new MemoryRenderSurface(width: 40, height: 8);
+        var composition = new TuiCompositionSession(
+            surface,
+            displayOptions: TuiMessageDisplayOptions.Agent,
+            statusTheme: TuiStatusBarTheme.Agent);
+        var terminal = new TuiPassiveTerminal();
+        var console = new InteractiveConsoleSession(terminal);
+        using var binding = composition.BindTranscript(console);
+        var renderer = new TuiCompositionInteractiveRenderer(composition);
+
+        renderer.WritePrompt(">> ");
+        renderer.Render(string.Empty, 0);
+        console.WriteRuntimeError("provider failed");
+
+        var result = composition.LastRenderResult;
+        Assert.NotNull(result);
+        Assert.Contains(
+            result!.BaseFrame!.Lines.Take(composition.Viewport.TranscriptHeight),
+            line => line.Contains("provider failed", StringComparison.Ordinal));
+        Assert.DoesNotContain(
+            result.Frame.Lines.Skip(composition.Viewport.TranscriptHeight),
+            line => line.Contains("provider failed", StringComparison.Ordinal));
+        Assert.Contains(result.Frame.Lines, line => line.Contains(">> ", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void CompositionInputRenderer_BatchesAutocompleteAndDraftIntoOneFrame()
+    {
+        var surface = new MemoryRenderSurface(width: 16, height: 10);
+        var session = new TuiCompositionSession(surface);
+        var renderer = new TuiCompositionInteractiveRenderer(session);
+
+        renderer.WritePrompt(">> ");
+        surface.Clear();
+
+        using (renderer.BeginRenderBatch())
+        {
+            renderer.RenderAutocomplete(
+                [new TuiAutocompleteItem("one", "one", "first")],
+                selectedIndex: 0);
+            renderer.Render("", cursorIndex: 0);
+        }
+
+        Assert.Single(surface.Diffs);
+        Assert.Equal(4, session.Viewport.ReservedBottomLines);
+        Assert.Contains(session.LastRenderResult!.Frame.Lines, line => line.Contains(">> ", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void CompositionInputRenderer_UsesStableInputFrameAndPreservesWidth()
     {
         var surface = new MemoryRenderSurface(width: 30, height: 8);
@@ -513,6 +564,45 @@ public sealed class TuiTranscriptViewportHostTests
         Assert.DoesNotContain(frame.Lines, line => line.Contains("╰", StringComparison.Ordinal));
         Assert.DoesNotContain(frame.Lines, line => line.Contains("│", StringComparison.Ordinal));
         Assert.All(frame.Lines, line => Assert.Equal(30, TuiText.VisibleWidth(line)));
+    }
+
+    [Fact]
+    public void CompositionInputRenderer_RebuildsOverlayWithOneTerminalFrame()
+    {
+        var surface = new MemoryRenderSurface(width: 12, height: 10);
+        var session = new TuiCompositionSession(surface);
+        var renderer = new TuiCompositionInteractiveRenderer(session);
+
+        renderer.WritePrompt(">> ");
+        surface.Clear();
+
+        renderer.Render("123456789", cursorIndex: 9);
+
+        Assert.Single(surface.Diffs);
+        Assert.Equal(4, session.Viewport.ReservedBottomLines);
+        Assert.All(session.LastRenderResult!.Frame.Lines, line =>
+            Assert.Equal(12, TuiText.VisibleWidth(line)));
+    }
+
+    [Fact]
+    public void CompositionInputRenderer_ClearingMultilineDraftRemovesStaleSeparatorRows()
+    {
+        var surface = new MemoryRenderSurface(width: 12, height: 10);
+        var session = new TuiCompositionSession(surface);
+        var renderer = new TuiCompositionInteractiveRenderer(session);
+
+        renderer.WritePrompt(">> ");
+        renderer.Render(new string('x', 80), cursorIndex: 80);
+        surface.Clear();
+
+        renderer.Render(string.Empty, cursorIndex: 0);
+
+        Assert.Single(surface.Diffs);
+        Assert.Equal(3, session.Viewport.ReservedBottomLines);
+        var frame = session.LastRenderResult!.Frame;
+        Assert.Equal(2, frame.Lines.Count(line => line.Contains("\u001b[90m", StringComparison.Ordinal)));
+        Assert.DoesNotContain(frame.Lines, line => line.Contains(new string('x', 20), StringComparison.Ordinal));
+        Assert.All(frame.Lines, line => Assert.Equal(12, TuiText.VisibleWidth(line)));
     }
 
     [Fact]

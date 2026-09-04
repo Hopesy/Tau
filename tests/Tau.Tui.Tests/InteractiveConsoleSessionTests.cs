@@ -181,7 +181,8 @@ public class InteractiveConsoleSessionTests
         Assert.Contains("Tau — Coding Agent\n", output);
         Assert.Contains("Type your message, or 'exit' to quit.\n", output);
         Assert.EndsWith("\n\n", output);
-        Assert.Equal(2, session.Transcript.Count);
+        Assert.Equal(TuiWelcomeBanner.Lines.Count + 2, session.Transcript.Count);
+        Assert.All(TuiWelcomeBanner.Lines, line => Assert.Contains(line + "\n", output, StringComparison.Ordinal));
     }
 
     [Fact]

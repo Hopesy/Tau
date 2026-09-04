@@ -49,6 +49,18 @@ public interface IInteractiveAutocompleteRenderer
     void RenderAutocomplete(IReadOnlyList<TuiAutocompleteItem> items, int selectedIndex);
 }
 
+/// <summary>
+/// 【终端渲染】【批量更新】定义交互式输入渲染器的批量绘制能力，保证一次编辑只输出一个完整终端帧。
+/// </summary>
+public interface IInteractiveRenderBatch
+{
+    /// <summary>
+    /// 开始批量更新；释放返回的令牌后提交最后一个完整帧。
+    /// </summary>
+    /// <returns>用于结束批量更新并提交帧的释放令牌。</returns>
+    IDisposable BeginRenderBatch();
+}
+
 public sealed class TuiCombinedAutocompleteProvider : ITuiAutocompleteProvider
 {
     private static readonly HashSet<char> PathDelimiters = [' ', '\t', '"', '\'', '='];

@@ -69,8 +69,18 @@ public sealed class SystemConsoleKeyReader : IConsoleKeyReader, IDisposable
 
     private static (IConsoleKeyReader? RawReader, IDisposable? RawMode) CreateEnvironmentRawInput()
     {
+        var configuredValue = Environment.GetEnvironmentVariable(RawInputEnvironmentVariable);
+        // 【终端输入】【Unicode 兼容】Windows Console.ReadKey 能直接返回 IME 提交的 Unicode 字符，默认采用它与 Cade 保持一致；需要 VT 原始协议时可显式设置 TAU_TUI_RAW_INPUT=1
+        if (OperatingSystem.IsWindows() &&
+            string.IsNullOrWhiteSpace(configuredValue) &&
+            !SafeIsInputRedirected() &&
+            !SafeIsOutputRedirected())
+        {
+            return (null, null);
+        }
+
         if (!ShouldUseRawInput(
-                Environment.GetEnvironmentVariable(RawInputEnvironmentVariable),
+                configuredValue,
                 SafeIsInputRedirected(),
                 SafeIsOutputRedirected()))
         {

@@ -1,6 +1,6 @@
 namespace Tau.Tui.Rendering;
 
-public sealed class TuiAnsiRenderSurface : ITuiRenderSurface
+public sealed class TuiAnsiRenderSurface : ITuiRenderSurface, ITuiCursorVisibilitySurface
 {
     private const string BeginSynchronizedOutput = "\u001b[?2026h";
     private const string EndSynchronizedOutput = "\u001b[?2026l";
@@ -14,6 +14,7 @@ public sealed class TuiAnsiRenderSurface : ITuiRenderSurface
     private readonly Func<int> _heightProvider;
     private readonly bool _synchronizedOutput;
     private readonly bool _avoidLastColumnWrap;
+    private bool _cursorVisible = true;
 
     /// <summary>
     /// 创建 ANSI 渲染表面。
@@ -88,6 +89,21 @@ public sealed class TuiAnsiRenderSurface : ITuiRenderSurface
         }
 
         _writer.Write(buffer.ToString());
+    }
+
+    /// <summary>
+    /// 【终端渲染】【光标控制】向 ANSI 终端同步硬件光标可见性，避免光标停留在输入框右侧持续闪烁。
+    /// </summary>
+    /// <param name="visible">为 <see langword="true"/> 时显示光标，否则隐藏光标。</param>
+    public void SetCursorVisible(bool visible)
+    {
+        if (_cursorVisible == visible)
+        {
+            return;
+        }
+
+        _cursorVisible = visible;
+        _writer.Write(visible ? "\u001b[?25h" : "\u001b[?25l");
     }
 
     private static void WriteFullRedraw(TextWriter writer, IReadOnlyList<TuiRenderOperation> operations)
