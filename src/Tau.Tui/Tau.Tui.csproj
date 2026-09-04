@@ -10,4 +10,9 @@
     <InternalsVisibleTo Include="Tau.Tui.Tests" />
   </ItemGroup>
 
+  <ItemGroup>
+    <PackageReference Include="Spectre.Console" Version="0.54.0" />
+    <PackageReference Include="Spectre.Console.Json" Version="0.54.0" />
+  </ItemGroup>
+
 </Project>

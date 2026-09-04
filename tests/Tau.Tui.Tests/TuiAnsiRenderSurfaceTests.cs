@@ -62,4 +62,26 @@ public sealed class TuiAnsiRenderSurfaceTests
         Assert.Equal(1, surface.Width);
         Assert.Equal(1, surface.Height);
     }
+
+    [Fact]
+    public void Apply_CanTemporarilyDisableAutoWrapForFullWidthConsoleFrames()
+    {
+        using var writer = new StringWriter();
+        var surface = new TuiAnsiRenderSurface(
+            writer,
+            () => 80,
+            () => 24,
+            synchronizedOutput: true,
+            avoidLastColumnWrap: true);
+
+        surface.Apply(new TuiRenderDiff(
+            RequiresFullRedraw: false,
+            Reason: "full width",
+            Operations: [TuiRenderOperation.ReplaceLine(0, new string('-', 80))]));
+
+        Assert.Equal(
+            "\u001b[?2026h\u001b[?7l\u001b[1;1H\u001b[2K" + new string('-', 80) +
+            "\u001b[?7h\u001b[?2026l",
+            writer.ToString());
+    }
 }

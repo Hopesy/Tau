@@ -1,0 +1,23 @@
+{
+  "providers": {
+    "azure-openai-responses-demo": {
+      "api": "azure-openai-responses",
+      "baseUrl": "https://YOUR_RESOURCE.openai.azure.com/openai/v1",
+      "apiKey": "AZURE_OPENAI_API_KEY",
+      "options": {
+        "azureApiVersion": "v1",
+        "azureDeploymentName": "YOUR_DEPLOYMENT_NAME"
+      },
+      "models": [
+        {
+          "id": "gpt-5.4",
+          "name": "Azure GPT-5.4 Responses",
+          "reasoning": true,
+          "input": ["text", "image"],
+          "contextWindow": 400000,
+          "maxTokens": 128000
+        }
+      ]
+    }
+  }
+}

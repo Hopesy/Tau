@@ -36,6 +36,19 @@ public interface ITuiAutocompleteProvider
         string prefix);
 }
 
+/// <summary>
+/// 定义可选的交互式补全列表渲染能力。
+/// </summary>
+public interface IInteractiveAutocompleteRenderer
+{
+    /// <summary>
+    /// 更新当前输入区下方显示的补全候选项。
+    /// </summary>
+    /// <param name="items">需要显示的候选项集合。</param>
+    /// <param name="selectedIndex">当前选中项索引；没有选中项时为负数。</param>
+    void RenderAutocomplete(IReadOnlyList<TuiAutocompleteItem> items, int selectedIndex);
+}
+
 public sealed class TuiCombinedAutocompleteProvider : ITuiAutocompleteProvider
 {
     private static readonly HashSet<char> PathDelimiters = [' ', '\t', '"', '\'', '='];

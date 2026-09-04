@@ -5,7 +5,7 @@ namespace Tau.Tui.Runtime;
 
 public sealed class InteractiveConsoleSession
 {
-    private const string DefaultPrompt = "> ";
+    private const string DefaultPrompt = ">> ";
     private const ConsoleColor DefaultPromptColor = ConsoleColor.Green;
     private const string PromptZoneStart = "\u001b]133;A\u0007";
     private const string PromptZoneEnd = "\u001b]133;B\u0007";
@@ -14,13 +14,23 @@ public sealed class InteractiveConsoleSession
     private readonly InteractiveInputEditor? _editor;
     private readonly Action? _clearScreenAction;
     private readonly List<TranscriptEntry> _transcript = [];
+    private readonly object _stateSync = new();
     private int _visibleTranscriptStart;
     private bool _streamingLineOpen;
     private TranscriptEntryKind? _streamingKind;
     private string _streamingBuffer = string.Empty;
 
     public InputBuffer InputBuffer { get; } = new();
-    public IReadOnlyList<TranscriptEntry> Transcript => _transcript;
+    public IReadOnlyList<TranscriptEntry> Transcript
+    {
+        get
+        {
+            lock (_stateSync)
+            {
+                return _transcript.ToArray();
+            }
+        }
+    }
     public IKeyBindingMap? InputKeyBindings => _editor?.KeyBindings;
     public event Action? TranscriptChanged;
 
@@ -36,39 +46,45 @@ public sealed class InteractiveConsoleSession
 
     public void ShowWelcome(string title, string promptHint, IReadOnlyList<string>? customHeaderLines = null)
     {
-        if (customHeaderLines is null)
+        lock (_stateSync)
         {
-            _terminal.WriteLine(title, ConsoleColor.Cyan);
-            _terminal.WriteLine(promptHint);
-            _transcript.Add(new TranscriptEntry(TranscriptEntryKind.System, title));
-            _transcript.Add(new TranscriptEntry(TranscriptEntryKind.System, promptHint));
-        }
-        else
-        {
-            foreach (var line in customHeaderLines)
+            if (customHeaderLines is null)
             {
-                _terminal.WriteLine(line);
-                _transcript.Add(new TranscriptEntry(TranscriptEntryKind.System, line));
+                _terminal.WriteLine(title, ConsoleColor.Cyan);
+                _terminal.WriteLine(promptHint);
+                _transcript.Add(new TranscriptEntry(TranscriptEntryKind.System, title));
+                _transcript.Add(new TranscriptEntry(TranscriptEntryKind.System, promptHint));
             }
-        }
+            else
+            {
+                foreach (var line in customHeaderLines)
+                {
+                    _terminal.WriteLine(line);
+                    _transcript.Add(new TranscriptEntry(TranscriptEntryKind.System, line));
+                }
+            }
 
-        _terminal.WriteLine();
-        NotifyTranscriptChanged();
+            _terminal.WriteLine();
+            NotifyTranscriptChanged();
+        }
     }
 
     public IReadOnlyList<TuiMessage> SnapshotMessages()
     {
-        var messages = _transcript
-            .Skip(Math.Clamp(_visibleTranscriptStart, 0, _transcript.Count))
-            .Select(static entry => new TuiMessage(ToMessageRole(entry.Kind), entry.Text))
-            .ToList();
-
-        if (_streamingLineOpen && _streamingKind is { } streamingKind)
+        lock (_stateSync)
         {
-            messages.Add(new TuiMessage(ToMessageRole(streamingKind), _streamingBuffer));
-        }
+            var messages = _transcript
+                .Skip(Math.Clamp(_visibleTranscriptStart, 0, _transcript.Count))
+                .Select(static entry => new TuiMessage(ToMessageRole(entry.Kind), entry.Text))
+                .ToList();
 
-        return messages;
+            if (_streamingLineOpen && _streamingKind is { } streamingKind)
+            {
+                messages.Add(new TuiMessage(ToMessageRole(streamingKind), _streamingBuffer));
+            }
+
+            return messages;
+        }
     }
 
     public async Task<string?> ReadInputAsync(CancellationToken cancellationToken = default)
@@ -98,198 +114,268 @@ public sealed class InteractiveConsoleSession
     {
         if (_editor is not null)
         {
-            EnsureStreamingLineClosed();
+            lock (_stateSync)
+            {
+                EnsureStreamingLineClosed();
+            }
+
             var result = await _editor.ReadLineAsync(prompt, promptColor, cancellationToken).ConfigureAwait(false);
             if (result.Kind != InputResultKind.Submitted)
             {
                 return result;
             }
 
-            InputBuffer.SetDraft(result.Text);
-            return InputResult.Submitted(InputBuffer.Commit());
+            lock (_stateSync)
+            {
+                InputBuffer.SetDraft(result.Text);
+                return InputResult.Submitted(InputBuffer.Commit());
+            }
         }
 
         var input = await _terminal.PromptAsync(prompt, promptColor, cancellationToken).ConfigureAwait(false);
-        InputBuffer.SetDraft(input);
-        return InputResult.Submitted(InputBuffer.Commit());
+        lock (_stateSync)
+        {
+            InputBuffer.SetDraft(input);
+            return InputResult.Submitted(InputBuffer.Commit());
+        }
     }
 
     public void SetDraft(string? value)
     {
-        InputBuffer.SetDraft(value);
-        _editor?.Buffer.SetDraft(value);
+        lock (_stateSync)
+        {
+            InputBuffer.SetDraft(value);
+            _editor?.Buffer.SetDraft(value);
+        }
     }
 
-    public string GetDraft() => _editor?.Buffer.Draft ?? InputBuffer.Draft;
+    public string GetDraft()
+    {
+        lock (_stateSync)
+        {
+            return _editor?.Buffer.Draft ?? InputBuffer.Draft;
+        }
+    }
 
     public void SetInputShortcutHandler(Func<ConsoleKeyInfo, CancellationToken, Task<bool>>? shortcutHandler)
     {
-        _editor?.SetShortcutHandler(shortcutHandler);
+        lock (_stateSync)
+        {
+            _editor?.SetShortcutHandler(shortcutHandler);
+        }
     }
 
     public void WriteUserMessage(string message)
     {
-        EnsureStreamingLineClosed();
-        _terminal.Write(PromptZoneStart);
-        _terminal.Write("you> ", ConsoleColor.Green);
-        _terminal.WriteLine(message);
-        _terminal.Write(PromptZoneEnd + PromptZoneFinal);
-        _transcript.Add(new TranscriptEntry(TranscriptEntryKind.User, message));
-        NotifyTranscriptChanged();
+        lock (_stateSync)
+        {
+            EnsureStreamingLineClosed();
+            _terminal.Write(PromptZoneStart);
+            _terminal.Write("you> ", ConsoleColor.Green);
+            _terminal.WriteLine(message);
+            _terminal.Write(PromptZoneEnd + PromptZoneFinal);
+            _transcript.Add(new TranscriptEntry(TranscriptEntryKind.User, message));
+            NotifyTranscriptChanged();
+        }
     }
 
     public void WriteCustomMessage(string message)
     {
-        EnsureStreamingLineClosed();
-        _terminal.Write("custom> ", ConsoleColor.Magenta);
-        _terminal.WriteLine(message);
-        _transcript.Add(new TranscriptEntry(TranscriptEntryKind.Custom, message));
-        NotifyTranscriptChanged();
+        lock (_stateSync)
+        {
+            EnsureStreamingLineClosed();
+            _terminal.Write("custom> ", ConsoleColor.Magenta);
+            _terminal.WriteLine(message);
+            _transcript.Add(new TranscriptEntry(TranscriptEntryKind.Custom, message));
+            NotifyTranscriptChanged();
+        }
     }
 
     public void WriteSkillInvocation(string message)
     {
-        EnsureStreamingLineClosed();
-        _terminal.Write("skill> ", ConsoleColor.Magenta);
-        _terminal.WriteLine(message);
-        _transcript.Add(new TranscriptEntry(TranscriptEntryKind.Skill, message));
-        NotifyTranscriptChanged();
+        lock (_stateSync)
+        {
+            EnsureStreamingLineClosed();
+            _terminal.Write("skill> ", ConsoleColor.Magenta);
+            _terminal.WriteLine(message);
+            _transcript.Add(new TranscriptEntry(TranscriptEntryKind.Skill, message));
+            NotifyTranscriptChanged();
+        }
     }
 
     public void WriteAssistantText(string delta)
     {
-        EnsureStreamingMode(TranscriptEntryKind.Assistant, "tau> ", ConsoleColor.Cyan);
-        _terminal.Write(delta);
-        _streamingBuffer += delta;
-        NotifyTranscriptChanged();
+        lock (_stateSync)
+        {
+            EnsureStreamingMode(TranscriptEntryKind.Assistant, "tau> ", ConsoleColor.Cyan);
+            _terminal.Write(delta);
+            _streamingBuffer += delta;
+            NotifyTranscriptChanged();
+        }
     }
 
     public void WriteAssistantThinking(string delta, string? label = null)
     {
-        var thinkingLabel = string.IsNullOrWhiteSpace(label) ? "thinking" : label.Trim();
-        EnsureStreamingMode(TranscriptEntryKind.Thinking, $"{thinkingLabel}> ", ConsoleColor.DarkGray);
-        _terminal.Write(delta, ConsoleColor.DarkGray);
-        _streamingBuffer += delta;
-        NotifyTranscriptChanged();
+        lock (_stateSync)
+        {
+            var thinkingLabel = string.IsNullOrWhiteSpace(label) ? "thinking" : label.Trim();
+            EnsureStreamingMode(TranscriptEntryKind.Thinking, $"{thinkingLabel}> ", ConsoleColor.DarkGray);
+            _terminal.Write(delta, ConsoleColor.DarkGray);
+            _streamingBuffer += delta;
+            NotifyTranscriptChanged();
+        }
     }
 
     public void WriteToolStart(string toolName)
     {
-        EnsureStreamingLineClosed();
-        _terminal.Write("tool> ", ConsoleColor.Yellow);
-        _terminal.Write($"[{toolName}] ", ConsoleColor.Yellow);
-        _transcript.Add(new TranscriptEntry(TranscriptEntryKind.Tool, $"[{toolName}]"));
-        NotifyTranscriptChanged();
+        lock (_stateSync)
+        {
+            EnsureStreamingLineClosed();
+            _terminal.Write("tool> ", ConsoleColor.Yellow);
+            _terminal.Write($"[{toolName}] ", ConsoleColor.Yellow);
+            _transcript.Add(new TranscriptEntry(TranscriptEntryKind.Tool, $"[{toolName}]"));
+            NotifyTranscriptChanged();
+        }
     }
 
     public void WriteToolEnd(bool isError)
     {
-        var status = isError ? "(error)" : "(done)";
-        _terminal.WriteLine(status, isError ? ConsoleColor.Red : ConsoleColor.DarkGreen);
-        _transcript.Add(new TranscriptEntry(TranscriptEntryKind.Status, status));
-        NotifyTranscriptChanged();
+        lock (_stateSync)
+        {
+            var status = isError ? "(error)" : "(done)";
+            _terminal.WriteLine(status, isError ? ConsoleColor.Red : ConsoleColor.DarkGreen);
+            _transcript.Add(new TranscriptEntry(TranscriptEntryKind.Status, status));
+            NotifyTranscriptChanged();
+        }
     }
 
     public void WriteToolComponent(ITuiComponent component, int width = 80, string? key = null)
     {
         ArgumentNullException.ThrowIfNull(component);
-        EnsureStreamingLineClosed();
-
-        var text = RenderComponentText(component, width);
-        if (text.Length == 0)
+        lock (_stateSync)
         {
-            return;
-        }
+            EnsureStreamingLineClosed();
 
-        var lines = text.Split('\n');
-        for (var i = 0; i < lines.Length; i++)
-        {
-            if (i == 0)
+            var text = RenderComponentText(component, width);
+            if (text.Length == 0)
             {
-                _terminal.Write("tool> ", ConsoleColor.Yellow);
-                _terminal.WriteLine(lines[i]);
+                return;
             }
-            else
-            {
-                _terminal.WriteLine("      " + lines[i]);
-            }
-        }
 
-        UpsertTranscriptEntry(TranscriptEntryKind.Tool, text, key);
-        NotifyTranscriptChanged();
+            var lines = text.Split('\n');
+            for (var i = 0; i < lines.Length; i++)
+            {
+                if (i == 0)
+                {
+                    _terminal.Write("tool> ", ConsoleColor.Yellow);
+                    _terminal.WriteLine(lines[i]);
+                }
+                else
+                {
+                    _terminal.WriteLine("      " + lines[i]);
+                }
+            }
+
+            UpsertTranscriptEntry(TranscriptEntryKind.Tool, text, key);
+            NotifyTranscriptChanged();
+        }
     }
 
     public void WriteBranchSummary(string message)
     {
-        EnsureStreamingLineClosed();
-        _terminal.Write("branch> ", ConsoleColor.Magenta);
-        _terminal.WriteLine(message);
-        _transcript.Add(new TranscriptEntry(TranscriptEntryKind.BranchSummary, message));
-        NotifyTranscriptChanged();
+        lock (_stateSync)
+        {
+            EnsureStreamingLineClosed();
+            _terminal.Write("branch> ", ConsoleColor.Magenta);
+            _terminal.WriteLine(message);
+            _transcript.Add(new TranscriptEntry(TranscriptEntryKind.BranchSummary, message));
+            NotifyTranscriptChanged();
+        }
     }
 
     public void WriteCompactionSummary(string message)
     {
-        EnsureStreamingLineClosed();
-        _terminal.Write("compaction> ", ConsoleColor.Magenta);
-        _terminal.WriteLine(message);
-        _transcript.Add(new TranscriptEntry(TranscriptEntryKind.CompactionSummary, message));
-        NotifyTranscriptChanged();
+        lock (_stateSync)
+        {
+            EnsureStreamingLineClosed();
+            _terminal.Write("compaction> ", ConsoleColor.Magenta);
+            _terminal.WriteLine(message);
+            _transcript.Add(new TranscriptEntry(TranscriptEntryKind.CompactionSummary, message));
+            NotifyTranscriptChanged();
+        }
     }
 
     public void WriteStatus(string message)
     {
-        EnsureStreamingLineClosed();
-        _terminal.Write("status> ", ConsoleColor.DarkGray);
-        _terminal.WriteLine(message);
-        _transcript.Add(new TranscriptEntry(TranscriptEntryKind.Status, message));
-        NotifyTranscriptChanged();
+        lock (_stateSync)
+        {
+            EnsureStreamingLineClosed();
+            _terminal.Write("status> ", ConsoleColor.DarkGray);
+            _terminal.WriteLine(message);
+            _transcript.Add(new TranscriptEntry(TranscriptEntryKind.Status, message));
+            NotifyTranscriptChanged();
+        }
     }
 
     public void WriteRuntimeError(string message)
     {
-        EnsureStreamingLineClosed();
-        _terminal.Write("error> ", ConsoleColor.Red);
-        _terminal.WriteLine(message, ConsoleColor.Red);
-        _transcript.Add(new TranscriptEntry(TranscriptEntryKind.Error, message));
-        NotifyTranscriptChanged();
+        lock (_stateSync)
+        {
+            EnsureStreamingLineClosed();
+            _terminal.Write("error> ", ConsoleColor.Red);
+            _terminal.WriteLine(message, ConsoleColor.Red);
+            _transcript.Add(new TranscriptEntry(TranscriptEntryKind.Error, message));
+            NotifyTranscriptChanged();
+        }
     }
 
     public void CompleteAssistantTurn()
     {
-        EnsureStreamingLineClosed();
+        lock (_stateSync)
+        {
+            EnsureStreamingLineClosed();
+        }
     }
 
     public void WriteCancelled()
     {
-        EnsureStreamingLineClosed();
-        _terminal.WriteLine("[Cancelled]", ConsoleColor.Yellow);
-        _transcript.Add(new TranscriptEntry(TranscriptEntryKind.Status, "[Cancelled]"));
-        NotifyTranscriptChanged();
+        lock (_stateSync)
+        {
+            EnsureStreamingLineClosed();
+            _terminal.WriteLine("[Cancelled]", ConsoleColor.Yellow);
+            _transcript.Add(new TranscriptEntry(TranscriptEntryKind.Status, "[Cancelled]"));
+            NotifyTranscriptChanged();
+        }
     }
 
     public void WriteShutdown(string message)
     {
-        EnsureStreamingLineClosed();
-        _terminal.WriteLine(message);
-        _transcript.Add(new TranscriptEntry(TranscriptEntryKind.System, message));
-        NotifyTranscriptChanged();
+        lock (_stateSync)
+        {
+            EnsureStreamingLineClosed();
+            _terminal.WriteLine(message);
+            _transcript.Add(new TranscriptEntry(TranscriptEntryKind.System, message));
+            NotifyTranscriptChanged();
+        }
     }
 
     public void ClearScreen()
     {
-        EnsureStreamingLineClosed();
-        if (_clearScreenAction is not null)
+        lock (_stateSync)
         {
-            _visibleTranscriptStart = _transcript.Count;
-            NotifyTranscriptChanged();
-            _clearScreenAction();
-            return;
-        }
+            EnsureStreamingLineClosed();
+            if (_clearScreenAction is not null)
+            {
+                _visibleTranscriptStart = _transcript.Count;
+                NotifyTranscriptChanged();
+                _clearScreenAction();
+                return;
+            }
 
-        // ANSI clear screen + move cursor home. Terminals that don't support ANSI
-        // will just print the codes, which is acceptable for a /clear best-effort.
-        _terminal.Write("\u001b[2J\u001b[H");
+            // ANSI clear screen + move cursor home. Terminals that don't support ANSI
+            // will just print the codes, which is acceptable for a /clear best-effort.
+            _terminal.Write("\u001b[2J\u001b[H");
+        }
     }
 
     private void EnsureStreamingLineClosed()

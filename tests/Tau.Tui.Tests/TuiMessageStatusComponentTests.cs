@@ -122,4 +122,146 @@ public sealed class TuiMessageStatusComponentTests
         Assert.Equal(3, bar.LineCount);
         Assert.All(lines, line => Assert.Equal(20, TuiText.VisibleWidth(line)));
     }
+
+    [Fact]
+    public void MessageArea_AgentThemeUsesCompactRoleMarkersAndStableWidths()
+    {
+        var lines = TuiMessageArea.RenderMessages(
+            [
+                new TuiMessage(TuiMessageRole.User, "hello"),
+                new TuiMessage(TuiMessageRole.Assistant, "answer"),
+                new TuiMessage(TuiMessageRole.Tool, "build")
+            ],
+            width: 24,
+            displayOptions: TuiMessageDisplayOptions.Agent);
+
+        Assert.Contains("→", lines[0], StringComparison.Ordinal);
+        Assert.Contains("◆", lines[1], StringComparison.Ordinal);
+        Assert.Contains("⚒", lines[2], StringComparison.Ordinal);
+        Assert.DoesNotContain("you>", lines[0], StringComparison.Ordinal);
+        Assert.DoesNotContain("tau>", lines[1], StringComparison.Ordinal);
+        Assert.DoesNotContain("tool>", lines[2], StringComparison.Ordinal);
+        Assert.All(lines, line => Assert.Equal(24, TuiText.VisibleWidth(line)));
+    }
+
+    [Fact]
+    public void MessageArea_AgentThemeSeparatesNewUserTurn()
+    {
+        var lines = TuiMessageArea.RenderMessages(
+            [
+                new TuiMessage(TuiMessageRole.User, "first"),
+                new TuiMessage(TuiMessageRole.Assistant, "answer"),
+                new TuiMessage(TuiMessageRole.User, "follow up")
+            ],
+            width: 24,
+            displayOptions: TuiMessageDisplayOptions.Agent);
+
+        Assert.Equal(new string(' ', 24), lines[2]);
+        Assert.Contains("follow up", lines[3], StringComparison.Ordinal);
+        Assert.All(lines, line => Assert.Equal(24, TuiText.VisibleWidth(line)));
+    }
+
+    [Fact]
+    public void MessageArea_AgentThemeFormatsAssistantMarkdownAndBoldUserText()
+    {
+        var lines = TuiMessageArea.RenderMessages(
+            [
+                new TuiMessage(TuiMessageRole.User, "Please inspect **this**"),
+                new TuiMessage(TuiMessageRole.Assistant, "# Answer\n\n```cs\nvar x = 1;\n```")
+            ],
+            width: 42,
+            displayOptions: TuiMessageDisplayOptions.Agent);
+
+        Assert.Contains(lines, line => line.Contains("\u001b[1m", StringComparison.Ordinal));
+        Assert.DoesNotContain(lines, line => line.Contains("\u001b[48;5;238m", StringComparison.Ordinal));
+        Assert.Contains(lines, line => line.Contains("Answer", StringComparison.Ordinal));
+        Assert.DoesNotContain(lines, line => line.Contains("# Answer", StringComparison.Ordinal));
+        Assert.Contains(lines, line => line.Contains("var", StringComparison.Ordinal) && line.Contains("x", StringComparison.Ordinal));
+        Assert.All(lines, line => Assert.Equal(42, TuiText.VisibleWidth(line)));
+    }
+
+    [Fact]
+    public void MessageArea_AgentThemeStylesWelcomeTitleWithoutLogPrefix()
+    {
+        var lines = TuiMessageArea.RenderMessages(
+            [
+                new TuiMessage(TuiMessageRole.System, "Tau — Coding Agent"),
+                new TuiMessage(TuiMessageRole.System, "Type your message")
+            ],
+            width: 32,
+            displayOptions: TuiMessageDisplayOptions.Agent);
+
+        Assert.Contains("Tau — Coding Agent", lines[0], StringComparison.Ordinal);
+        Assert.Contains("\u001b[1;38;5;215m", lines[0], StringComparison.Ordinal);
+        Assert.DoesNotContain("•", lines[0], StringComparison.Ordinal);
+        Assert.Contains("\u001b[2;90m", lines[1], StringComparison.Ordinal);
+        Assert.All(lines, line => Assert.Equal(32, TuiText.VisibleWidth(line)));
+    }
+
+    [Fact]
+    public void StatusBar_AgentThemeStylesSegmentsWithoutChangingLayoutWidth()
+    {
+        var bar = new TuiStatusBar("~/repo (main)", "gpt-5.4", TuiStatusBarTheme.Agent);
+
+        var line = Assert.Single(bar.Render(32));
+
+        Assert.Contains("\u001b[90m", line, StringComparison.Ordinal);
+        Assert.Contains("\u001b[36m", line, StringComparison.Ordinal);
+        Assert.Contains("~/repo (main)", line, StringComparison.Ordinal);
+        Assert.Contains("gpt-5.4", line, StringComparison.Ordinal);
+        Assert.Equal(32, TuiText.VisibleWidth(line));
+    }
+
+    [Fact]
+    public void ToolAndBashAgentThemesExposeLifecycleMarkers()
+    {
+        var tool = new TuiToolExecution("read_file", "call-visual", theme: TuiToolExecutionTheme.Agent);
+        var pending = string.Join('\n', tool.Render(40));
+        tool.UpdateResult(new TuiToolExecutionResult([new TuiToolTextBlock("done")]));
+        var complete = string.Join('\n', tool.Render(40));
+        var failedTool = new TuiToolExecution("write_file", "call-error", theme: TuiToolExecutionTheme.Agent);
+        failedTool.UpdateResult(new TuiToolExecutionResult(
+            [new TuiToolTextBlock("failed")],
+            IsError: true));
+        var failed = string.Join('\n', failedTool.Render(40));
+
+        var bash = new TuiBashExecution("dotnet test", theme: TuiBashExecutionTheme.Agent);
+        var running = string.Join('\n', bash.Render(40));
+        bash.SetComplete(exitCode: 0);
+        var done = string.Join('\n', bash.Render(40));
+        var failedBash = new TuiBashExecution("dotnet test", theme: TuiBashExecutionTheme.Agent);
+        failedBash.SetComplete(exitCode: 1);
+        var bashError = string.Join('\n', failedBash.Render(40));
+
+        Assert.Contains("⏳", pending, StringComparison.Ordinal);
+        Assert.Contains("✓", complete, StringComparison.Ordinal);
+        Assert.Contains("✗", failed, StringComparison.Ordinal);
+        Assert.Contains("╭", pending, StringComparison.Ordinal);
+        Assert.Contains("╰", pending, StringComparison.Ordinal);
+        Assert.DoesNotContain("\u001b[38;5;252;48;5;236m", pending, StringComparison.Ordinal);
+        Assert.Contains("╭", complete, StringComparison.Ordinal);
+        Assert.Contains("╭", failed, StringComparison.Ordinal);
+        Assert.Contains("⏳", running, StringComparison.Ordinal);
+        Assert.Contains("✓", done, StringComparison.Ordinal);
+        Assert.Contains("✗", bashError, StringComparison.Ordinal);
+        Assert.All(tool.Render(40), line => Assert.Equal(40, TuiText.VisibleWidth(line)));
+        Assert.All(failedTool.Render(40), line => Assert.Equal(40, TuiText.VisibleWidth(line)));
+        Assert.All(bash.Render(40), line => Assert.Equal(40, TuiText.VisibleWidth(line)));
+        Assert.All(failedBash.Render(40), line => Assert.Equal(40, TuiText.VisibleWidth(line)));
+    }
+
+    [Fact]
+    public void MessageArea_AgentThemeUsesSpectrePanelForReasoning()
+    {
+        var lines = TuiMessageArea.RenderMessages(
+            [new TuiMessage(TuiMessageRole.Thinking, "Inspecting the repository")],
+            width: 48,
+            displayOptions: TuiMessageDisplayOptions.Agent);
+
+        Assert.Contains(lines, line => line.Contains("思维链", StringComparison.Ordinal));
+        Assert.Contains(lines, line => line.Contains("Inspecting the repository", StringComparison.Ordinal));
+        Assert.Contains(lines, line => line.Contains("╭", StringComparison.Ordinal));
+        Assert.Contains(lines, line => line.Contains("╰", StringComparison.Ordinal));
+        Assert.All(lines, line => Assert.Equal(48, TuiText.VisibleWidth(line)));
+    }
 }

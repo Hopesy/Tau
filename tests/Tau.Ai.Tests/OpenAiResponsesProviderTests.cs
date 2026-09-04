@@ -57,6 +57,57 @@ public sealed class OpenAiResponsesProviderTests
     }
 
     [Fact]
+    public async Task Stream_HandlesNullUsageAndErrorFieldsInLifecycleEvents()
+    {
+        using var handler = new StubHandler(_ => SseResponse(
+            """
+            data: {"type":"response.created","response":{"id":"resp_nulls","usage":null,"error":null}}
+
+            data: {"type":"response.output_item.added","item":{"id":"msg_nulls","type":"message"}}
+
+            data: {"type":"response.output_text.delta","item_id":"msg_nulls","delta":"ok"}
+
+            data: {"type":"response.output_item.done","item":{"id":"msg_nulls","type":"message","content":[{"type":"output_text","text":"ok","annotations":[]}]}}
+
+            data: {"type":"response.completed","response":{"id":"resp_nulls","status":"completed","usage":null,"error":null}}
+
+            """));
+        using var client = new HttpClient(handler);
+        var provider = new OpenAiResponsesProvider(client);
+
+        var events = await CollectAsync(provider.Stream(
+            BuildResponsesModel(),
+            new LlmContext { Messages = [new UserMessage("hi")] },
+            new StreamOptions { ApiKey = "test-key" }));
+
+        var done = Assert.Single(events.OfType<DoneEvent>());
+        Assert.Equal("ok", Assert.IsType<TextContent>(Assert.Single(done.Message.Content)).Text);
+        Assert.Null(done.Message.Usage);
+        Assert.Equal(StopReason.EndTurn, done.Message.StopReason);
+        Assert.DoesNotContain(events, static evt => evt is ErrorEvent);
+    }
+
+    [Fact]
+    public async Task Stream_HandlesNullErrorPayloadOnFailedEvent()
+    {
+        using var handler = new StubHandler(_ => SseResponse(
+            """
+            data: {"type":"response.failed","response":{"error":null}}
+
+            """));
+        using var client = new HttpClient(handler);
+        var provider = new OpenAiResponsesProvider(client);
+
+        var events = await CollectAsync(provider.Stream(
+            BuildResponsesModel(),
+            new LlmContext { Messages = [new UserMessage("hi")] },
+            new StreamOptions { ApiKey = "test-key" }));
+
+        var error = Assert.Single(events.OfType<ErrorEvent>());
+        Assert.Equal("OpenAI Responses error", error.Error);
+    }
+
+    [Fact]
     public async Task Stream_TranslatesToolCallEvents()
     {
         using var handler = new StubHandler(_ => SseResponse(

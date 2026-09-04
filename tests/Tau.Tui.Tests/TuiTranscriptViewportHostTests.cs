@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using Tau.Tui.Abstractions;
 using Tau.Tui.Components;
 using Tau.Tui.Rendering;
@@ -22,6 +23,30 @@ public sealed class TuiTranscriptViewportHostTests
         Assert.Equal(["", "", "you> one"], MessageRows(result.Frame, host));
         Assert.Equal("ready            gpt", result.Frame.Lines[^1]);
         Assert.Same(result.Diff, Assert.Single(surface.Diffs));
+    }
+
+    [Fact]
+    public void ReservedBottomLinesKeepTranscriptAboveInputOverlay()
+    {
+        var surface = new MemoryRenderSurface(width: 24, height: 8);
+        var host = new TuiTranscriptViewportHost(
+            surface,
+            [new TuiMessage(TuiMessageRole.System, "line one"), new TuiMessage(TuiMessageRole.System, "line two")],
+            statusLeft: "cwd",
+            statusRight: "model",
+            displayOptions: TuiMessageDisplayOptions.Agent);
+
+        host.SetReservedBottomLines(3);
+        var result = host.Render();
+
+        Assert.Equal(3, host.Viewport.ReservedBottomLines);
+        Assert.Equal(4, host.Viewport.TranscriptHeight);
+        Assert.Equal(7, host.Viewport.MessageHeight);
+        Assert.Contains("line one", result.Frame.Lines[0], StringComparison.Ordinal);
+        Assert.Contains("line two", result.Frame.Lines[1], StringComparison.Ordinal);
+        Assert.All(result.Frame.Lines.Skip(2).Take(5), line => Assert.Equal(new string(' ', 24), line));
+        Assert.StartsWith("cwd", result.Frame.Lines[^1], StringComparison.Ordinal);
+        Assert.EndsWith("model", result.Frame.Lines[^1], StringComparison.Ordinal);
     }
 
     [Fact]
@@ -176,6 +201,31 @@ public sealed class TuiTranscriptViewportHostTests
         Assert.Equal(5, result.Frame.Lines.Count);
         Assert.Equal("ready             ", result.Frame.Lines[^1]);
         Assert.Equal(["", "you> one", "tau> two", "tool> three"], MessageRows(result.Frame, host));
+    }
+
+    [Fact]
+    public void Render_WhenSurfaceShrinksClampsReservedInputRowsBeforeComposingFrame()
+    {
+        var surface = new MemoryRenderSurface(width: 24, height: 10);
+        var host = new TuiTranscriptViewportHost(
+            surface,
+            statusLeft: "cwd",
+            statusRight: "model");
+
+        host.SetReservedBottomLines(6);
+        host.Render();
+        surface.Clear();
+
+        surface.Height = 4;
+        var result = host.Render();
+
+        Assert.Equal(3, host.Viewport.MessageHeight);
+        Assert.Equal(3, host.Viewport.ReservedBottomLines);
+        Assert.Equal(0, host.Viewport.TranscriptHeight);
+        Assert.Equal(4, result.Frame.Lines.Count);
+        Assert.All(result.Frame.Lines, line => Assert.Equal(24, TuiText.VisibleWidth(line)));
+        Assert.StartsWith("cwd", result.Frame.Lines[^1], StringComparison.Ordinal);
+        Assert.EndsWith("model", result.Frame.Lines[^1], StringComparison.Ordinal);
     }
 
     [Fact]
@@ -442,6 +492,203 @@ public sealed class TuiTranscriptViewportHostTests
         Assert.False(hidden.CursorVisible);
         Assert.True(visibleAgain.CursorVisible);
         Assert.True(host.CursorVisible);
+    }
+
+    [Fact]
+    public void CompositionInputRenderer_UsesStableInputFrameAndPreservesWidth()
+    {
+        var surface = new MemoryRenderSurface(width: 30, height: 8);
+        var session = new TuiCompositionSession(surface);
+        var renderer = new TuiCompositionInteractiveRenderer(session);
+
+        renderer.WritePrompt(">> ");
+        renderer.Render("hello", cursorIndex: 5);
+
+        var renderResult = session.LastRenderResult;
+        Assert.NotNull(renderResult);
+        var frame = renderResult!.Frame;
+        Assert.Contains(frame.Lines, line => line.Contains("─", StringComparison.Ordinal));
+        Assert.Contains(frame.Lines, line => line.Contains(">> hello", StringComparison.Ordinal));
+        Assert.DoesNotContain(frame.Lines, line => line.Contains("╭", StringComparison.Ordinal));
+        Assert.DoesNotContain(frame.Lines, line => line.Contains("╰", StringComparison.Ordinal));
+        Assert.DoesNotContain(frame.Lines, line => line.Contains("│", StringComparison.Ordinal));
+        Assert.All(frame.Lines, line => Assert.Equal(30, TuiText.VisibleWidth(line)));
+    }
+
+    [Fact]
+    public void CompositionInputRenderer_ClampsInputFrameForVeryNarrowTerminals()
+    {
+        foreach (var width in new[] { 1, 2, 3, 4 })
+        {
+            var surface = new MemoryRenderSurface(width, height: 6);
+            var session = new TuiCompositionSession(surface);
+            var renderer = new TuiCompositionInteractiveRenderer(session);
+
+            renderer.WritePrompt(">> ");
+            renderer.Render("x", cursorIndex: 1);
+
+            var result = session.LastRenderResult;
+            Assert.NotNull(result);
+            Assert.All(result!.Frame.Lines, line => Assert.Equal(width, TuiText.VisibleWidth(line)));
+        }
+    }
+
+    [Fact]
+    public void CompositionInputRenderer_UsesHorizontalSeparatorsForMultilineInputAndKeepsCursorVisible()
+    {
+        var surface = new MemoryRenderSurface(width: 12, height: 10);
+        var session = new TuiCompositionSession(surface);
+        var renderer = new TuiCompositionInteractiveRenderer(session);
+
+        renderer.WritePrompt(">> ");
+        renderer.Render("123456789", cursorIndex: 9);
+
+        var frame = session.LastRenderResult!.Frame;
+        var separatorIndexes = frame.Lines
+            .Select((line, index) => (line, index))
+            .Where(item => item.line.Contains("─", StringComparison.Ordinal))
+            .Select(item => item.index)
+            .ToArray();
+
+        Assert.Equal(2, separatorIndexes.Length);
+        Assert.Equal(3, separatorIndexes[1] - separatorIndexes[0]);
+        Assert.Contains(frame.Lines, line => line.Contains("\u001b[7m", StringComparison.Ordinal));
+        Assert.DoesNotContain(frame.Lines, line => line.Contains("╭", StringComparison.Ordinal));
+        Assert.DoesNotContain(frame.Lines, line => line.Contains("╰", StringComparison.Ordinal));
+        Assert.DoesNotContain(frame.Lines, line => line.Contains("│", StringComparison.Ordinal));
+        Assert.All(frame.Lines, line => Assert.Equal(12, TuiText.VisibleWidth(line)));
+    }
+
+    [Fact]
+    public void CompositionInputRenderer_UsesCadeFiveLineInputLimit()
+    {
+        var surface = new MemoryRenderSurface(width: 8, height: 16);
+        var session = new TuiCompositionSession(surface);
+        var renderer = new TuiCompositionInteractiveRenderer(session);
+
+        renderer.WritePrompt(">> ");
+        renderer.Render(new string('x', 80), cursorIndex: 80);
+
+        var frame = session.LastRenderResult!.Frame;
+        var separatorCount = frame.Lines.Count(line => line.Contains("─", StringComparison.Ordinal));
+
+        Assert.Equal(2, separatorCount);
+        Assert.Equal(7, session.Viewport.ReservedBottomLines);
+        Assert.All(frame.Lines, line => Assert.Equal(8, TuiText.VisibleWidth(line)));
+    }
+
+    [Fact]
+    public void CompositionInputRenderer_RendersCadeStyleAutocompleteBelowInput()
+    {
+        var surface = new MemoryRenderSurface(width: 42, height: 12);
+        var session = new TuiCompositionSession(surface);
+        var renderer = new TuiCompositionInteractiveRenderer(session);
+
+        renderer.WritePrompt(">> ");
+        renderer.RenderAutocomplete(
+            [
+                new TuiAutocompleteItem("help", "help", "show available commands"),
+                new TuiAutocompleteItem("model", "model", "select a model")
+            ],
+            selectedIndex: 1);
+        renderer.Render("/", cursorIndex: 1);
+
+        var frame = session.LastRenderResult!.Frame;
+        Assert.Contains(frame.Lines, line => line.Contains(">", StringComparison.Ordinal) && line.Contains("model", StringComparison.Ordinal));
+        Assert.Contains(frame.Lines, line => line.Contains("help", StringComparison.Ordinal));
+        Assert.Contains(frame.Lines, line => line.Contains("select a model", StringComparison.Ordinal));
+        Assert.Equal(5, session.Viewport.ReservedBottomLines);
+        Assert.All(frame.Lines, line => Assert.Equal(42, TuiText.VisibleWidth(line)));
+    }
+
+    [Fact]
+    public async Task CompositionInputRenderer_SerializesConcurrentStateUpdates()
+    {
+        var surface = new MemoryRenderSurface(width: 40, height: 12);
+        var session = new TuiCompositionSession(surface);
+        var renderer = new TuiCompositionInteractiveRenderer(session);
+        var failures = new ConcurrentQueue<Exception>();
+
+        renderer.WritePrompt(">> ");
+        var tasks = Enumerable.Range(0, 80)
+            .Select(index => Task.Run(() =>
+            {
+                try
+                {
+                    renderer.Render($"draft-{index}-中文", cursorIndex: index % 12);
+                    session.Render();
+                }
+                catch (Exception ex)
+                {
+                    failures.Enqueue(ex);
+                }
+            }))
+            .ToArray();
+
+        await Task.WhenAll(tasks);
+
+        Assert.Empty(failures);
+        Assert.All(session.LastRenderResult!.Frame.Lines, line =>
+            Assert.Equal(40, TuiText.VisibleWidth(line)));
+    }
+
+    [Fact]
+    public void CompositionInputRenderer_DoesNotCoverStatusRowsInShortTerminal()
+    {
+        var surface = new MemoryRenderSurface(width: 24, height: 4);
+        var session = new TuiCompositionSession(surface);
+        session.SetStatusLines(
+            [
+                new TuiStatusBarLine("cwd", string.Empty),
+                new TuiStatusBarLine("tokens", "model"),
+                new TuiStatusBarLine("extension", string.Empty)
+            ]);
+        var renderer = new TuiCompositionInteractiveRenderer(session);
+
+        renderer.WritePrompt(">> ");
+        renderer.Render("hello", cursorIndex: 5);
+
+        var result = session.LastRenderResult;
+        Assert.NotNull(result);
+        Assert.Contains("hello", result!.Frame.Lines[0], StringComparison.Ordinal);
+        Assert.StartsWith("cwd", result.Frame.Lines[1], StringComparison.Ordinal);
+        Assert.StartsWith("tokens", result.Frame.Lines[2], StringComparison.Ordinal);
+        Assert.StartsWith("extension", result.Frame.Lines[3], StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CompositionInputRenderer_ReservesBottomRowsAndReleasesThemAfterCommit()
+    {
+        var surface = new MemoryRenderSurface(width: 32, height: 8);
+        var session = new TuiCompositionSession(
+            surface,
+            messages: Enumerable.Range(1, 7)
+                .Select(index => new TuiMessage(TuiMessageRole.System, $"event {index}")),
+            statusLeft: "cwd",
+            statusRight: "model");
+        var renderer = new TuiCompositionInteractiveRenderer(session);
+
+        renderer.WritePrompt(">> ");
+        renderer.Render("draft", cursorIndex: 5);
+
+        var editing = session.LastRenderResult;
+        Assert.NotNull(editing);
+        Assert.Equal(3, session.Viewport.ReservedBottomLines);
+        Assert.Equal(4, session.Viewport.TranscriptHeight);
+        Assert.Contains("event 7", editing!.BaseFrame!.Lines[3], StringComparison.Ordinal);
+        Assert.Contains("─", editing.Frame.Lines[4], StringComparison.Ordinal);
+        Assert.DoesNotContain("╭", editing.Frame.Lines[4], StringComparison.Ordinal);
+        Assert.Contains("draft", editing.Frame.Lines[5], StringComparison.Ordinal);
+        Assert.StartsWith("cwd", editing.Frame.Lines[^1], StringComparison.Ordinal);
+        Assert.EndsWith("model", editing.Frame.Lines[^1], StringComparison.Ordinal);
+
+        renderer.Commit();
+
+        Assert.Equal(0, session.Viewport.ReservedBottomLines);
+        Assert.Equal(7, session.Viewport.TranscriptHeight);
+        Assert.DoesNotContain("draft", session.LastRenderResult!.Frame.Lines);
+        Assert.StartsWith("cwd", session.LastRenderResult.Frame.Lines[^1], StringComparison.Ordinal);
+        Assert.EndsWith("model", session.LastRenderResult.Frame.Lines[^1], StringComparison.Ordinal);
     }
 
     private static IReadOnlyList<string> MessageRows(TuiRenderFrame frame, TuiTranscriptViewportHost host) =>

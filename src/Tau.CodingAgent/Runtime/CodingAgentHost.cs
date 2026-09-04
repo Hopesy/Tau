@@ -26,6 +26,8 @@ public sealed class CodingAgentHost
     private readonly CodingAgentSkillStore? _skillStore;
     private readonly CodingAgentExtensionCommandStore? _extensionCommandStore;
     private readonly CodingAgentFooterDataProvider? _footerDataProvider;
+    private readonly TuiToolExecutionTheme _toolExecutionTheme;
+    private readonly TuiBashExecutionTheme _bashExecutionTheme;
     private readonly bool _ownsFooterDataProvider;
     private readonly CodingAgentRpcExtensionUiBridge? _extensionUiBridge;
     private readonly CodingAgentAutoCompactionOptions _autoCompactionBase;
@@ -96,6 +98,12 @@ public sealed class CodingAgentHost
         _ui = ui;
         _runner = runner;
         _compositionSession = compositionSession;
+        _toolExecutionTheme = compositionSession is null
+            ? new TuiToolExecutionTheme()
+            : TuiToolExecutionTheme.Agent;
+        _bashExecutionTheme = compositionSession is null
+            ? new TuiBashExecutionTheme()
+            : TuiBashExecutionTheme.Agent;
         _sessionStore = sessionStore;
         _settingsStore = settingsStore;
         _treeSessionController = treeSessionController;
@@ -1796,7 +1804,9 @@ public sealed class CodingAgentHost
     {
         if (IsBashTool(toolStart.ToolName))
         {
-            var bash = new TuiBashExecution(TryGetCommandFromArgs(toolStart.Args) ?? toolStart.ToolName);
+            var bash = new TuiBashExecution(
+                TryGetCommandFromArgs(toolStart.Args) ?? toolStart.ToolName,
+                theme: _bashExecutionTheme);
             bash.SetExpanded(_toolOutputExpanded);
             bash.SetExpandKeyHint(ToolOutputExpandKeyHint());
             _activeBashExecutions[toolStart.ToolCallId] = bash;
@@ -1804,7 +1814,11 @@ public sealed class CodingAgentHost
             return;
         }
 
-        var tool = new TuiToolExecution(toolStart.ToolName, toolStart.ToolCallId, toolStart.Args);
+        var tool = new TuiToolExecution(
+            toolStart.ToolName,
+            toolStart.ToolCallId,
+            toolStart.Args,
+            _toolExecutionTheme);
         tool.SetExpanded(_toolOutputExpanded);
         tool.SetExpandKeyHint(ToolOutputExpandKeyHint());
         tool.MarkExecutionStarted();
@@ -1830,7 +1844,8 @@ public sealed class CodingAgentHost
             tool = new TuiToolExecution(
                 string.IsNullOrWhiteSpace(toolUpdate.ToolName) ? "tool" : toolUpdate.ToolName,
                 toolUpdate.ToolCallId,
-                toolUpdate.Args);
+                toolUpdate.Args,
+                _toolExecutionTheme);
             tool.SetExpanded(_toolOutputExpanded);
             tool.MarkExecutionStarted();
             _activeToolExecutions[toolUpdate.ToolCallId] = tool;
@@ -1881,7 +1896,8 @@ public sealed class CodingAgentHost
         {
             tool = new TuiToolExecution(
                 string.IsNullOrWhiteSpace(toolEnd.ToolName) ? "tool" : toolEnd.ToolName,
-                toolEnd.ToolCallId);
+                toolEnd.ToolCallId,
+                theme: _toolExecutionTheme);
             tool.SetExpanded(_toolOutputExpanded);
         }
 

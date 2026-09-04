@@ -3,6 +3,7 @@ using Tau.Ai.Observability;
 using Tau.Ai.Registry;
 using Tau.CodingAgent.Runtime;
 using Tau.Tui.Abstractions;
+using Tau.Tui.Components;
 using Tau.Tui.Rendering;
 using Tau.Tui.Runtime;
 
@@ -130,7 +131,11 @@ if (!rpcMode && !printMode && stdinContent is not null)
 var keyReader = new SystemConsoleKeyReader();
 var useCompositionUi = ShouldUseCompositionUi(printMode, rpcMode);
 var compositionSession = useCompositionUi
-    ? new TuiCompositionSession(TuiAnsiRenderSurface.ForConsole(), keyReader)
+    ? new TuiCompositionSession(
+        TuiAnsiRenderSurface.ForConsole(),
+        keyReader,
+        displayOptions: TuiMessageDisplayOptions.Agent,
+        statusTheme: TuiStatusBarTheme.Agent)
     : null;
 ITerminal terminal = compositionSession is null ? new SystemConsoleTerminal() : new TuiPassiveTerminal();
 var editor = !printMode && !rpcMode ? CreateInteractiveEditorIfAttached(keyReader, compositionSession, useCompositionUi) : null;

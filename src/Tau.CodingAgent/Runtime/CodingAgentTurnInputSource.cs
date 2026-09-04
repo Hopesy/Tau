@@ -101,7 +101,7 @@ public sealed class SystemConsoleCodingAgentTurnInputSource : ICodingAgentTurnIn
 
 public sealed class CompositionCodingAgentTurnInputSource : ICodingAgentTurnInputSource
 {
-    private const string Prompt = "turn> ";
+    private const string Prompt = ">> ";
 
     private readonly InteractiveInputEditor _editor;
     private readonly TrackingSubmitKeyReader _keyReader;

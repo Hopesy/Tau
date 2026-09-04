@@ -42,6 +42,18 @@ public sealed class TuiCompositionHost
     private readonly List<OverlayInputEntry> _inputOverlays = [];
     private readonly object _sync = new();
 
+    /// <summary>
+    /// 创建组合式终端渲染宿主，并初始化消息区、状态栏和覆盖层管理器。
+    /// </summary>
+    /// <param name="surface">负责输出终端帧的渲染表面。</param>
+    /// <param name="keyReader">可选的控制台按键读取器。</param>
+    /// <param name="messages">初始消息集合。</param>
+    /// <param name="statusLeft">状态栏左侧初始文本。</param>
+    /// <param name="statusRight">状态栏右侧初始文本。</param>
+    /// <param name="autoRender">状态变化后是否自动渲染。</param>
+    /// <param name="maxScrollbackLines">滚动缓冲区最大行数。</param>
+    /// <param name="displayOptions">消息区域显示主题。</param>
+    /// <param name="statusTheme">状态栏显示主题。</param>
     public TuiCompositionHost(
         ITuiRenderSurface surface,
         IConsoleKeyReader? keyReader = null,
@@ -49,14 +61,18 @@ public sealed class TuiCompositionHost
         string statusLeft = "",
         string statusRight = "",
         bool autoRender = true,
-        int maxScrollbackLines = 10_000)
+        int maxScrollbackLines = 10_000,
+        TuiMessageDisplayOptions? displayOptions = null,
+        TuiStatusBarTheme? statusTheme = null)
     {
         TranscriptHost = new TuiTranscriptViewportHost(
             surface,
             messages,
             statusLeft,
             statusRight,
-            maxScrollbackLines);
+            maxScrollbackLines,
+            displayOptions,
+            statusTheme);
         _keyReader = keyReader;
         AutoRender = autoRender;
     }
@@ -172,6 +188,26 @@ public sealed class TuiCompositionHost
         lock (_sync)
         {
             TranscriptHost.SetStatusLines(lines);
+            return RenderAfterStateChangeCore();
+        }
+    }
+
+    /// <summary>
+    /// 设置底部输入区域的占位行数，并在自动渲染开启时立即更新画面。
+    /// </summary>
+    /// <param name="lines">输入框或其他底部覆盖层需要占用的行数。</param>
+    /// <returns>自动渲染产生的结果；关闭自动渲染时返回 <see langword="null"/>。</returns>
+    public TuiTranscriptRenderResult? SetReservedBottomLines(int lines)
+    {
+        lock (_sync)
+        {
+            var normalized = Math.Clamp(lines, 0, TranscriptHost.Viewport.MessageHeight);
+            if (TranscriptHost.Viewport.ReservedBottomLines == normalized)
+            {
+                return LastRenderResult;
+            }
+
+            TranscriptHost.SetReservedBottomLines(lines);
             return RenderAfterStateChangeCore();
         }
     }

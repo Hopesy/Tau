@@ -114,7 +114,7 @@ public class InteractiveConsoleSessionTests
         var input = await session.ReadInputAsync();
 
         Assert.Equal("hello", input);
-        Assert.Contains(terminal.Writes, w => w.Text == "> ");
+        Assert.Contains(terminal.Writes, w => w.Text == ">> ");
     }
 
     [Fact]

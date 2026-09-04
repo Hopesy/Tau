@@ -731,7 +731,8 @@ public static class OpenAiResponsesShared
                 _partial = _partial with { ResponseId = id };
             }
 
-            if (response.TryGetProperty("usage", out var usage))
+            // Responses API 在流开始阶段通常将 usage 设为 null，只有完成事件才可能提供统计值
+            if (response.TryGetProperty("usage", out var usage) && usage.ValueKind == JsonValueKind.Object)
             {
                 _partial = _partial with { Usage = ExtractUsage(usage, ResolveServiceTier(response)) };
             }
@@ -896,7 +897,8 @@ public static class OpenAiResponsesShared
                     _partial = _partial with { ResponseId = id };
                 }
 
-                if (response.TryGetProperty("usage", out var usage))
+                // 网关可以合法返回 usage=null，不能把 Null 元素当作 JSON 对象读取
+                if (response.TryGetProperty("usage", out var usage) && usage.ValueKind == JsonValueKind.Object)
                 {
                     _partial = _partial with { Usage = ExtractUsage(usage, ResolveServiceTier(response)) };
                 }
@@ -1042,7 +1044,9 @@ public static class OpenAiResponsesShared
             var input = GetInt(usage, "input_tokens") ?? GetInt(usage, "prompt_tokens") ?? 0;
             var output = GetInt(usage, "output_tokens") ?? GetInt(usage, "completion_tokens") ?? 0;
             int? cacheRead = null;
-            if (usage.TryGetProperty("input_tokens_details", out var inputDetails))
+            if (usage.ValueKind == JsonValueKind.Object &&
+                usage.TryGetProperty("input_tokens_details", out var inputDetails) &&
+                inputDetails.ValueKind == JsonValueKind.Object)
             {
                 cacheRead = GetInt(inputDetails, "cached_tokens");
             }
@@ -1077,14 +1081,18 @@ public static class OpenAiResponsesShared
                     return error.GetString() ?? "OpenAI Responses error";
                 }
 
-                if (error.TryGetProperty("message", out var message) && message.ValueKind == JsonValueKind.String)
+                if (error.ValueKind == JsonValueKind.Object &&
+                    error.TryGetProperty("message", out var message) &&
+                    message.ValueKind == JsonValueKind.String)
                 {
                     return message.GetString() ?? "OpenAI Responses error";
                 }
             }
 
             if (root.TryGetProperty("response", out var response) &&
+                response.ValueKind == JsonValueKind.Object &&
                 response.TryGetProperty("error", out var responseError) &&
+                responseError.ValueKind == JsonValueKind.Object &&
                 responseError.TryGetProperty("message", out var responseMessage) &&
                 responseMessage.ValueKind == JsonValueKind.String)
             {

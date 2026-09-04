@@ -4,6 +4,8 @@ public sealed class TuiAnsiRenderSurface : ITuiRenderSurface
 {
     private const string BeginSynchronizedOutput = "\u001b[?2026h";
     private const string EndSynchronizedOutput = "\u001b[?2026l";
+    private const string DisableAutoWrap = "\u001b[?7l";
+    private const string EnableAutoWrap = "\u001b[?7h";
     private const string ClearScreenAndHome = "\u001b[2J\u001b[H";
     private const string ClearLine = "\u001b[2K";
 
@@ -11,24 +13,40 @@ public sealed class TuiAnsiRenderSurface : ITuiRenderSurface
     private readonly Func<int> _widthProvider;
     private readonly Func<int> _heightProvider;
     private readonly bool _synchronizedOutput;
+    private readonly bool _avoidLastColumnWrap;
 
+    /// <summary>
+    /// 创建 ANSI 渲染表面。
+    /// </summary>
+    /// <param name="writer">写入 ANSI 序列的目标。</param>
+    /// <param name="widthProvider">获取终端列数的函数。</param>
+    /// <param name="heightProvider">获取终端行数的函数。</param>
+    /// <param name="synchronizedOutput">是否使用同步输出扩展。</param>
+    /// <param name="avoidLastColumnWrap">是否临时关闭末列自动换行。</param>
     public TuiAnsiRenderSurface(
         TextWriter writer,
         Func<int> widthProvider,
         Func<int> heightProvider,
-        bool synchronizedOutput = true)
+        bool synchronizedOutput = true,
+        bool avoidLastColumnWrap = false)
     {
         _writer = writer ?? throw new ArgumentNullException(nameof(writer));
         _widthProvider = widthProvider ?? throw new ArgumentNullException(nameof(widthProvider));
         _heightProvider = heightProvider ?? throw new ArgumentNullException(nameof(heightProvider));
         _synchronizedOutput = synchronizedOutput;
+        _avoidLastColumnWrap = avoidLastColumnWrap;
     }
 
     public int Width => Math.Max(1, _widthProvider());
     public int Height => Math.Max(1, _heightProvider());
 
+    /// <summary>
+    /// 创建绑定当前 Windows/VT 控制台的 ANSI 渲染表面。
+    /// </summary>
+    /// <param name="synchronizedOutput">是否使用同步输出扩展。</param>
+    /// <returns>绑定控制台尺寸和输出流的渲染表面。</returns>
     public static TuiAnsiRenderSurface ForConsole(bool synchronizedOutput = true) =>
-        new(Console.Out, SafeGetWindowWidth, SafeGetWindowHeight, synchronizedOutput);
+        new(Console.Out, SafeGetWindowWidth, SafeGetWindowHeight, synchronizedOutput, avoidLastColumnWrap: true);
 
     public void Apply(TuiRenderDiff diff)
     {
@@ -45,6 +63,11 @@ public sealed class TuiAnsiRenderSurface : ITuiRenderSurface
             buffer.Write(BeginSynchronizedOutput);
         }
 
+        if (_avoidLastColumnWrap)
+        {
+            buffer.Write(DisableAutoWrap);
+        }
+
         if (diff.RequiresFullRedraw)
         {
             WriteFullRedraw(buffer, diff.Operations);
@@ -52,6 +75,11 @@ public sealed class TuiAnsiRenderSurface : ITuiRenderSurface
         else
         {
             WriteLineOperations(buffer, diff.Operations);
+        }
+
+        if (_avoidLastColumnWrap)
+        {
+            buffer.Write(EnableAutoWrap);
         }
 
         if (_synchronizedOutput)

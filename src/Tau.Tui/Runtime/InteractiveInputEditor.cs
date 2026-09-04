@@ -497,6 +497,14 @@ public sealed class InteractiveInputEditor
     {
         var collapsed = new string(chars.ToArray());
         _buffer.SetDraft(collapsed);
+        if (_renderer is IInteractiveAutocompleteRenderer autocompleteRenderer)
+        {
+            var session = _autocompleteSession;
+            autocompleteRenderer.RenderAutocomplete(
+                session?.Items ?? [],
+                session?.SelectedIndex ?? -1);
+        }
+
         _renderer.Render(collapsed, Math.Clamp(cursor, 0, chars.Count));
     }
 

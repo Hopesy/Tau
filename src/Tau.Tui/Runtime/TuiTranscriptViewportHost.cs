@@ -94,12 +94,24 @@ public sealed class TuiTranscriptViewportHost
     private OverlayEntry? _focusedOverlay;
     private long _focusOrder;
 
+    /// <summary>
+    /// 创建负责视口渲染、差异输出和输入覆盖层管理的宿主。
+    /// </summary>
+    /// <param name="surface">负责输出终端帧的渲染表面。</param>
+    /// <param name="messages">初始消息集合。</param>
+    /// <param name="statusLeft">状态栏左侧初始文本。</param>
+    /// <param name="statusRight">状态栏右侧初始文本。</param>
+    /// <param name="maxScrollbackLines">滚动缓冲区最大行数。</param>
+    /// <param name="displayOptions">消息区域显示主题。</param>
+    /// <param name="statusTheme">状态栏显示主题。</param>
     public TuiTranscriptViewportHost(
         ITuiRenderSurface surface,
         IEnumerable<TuiMessage>? messages = null,
         string statusLeft = "",
         string statusRight = "",
-        int maxScrollbackLines = 10_000)
+        int maxScrollbackLines = 10_000,
+        TuiMessageDisplayOptions? displayOptions = null,
+        TuiStatusBarTheme? statusTheme = null)
     {
         _surface = surface ?? throw new ArgumentNullException(nameof(surface));
         Viewport = new TuiTranscriptViewport(
@@ -108,7 +120,9 @@ public sealed class TuiTranscriptViewportHost
             messages,
             statusLeft,
             statusRight,
-            maxScrollbackLines);
+            maxScrollbackLines,
+            displayOptions,
+            statusTheme);
     }
 
     public TuiTranscriptViewport Viewport { get; }
@@ -128,6 +142,12 @@ public sealed class TuiTranscriptViewportHost
     public void SetStatus(string left, string right) => Viewport.SetStatus(left, right);
 
     public void SetStatusLines(IEnumerable<TuiStatusBarLine> lines) => Viewport.SetStatusLines(lines);
+
+    /// <summary>
+    /// 为输入框等底部固定覆盖层预留 transcript 行空间。
+    /// </summary>
+    /// <param name="lines">需要预留的行数。</param>
+    public void SetReservedBottomLines(int lines) => Viewport.SetReservedBottomLines(lines);
 
     public void ScrollLine(int delta) => Viewport.ScrollLine(delta);
 
