@@ -5,8 +5,53 @@ using Tau.Ai.Registry;
 
 namespace Tau.Ai.Tests;
 
+[Collection("ProcessEnvironment")]
 public sealed class ProviderAuthResolverTests
 {
+    /// <summary>【AI】【预检环境】按能力隔离同名模型，保留环境优先级和独立快照，不执行头部秘密命令。</summary>
+    /// <param name="type">模型能力。</param><returns>无异步返回值。</returns>
+    [Theory] [InlineData("chat")] [InlineData("image")] [InlineData("classifier")]
+    public void GetStatus_UsesConfiguredModelEnvironmentWithoutRunningCommands(string type)
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-auth-environment-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var marker = Path.Combine(directory, "executed.txt");
+            var path = Path.Combine(directory, "models.json");
+            var document = System.Text.Json.Nodes.JsonNode.Parse("""
+                {"providers":{"openai":{
+                  "options":{"env":{"BASE":"provider","LAYER":"provider","OPENAI_API_KEY":"provider-key"}},
+                  "modelOverrides":{"shared":{"type":"chat","options":{"env":{"OVERRIDE":"chat","LAYER":"override"}}}},
+                  "models":[
+                    {"id":"shared","type":"image","options":{"env":{"LAYER":"image","OPENAI_API_KEY":"image-key"}}},
+                    {"id":"shared","type":"chat","options":{"env":{"LAYER":"chat","OPENAI_API_KEY":"chat-key"}}},
+                    {"id":"shared","type":"classifier","options":{"env":{"LAYER":"classifier","OPENAI_API_KEY":"classifier-key"}}}
+                  ]
+                }}}
+                """)!;
+            document["providers"]!["openai"]!["headers"] = new System.Text.Json.Nodes.JsonObject
+            { ["Authorization"] = "!" + CreateSecretCommand(directory, marker) };
+            File.WriteAllText(path, document.ToJsonString());
+            var store = new ModelConfigurationStore([path]);
+            var resolver = CreateResolver(Path.Combine(directory, "missing-auth.json"), path);
+            var model = new Model { Provider = "openai", Id = "shared", Name = "Shared", Api = "test", Type = type };
+            var environment = store.GetRequestEnvironment(model)!;
+            Assert.Equal(type, environment["LAYER"]); Assert.Equal("provider", environment["BASE"]);
+            Assert.Equal(type == "chat", environment.ContainsKey("OVERRIDE"));
+            Assert.Equal(type + "-key", environment["OPENAI_API_KEY"]);
+            var status = resolver.GetStatus(model);
+            Assert.True(status.IsConfigured); Assert.Equal("environment", status.Source);
+            Assert.DoesNotContain(type + "-key", status.Message);
+            var overridden = store.GetRequestEnvironment(model, new Dictionary<string, string> { ["layer"] = "explicit" })!;
+            Assert.Equal("explicit", overridden["LAYER"]);
+            Assert.IsType<Dictionary<string, string>>(overridden)["LAYER"] = "mutated";
+            Assert.Equal(type, store.GetRequestEnvironment(model)!["LAYER"]);
+            Assert.False(File.Exists(marker));
+        }
+        finally { Directory.Delete(directory, recursive: true); }
+    }
+
     [Fact]
     public void ResolveApiKey_PrefersExplicitValue()
     {

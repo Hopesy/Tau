@@ -5,13 +5,14 @@ using Tau.Tui.Abstractions;
 
 namespace Tau.CodingAgent.Runtime;
 
-public sealed class CodingAgentCommandRouter
+public sealed partial class CodingAgentCommandRouter
 {
     private readonly ICodingAgentRunner _runner;
     private readonly CodingAgentSettingsStore? _settingsStore;
     private readonly ICodingAgentClipboard _clipboard;
     private readonly ICodingAgentShareClient _shareClient;
-    private readonly CodingAgentTreeSessionController? _treeSessionController;
+    private readonly CodingAgentTreeSessionController? _initialTreeSessionController;
+    private CodingAgentTreeSessionController? _treeSessionController => _extensionCommandStore?.CurrentTreeSessionController ?? (_runner as RuntimeCodingAgentRunner)?.CurrentTreeSessionController ?? _initialTreeSessionController;
     private readonly CodingAgentPromptTemplateStore? _promptTemplateStore;
     private readonly CodingAgentSkillStore? _skillStore;
     private readonly CodingAgentContextFileStore? _contextFileStore;
@@ -27,6 +28,7 @@ public sealed class CodingAgentCommandRouter
     private readonly Func<int, IReadOnlyList<string>>? _historySnapshotProvider;
     private readonly Action? _clearScreenAction;
     private readonly Action<string?>? _inputDraftSetter;
+    private readonly Func<string?>? _inputDraftGetter;
     private readonly Func<CodingAgentTreeNavigationPromptState, CancellationToken, Task<CodingAgentTreeNavigationDecision>>? _treeNavigationPrompt;
     private readonly CodingAgentSessionSwitchCoordinator _sessionSwitchCoordinator;
     private readonly Func<CodingAgentTreeLabelPromptState, CancellationToken, Task<CodingAgentTreeLabelPromptResult>>? _treeLabelPrompt;
@@ -87,18 +89,27 @@ public sealed class CodingAgentCommandRouter
         IKeyBindingMap? keyBindings = null,
         CodingAgentExtensionResourceState? extensionResourceState = null,
         Func<IKeyBindingMap?>? reloadKeyBindings = null,
-        IReadOnlyList<string>? scopedModelsOverride = null)
+        IReadOnlyList<string>? scopedModelsOverride = null,
+        Func<Func<CodingAgentMcpMenu>, CancellationToken, Task<string?>>? mcpMenuSelector = null,
+        Func<string?>? inputDraftGetter = null)
     {
         _runner = runner;
+        _mcpMenu = mcpMenuSelector;
         _settingsStore = settingsStore;
         _clipboard = clipboard ?? new SystemCodingAgentClipboard();
         _shareClient = shareClient ?? new GitHubCliCodingAgentShareClient();
-        _treeSessionController = treeSessionController;
+        _initialTreeSessionController = treeSessionController;
         _promptTemplateStore = promptTemplateStore;
         _skillStore = skillStore;
         _contextFileStore = contextFileStore;
+        if (runner is RuntimeCodingAgentRunner resourceRunner && skillStore is not null && contextFileStore is not null)
+            resourceRunner.ConfigureResourceReload(() => resourceRunner.RefreshSystemPromptResources(skillStore.Load(), contextFileStore.Load()));
         _themeStore = themeStore;
         _extensionCommandStore = extensionCommandStore;
+        _extensionCommandStore?.BindSession(runner, treeSessionController,
+            !string.IsNullOrWhiteSpace(sessionFile) && !CodingAgentTreeSessionStore.IsJsonlPath(sessionFile)
+                ? new CodingAgentSessionStore(sessionFile) : null);
+        if (runner is RuntimeCodingAgentRunner sessionRunner) sessionRunner.EnsureSessionContext(treeSessionController, null);
         _packageManager = packageManager;
         _packageResourceState = packageResourceState;
         _changelogStore = changelogStore ?? new CodingAgentChangelogStore();
@@ -110,6 +121,7 @@ public sealed class CodingAgentCommandRouter
         _historySnapshotProvider = historySnapshotProvider;
         _clearScreenAction = clearScreenAction;
         _inputDraftSetter = inputDraftSetter;
+        _inputDraftGetter = inputDraftGetter;
         _treeNavigationPrompt = treeNavigationPrompt;
         _sessionSwitchCoordinator = new CodingAgentSessionSwitchCoordinator(
             runner,
@@ -155,7 +167,7 @@ public sealed class CodingAgentCommandRouter
             return command switch
             {
                 "/help" => HandleHelpCommand(parts),
-                "/reload" => HandleReloadCommand(parts),
+                "/reload" => await HandleReloadCommandAsync(parts, cancellationToken).ConfigureAwait(false),
                 "/hotkeys" => HandleHotkeysCommand(parts),
                 "/arminsayshi" => HandleArminSaysHiCommand(parts),
                 "/dementedelves" => HandleDementedDelvesCommand(parts),
@@ -185,6 +197,7 @@ public sealed class CodingAgentCommandRouter
                 "/skills" => HandleSkillsCommand(parts),
                 "/extensions" => HandleExtensionsCommand(parts),
                 "/auth" => await HandleAuthCommandAsync(parts, cancellationToken).ConfigureAwait(false),
+                "/mcp" => await HandleMcpCommandAsync(parts, cancellationToken).ConfigureAwait(false),
                 "/login" => await HandleLoginCommandAsync(parts, cancellationToken).ConfigureAwait(false),
                 "/logout" => await HandleLogoutCommandAsync(parts, cancellationToken).ConfigureAwait(false),
                 "/changelog" => HandleChangelogCommand(parts),
@@ -213,7 +226,11 @@ public sealed class CodingAgentCommandRouter
         return CodingAgentCommandResult.Status(CodingAgentCommandCatalog.HelpLine);
     }
 
-    private CodingAgentCommandResult HandleReloadCommand(IReadOnlyList<string> parts)
+    /// <summary>【CodingAgent】【资源重载】重建扩展和资源，并发布重新加载后的会话开始事件</summary>
+    /// <param name="parts">拆分后的命令参数</param>
+    /// <param name="cancellationToken">重载取消信号</param>
+    /// <returns>重载结果及诊断信息</returns>
+    private async Task<CodingAgentCommandResult> HandleReloadCommandAsync(IReadOnlyList<string> parts, CancellationToken cancellationToken)
     {
         if (parts.Count != 1)
         {
@@ -252,7 +269,7 @@ public sealed class CodingAgentCommandRouter
                 $"packages: {_packageManager.ListConfiguredPackages().Count} configured, resources {packageResources.ExtensionPaths.Count} extensions, {packageResources.SkillPaths.Count} skills, {packageResources.PromptPaths.Count} prompts, {packageResources.ThemePaths.Count} themes, issues {packageResources.Diagnostics.Count}");
         }
 
-        var extensionStatus = _extensionCommandStore?.LoadStatus();
+        var extensionStatus = _extensionCommandStore?.Reload();
         if (extensionStatus is null)
         {
             lines.Add("extensions: unavailable");
@@ -298,6 +315,14 @@ public sealed class CodingAgentCommandRouter
         lines.Add(themeStatus is null
             ? "themes: unavailable"
             : $"themes: {themeStatus.Themes.Count}, current {FormatCurrentTheme(settings?.Theme)}, issues {themeStatus.Diagnostics.Count}");
+        if (_extensionCommandStore is not null)
+        {
+            // 1. 【CodingAgent】【扩展重载】新实例需要重新建立 session_start 中维护的状态
+            var errors = await _extensionCommandStore.PublishSessionStartAsync("reload", cancellationToken).ConfigureAwait(false);
+            lines.AddRange(errors.Select(error => $"extension {error.EventType} failed: {error.Error}"));
+            if (_runner is RuntimeCodingAgentRunner runtime) runtime.StartBackgroundDelivery();
+        }
+
         return CodingAgentCommandResult.Status($"reload complete:{Environment.NewLine}{string.Join(Environment.NewLine, lines)}");
     }
 
@@ -396,7 +421,8 @@ public sealed class CodingAgentCommandRouter
             _runner.Model,
             _runner.ThinkingLevel,
             ResolveAutoCompactionEnabled(settings.AutoCompactionEnabled),
-            FormatCurrentTheme(settings.Theme));
+            FormatCurrentTheme(settings.Theme),
+            _settingsStore?.GetCacheWarmingMode() ?? (_runner as RuntimeCodingAgentRunner)?.CacheWarmingMode ?? CodingAgentCacheWarmingMode.Streaming);
 
     private async Task<CodingAgentCommandResult> ApplySettingsSelectionAsync(
         CodingAgentSettingsSnapshot snapshot,
@@ -415,6 +441,9 @@ public sealed class CodingAgentCommandRouter
         return normalized switch
         {
             CodingAgentSettingsSelector.AutoCompactionAction => SaveAutoCompactionSelection(current),
+            CodingAgentSettingsSelector.CacheWarmingAction => SaveCacheWarmingSelection(null),
+            CodingAgentSettingsSelector.CacheMissNoticesAction => SaveBooleanSetting(current, current.ShowCacheMissNotices == true ? "off" : "on",
+                "cache miss notices", value => current with { ShowCacheMissNotices = value }),
             CodingAgentSettingsSelector.SteeringModeAction => SaveSteeringModeSelection(current),
             CodingAgentSettingsSelector.FollowUpModeAction => SaveFollowUpModeSelection(current),
             CodingAgentSettingsSelector.TreeFilterModeAction => SaveTreeFilterModeSelection(current),
@@ -436,6 +465,9 @@ public sealed class CodingAgentCommandRouter
         {
             CodingAgentSettingsSelector.AutoCompactionAction =>
                 SaveAutoCompactionValue(current, settingValue),
+            CodingAgentSettingsSelector.CacheWarmingAction => SaveCacheWarmingSelection(settingValue),
+            CodingAgentSettingsSelector.CacheMissNoticesAction => SaveBooleanSetting(current, settingValue, "cache miss notices",
+                value => current with { ShowCacheMissNotices = value }),
             CodingAgentSettingsSelector.TerminalShowImagesAction =>
                 SaveBooleanSetting(current, settingValue, "show images", value => current with { TerminalShowImages = value }),
             CodingAgentSettingsSelector.ImagesAutoResizeAction =>
@@ -495,6 +527,20 @@ public sealed class CodingAgentCommandRouter
         _settingsStore?.Save(current with { AutoCompactionEnabled = next });
         _autoCompactionChanged?.Invoke(next);
         return CodingAgentCommandResult.Status($"auto compaction: {FormatSettingsAutoCompaction(next)}");
+    }
+
+    /// <summary>【CodingAgent】【预热设置】应用显式模式或循环选择，始终写入全局层并通知活动运行器。</summary>
+    /// <param name="value">off、streaming、idle；空值循环下一模式。</param><returns>设置结果。</returns>
+    private CodingAgentCommandResult SaveCacheWarmingSelection(string? value)
+    {
+        var current = _settingsStore?.GetCacheWarmingMode() ?? (_runner as RuntimeCodingAgentRunner)?.CacheWarmingMode ?? CodingAgentCacheWarmingMode.Streaming;
+        var mode = value is null ? (CodingAgentCacheWarmingMode)(((int)current + 1) % 3)
+            : value switch { "off" => CodingAgentCacheWarmingMode.Off, "streaming" => CodingAgentCacheWarmingMode.Streaming,
+                "idle" => CodingAgentCacheWarmingMode.Idle, _ => (CodingAgentCacheWarmingMode)(-1) };
+        if (!Enum.IsDefined(mode)) return CodingAgentCommandResult.Error("cache warming must be off, streaming, or idle");
+        _settingsStore?.SetCacheWarmingMode(mode);
+        if (_runner is RuntimeCodingAgentRunner runtime) runtime.SetCacheWarmingMode(mode);
+        return CodingAgentCommandResult.Status("cache warming: " + mode.ToString().ToLowerInvariant());
     }
 
     private CodingAgentCommandResult SaveAutoCompactionValue(CodingAgentSettingsSnapshot current, string value)
@@ -812,9 +858,9 @@ public sealed class CodingAgentCommandRouter
         }
 
         var name = input[(input.IndexOf(' ') + 1)..].Trim();
-        _runner.SessionName = name.Equals("clear", StringComparison.OrdinalIgnoreCase)
-            ? null
-            : name;
+        var selectedName = name.Equals("clear", StringComparison.OrdinalIgnoreCase) ? null : name;
+        if (_runner is RuntimeCodingAgentRunner runtime) runtime.SetSessionName(selectedName);
+        else _runner.SessionName = selectedName;
         return CodingAgentCommandResult.Status($"session name: {FormatSessionName(_runner.SessionName)}");
     }
 
@@ -883,10 +929,14 @@ public sealed class CodingAgentCommandRouter
         }
 
         var store = new CodingAgentSessionStore(exportPath);
-        store.Save(_runner.Messages, _runner.Model, _runner.SessionName);
+        store.Save(_runner.Messages, _runner.Model, _runner.SessionName, CodingAgentThinkingLevels.Format(_runner.ThinkingLevel));
         return CodingAgentCommandResult.Status($"exported session to {store.Path}");
     }
 
+    /// <summary>【CodingAgent】【会话分享】存在真实对话时导出并分享会话。</summary>
+    /// <param name="parts">解析后的命令参数。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>分享链接或命令错误。</returns>
     private async Task<CodingAgentCommandResult> HandleShareCommandAsync(
         IReadOnlyList<string> parts,
         CancellationToken cancellationToken)
@@ -896,7 +946,7 @@ public sealed class CodingAgentCommandRouter
             return CodingAgentCommandResult.Error(CodingAgentCommandCatalog.Usage("/share"));
         }
 
-        if (_runner.Messages.Count == 0)
+        if (!_runner.Messages.Any(message => message is not SystemMessage))
         {
             return CodingAgentCommandResult.Error("nothing to share yet");
         }
@@ -1040,8 +1090,16 @@ public sealed class CodingAgentCommandRouter
             return CodingAgentCommandResult.Status("new session cancelled");
         }
 
-        _runner.ResetSession();
-        _treeSessionController?.StartNewFromRunner(_runner);
+        if (_runner is RuntimeCodingAgentRunner nativeRunner)
+        {
+            var replaced = await nativeRunner.NewSessionAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
+            if (replaced.Cancelled) return CodingAgentCommandResult.Status("new session cancelled");
+        }
+        else
+        {
+            _runner.ResetSession();
+            _treeSessionController?.StartNewFromRunner(_runner);
+        }
         return CodingAgentCommandResult.Status(
             $"started new session with model {_runner.Model.Provider}/{_runner.Model.Id}{FormatSessionSwitchSummarySuffix(switchSummary)}",
             FormatBranchSummaryMessages(switchSummary));
@@ -1067,15 +1125,25 @@ public sealed class CodingAgentCommandRouter
         var stats = GetSessionStats();
         var file = string.IsNullOrWhiteSpace(stats.SessionFile) ? "none" : stats.SessionFile;
         var tokenBudget = FormatTokenBudget(stats);
+        var warming = _runner is RuntimeCodingAgentRunner runtime
+            ? $"\ncache warming: {runtime.CacheWarmingMode.ToString().ToLowerInvariant()}, {(runtime.CacheWarmingStatus is { } status ? CodingAgentCacheWarmingFormatter.FormatStatus(status) : "Inactive (cache warming unavailable)")}"
+            : "";
+        if (stats.CacheWaste is { MissCount: > 0 } waste)
+            warming += "\ncache re-billed: $" + waste.MissedCost.ToString("F3", System.Globalization.CultureInfo.InvariantCulture) +
+                $" ({waste.MissedTokens} tokens, {waste.MissCount} {(waste.MissCount == 1 ? "miss" : "misses")})";
+        if (stats.UsageBreakdown.Count > 0 && (stats.UsageBreakdown.Count > 1 || stats.UsageBreakdown[0].Key != stats.Provider + "/" + stats.Model))
+            foreach (var entry in stats.UsageBreakdown)
+                warming += "\n  " + entry.Key + ": $" + entry.Cost.ToString("F3", System.Globalization.CultureInfo.InvariantCulture) +
+                    $" ({entry.Tokens} tokens)";
         if (_treeSessionController is not null)
         {
             var tree = _treeSessionController.GetSummary();
             return CodingAgentCommandResult.Status(
-                $"session: name {FormatSessionName(stats.SessionName)}, model {stats.Provider}/{stats.Model}, messages {stats.TotalMessages} (user {stats.UserMessages}, assistant {stats.AssistantMessages}, tool {stats.ToolResultMessages}, toolCalls {stats.ToolCalls}), tokens {tokenBudget}{FormatUsageAndCost(stats)}, retry {FormatRetryPolicy(_retryOptions)}, file {file}, tree {tree.FilePath}, leaf {FormatTreeId(tree.LeafId)}, entries {tree.EntryCount}, messages {tree.TotalMessageCount}, branch entries {tree.BranchEntryCount}, branch messages {tree.BranchMessageCount}, branches {tree.BranchPointCount}, labels {tree.LabelCount}, cwd {tree.Cwd}{FormatParentSession(tree.ParentSession)}");
+                $"session: name {FormatSessionName(stats.SessionName)}, model {stats.Provider}/{stats.Model}, messages {stats.TotalMessages} (user {stats.UserMessages}, assistant {stats.AssistantMessages}, tool {stats.ToolResultMessages}, toolCalls {stats.ToolCalls}), tokens {tokenBudget}{FormatUsageAndCost(stats)}, retry {FormatRetryPolicy(_retryOptions)}, file {file}, tree {tree.FilePath}, leaf {FormatTreeId(tree.LeafId)}, entries {tree.EntryCount}, messages {tree.TotalMessageCount}, branch entries {tree.BranchEntryCount}, branch messages {tree.BranchMessageCount}, branches {tree.BranchPointCount}, labels {tree.LabelCount}, cwd {tree.Cwd}{FormatParentSession(tree.ParentSession)}{warming}");
         }
 
         return CodingAgentCommandResult.Status(
-            $"session: name {FormatSessionName(stats.SessionName)}, model {stats.Provider}/{stats.Model}, messages {stats.TotalMessages} (user {stats.UserMessages}, assistant {stats.AssistantMessages}, tool {stats.ToolResultMessages}, toolCalls {stats.ToolCalls}), tokens {tokenBudget}{FormatUsageAndCost(stats)}, retry {FormatRetryPolicy(_retryOptions)}, file {file}");
+            $"session: name {FormatSessionName(stats.SessionName)}, model {stats.Provider}/{stats.Model}, messages {stats.TotalMessages} (user {stats.UserMessages}, assistant {stats.AssistantMessages}, tool {stats.ToolResultMessages}, toolCalls {stats.ToolCalls}), tokens {tokenBudget}{FormatUsageAndCost(stats)}, retry {FormatRetryPolicy(_retryOptions)}, file {file}{warming}");
     }
 
     private async Task<CodingAgentCommandResult> HandleMetadataCommandAsync(
@@ -1187,6 +1255,10 @@ public sealed class CodingAgentCommandRouter
                     return CodingAgentCommandResult.Status("Already at this point");
                 }
 
+                // 1. 【CodingAgent】【生成中树浏览】原生会话允许确认后中止当前回答，压缩事务仍保持互斥
+                if (_runner.IsCompacting || _runner.IsStreaming && _runner is not RuntimeCodingAgentRunner)
+                    return CodingAgentCommandResult.Error("Wait for the current response, compaction or tree navigation to finish.");
+
                 var navigationTargetId = ShouldUseUserEntryNavigation(selectedItem)
                     ? selectedItem.ParentEntryId
                     : selectedItem.EntryId;
@@ -1204,7 +1276,24 @@ public sealed class CodingAgentCommandRouter
                     continue;
                 }
 
+                if (_runner is RuntimeCodingAgentRunner native)
+                {
+                    var navigation = await NavigateNativeTreeAsync(native, selectedItem.EntryId, navigationDecision, cancellationToken).ConfigureAwait(false);
+                    if (navigation.Aborted)
+                    {
+                        preferredEntryId = selectedItem.EntryId;
+                        items = _treeSessionController.EnumerateView(options with { MaxEntries = int.MaxValue });
+                        continue;
+                    }
+                    if (navigation.Cancelled) return CodingAgentCommandResult.Status("Navigation cancelled");
+                    if (!string.IsNullOrEmpty(navigation.EditorText) && string.IsNullOrWhiteSpace(_inputDraftGetter?.Invoke()))
+                        _inputDraftSetter?.Invoke(navigation.EditorText);
+                    return CodingAgentCommandResult.Status("Navigated to selected point");
+                }
+
                 var originalSessionName = _runner.SessionName;
+                if (_runner.IsStreaming || _runner.IsCompacting)
+                    return CodingAgentCommandResult.Error("Wait for the current response, compaction or tree navigation to finish.");
                 var navigationLabel = NormalizeTreeLabel(navigationDecision.Label);
                 CodingAgentTreeSessionSnapshot snapshot;
                 CodingAgentBranchSummaryResult? summary = null;
@@ -1287,6 +1376,7 @@ public sealed class CodingAgentCommandRouter
         IReadOnlyList<string> parts,
         CancellationToken cancellationToken)
     {
+        if (parts.Count == 1) return await SelectForkMessageAsync(cancellationToken).ConfigureAwait(false);
         if (parts.Count < 2 || (parts.Count >= 3 && !IsBranchSummaryOption(parts[2])))
         {
             return CodingAgentCommandResult.Error(CodingAgentCommandCatalog.Usage("/fork"));
@@ -1300,6 +1390,12 @@ public sealed class CodingAgentCommandRouter
         var entryId = parts[1];
         var summarize = parts.Count >= 3;
         _treeSessionController.SyncFromRunner(_runner);
+        if (_runner is RuntimeCodingAgentRunner nativeRunner && !summarize)
+        {
+            var result = await nativeRunner.ForkSessionAsync(entryId, "at", cancellationToken).ConfigureAwait(false);
+            if (result.Cancelled) return CodingAgentCommandResult.Status("fork cancelled");
+            return CodingAgentCommandResult.Status($"forked session at {entryId}: {_treeSessionController!.Path}");
+        }
         CodingAgentTreeSessionSnapshot snapshot;
         CodingAgentBranchSummaryResult? summary = null;
         if (summarize)
@@ -1409,8 +1505,18 @@ public sealed class CodingAgentCommandRouter
             return CodingAgentCommandResult.Status("resume switch cancelled");
         }
 
-        var snapshot = _treeSessionController.Resume(path);
-        _runner.RestoreSession(snapshot.ToFlatSnapshot());
+        CodingAgentTreeSessionSnapshot snapshot;
+        if (_runner is RuntimeCodingAgentRunner nativeRunner)
+        {
+            var result = await nativeRunner.SwitchSessionAsync(path, cancellationToken).ConfigureAwait(false);
+            if (result.Cancelled) return CodingAgentCommandResult.Status("resume switch cancelled");
+            snapshot = _treeSessionController!.LoadSnapshot();
+        }
+        else
+        {
+            snapshot = _treeSessionController.Resume(path);
+            _runner.RestoreSession(snapshot.ToFlatSnapshot());
+        }
         return CodingAgentCommandResult.Status(
             $"resumed session from {snapshot.FilePath}: {snapshot.Messages.Count} messages, model {_runner.Model.Provider}/{_runner.Model.Id}, name {FormatSessionName(_runner.SessionName)}, leaf {FormatTreeId(snapshot.LeafId)}{FormatSessionSwitchSummarySuffix(switchSummary)}",
             FormatBranchSummaryMessages(switchSummary));
@@ -1440,7 +1546,8 @@ public sealed class CodingAgentCommandRouter
         var selection = await _resumeSelector(state, cancellationToken).ConfigureAwait(false);
         if (!string.IsNullOrWhiteSpace(selection.RenamedCurrentSessionName))
         {
-            _runner.SessionName = selection.RenamedCurrentSessionName;
+            if (_runner is RuntimeCodingAgentRunner renamedRunner) renamedRunner.SetSessionName(selection.RenamedCurrentSessionName);
+            else _runner.SessionName = selection.RenamedCurrentSessionName;
         }
 
         var selectedPath = selection.SelectedPath;
@@ -1466,8 +1573,18 @@ public sealed class CodingAgentCommandRouter
             return CodingAgentCommandResult.Status("resume switch cancelled");
         }
 
-        var snapshot = _treeSessionController.Resume(normalizedSelectedPath);
-        _runner.RestoreSession(snapshot.ToFlatSnapshot());
+        CodingAgentTreeSessionSnapshot snapshot;
+        if (_runner is RuntimeCodingAgentRunner nativeRunner)
+        {
+            var result = await nativeRunner.SwitchSessionAsync(normalizedSelectedPath, cancellationToken).ConfigureAwait(false);
+            if (result.Cancelled) return CodingAgentCommandResult.Status("resume switch cancelled");
+            snapshot = _treeSessionController!.LoadSnapshot();
+        }
+        else
+        {
+            snapshot = _treeSessionController.Resume(normalizedSelectedPath);
+            _runner.RestoreSession(snapshot.ToFlatSnapshot());
+        }
         return CodingAgentCommandResult.Status(
             $"resumed session from {snapshot.FilePath}: {snapshot.Messages.Count} messages, model {_runner.Model.Provider}/{_runner.Model.Id}, name {FormatSessionName(_runner.SessionName)}, leaf {FormatTreeId(snapshot.LeafId)}{FormatSessionSwitchSummarySuffix(switchSummary)}",
             FormatBranchSummaryMessages(switchSummary));
@@ -1500,7 +1617,9 @@ public sealed class CodingAgentCommandRouter
                 ? (currentIndex - 1 + candidates.Count) % candidates.Count
                 : (currentIndex + 1) % candidates.Count;
         var next = candidates[nextIndex];
-        var selected = _runner.SelectModel(next.Model.Provider, next.Model.Id);
+        var selected = _runner is RuntimeCodingAgentRunner runtime
+            ? runtime.SelectModelWithSourceAsync(next.Model.Provider, next.Model.Id, "cycle", thinkingLevelOverride: next.ThinkingLevel).GetAwaiter().GetResult()
+            : _runner.SelectModel(next.Model.Provider, next.Model.Id);
         SaveDefaultModel(selected);
         ApplyScopedThinkingOverride(next.ThinkingLevel);
         _treeSessionController?.SyncFromRunner(_runner);
@@ -2321,6 +2440,8 @@ public sealed class CodingAgentCommandRouter
         return CodingAgentCommandResult.Status(FormatAuthStatus(status));
     }
 
+    /// <summary>【CodingAgent】【认证查询】通过当前显示名称选择提供方并查询认证状态。</summary>
+    /// <param name="cancellationToken">取消信号。</param><returns>认证状态或取消结果。</returns>
     private async Task<CodingAgentCommandResult> SelectAuthProviderAsync(CancellationToken cancellationToken)
     {
         if (_authSelector is null)
@@ -2328,7 +2449,7 @@ public sealed class CodingAgentCommandRouter
             return CodingAgentCommandResult.Error("auth selector is not available in this session");
         }
 
-        var providers = _runner.GetProviders()
+        var providers = _runner.GetAuthProviders()
             .Select(provider => _runner.GetAuthStatus(provider))
             .ToArray();
         if (providers.Length == 0)
@@ -2336,8 +2457,11 @@ public sealed class CodingAgentCommandRouter
             return CodingAgentCommandResult.Error("auth selector has no providers");
         }
 
+        var options = providers.Select(status => new CodingAgentAuthOption(status.Provider,
+            _runner.GetProviderDisplayName(status.Provider), status.UsesOAuth ? "oauth" : "api_key", status,
+            Subscription: _runner.GetOAuthProvider(status.Provider)?.IsSubscription == true)).ToArray();
         var selected = await _authSelector(
-                new CodingAgentAuthSelectorState(_runner.Model.Provider, providers),
+                CreateAuthState(options, "auth"),
                 cancellationToken)
             .ConfigureAwait(false);
         if (string.IsNullOrWhiteSpace(selected))
@@ -2345,7 +2469,9 @@ public sealed class CodingAgentCommandRouter
             return CodingAgentCommandResult.Status("auth selection cancelled");
         }
 
-        return CodingAgentCommandResult.Status(FormatAuthStatus(_runner.GetAuthStatus(selected)));
+        var option = ResolveAuthSelection(options, selected);
+        return option is null ? CodingAgentCommandResult.Error("auth selection does not identify a provider")
+            : CodingAgentCommandResult.Status(FormatAuthStatus(_runner.GetAuthStatus(option.Provider)));
     }
 
     private static string FormatAuthStatus(ProviderAuthStatus status)
@@ -2355,13 +2481,10 @@ public sealed class CodingAgentCommandRouter
         return $"auth {status.Provider}: {configured} via {status.Source}{oauth}. {status.Message}";
     }
 
+    /// <summary>【CodingAgent】【登录命令】解析提供方参数并在存在多种认证方式时打开选择器。</summary>
+    /// <param name="parts">命令词。</param><param name="cancellationToken">取消信号。</param><returns>登录结果。</returns>
     private async Task<CodingAgentCommandResult> HandleLoginCommandAsync(IReadOnlyList<string> parts, CancellationToken cancellationToken)
     {
-        if (parts.Count > 2)
-        {
-            return CodingAgentCommandResult.Error(CodingAgentCommandCatalog.Usage("/login"));
-        }
-
         if (parts.Count == 2 && parts[1].Equals("select", StringComparison.OrdinalIgnoreCase))
         {
             return await SelectAndLoginProviderAsync(cancellationToken).ConfigureAwait(false);
@@ -2372,67 +2495,98 @@ public sealed class CodingAgentCommandRouter
             return await SelectAndLoginProviderAsync(cancellationToken).ConfigureAwait(false);
         }
 
+        var reference = parts.Count > 1 ? string.Join(' ', parts.Skip(1)).Trim('"', '\'') : _runner.Model.Provider;
+        var allOptions = GetLoginOptions();
+        var options = allOptions.Where(option => option.Provider.Equals(reference, StringComparison.OrdinalIgnoreCase)
+            || option.Name.Equals(reference, StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (options.Length > 1) return await SelectAndLoginProviderAsync(cancellationToken, options).ConfigureAwait(false);
+        if (options.Length == 1) return await LoginProviderAsync(options[0].Provider, cancellationToken, options[0].AuthType).ConfigureAwait(false);
+        if (parts.Count > 1 && _authSelector is not null && !_runner.GetAuthStatus(reference).IsConfigured)
+            return await SelectAndLoginProviderAsync(cancellationToken, allOptions, reference).ConfigureAwait(false);
+
         return await LoginProviderAsync(
-                parts.Count == 2 ? parts[1] : null,
+                parts.Count > 1 ? reference : null,
                 cancellationToken)
             .ConfigureAwait(false);
     }
 
-    private async Task<CodingAgentCommandResult> SelectAndLoginProviderAsync(CancellationToken cancellationToken)
+    /// <summary>【CodingAgent】【登录选择】选择提供方及认证方式，保留旧回调对单一方式的兼容。</summary>
+    /// <param name="cancellationToken">取消信号。</param><param name="options">可选的指定提供方选项。</param>
+    /// <param name="initialFilter">不完全匹配的提供方查询。</param><returns>登录结果。</returns>
+    private async Task<CodingAgentCommandResult> SelectAndLoginProviderAsync(CancellationToken cancellationToken,
+        IReadOnlyList<CodingAgentAuthOption>? options = null, string? initialFilter = null)
     {
         if (_authSelector is null)
         {
             return CodingAgentCommandResult.Error("login selector is not available in this session");
         }
 
-        var providers = _runner.GetProviders()
-            .Where(provider => _runner.GetOAuthProvider(provider) is not null)
-            .Select(provider => _runner.GetAuthStatus(provider))
-            .ToArray();
-        if (providers.Length == 0)
+        options ??= GetLoginOptions();
+        if (options.Count == 0)
         {
-            return CodingAgentCommandResult.Error("login selector has no OAuth providers");
+            return CodingAgentCommandResult.Error("login selector has no login providers");
         }
 
-        var selected = await _authSelector(
-                new CodingAgentAuthSelectorState(_runner.Model.Provider, providers),
-                cancellationToken)
-            .ConfigureAwait(false);
-        if (string.IsNullOrWhiteSpace(selected))
+        while (true)
         {
-            return CodingAgentCommandResult.Status("login selection cancelled");
+            cancellationToken.ThrowIfCancellationRequested();
+            var selected = await _authSelector(CreateAuthState(options, "login") with
+                { InitialFilter = initialFilter, SelectMethodFirst = initialFilter is null }, cancellationToken).ConfigureAwait(false);
+            if (string.IsNullOrWhiteSpace(selected)) return CodingAgentCommandResult.Status("login selection cancelled");
+            var option = ResolveAuthSelection(options, selected);
+            if (option is null) return CodingAgentCommandResult.Error("login selection must identify a provider and authentication method");
+            try { return await LoginProviderAsync(option.Provider, cancellationToken, option.AuthType).ConfigureAwait(false); }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                // 1. 【CodingAgent】【登录返回】取消单次认证输入后回到选择器，整个命令取消仍向外传播
+            }
         }
-
-        return await LoginProviderAsync(selected, cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>【CodingAgent】【提供方登录】运行所选认证方式，取消或失败时不保存凭据。</summary>
+    /// <param name="providerId">提供方，空值表示当前提供方。</param><param name="cancellationToken">取消信号。</param>
+    /// <param name="authType">明确选择的认证方式；空值保留旧调用行为。</param><returns>保存或错误状态。</returns>
     private async Task<CodingAgentCommandResult> LoginProviderAsync(
         string? providerId,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? authType = null)
     {
         var status = string.IsNullOrWhiteSpace(providerId)
             ? _runner.GetAuthStatus()
             : _runner.GetAuthStatus(providerId);
-        if (status.IsConfigured)
+        if (authType is null && status.IsConfigured)
         {
             return CodingAgentCommandResult.Status($"auth {status.Provider}: already configured via {status.Source}.");
         }
 
-        if (!status.CanLogin)
+        if (authType is null && !status.CanLogin)
         {
             return CodingAgentCommandResult.Error(
                 $"login {status.Provider}: No OAuth login flow is registered for this provider; configure environment variables, auth.json, or models.json.");
         }
 
         var provider = _runner.GetOAuthProvider(status.Provider);
+        var apiKeyProvider = _runner.GetApiKeyProvider(status.Provider);
+        if ((authType == "api_key" || provider is null) && apiKeyProvider?.LoginAsync is { } loginApiKey)
+        {
+            var interaction = new CodingAgentCallbackAuthInteraction(_oauthLoginCallbacksFactory(), cancellationToken);
+            var credential = await loginApiKey(interaction).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            await _runner.SaveApiKeyCredentialAsync(status.Provider, credential, cancellationToken).ConfigureAwait(false);
+            return CodingAgentCommandResult.Status($"login {status.Provider}: authenticated successfully. Credentials saved to auth.json.");
+        }
+        if (authType == "api_key")
+            return CodingAgentCommandResult.Status($"login {status.Provider}: {apiKeyProvider?.Name ?? "API key"} uses external credentials. Configure the provider environment or credential files.");
         if (provider is null)
         {
             return CodingAgentCommandResult.Error($"login {status.Provider}: OAuth provider not found.");
         }
 
         var callbacks = _oauthLoginCallbacksFactory();
-        var credentials = await provider.LoginAsync(callbacks, cancellationToken).ConfigureAwait(false);
-        _runner.SaveOAuthCredentials(status.Provider, credentials);
+        var loginOptions = new Tau.Ai.Auth.OAuth.OAuthLoginOptions(() => (_settingsStore ?? CodingAgentSettingsStore.ForInstallation()).GetOrCreateDeviceId());
+        var credentials = await provider.LoginAsync(callbacks, loginOptions, cancellationToken).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+        await _runner.SaveOAuthCredentialsAsync(status.Provider, credentials, cancellationToken).ConfigureAwait(false);
         return CodingAgentCommandResult.Status($"login {status.Provider}: authenticated successfully. Credentials saved to auth.json.");
     }
 
@@ -2455,9 +2609,11 @@ public sealed class CodingAgentCommandRouter
             return await SelectAndLogoutProviderAsync(cancellationToken).ConfigureAwait(false);
         }
 
-        return LogoutProvider(parts.Count == 2 ? parts[1] : null);
+        return await LogoutProviderAsync(parts.Count == 2 ? parts[1] : null, cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>【CodingAgent】【登出选择】只列出持久凭据，允许移除已经卸载的提供方。</summary>
+    /// <param name="cancellationToken">取消信号。</param><returns>登出结果。</returns>
     private async Task<CodingAgentCommandResult> SelectAndLogoutProviderAsync(CancellationToken cancellationToken)
     {
         if (_authSelector is null)
@@ -2465,17 +2621,18 @@ public sealed class CodingAgentCommandRouter
             return CodingAgentCommandResult.Error("logout selector is not available in this session");
         }
 
-        var providers = _runner.GetProviders()
-            .Select(provider => _runner.GetAuthStatus(provider))
-            .Where(status => status.UsesOAuth && _runner.GetOAuthProvider(status.Provider) is not null)
-            .ToArray();
-        if (providers.Length == 0)
+        var options = _runner.ListStoredCredentials().Select(credential => new CodingAgentAuthOption(
+                credential.ProviderId, _runner.GetProviderDisplayName(credential.ProviderId), credential.Type,
+                new(credential.ProviderId, true, "stored credential", credential.Type == "oauth", false, "Stored credential."),
+                Subscription: _runner.GetOAuthProvider(credential.ProviderId)?.IsSubscription == true))
+            .OrderBy(option => option.Name, StringComparer.CurrentCultureIgnoreCase).ToArray();
+        if (options.Length == 0)
         {
-            return CodingAgentCommandResult.Status("No OAuth providers logged in. Use /login first.");
+            return CodingAgentCommandResult.Status("No providers logged in. Use /login first.");
         }
 
         var selected = await _authSelector(
-                new CodingAgentAuthSelectorState(_runner.Model.Provider, providers),
+                CreateAuthState(options, "logout"),
                 cancellationToken)
             .ConfigureAwait(false);
         if (string.IsNullOrWhiteSpace(selected))
@@ -2483,15 +2640,18 @@ public sealed class CodingAgentCommandRouter
             return CodingAgentCommandResult.Status("logout selection cancelled");
         }
 
-        return LogoutProvider(selected);
+        var option = ResolveAuthSelection(options, selected);
+        return option is null ? CodingAgentCommandResult.Error("logout selection does not identify a stored credential") : await LogoutProviderAsync(option.Provider, cancellationToken).ConfigureAwait(false);
     }
 
-    private CodingAgentCommandResult LogoutProvider(string? providerId)
+    /// <summary>【CodingAgent】【登出命令】删除持久凭据并等待对应提供方的本地状态同步。</summary>
+    /// <param name="providerId">可选提供方，缺省为当前模型提供方。</param><param name="cancellationToken">取消信号。</param><returns>登出状态。</returns>
+    private async Task<CodingAgentCommandResult> LogoutProviderAsync(string? providerId, CancellationToken cancellationToken)
     {
         var status = string.IsNullOrWhiteSpace(providerId)
             ? _runner.GetAuthStatus()
             : _runner.GetAuthStatus(providerId);
-        var removed = _runner.Logout(status.Provider);
+        var removed = await _runner.LogoutAsync(status.Provider, cancellationToken).ConfigureAwait(false);
         var unchanged = "Environment variables and models.json credentials are unchanged.";
         return removed
             ? CodingAgentCommandResult.Status($"logout {status.Provider}: auth.json credentials removed. {unchanged}")
@@ -2828,11 +2988,14 @@ public sealed class CodingAgentCommandRouter
         SetAndSaveThinkingLevel(_runner.ThinkingLevel);
     }
 
+    /// <summary>【CodingAgent】【思考保存】记录会话分支的等级，关闭状态也保存到默认设置。</summary>
+    /// <param name="level">当前生效等级，空值代表关闭。</param>
     private void SaveThinkingLevel(ThinkingLevel? level)
     {
+        _treeSessionController?.SyncFromRunner(_runner);
         if (_settingsStore is null) return;
         var settings = _settingsStore.Load();
-        _settingsStore.Save(settings with { DefaultThinkingLevel = FormatThinkingLevelRaw(level) });
+        _settingsStore.Save(settings with { DefaultThinkingLevel = CodingAgentThinkingLevels.Format(level) });
     }
 
     private void SaveScopedModels(CodingAgentSettingsSnapshot current, IReadOnlyList<string>? enabledModels)
@@ -2925,7 +3088,8 @@ public sealed class CodingAgentCommandRouter
             _settingsStore.Save(settings with
             {
                 RetryMaxAttempts = configuredMaxAttempts,
-                RetryBaseDelayMilliseconds = configuredBaseDelayMilliseconds
+                RetryBaseDelayMilliseconds = configuredBaseDelayMilliseconds,
+                Retry = configuredMaxAttempts is null && configuredBaseDelayMilliseconds is null ? null : settings.Retry
             });
         }
 
@@ -3108,7 +3272,7 @@ public sealed class CodingAgentCommandRouter
             return CodingAgentTreeNavigationDecision.NoSummary;
         }
 
-        if (_treeNavigationPrompt is null)
+        if (_treeNavigationPrompt is null || _settingsStore?.Load().GetBranchSummarySkipPrompt() == true)
         {
             return CodingAgentTreeNavigationDecision.NoSummary;
         }
@@ -3287,7 +3451,7 @@ public sealed class CodingAgentCommandRouter
         _treeSessionController.SyncFromRunner(_runner);
         return _runner
             .GetSessionStats(_sessionFile)
-            .WithUsage(_treeSessionController.GetCurrentBranchUsageSummary());
+            .WithUsage(_treeSessionController.GetSessionUsageSummary());
     }
 
     private static string FormatUsageAndCost(CodingAgentSessionStats stats)

@@ -73,7 +73,7 @@ public sealed class GoogleStreamParserTests
 
         var done = Assert.Single(events.OfType<DoneEvent>());
         Assert.Equal("resp_google_1", done.Message.ResponseId);
-        Assert.Equal(new Usage(7, 6, 3), done.Message.Usage);
+        Assert.Equal(new Usage(7, 6, 3, 0, Cost: default(UsageCost)), done.Message.Usage);
         Assert.Equal(StopReason.ToolUse, done.Message.StopReason);
 
         var thinking = Assert.IsType<ThinkingContent>(done.Message.Content[0]);
@@ -113,20 +113,21 @@ public sealed class GoogleStreamParserTests
             }
             """.Replace("__FINISH_REASON__", finishReason, StringComparison.Ordinal));
 
-        Assert.True(terminal);
+        Assert.False(terminal);
+        parser.EmitDone();
         var events = await OpenAiResponsesProviderTests.CollectAsync(stream);
 
         Assert.Empty(events.OfType<DoneEvent>());
         var error = Assert.Single(events.OfType<ErrorEvent>());
-        Assert.Equal($"Provider finishReason: {finishReason}", error.Error);
+        Assert.Equal($"Provider stopped with: {finishReason}", error.Error);
         Assert.Equal(StopReason.Error, error.Message?.StopReason);
-        Assert.Equal($"Provider finishReason: {finishReason}", error.Message?.ErrorMessage);
-        Assert.Equal(new Usage(2, 0), error.Message?.Usage);
+        Assert.Equal($"Provider stopped with: {finishReason}", error.Message?.ErrorMessage);
+        Assert.Equal(new Usage(2, 0, 0, 0, Cost: default(UsageCost)), error.Message?.Usage);
         Assert.Equal("blocked", Assert.IsType<TextContent>(Assert.Single(error.Message!.Content)).Text);
 
         var result = await stream.ResultAsync;
         Assert.Equal(StopReason.Error, result.StopReason);
-        Assert.Equal($"Provider finishReason: {finishReason}", result.ErrorMessage);
+        Assert.Equal($"Provider stopped with: {finishReason}", result.ErrorMessage);
     }
 
     [Fact]

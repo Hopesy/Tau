@@ -46,18 +46,24 @@ public sealed class TuiMarkdown : ITuiComponent
     private readonly TuiMarkdownTheme _theme;
     private readonly TuiDefaultTextStyle? _defaultTextStyle;
     private readonly bool _enableHyperlinks;
+    private readonly Func<string, int, string>? _transform;
     private string _text;
     private string? _cachedText;
     private int? _cachedWidth;
     private IReadOnlyList<string>? _cachedLines;
 
+    /// <summary>【TUI】【Markdown 组件】保留原始正文，在实际内容宽度确定后转换并排版。</summary>
+    /// <param name="text">原始 Markdown。</param><param name="paddingX">左右留白。</param><param name="paddingY">上下留白。</param>
+    /// <param name="theme">语法样式。</param><param name="defaultTextStyle">默认正文样式。</param>
+    /// <param name="enableHyperlinks">是否输出终端超链接。</param><param name="transform">可选的渲染前转换器。</param>
     public TuiMarkdown(
         string text,
         int paddingX = 0,
         int paddingY = 0,
         TuiMarkdownTheme? theme = null,
         TuiDefaultTextStyle? defaultTextStyle = null,
-        bool enableHyperlinks = false)
+        bool enableHyperlinks = false,
+        Func<string, int, string>? transform = null)
     {
         _text = text;
         _paddingX = Math.Max(0, paddingX);
@@ -65,6 +71,7 @@ public sealed class TuiMarkdown : ITuiComponent
         _theme = theme ?? new TuiMarkdownTheme();
         _defaultTextStyle = defaultTextStyle;
         _enableHyperlinks = enableHyperlinks;
+        _transform = transform;
     }
 
     public string Text => _text;
@@ -95,7 +102,9 @@ public sealed class TuiMarkdown : ITuiComponent
             return _cachedLines;
         }
 
-        if (string.IsNullOrWhiteSpace(_text))
+        var contentWidth = Math.Max(1, width - (_paddingX * 2));
+        var text = _transform?.Invoke(_text, contentWidth) ?? _text;
+        if (string.IsNullOrWhiteSpace(text))
         {
             _cachedText = _text;
             _cachedWidth = width;
@@ -103,8 +112,7 @@ public sealed class TuiMarkdown : ITuiComponent
             return _cachedLines;
         }
 
-        var contentWidth = Math.Max(1, width - (_paddingX * 2));
-        var normalized = _text.Replace("\t", "   ", StringComparison.Ordinal).Replace("\r\n", "\n", StringComparison.Ordinal);
+        var normalized = text.Replace("\t", "   ", StringComparison.Ordinal).Replace("\r\n", "\n", StringComparison.Ordinal);
         var rendered = RenderBlocks(normalized.Split('\n'), contentWidth);
         var wrapped = new List<string>();
         foreach (var line in rendered)

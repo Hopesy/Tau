@@ -1,5 +1,7 @@
 using Tau.AgentCore.Runtime;
 using Tau.Ai;
+using Tau.Ai.Auth;
+using Tau.Ai.Registry;
 using Tau.Ai.Observability;
 using Tau.Ai.Providers;
 using Tau.Ai.Streaming;
@@ -9,7 +11,14 @@ namespace Tau.AgentCore;
 public sealed record AgentOptions
 {
     public required Model Model { get; init; }
-    public required ProviderRegistry ProviderRegistry { get; init; }
+    public ProviderRegistry ProviderRegistry { get; init; } = new();
+    /// <summary>【AgentCore】【流式函数】实例级请求入口，优先于进程默认函数和提供方注册表</summary>
+    public AgentStreamFunction? StreamFunction { get; init; }
+    /// <summary>【AgentCore】【请求配置】会话绑定的模型配置来源。</summary>
+    public ModelConfigurationStore? ConfigurationStore { get; init; }
+    /// <summary>【AgentCore】【请求认证】会话绑定的认证解析器。</summary>
+    public ProviderAuthResolver? AuthResolver { get; init; }
+    /// <summary>初始提示；历史已有首条系统消息时以历史为准，否则与工具共同生成基线。</summary>
     public string? SystemPrompt { get; init; }
     public IReadOnlyList<ChatMessage> Messages { get; init; } = [];
     public IReadOnlyList<IAgentTool> Tools { get; init; } = [];
@@ -20,6 +29,11 @@ public sealed record AgentOptions
     public Func<IReadOnlyList<ChatMessage>, CancellationToken, Task<IReadOnlyList<ChatMessage>>>? TransformContextAsync { get; init; }
     public Func<IReadOnlyList<ChatMessage>, IReadOnlyList<ChatMessage>>? ConvertToLlm { get; init; }
     public Func<AgentLoopTurnContext, CancellationToken, Task<AgentLoopTurnUpdate?>>? PrepareNextTurnAsync { get; init; }
+    /// <summary>【AgentCore】【请求准备】每次模型请求前的状态替换钩子</summary>
+    public Func<AgentPrepareRequestContext, CancellationToken, Task<AgentRequestUpdate?>>? PrepareRequestAsync { get; init; }
+    /// <summary>【AgentCore】【回合完成】最终消息发布后、turn_end 前的调度钩子</summary>
+    public Func<AgentLoopTurnContext, CancellationToken, Task<AgentTurnDecision?>>? FinishTurnAsync { get; init; }
+    /// <summary>兼容旧停止接口；设置 FinishTurnAsync 时忽略此回调</summary>
     public Func<AgentLoopTurnContext, CancellationToken, Task<bool>>? ShouldStopAfterTurnAsync { get; init; }
     public AgentQueueMode SteeringMode { get; init; } = AgentQueueMode.OneAtATime;
     public AgentQueueMode FollowUpMode { get; init; } = AgentQueueMode.OneAtATime;
@@ -37,23 +51,28 @@ public sealed class Agent
     private CancellationTokenSource? _activeCts;
     private Model _model;
     private ProviderRegistry _providerRegistry;
-    private string? _systemPrompt;
     private IReadOnlyList<IAgentTool> _tools;
     private IReadOnlyList<IToolInterceptor> _interceptors;
 
+    /// <summary>【AgentCore】【运行配置】创建代理并初始化模型、工具及生命周期钩子</summary>
+    /// <param name="options">代理初始状态和运行配置</param>
     public Agent(AgentOptions options)
     {
         _model = options.Model;
         _providerRegistry = options.ProviderRegistry;
-        _systemPrompt = options.SystemPrompt;
+        StreamFunction = options.StreamFunction ?? AgentStreaming.GetDefaultStreamFunction();
         _tools = options.Tools.ToArray();
         _interceptors = options.Interceptors.ToArray();
         StreamOptions = options.StreamOptions;
+        ConfigurationStore = options.ConfigurationStore;
+        AuthResolver = options.AuthResolver;
         GetApiKeyAsync = options.GetApiKeyAsync;
         TransformContext = options.TransformContext;
         TransformContextAsync = options.TransformContextAsync;
         ConvertToLlm = options.ConvertToLlm;
         PrepareNextTurnAsync = options.PrepareNextTurnAsync;
+        PrepareRequestAsync = options.PrepareRequestAsync;
+        FinishTurnAsync = options.FinishTurnAsync;
         ShouldStopAfterTurnAsync = options.ShouldStopAfterTurnAsync;
         ToolExecution = options.ToolExecution;
         LogSink = options.LogSink;
@@ -62,10 +81,10 @@ public sealed class Agent
         FollowUpMode = options.FollowUpMode;
 
         SyncStateConfiguration();
-        foreach (var message in options.Messages)
-        {
-            _runtime.AddMessage(message);
-        }
+        // 1. 【AgentCore】【会话基线】已有开场系统消息具有优先权，旧配置仅用于补齐缺失的基线
+        var initial = CreateInitialSystemMessage(options.SystemPrompt);
+        State.SetMessages(options.Messages.FirstOrDefault() is not SystemMessage && initial is not null
+            ? [initial, .. options.Messages] : options.Messages.ToList());
     }
 
     public AgentState State => _runtime.State;
@@ -86,14 +105,11 @@ public sealed class Agent
         set => _providerRegistry = value;
     }
 
+    /// <summary>重放后的完整提示；赋值为 Tau 兼容接口，会替换提示文本并保留工具声明。</summary>
     public string? SystemPrompt
     {
-        get => _systemPrompt;
-        set
-        {
-            _systemPrompt = value;
-            SyncStateConfiguration();
-        }
+        get => State.SystemPrompt;
+        set => State.ReplaceSystemPrompt(value);
     }
 
     public IReadOnlyList<IAgentTool> Tools
@@ -113,11 +129,22 @@ public sealed class Agent
     }
 
     public SimpleStreamOptions? StreamOptions { get; set; }
+    /// <summary>【AgentCore】【流式函数】后续运行使用的请求入口，每次运行开始时捕获当前函数</summary>
+    public AgentStreamFunction? StreamFunction { get; set; }
+    /// <summary>【AgentCore】【请求配置】当前会话的模型配置来源。</summary>
+    public ModelConfigurationStore? ConfigurationStore { get; set; }
+    /// <summary>【AgentCore】【请求认证】当前会话的认证解析器。</summary>
+    public ProviderAuthResolver? AuthResolver { get; set; }
     public Func<string, CancellationToken, Task<string?>>? GetApiKeyAsync { get; set; }
     public Func<IReadOnlyList<ChatMessage>, IReadOnlyList<ChatMessage>>? TransformContext { get; set; }
     public Func<IReadOnlyList<ChatMessage>, CancellationToken, Task<IReadOnlyList<ChatMessage>>>? TransformContextAsync { get; set; }
     public Func<IReadOnlyList<ChatMessage>, IReadOnlyList<ChatMessage>>? ConvertToLlm { get; set; }
     public Func<AgentLoopTurnContext, CancellationToken, Task<AgentLoopTurnUpdate?>>? PrepareNextTurnAsync { get; set; }
+    /// <summary>【AgentCore】【请求准备】每次模型请求前的状态替换钩子</summary>
+    public Func<AgentPrepareRequestContext, CancellationToken, Task<AgentRequestUpdate?>>? PrepareRequestAsync { get; set; }
+    /// <summary>【AgentCore】【回合完成】最终消息发布后、turn_end 前的调度钩子</summary>
+    public Func<AgentLoopTurnContext, CancellationToken, Task<AgentTurnDecision?>>? FinishTurnAsync { get; set; }
+    /// <summary>兼容旧停止接口；设置 FinishTurnAsync 时忽略此回调</summary>
     public Func<AgentLoopTurnContext, CancellationToken, Task<bool>>? ShouldStopAfterTurnAsync { get; set; }
     public ToolExecutionMode ToolExecution { get; set; }
     public ITauLogSink LogSink { get; set; }
@@ -193,7 +220,7 @@ public sealed class Agent
         ThrowIfActive("Agent is already processing. Wait for completion before continuing.");
 
         var lastMessage = State.Messages.LastOrDefault();
-        if (lastMessage is null)
+        if (lastMessage is null || State.Messages.All(message => message is SystemMessage))
         {
             throw new InvalidOperationException("No messages to continue from.");
         }
@@ -226,14 +253,16 @@ public sealed class Agent
 
     public void Steer(ChatMessage message) => _runtime.Steer(message);
     public void FollowUp(ChatMessage message) => _runtime.FollowUp(message);
+
+    /// <summary>【AgentCore】【队列预览】按当前模式预览下一回合会选中的消息，不消费队列；引导消息优先</summary>
+    /// <returns>包含原消息对象的独立快照数组</returns>
+    public IReadOnlyList<ChatMessage> PeekQueuedMessages() => _runtime.PeekQueuedMessages();
+
     public void ClearSteeringQueue() => _runtime.ClearSteeringQueue();
     public void ClearFollowUpQueue() => _runtime.ClearFollowUpQueue();
 
-    public void ClearAllQueues()
-    {
-        ClearSteeringQueue();
-        ClearFollowUpQueue();
-    }
+    /// <summary>【AgentCore】【队列清空】一次性清除引导和跟进消息，不在两个清空操作之间暴露中间状态。</summary>
+    public void ClearAllQueues() => _runtime.ClearAllQueues();
 
     public void Abort()
     {
@@ -241,6 +270,8 @@ public sealed class Agent
         _runtime.Abort();
     }
 
+    /// <summary>【AgentCore】【空闲等待】等待当前运行及其事件监听器结束</summary>
+    /// <returns>当前运行的稳定完成任务；空闲时返回已完成任务</returns>
     public Task WaitForIdleAsync()
     {
         lock (_sync)
@@ -250,21 +281,28 @@ public sealed class Agent
     }
 
     /// <summary>
-    /// 清空当前 agent 的消息和运行时状态。
+    /// 【AgentCore】【会话重置】清除对话、队列和运行状态，保留重放后的系统提示与已声明工具。
     /// </summary>
     /// <exception cref="InvalidOperationException">agent 仍在运行时抛出。</exception>
     public void Reset()
     {
         ThrowIfActive("Cannot reset an agent while it is running.");
+        var baseline = Transcript.GetCurrentSystemMessage(State.Messages);
         _runtime.Reset();
+        if (baseline is not null) _runtime.AddMessage(baseline);
         SyncStateConfiguration();
     }
 
+    /// <summary>【AgentCore】【运行生命周期】登记唯一运行任务并启动执行器</summary>
+    /// <param name="executor">本次运行的异步执行器</param>
+    /// <param name="cancellationToken">调用方的取消信号</param>
+    /// <returns>执行结束并清理状态后完成的任务</returns>
     private Task StartRun(Func<CancellationToken, Task> executor, CancellationToken cancellationToken)
     {
         var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        var placeholder = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
+        // 1. 【AgentCore】【运行生命周期】在发出任何事件前登记稳定任务，供所有等待方共用
         lock (_sync)
         {
             if (_activeRun is not null)
@@ -275,29 +313,35 @@ public sealed class Agent
             }
 
             _activeCts = cts;
-            _activeRun = placeholder.Task;
+            _activeRun = completion.Task;
         }
 
-        var task = RunAndClearAsync(executor, cts);
-        lock (_sync)
-        {
-            if (ReferenceEquals(_activeCts, cts))
-            {
-                _activeRun = task;
-            }
-        }
-
-        return task;
+        _ = RunAndClearAsync(executor, cts, completion);
+        return completion.Task;
     }
 
-    private async Task RunAndClearAsync(Func<CancellationToken, Task> executor, CancellationTokenSource cts)
+    /// <summary>【AgentCore】【运行生命周期】执行运行并将成功、异常或取消传播到稳定任务</summary>
+    /// <param name="executor">运行执行器</param>
+    /// <param name="cts">本次运行拥有的取消源</param>
+    /// <param name="completion">供提示调用与空闲等待共用的完成信号</param>
+    /// <returns>执行和状态清理任务</returns>
+    private async Task RunAndClearAsync(
+        Func<CancellationToken, Task> executor,
+        CancellationTokenSource cts,
+        TaskCompletionSource completion)
     {
+        Exception? error = null;
         try
         {
             await executor(cts.Token).ConfigureAwait(false);
         }
+        catch (Exception ex)
+        {
+            error = ex;
+        }
         finally
         {
+            // 2. 【AgentCore】【运行生命周期】先释放运行状态，再唤醒等待方
             lock (_sync)
             {
                 if (ReferenceEquals(_activeCts, cts))
@@ -305,61 +349,60 @@ public sealed class Agent
                     _activeRun = null;
                     _activeCts = null;
                 }
-            }
 
-            cts.Dispose();
+                cts.Dispose();
+                if (error is OperationCanceledException cancelled)
+                {
+                    completion.TrySetCanceled(cancelled.CancellationToken);
+                }
+                else if (error is not null)
+                {
+                    completion.TrySetException(error);
+                }
+                else
+                {
+                    completion.TrySetResult();
+                }
+            }
         }
     }
 
+    /// <summary>【AgentCore】【运行生命周期】发布提示消息并将运行事件转发给订阅者</summary>
+    /// <param name="promptMessages">本次运行新增的提示消息</param>
+    /// <param name="skipInitialSteeringPoll">是否跳过已完成的首次 steering 选择</param>
+    /// <param name="cancellationToken">本次运行取消信号</param>
+    /// <returns>运行及订阅者处理结束后完成的任务</returns>
     private async Task RunRuntimeAsync(
         IReadOnlyList<ChatMessage> promptMessages,
         bool skipInitialSteeringPoll,
         CancellationToken cancellationToken)
     {
-        var emittedPromptMessages = promptMessages.Count == 0;
         var sawAgentEnd = false;
+        var newMessages = new List<ChatMessage>();
 
         SyncStateConfiguration();
         State.SetStreaming(true);
         State.SetError(null);
 
-        foreach (var message in promptMessages)
-        {
-            _runtime.AddMessage(message);
-        }
-
         try
         {
-            await foreach (var runtimeEvent in _runtime.RunAsync(CreateConfig(skipInitialSteeringPoll), cancellationToken)
+            await foreach (var runtimeEvent in _runtime.RunAsync(CreateConfig(skipInitialSteeringPoll, promptMessages), cancellationToken)
                                .ConfigureAwait(false))
             {
-                var evt = NormalizeRuntimeEvent(runtimeEvent);
-                await EmitAsync(evt, cancellationToken).ConfigureAwait(false);
-                if (!emittedPromptMessages && evt is TurnStartEvent)
-                {
-                    foreach (var message in promptMessages)
-                    {
-                        await EmitAsync(new MessageStartEvent(message), cancellationToken).ConfigureAwait(false);
-                        await EmitAsync(new MessageEndEvent(message), cancellationToken).ConfigureAwait(false);
-                    }
-
-                    emittedPromptMessages = true;
-                }
-
-                if (evt is AgentEndEvent)
-                {
-                    sawAgentEnd = true;
-                }
+                // 1. 【AgentCore】【运行结果】按发布顺序累计新增消息，异常路径同样保留已完成输入与输出
+                if (runtimeEvent is MessageEndEvent messageEnd) newMessages.Add(messageEnd.Message);
+                if (runtimeEvent is AgentEndEvent) sawAgentEnd = true;
+                await EmitAsync(runtimeEvent, cancellationToken).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             const string error = "Operation canceled.";
-            await EmitFailureAsync(error, aborted: true, sawAgentEnd, cancellationToken).ConfigureAwait(false);
+            await EmitFailureAsync(error, aborted: true, sawAgentEnd, newMessages, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
-            await EmitFailureAsync(ex.Message, aborted: false, sawAgentEnd, cancellationToken).ConfigureAwait(false);
+            await EmitFailureAsync(ex.Message, aborted: false, sawAgentEnd, newMessages, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -367,49 +410,49 @@ public sealed class Agent
         }
     }
 
-    private static AgentEvent NormalizeRuntimeEvent(AgentEvent evt)
-    {
-        if (evt is not AgentEndEvent end || string.IsNullOrWhiteSpace(end.ErrorMessage))
-        {
-            return evt;
-        }
-
-        var failureMessage = end.Messages
-            .OfType<AssistantMessage>()
-            .LastOrDefault(static message =>
-                !string.IsNullOrWhiteSpace(message.ErrorMessage) ||
-                message.StopReason is StopReason.Error or StopReason.Aborted);
-
-        return failureMessage is null
-            ? evt
-            : new AgentEndEvent(end.ErrorMessage, [failureMessage]);
-    }
-
-    private AgentLoopConfig CreateConfig(bool skipInitialSteeringPoll) =>
+    /// <summary>【AgentCore】【运行配置】快照当前配置并传入本次提示消息以区分新增消息与历史</summary>
+    /// <param name="skipInitialSteeringPoll">是否跳过已由继续操作完成的首次队列轮询</param>
+    /// <param name="promptMessages">由运行时追加并发布事件的本次提示消息</param>
+    /// <returns>本次循环配置</returns>
+    private AgentLoopConfig CreateConfig(bool skipInitialSteeringPoll, IReadOnlyList<ChatMessage> promptMessages) =>
         new()
         {
             Model = _model,
             ProviderRegistry = _providerRegistry,
+            ConfigurationStore = ConfigurationStore,
+            AuthResolver = AuthResolver,
             Tools = _tools,
             Interceptors = _interceptors,
             LogSink = LogSink,
             LogContext = LogContext,
-            SystemPrompt = _systemPrompt,
+            SystemPromptFromTranscript = true,
             StreamOptions = StreamOptions,
+            StreamFunction = StreamFunction,
             GetApiKeyAsync = GetApiKeyAsync,
             DefaultExecutionMode = ToolExecution,
             TransformContext = TransformContext,
             TransformContextAsync = TransformContextAsync,
             ConvertToLlm = ConvertToLlm,
             PrepareNextTurnAsync = PrepareNextTurnAsync,
+            PrepareRequestAsync = PrepareRequestAsync,
+            FinishTurnAsync = FinishTurnAsync,
             ShouldStopAfterTurnAsync = ShouldStopAfterTurnAsync,
+            InitialMessages = promptMessages,
             SkipInitialSteeringPoll = skipInitialSteeringPoll
         };
 
+    /// <summary>【AgentCore】【运行失败】保留本次已发布消息，并追加异常产生的助手结果。</summary>
+    /// <param name="error">错误说明。</param>
+    /// <param name="aborted">是否由取消引起。</param>
+    /// <param name="sawAgentEnd">是否已发布结束事件。</param>
+    /// <param name="newMessages">本次已发布的消息。</param>
+    /// <param name="cancellationToken">当前取消信号。</param>
+    /// <returns>事件处理任务。</returns>
     private async Task EmitFailureAsync(
         string error,
         bool aborted,
         bool sawAgentEnd,
+        IReadOnlyList<ChatMessage> newMessages,
         CancellationToken cancellationToken)
     {
         State.SetError(error);
@@ -418,7 +461,7 @@ public sealed class Agent
 
         if (!sawAgentEnd)
         {
-            await EmitAsync(new AgentEndEvent(error, [failureMessage]), cancellationToken).ConfigureAwait(false);
+            await EmitAsync(new AgentEndEvent(error, [.. newMessages, failureMessage]), cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -461,7 +504,14 @@ public sealed class Agent
         }
     }
 
-    private void SyncStateConfiguration() => State.Configure(_systemPrompt, _model, _tools);
+    /// <summary>【AgentCore】【状态同步】同步执行配置，提示始终由会话中的系统声明重放。</summary>
+    private void SyncStateConfiguration() => State.Configure(null, _model, _tools);
+
+    /// <summary>【AgentCore】【会话基线】为旧配置复制纯工具定义并创建首条系统消息。</summary>
+    /// <param name="systemPrompt">初始或恢复时的默认提示。</param>
+    /// <returns>独立的基线；空配置返回 null。</returns>
+    private SystemMessage? CreateInitialSystemMessage(string? systemPrompt) => Transcript.CreateInitialSystemMessage(systemPrompt,
+        _tools.Select(tool => new Tool(tool.Name, tool.Description, tool.ParameterSchema) { ConstrainedSampling = tool.ConstrainedSampling }).ToArray());
 
     private sealed class Subscription(Action unsubscribe) : IDisposable
     {

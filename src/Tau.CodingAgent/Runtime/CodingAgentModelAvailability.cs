@@ -31,6 +31,8 @@ internal static class CodingAgentModelAvailability
         return models;
     }
 
+    /// <summary>【CodingAgent】【可用目录】先检查提供方认证，再应用账户权限，保留输入模型顺序。</summary>
+    /// <param name="runner">会话运行器。</param><param name="registeredModels">可选目录子集。</param><returns>认证与账户权限均允许的模型。</returns>
     public static IReadOnlyList<Model> GetAuthConfiguredModels(
         ICodingAgentRunner runner,
         IReadOnlyList<Model>? registeredModels = null)
@@ -38,23 +40,15 @@ internal static class CodingAgentModelAvailability
         ArgumentNullException.ThrowIfNull(runner);
 
         var source = registeredModels ?? GetRegisteredModels(runner);
-        var providerStatuses = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
-        var models = new List<Model>();
-        foreach (var model in source)
+        var allowed = new HashSet<Model>();
+        foreach (var group in source.GroupBy(model => model.Provider, StringComparer.OrdinalIgnoreCase))
         {
-            if (!providerStatuses.TryGetValue(model.Provider, out var isConfigured))
-            {
-                isConfigured = runner.GetAuthStatus(model.Provider).IsConfigured;
-                providerStatuses[model.Provider] = isConfigured;
-            }
-
-            if (isConfigured)
-            {
-                models.Add(model);
-            }
+            // 1. 【CodingAgent】【认证可用性】过期 OAuth 仍是已配置认证，目录查询不负责刷新令牌
+            var status = runner.GetAuthStatus(group.Key);
+            if (status.IsConfigured || status.UsesOAuth && runner.GetOAuthProvider(group.Key) is not null)
+                allowed.UnionWith(runner.FilterAvailableModels(group.Key, group.ToArray()));
         }
-
-        return models;
+        return source.Where(allowed.Contains).ToArray();
     }
 
     public static string FormatModelId(Model model) => $"{model.Provider}/{model.Id}";

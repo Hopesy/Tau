@@ -1,0 +1,26 @@
+{
+  "$comment": "作者：xxx；密钥从进程环境变量读取",
+  "providers": {
+    "deepseek-responses": {
+      "baseUrl": "https://api.deepseek.com",
+      "api": "openai-responses",
+      "apiKey": "TAU_SMOKE_API_KEY",
+      "options": {
+        "maxTokens": 512,
+        "timeoutMs": 45000,
+        "maxRetries": 0
+      },
+      "models": [
+        {
+          "id": "deepseek-flash",
+          "name": "DeepSeek Flash Responses",
+          "reasoning": true,
+          "compat": {
+            "supportsDeveloperRole": false,
+            "supportsStrictMode": false
+          }
+        }
+      ]
+    }
+  }
+}

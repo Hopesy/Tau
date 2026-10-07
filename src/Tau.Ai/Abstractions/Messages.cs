@@ -30,6 +30,10 @@ public sealed record AssistantMessage : ChatMessage
     public string? ResponseId { get; init; }
     /// <summary>provider 返回的具体响应模型名称。</summary>
     public string? ResponseModel { get; init; }
+    /// <summary>本轮使用的供应商原生思考等级，供后续会话恢复 effort 前缀。</summary>
+    public string? ProviderThinkingLevel { get; init; }
+    /// <summary>【AI】【请求路由】本次请求实际使用的通用推理等级，与提供方专用等级分别保存。</summary>
+    public string? ThinkingLevel { get; init; }
     /// <summary>provider 原始停止原因，便于诊断。</summary>
     public string? RawStopReason { get; init; }
     /// <summary>provider 是否明确报告了 end-turn。</summary>
@@ -49,6 +53,8 @@ public sealed record ToolResultMessage(
     public object? Details { get; init; }
     /// <summary>工具执行阶段产生的用量。</summary>
     public Usage? Usage { get; init; }
+    /// <summary>【Ai】【嵌套调用】父工具发起的有界调用记录，仅用于会话保存。</summary>
+    public NestedToolCalls? NestedCalls { get; init; }
     /// <summary>本次结果使 provider 新增可用的工具名称。</summary>
     public IReadOnlyList<string>? AddedToolNames { get; init; }
     /// <summary>工具结果创建时间。</summary>

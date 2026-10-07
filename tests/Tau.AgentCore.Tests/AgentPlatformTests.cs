@@ -68,7 +68,7 @@ public sealed class AgentPlatformTests
         Assert.Equal("session-1", result.LogContext.SessionId);
         Assert.False(string.IsNullOrWhiteSpace(result.LogContext.MessageId));
 
-        Assert.Equal(4, result.Messages.Count);
+        Assert.Equal(5, result.Messages.Count);
         Assert.Equal(["agent_start", "turn_start"], result.Events.Take(2).Select(static evt => evt.Type).ToArray());
         var toolStart = Assert.Single(result.ToolStarts);
         Assert.Equal("call-1", toolStart.ToolCallId);
@@ -81,7 +81,7 @@ public sealed class AgentPlatformTests
 
         var snapshot = sessions.Load("session-1");
         Assert.NotNull(snapshot);
-        Assert.Equal(4, snapshot.Messages.Count);
+        Assert.Equal(5, snapshot.Messages.Count);
         Assert.Equal("test", snapshot.Metadata["tenant"]);
     }
 
@@ -123,6 +123,7 @@ public sealed class AgentPlatformTests
         Assert.True(prepared);
         Assert.Collection(
             result.Messages,
+            message => Assert.IsType<SystemMessage>(message),
             message => Assert.Equal("hello", ReadText(Assert.IsType<UserMessage>(message).Content)),
             message => Assert.IsType<AssistantMessage>(message),
             message => Assert.Equal("prepared hello", ReadText(Assert.IsType<ToolResultMessage>(message).Content)),

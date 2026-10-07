@@ -8,7 +8,7 @@ namespace Tau.CodingAgent.Tests;
 public class CodingAgentPrintModeTests
 {
     [Fact]
-    public async Task RunAsync_StreamsTextDeltasAndReturnsZero()
+    public async Task RunAsync_PrintsCompletedTextAndReturnsZero()
     {
         var runner = new FakeCodingAgentRunner((_, _) => GetEvents());
         var output = new StringWriter();
@@ -28,6 +28,7 @@ public class CodingAgentPrintModeTests
             var partial = new AssistantMessage();
             yield return new MessageUpdateEvent(new TextDeltaEvent(0, "Hello ", partial));
             yield return new MessageUpdateEvent(new TextDeltaEvent(1, "world", partial));
+            yield return new MessageEndEvent(new AssistantMessage([new TextContent("Hello world")]) { StopReason = StopReason.EndTurn });
             yield return new AgentEndEvent();
             await Task.CompletedTask;
         }

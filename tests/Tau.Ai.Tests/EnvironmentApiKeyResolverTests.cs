@@ -2,6 +2,7 @@ using Tau.Ai.Auth;
 
 namespace Tau.Ai.Tests;
 
+[Collection("ProcessEnvironment")]
 public sealed class EnvironmentApiKeyResolverTests
 {
     [Fact]

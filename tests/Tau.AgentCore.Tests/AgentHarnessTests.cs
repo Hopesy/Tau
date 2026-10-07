@@ -11,6 +11,41 @@ namespace Tau.AgentCore.Tests;
 
 public sealed class AgentHarnessTests
 {
+    /// <summary>【AgentCore】【Harness 恢复】旧历史补入请求基线时，不重复持久化已有消息。</summary>
+    /// <returns>测试任务。</returns>
+    [Fact]
+    public async Task PromptAsync_LegacyHistoryDoesNotDuplicatePersistedTail()
+    {
+        var provider = new CapturingProvider("one", "two");
+        var harness = CreateHarness(provider);
+        await harness.AppendMessageAsync(new UserMessage("legacy user"));
+        await harness.AppendMessageAsync(new AssistantMessage([new TextContent("legacy assistant")]));
+        await harness.PromptAsync("first");
+        await harness.PromptAsync("second");
+        var messages = (await harness.Session.BuildContextAsync()).Messages;
+        Assert.Equal(new[] { "legacy user", "legacy assistant", "first", "one", "second", "two" },
+            messages.Select(message => message switch { UserMessage user => ReadText(user.Content), AssistantMessage assistant => ReadText(assistant.Content), _ => message.Role }));
+        Assert.Equal("system", provider.LastContext!.Value.SystemPrompt);
+    }
+
+    /// <summary>【AgentCore】【Harness 基线】新会话仅保存一次基线，包装层保留原生声明能力。</summary>
+    /// <returns>测试任务。</returns>
+    [Fact]
+    public async Task PromptAsync_NativeProviderReceivesSinglePersistedBaseline()
+    {
+        var provider = new CapturingProvider("one", "two") { SupportsTranscriptContext = true };
+        var harness = CreateHarness(provider);
+        await harness.PromptAsync("first");
+        await harness.PromptAsync("second");
+        var request = provider.LastContext!.Value;
+        Assert.Null(request.SystemPrompt);
+        Assert.Equal("system", Assert.IsType<SystemMessage>(request.Messages[0]).Content);
+        Assert.Single(request.Messages.OfType<SystemMessage>());
+        var messages = (await harness.Session.BuildContextAsync()).Messages;
+        Assert.Equal(5, messages.Count);
+        Assert.Single(messages.OfType<SystemMessage>());
+    }
+
     [Fact]
     public async Task PromptAsync_AppendsPromptAndAssistantToSessionAndEmitsEvents()
     {
@@ -29,9 +64,10 @@ public sealed class AgentHarnessTests
         Assert.Equal("hello", ReadText(Assert.IsType<UserMessage>(request).Content));
 
         var branch = await harness.Session.GetBranchAsync();
-        Assert.Equal(["message", "message"], branch.Select(static entry => entry.Type));
-        Assert.Equal("hello", ReadText(Assert.IsType<UserMessage>(Assert.IsType<MessageSessionEntry>(branch[0]).Message).Content));
-        Assert.Equal("done", ReadText(Assert.IsType<AssistantMessage>(Assert.IsType<MessageSessionEntry>(branch[1]).Message).Content));
+        Assert.Equal(["message", "message", "message"], branch.Select(static entry => entry.Type));
+        Assert.Equal("system with 1 skills", Assert.IsType<SystemMessage>(Assert.IsType<MessageSessionEntry>(branch[0]).Message).Content);
+        Assert.Equal("hello", ReadText(Assert.IsType<UserMessage>(Assert.IsType<MessageSessionEntry>(branch[1]).Message).Content));
+        Assert.Equal("done", ReadText(Assert.IsType<AssistantMessage>(Assert.IsType<MessageSessionEntry>(branch[2]).Message).Content));
 
         Assert.Contains(events, static evt => evt is AgentEndEvent);
         Assert.Contains(events, static evt => evt is AgentHarnessSavePointEvent);
@@ -350,7 +386,7 @@ public sealed class AgentHarnessTests
         Assert.Single(assistant.Content.OfType<ToolCallContent>());
         Assert.Equal(1, provider.StreamSimpleCallCount);
         var context = await harness.Session.BuildContextAsync();
-        Assert.Equal(["user", "assistant", "toolResult"], context.Messages.Select(static message => message.Role));
+        Assert.Equal(["system", "user", "assistant", "toolResult"], context.Messages.Select(static message => message.Role));
         var toolResultMessage = Assert.Single(context.Messages.OfType<ToolResultMessage>());
         Assert.Equal("terminal hook result", ReadText(toolResultMessage.Content));
         Assert.DoesNotContain(
@@ -636,6 +672,7 @@ public sealed class AgentHarnessTests
         private readonly Queue<string> _responses = new(responses);
 
         public string Api => "capture";
+        public bool SupportsTranscriptContext { get; init; }
         public LlmContext? LastContext { get; private set; }
 
         public AssistantMessageStream Stream(Model model, LlmContext context, StreamOptions options) =>

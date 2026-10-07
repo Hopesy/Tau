@@ -51,19 +51,22 @@ internal sealed record CodingAgentCliArguments(
     IReadOnlyList<string> FileArguments,
     IReadOnlyDictionary<string, string?> ExtensionFlags)
 {
+    public IReadOnlyList<string>? ExcludeTools { get; init; }
+    public bool NoBuiltInTools { get; init; }
+    public bool? ProjectTrustOverride { get; init; }
     /// <summary>
-    /// Upstream CLI tool names (<c>cli/args.ts</c> <c>allTools</c>) mapped to the Tau tool
-    /// <see cref="IAgentTool.Name"/> values they select.
+    /// 【CodingAgent】【命令行名称】规范化原生内置名称；旧别名在实际工具目录建立后解析。
     /// </summary>
     internal static readonly IReadOnlyDictionary<string, string> CliToolNameToTauToolName =
         new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
-            ["read"] = "read_file",
-            ["bash"] = "shell",
-            ["edit"] = "edit_file",
-            ["write"] = "write_file",
+            ["read"] = "read",
+            ["bash"] = "bash",
+            ["powershell"] = "powershell",
+            ["edit"] = "edit",
+            ["write"] = "write",
             ["grep"] = "grep",
-            ["find"] = "glob",
+            ["find"] = "find",
             ["ls"] = "ls"
         };
 
@@ -92,7 +95,7 @@ internal sealed record CodingAgentCliArguments(
     /// <c>VALID_THINKING_LEVELS</c>.
     /// </summary>
     private static readonly IReadOnlyList<string> ValidThinkingLevels =
-        ["off", "minimal", "low", "medium", "high", "xhigh"];
+        ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
     public static CodingAgentCliArguments Parse(IReadOnlyList<string> args)
     {
@@ -130,13 +133,21 @@ internal sealed record CodingAgentCliArguments(
         var extensionFlags = new Dictionary<string, string?>(StringComparer.Ordinal);
         var offline = false;
         var noTools = false;
+        var noBuiltInTools = false;
+        bool? projectTrustOverride = null;
         List<string>? tools = null;
+        List<string>? excludedTools = null;
         string? thinking = null;
         var diagnostics = new List<CodingAgentCliDiagnostic>();
 
         for (var i = 0; i < args.Count; i++)
         {
             var arg = args[i];
+            if (arg is "--approve" or "-a" or "--no-approve" or "-na")
+            {
+                projectTrustOverride = arg is "--approve" or "-a";
+                continue;
+            }
             if (arg.Equals("--mode", StringComparison.OrdinalIgnoreCase))
             {
                 if (i + 1 < args.Count)
@@ -203,8 +214,7 @@ internal sealed record CodingAgentCliArguments(
                 continue;
             }
 
-            if (arg.Equals("--no-themes", StringComparison.OrdinalIgnoreCase) ||
-                arg.Equals("-nt", StringComparison.OrdinalIgnoreCase))
+            if (arg.Equals("--no-themes", StringComparison.OrdinalIgnoreCase))
             {
                 noThemes = true;
                 continue;
@@ -231,13 +241,28 @@ internal sealed record CodingAgentCliArguments(
                 continue;
             }
 
-            if (arg.Equals("--no-tools", StringComparison.OrdinalIgnoreCase))
+            if (arg.Equals("--no-tools", StringComparison.OrdinalIgnoreCase) || arg.Equals("-nt", StringComparison.OrdinalIgnoreCase))
             {
                 noTools = true;
                 continue;
             }
 
-            if (arg.Equals("--tools", StringComparison.OrdinalIgnoreCase) ||
+            if (arg is "--no-builtin-tools" or "-nbt")
+            {
+                noBuiltInTools = true;
+                continue;
+            }
+
+            if (arg is "--exclude-tools" or "-xt" || arg.StartsWith("--exclude-tools=", StringComparison.OrdinalIgnoreCase))
+            {
+                var raw = arg.StartsWith("--exclude-tools=", StringComparison.OrdinalIgnoreCase) ? arg["--exclude-tools=".Length..]
+                    : i + 1 < args.Count ? args[++i] : throw new ArgumentException("error: --exclude-tools requires a comma-separated tool list");
+                excludedTools ??= [];
+                excludedTools.AddRange(CodingAgentToolSelection.NormalizeNames(raw.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))!);
+                continue;
+            }
+
+            if (arg.Equals("--tools", StringComparison.OrdinalIgnoreCase) || arg.Equals("-t", StringComparison.OrdinalIgnoreCase) ||
                 arg.StartsWith("--tools=", StringComparison.OrdinalIgnoreCase))
             {
                 string? rawTools;
@@ -257,19 +282,8 @@ internal sealed record CodingAgentCliArguments(
                 tools ??= new List<string>();
                 foreach (var name in rawTools.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
                 {
-                    if (CliToolNameToTauToolName.TryGetValue(name, out var tauToolName))
-                    {
-                        if (!tools.Contains(tauToolName, StringComparer.Ordinal))
-                        {
-                            tools.Add(tauToolName);
-                        }
-                    }
-                    else
-                    {
-                        diagnostics.Add(new CodingAgentCliDiagnostic(
-                            "warning",
-                            $"Unknown tool \"{name}\". Valid tools: {ValidToolNames}"));
-                    }
+                    var toolName = CliToolNameToTauToolName.GetValueOrDefault(name, name);
+                    if (!tools.Contains(toolName, StringComparer.Ordinal)) tools.Add(toolName);
                 }
 
                 continue;
@@ -555,7 +569,7 @@ internal sealed record CodingAgentCliArguments(
             diagnostics,
             messages,
             fileArguments,
-            extensionFlags);
+            extensionFlags) { ExcludeTools = excludedTools?.Distinct(StringComparer.Ordinal).ToArray(), NoBuiltInTools = noBuiltInTools, ProjectTrustOverride = projectTrustOverride };
     }
 
     private static bool TryConsumeStringOption(
@@ -789,23 +803,16 @@ internal static class CodingAgentInitialMessageBuilder
             }
 
             var bytes = await File.ReadAllBytesAsync(path, cancellationToken).ConfigureAwait(false);
-            var processed = await CodingAgentImageResizeWorker.Default
-                .ProcessAsync(bytes, mimeType, options.AutoResizeImages, cancellationToken: cancellationToken)
-                .ConfigureAwait(false);
-            if (processed is null)
+            var processed = await CodingAgentImageProcessing.ProcessAsync(new(Convert.ToBase64String(bytes), mimeType),
+                options.AutoResizeImages, null, cancellationToken).ConfigureAwait(false);
+            if (processed.Image is null)
             {
-                var message = options.AutoResizeImages
-                    ? "[Image omitted: could not be resized below the inline image size limit.]"
-                    : "[Image omitted: exceeds the inline image size limit.]";
-                text += $"<file name=\"{path}\">{message}</file>\n";
+                text += $"<file name=\"{path}\">{string.Join("\n", processed.Hints)}</file>\n";
                 continue;
             }
 
-            images.Add(new ImageContent(processed.Data, processed.MimeType));
-            var dimensionNote = CodingAgentImagePreprocessor.FormatDimensionNote(processed);
-            text += dimensionNote is null
-                ? $"<file name=\"{path}\"></file>\n"
-                : $"<file name=\"{path}\">{dimensionNote}</file>\n";
+            images.Add(processed.Image);
+            text += $"<file name=\"{path}\">{string.Join("\n", processed.Hints)}</file>\n";
         }
 
         return new ProcessedFiles(text, images);

@@ -17,12 +17,16 @@ public static class BuiltInModels
             ["anthropic"] = new Dictionary<string, Model>(StringComparer.OrdinalIgnoreCase)
             {
                 ["claude-sonnet-4-20250514"] = Create("claude-sonnet-4-20250514", "Claude Sonnet 4", "anthropic-messages", "anthropic", "https://api.anthropic.com", true, 200_000, 8_192, 3.0m, 15.0m),
-                ["claude-opus-4-6"] = Create("claude-opus-4-6", "Claude Opus 4.6", "anthropic-messages", "anthropic", "https://api.anthropic.com", true, 200_000, 8_192, 15.0m, 75.0m)
+                ["claude-opus-4-6"] = Create("claude-opus-4-6", "Claude Opus 4.6", "anthropic-messages", "anthropic", "https://api.anthropic.com", true, 200_000, 8_192, 15.0m, 75.0m) with
+                {
+                    Compat = new ModelCompatibility { ForceAdaptiveThinking = true },
+                    ThinkingLevelMap = new Dictionary<string, string?> { ["max"] = "max" }
+                }
             },
             ["google"] = new Dictionary<string, Model>(StringComparer.OrdinalIgnoreCase)
             {
-                ["gemini-2.5-flash"] = Create("gemini-2.5-flash", "Gemini 2.5 Flash", "google-generative-language", "google", "https://generativelanguage.googleapis.com", true, 1_048_576, 65_536, 0.30m, 2.50m),
-                ["gemini-2.5-pro"] = Create("gemini-2.5-pro", "Gemini 2.5 Pro", "google-generative-language", "google", "https://generativelanguage.googleapis.com", true, 1_048_576, 65_536, 1.25m, 10.0m)
+                ["gemini-2.5-flash"] = Create("gemini-2.5-flash", "Gemini 2.5 Flash", "google-generative-language", "google", "https://generativelanguage.googleapis.com/v1beta", true, 1_048_576, 65_536, 0.30m, 2.50m),
+                ["gemini-2.5-pro"] = Create("gemini-2.5-pro", "Gemini 2.5 Pro", "google-generative-language", "google", "https://generativelanguage.googleapis.com/v1beta", true, 1_048_576, 65_536, 1.25m, 10.0m)
             },
             ["azure-openai-responses"] = new Dictionary<string, Model>(StringComparer.OrdinalIgnoreCase)
             {

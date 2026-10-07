@@ -139,7 +139,8 @@ public sealed class AgentApplication
         TauRuntimeLogContext logContext)
     {
         var agentEnd = events.OfType<AgentEndEvent>().LastOrDefault();
-        var messages = (agentEnd?.Messages.Count > 0 ? agentEnd.Messages : Agent.State.Messages).ToArray();
+        // 1. 【AgentCore】【会话保存】应用层快照保留完整历史，结束事件只包含本次增量
+        var messages = Agent.State.Messages.ToArray();
         var assistant = messages.OfType<AssistantMessage>().LastOrDefault();
         var errorMessage = agentEnd?.ErrorMessage ?? assistant?.ErrorMessage;
 
@@ -174,6 +175,9 @@ public sealed class AgentApplication
             : options;
     }
 
+    /// <summary>【AgentCore】【失败回滚】精确恢复运行前的历史，避免保留失败运行引入的系统指令。</summary>
+    /// <param name="messages">保存的完整历史。</param>
+    /// <param name="errorMessage">保存的错误信息。</param>
     private void RestoreMessages(IReadOnlyList<ChatMessage> messages, string? errorMessage)
     {
         Agent.State.SetMessages(messages.ToList());

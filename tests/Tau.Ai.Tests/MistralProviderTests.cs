@@ -68,7 +68,8 @@ public sealed class MistralProviderTests
 
         var done = Assert.Single(events.OfType<DoneEvent>());
         Assert.Equal("bonjour", Assert.IsType<TextContent>(Assert.Single(done.Message.Content)).Text);
-        Assert.Equal(new Usage(2, 3), done.Message.Usage);
+        Assert.Equal(new Usage(2, 3, 0, 0, Cost: default(UsageCost)), done.Message.Usage);
+        Assert.Equal(5, done.Message.Usage!.Value.TotalTokens);
         Assert.Equal(StopReason.EndTurn, done.Message.StopReason);
     }
 
@@ -210,11 +211,11 @@ public sealed class MistralProviderTests
         var messages = doc.RootElement.GetProperty("messages").EnumerateArray().ToArray();
         Assert.Equal(
             "(tool image omitted: model does not support images)",
-            messages[1].GetProperty("content").GetString());
+            messages[1].GetProperty("content")[0].GetProperty("text").GetString());
     }
 
     [Fact]
-    public async Task StreamSimple_AddsMistralReasoningEffortForSmallModels()
+    public async Task StreamSimple_UsesModelReasoningEffortMapping()
     {
         using var handler = new OpenAiResponsesProviderTests.StubHandler(_ => new HttpResponseMessage(HttpStatusCode.BadRequest)
         {
@@ -224,7 +225,7 @@ public sealed class MistralProviderTests
         var provider = new MistralProvider(client);
 
         await OpenAiResponsesProviderTests.CollectAsync(provider.StreamSimple(
-            BuildModel(reasoning: true),
+            BuildModel(reasoning: true) with { ThinkingLevelMap = new Dictionary<string, string?> { ["high"] = "high" } },
             new LlmContext { Messages = [new UserMessage("think")] },
             new SimpleStreamOptions { ApiKey = "mistral-key", Reasoning = ThinkingLevel.High }));
 

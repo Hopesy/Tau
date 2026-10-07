@@ -1,8 +1,10 @@
+using System.Buffers.Binary;
+
 namespace Tau.CodingAgent.Runtime;
 
 /// <summary>
 /// 【CodingAgent】【图片MIME嗅探】对齐上游 <c>utils/mime.ts</c>，根据文件头字节判断 CodingAgent 支持的内联图片 MIME。
-/// 支持 JPEG、PNG、GIF、WebP，并保留上游的严格规则：拒绝 <c>0xF7</c> JPEG 标记、无效 IHDR 和动态 PNG。
+/// 支持 JPEG、PNG、GIF、WebP、BMP，并保留上游的严格规则：拒绝 <c>0xF7</c> JPEG 标记、无效 IHDR 和动态 PNG。
 /// </summary>
 public static class CodingAgentImageMimeDetector
 {
@@ -33,7 +35,7 @@ public static class CodingAgentImageMimeDetector
         }
 
         // 3. GIF 和 WebP 使用上游相同的魔数前缀检查
-        if (StartsWithAscii(buffer, 0, "GIF"))
+        if (StartsWithAscii(buffer, 0, "GIF87a") || StartsWithAscii(buffer, 0, "GIF89a"))
         {
             return "image/gif";
         }
@@ -43,7 +45,23 @@ public static class CodingAgentImageMimeDetector
             return "image/webp";
         }
 
+        // 4. 【CodingAgent】【BMP 嗅探】校验文件大小、像素偏移、DIB 头、平面和位深，避免把普通 BM 文本误判为图片
+        if (StartsWithAscii(buffer, 0, "BM") && IsBmp(buffer)) return "image/bmp";
         return null;
+    }
+
+    /// <summary>【CodingAgent】【BMP 头校验】支持核心头和 40 至 124 字节扩展头，与上游位深范围一致。</summary>
+    /// <param name="buffer">文件头。</param><returns>头部是否满足 BMP 嗅探条件。</returns>
+    private static bool IsBmp(ReadOnlySpan<byte> buffer)
+    {
+        if (buffer.Length < 26) return false;
+        var fileSize = BinaryPrimitives.ReadUInt32LittleEndian(buffer[2..]);
+        var pixelOffset = BinaryPrimitives.ReadUInt32LittleEndian(buffer[10..]);
+        var headerSize = BinaryPrimitives.ReadUInt32LittleEndian(buffer[14..]);
+        if (fileSize != 0 && fileSize < 26 || pixelOffset < 14L + headerSize || fileSize != 0 && pixelOffset >= fileSize) return false;
+        var planesOffset = headerSize == 12 ? 22 : headerSize is >= 40 and <= 124 && buffer.Length >= 30 ? 26 : -1;
+        return planesOffset >= 0 && BinaryPrimitives.ReadUInt16LittleEndian(buffer[planesOffset..]) == 1 &&
+            BinaryPrimitives.ReadUInt16LittleEndian(buffer[(planesOffset + 2)..]) is 1 or 4 or 8 or 16 or 24 or 32;
     }
 
     /// <summary>

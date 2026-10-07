@@ -9,7 +9,7 @@ namespace Tau.Ai.Providers.Google;
 /// Google Gemini streaming provider.
 /// Endpoint: POST /v1beta/models/{model}:streamGenerateContent?alt=sse
 /// </summary>
-public sealed class GoogleProvider : IStreamProvider
+public sealed partial class GoogleProvider : IStreamProvider
 {
     private readonly HttpClient _httpClient;
 
@@ -23,20 +23,21 @@ public sealed class GoogleProvider : IStreamProvider
     public AssistantMessageStream Stream(Model model, LlmContext context, StreamOptions options)
     {
         var stream = new AssistantMessageStream();
+        var parser = GoogleStreamParser.Create(model, Api, stream);
 
         _ = Task.Run(async () =>
         {
             try
             {
-                await StreamInternalAsync(model, context, options, stream, reasoning: null).ConfigureAwait(false);
+                await StreamInternalAsync(model, context, options, stream, parser, reasoning: null).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (options.Signal.IsCancellationRequested)
             {
-                StreamOptionHelpers.PushAborted(stream, model, Api);
+                parser.PushError(StreamOptionHelpers.AbortedErrorMessage, StopReason.Aborted);
             }
             catch (Exception ex)
             {
-                stream.Push(new ErrorEvent(ex.Message));
+                parser.PushError(ex.Message);
             }
         });
 
@@ -45,21 +46,23 @@ public sealed class GoogleProvider : IStreamProvider
 
     public AssistantMessageStream StreamSimple(Model model, LlmContext context, SimpleStreamOptions options)
     {
+        options = SimpleTokenOptions.WithContextLimit(model, context, options);
         var stream = new AssistantMessageStream();
+        var parser = GoogleStreamParser.Create(model, Api, stream);
 
         _ = Task.Run(async () =>
         {
             try
             {
-                await StreamInternalAsync(model, context, options, stream, options.Reasoning).ConfigureAwait(false);
+                await StreamInternalAsync(model, context, options, stream, parser, options.Reasoning).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (options.Signal.IsCancellationRequested)
             {
-                StreamOptionHelpers.PushAborted(stream, model, Api);
+                parser.PushError(StreamOptionHelpers.AbortedErrorMessage, StopReason.Aborted);
             }
             catch (Exception ex)
             {
-                stream.Push(new ErrorEvent(ex.Message));
+                parser.PushError(ex.Message);
             }
         });
 
@@ -71,15 +74,12 @@ public sealed class GoogleProvider : IStreamProvider
         LlmContext context,
         StreamOptions options,
         AssistantMessageStream stream,
+        GoogleStreamParser parser,
         ThinkingLevel? reasoning)
     {
-        if (StreamOptionHelpers.PushAbortedIfCanceled(options, stream, model, Api))
-        {
-            return;
-        }
+        options.Signal.ThrowIfCancellationRequested();
 
-        var baseUrl = model.BaseUrl?.TrimEnd('/') ?? "https://generativelanguage.googleapis.com";
-        var url = $"{baseUrl}/v1beta/models/{model.Id}:streamGenerateContent?alt=sse";
+        var url = BuildEndpoint(model);
 
         var body = await StreamOptionHelpers.ApplyPayloadCallbackAsync(
             options,
@@ -95,51 +95,40 @@ public sealed class GoogleProvider : IStreamProvider
         if (!string.IsNullOrEmpty(apiKey))
             request.Headers.TryAddWithoutValidation("x-goog-api-key", apiKey);
 
-        if (model.Headers is not null)
-            foreach (var (key, value) in model.Headers)
-                request.Headers.TryAddWithoutValidation(key, value);
-
-        if (options.Headers is not null)
-            foreach (var (key, value) in options.Headers)
-                request.Headers.TryAddWithoutValidation(key, value);
+        request.Headers.TryAddWithoutValidation("User-Agent", ProviderHttpHeaders.UserAgent());
+        ProviderHttpHeaders.Apply(request, model.Headers);
+        ProviderHttpHeaders.Apply(request, options.Headers);
 
         using var requestTimeout = StreamOptionHelpers.CreateRequestTimeout(options);
         try
         {
-            using var response = await _httpClient.SendAsync(
-                request, HttpCompletionOption.ResponseHeadersRead, requestTimeout.Token).ConfigureAwait(false);
-            await StreamOptionHelpers.InvokeResponseCallbackAsync(options, model, response).ConfigureAwait(false);
+            await StreamOptionHelpers.ApplyHeadersCallbackAsync(options, model, request).ConfigureAwait(false);
+            using var response = await ProviderHttpRetry.SendAsync(_httpClient, request, model, options, requestTimeout.Token).ConfigureAwait(false);
 
             if (!response.IsSuccessStatusCode)
             {
                 var errorBody = await response.Content.ReadAsStringAsync(requestTimeout.Token).ConfigureAwait(false);
-                stream.Push(new ErrorEvent($"Google API error {(int)response.StatusCode}: {errorBody}"));
+                parser.PushError($"Google API error {(int)response.StatusCode}: {errorBody}");
                 return;
             }
 
             await using var responseStream = await response.Content.ReadAsStreamAsync(requestTimeout.Token).ConfigureAwait(false);
 
-            var initial = new AssistantMessage
-            {
-                Api = Api,
-                Provider = model.Provider,
-                Model = model.Id,
-                Content = []
-            };
-
-            var parser = new GoogleStreamParser(initial, stream);
             parser.EmitStart();
 
             await foreach (var sse in SseParser.ParseAsync(responseStream, requestTimeout.Token))
             {
                 if (string.IsNullOrEmpty(sse.Data))
                     continue;
+                await StreamOptionHelpers.InvokeProviderStreamEventAsync(options, model, sse.Data).ConfigureAwait(false);
+                requestTimeout.Token.ThrowIfCancellationRequested();
                 if (parser.ParseChunk(sse.Data))
                 {
                     return;
                 }
             }
 
+            requestTimeout.Token.ThrowIfCancellationRequested();
             parser.EmitDone();
         }
         catch (OperationCanceledException ex) when (requestTimeout.IsTimeoutCancellation)
@@ -154,10 +143,11 @@ public sealed class GoogleProvider : IStreamProvider
         Model model,
         ThinkingLevel? reasoning)
     {
+        context = Transcript.ResolveContext(context);
         context = MessageTransformer.DowngradeUnsupportedImages(context, model);
         var body = new Dictionary<string, object>
         {
-            ["contents"] = GoogleMessageConverter.ConvertMessages(context.Messages)
+            ["contents"] = GoogleMessageConverter.ConvertMessages(model, context.Messages)
         };
 
         if (!string.IsNullOrEmpty(context.SystemPrompt))
@@ -172,15 +162,7 @@ public sealed class GoogleProvider : IStreamProvider
             };
         }
 
-        if (context.Tools is { Count: > 0 })
-        {
-            body["tools"] = GoogleMessageConverter.ConvertTools(context.Tools);
-        }
-
-        if (context.Tools is { Count: > 0 } && options is GoogleOptions { ToolChoice: { Length: > 0 } toolChoice })
-        {
-            body["toolConfig"] = BuildToolConfig(toolChoice);
-        }
+        GoogleMessageConverter.ApplyTools(body, model, context.Tools, options);
 
         var generationConfig = new Dictionary<string, object>();
         if (options.Temperature.HasValue)
@@ -194,14 +176,11 @@ public sealed class GoogleProvider : IStreamProvider
 
         if (options is GoogleOptions { Thinking: { } thinking } && model.Reasoning)
         {
-            generationConfig["thinkingConfig"] = BuildThinkingConfig(model, thinking);
+            generationConfig["thinkingConfig"] = GoogleThinking.BuildConfig(model, thinking);
         }
-        else if (reasoning.HasValue && model.Reasoning)
+        else if (options is SimpleStreamOptions simple && model.Reasoning)
         {
-            generationConfig["thinkingConfig"] = BuildSimpleThinkingConfig(
-                model,
-                (options as SimpleStreamOptions)?.ThinkingBudgets,
-                reasoning.Value);
+            generationConfig["thinkingConfig"] = GoogleThinking.BuildConfig(model, GoogleThinking.ResolveSimple(model, reasoning, simple.ThinkingBudgets));
         }
 
         if (generationConfig.Count > 0)
@@ -210,186 +189,7 @@ public sealed class GoogleProvider : IStreamProvider
         return body;
     }
 
-    private static Dictionary<string, object> BuildToolConfig(string toolChoice) => new()
-    {
-        ["functionCallingConfig"] = new Dictionary<string, object>
-        {
-            ["mode"] = MapToolChoice(toolChoice)
-        }
-    };
 
-    private static string MapToolChoice(string toolChoice) =>
-        toolChoice.Trim().ToLowerInvariant() switch
-        {
-            "none" => "NONE",
-            "any" => "ANY",
-            _ => "AUTO"
-        };
-
-    private static Dictionary<string, object> BuildThinkingConfig(Model model, GoogleThinkingOptions thinking)
-    {
-        if (!thinking.Enabled)
-        {
-            return GetDisabledThinkingConfig(model);
-        }
-
-        var config = new Dictionary<string, object>
-        {
-            ["includeThoughts"] = true
-        };
-
-        if (!string.IsNullOrWhiteSpace(thinking.Level))
-        {
-            config["thinkingLevel"] = NormalizeGoogleThinkingLevel(model, thinking.Level!);
-        }
-        else if (thinking.BudgetTokens.HasValue)
-        {
-            config["thinkingBudget"] = thinking.BudgetTokens.Value;
-        }
-
-        return config;
-    }
-
-    /// <summary>
-    /// 将通用 simple stream 推理级别转换为 Gemini API 的 thinkingConfig。
-    /// </summary>
-    /// <param name="model">包含可选 thinkingLevelMap 的模型。</param>
-    /// <param name="budgets">调用方自定义 token 预算。</param>
-    /// <param name="reasoning">通用推理级别。</param>
-    /// <returns>包含 includeThoughts 以及级别或预算的配置。</returns>
-    private static Dictionary<string, object> BuildSimpleThinkingConfig(
-        Model model,
-        ThinkingBudgets? budgets,
-        ThinkingLevel reasoning)
-    {
-        if (reasoning == ThinkingLevel.Off)
-        {
-            return GetDisabledThinkingConfig(model);
-        }
-
-        var mapped = TryGetMappedGoogleThinkingLevel(model, reasoning);
-        if (mapped is not null)
-        {
-            return new Dictionary<string, object>
-            {
-                ["includeThoughts"] = true,
-                ["thinkingLevel"] = mapped
-            };
-        }
-
-        var budget = GetGoogleThinkingBudget(model, budgets, reasoning);
-        return new Dictionary<string, object>
-        {
-            ["includeThoughts"] = true,
-            ["thinkingBudget"] = budget
-        };
-    }
-
-    /// <summary>解析模型映射后的 Gemini thinking level，返回 API 所需的大写枚举值。</summary>
-    /// <param name="model">目标模型。</param>
-    /// <param name="level">模型专用或通用级别文本。</param>
-    /// <returns>Gemini 支持的 MINIMAL、LOW、MEDIUM、HIGH；不支持时返回原值。</returns>
-    private static string NormalizeGoogleThinkingLevel(Model model, string level)
-    {
-        var normalized = level.Trim().ToLowerInvariant();
-        if (model.ThinkingLevelMap is not null)
-        {
-            var mapped = model.ThinkingLevelMap
-                .FirstOrDefault(pair => pair.Key.Equals(normalized, StringComparison.OrdinalIgnoreCase));
-            if (!string.IsNullOrWhiteSpace(mapped.Value))
-            {
-                normalized = mapped.Value!;
-            }
-        }
-
-        return normalized.ToUpperInvariant();
-    }
-
-    /// <summary>读取通用推理级别对应的 Google level 映射。</summary>
-    /// <param name="model">目标模型。</param>
-    /// <param name="reasoning">通用推理级别。</param>
-    /// <returns>映射后的大写 Google level；未映射时返回 null。</returns>
-    private static string? TryGetMappedGoogleThinkingLevel(Model model, ThinkingLevel reasoning)
-    {
-        var key = StreamOptionHelpers.ToReasoningEffortName(reasoning, allowExtraHigh: false);
-        if (model.ThinkingLevelMap is null ||
-            !model.ThinkingLevelMap.TryGetValue(key, out var mapped) ||
-            string.IsNullOrWhiteSpace(mapped))
-        {
-            return null;
-        }
-
-        var normalized = mapped.Trim().ToLowerInvariant();
-        return normalized is "minimal" or "low" or "medium" or "high"
-            ? normalized.ToUpperInvariant()
-            : null;
-    }
-
-    private static Dictionary<string, object> GetDisabledThinkingConfig(Model model)
-    {
-        if (IsGemini3ProModel(model.Id))
-        {
-            return new Dictionary<string, object> { ["thinkingLevel"] = "LOW" };
-        }
-
-        if (IsGemini3FlashModel(model.Id) || IsGemma4Model(model.Id))
-        {
-            return new Dictionary<string, object> { ["thinkingLevel"] = "MINIMAL" };
-        }
-
-        return new Dictionary<string, object> { ["thinkingBudget"] = 0 };
-    }
-
-    private static int GetGoogleThinkingBudget(Model model, ThinkingBudgets? budgets, ThinkingLevel reasoning)
-    {
-        var id = model.Id;
-        if (id.Contains("2.5-pro", StringComparison.OrdinalIgnoreCase))
-        {
-            return StreamOptionHelpers.GetThinkingBudget(
-                budgets,
-                reasoning,
-                defaultMinimal: 128,
-                defaultLow: 2_048,
-                defaultMedium: 8_192,
-                defaultHigh: 32_768);
-        }
-
-        if (id.Contains("2.5-flash-lite", StringComparison.OrdinalIgnoreCase))
-        {
-            return StreamOptionHelpers.GetThinkingBudget(
-                budgets,
-                reasoning,
-                defaultMinimal: 512,
-                defaultLow: 2_048,
-                defaultMedium: 8_192,
-                defaultHigh: 24_576);
-        }
-
-        if (id.Contains("2.5-flash", StringComparison.OrdinalIgnoreCase))
-        {
-            return StreamOptionHelpers.GetThinkingBudget(
-                budgets,
-                reasoning,
-                defaultMinimal: 128,
-                defaultLow: 2_048,
-                defaultMedium: 8_192,
-                defaultHigh: 24_576);
-        }
-
-        return StreamOptionHelpers.GetCustomThinkingBudget(budgets, reasoning) ?? -1;
-    }
-
-    internal static bool IsGemini3ProModel(string modelId) =>
-        modelId.Contains("gemini-3", StringComparison.OrdinalIgnoreCase) &&
-        modelId.Contains("pro", StringComparison.OrdinalIgnoreCase);
-
-    internal static bool IsGemini3FlashModel(string modelId) =>
-        modelId.Contains("gemini-3", StringComparison.OrdinalIgnoreCase) &&
-        modelId.Contains("flash", StringComparison.OrdinalIgnoreCase);
-
-    internal static bool IsGemma4Model(string modelId) =>
-        modelId.Contains("gemma-4", StringComparison.OrdinalIgnoreCase) ||
-        modelId.Contains("gemma4", StringComparison.OrdinalIgnoreCase);
 }
 
 public record GoogleThinkingOptions

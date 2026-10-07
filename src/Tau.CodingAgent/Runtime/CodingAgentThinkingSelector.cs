@@ -117,6 +117,8 @@ public static class CodingAgentThinkingSelector
         return result;
     }
 
+    /// <summary>【CodingAgent】【推理选择】规范化候选等级。</summary>
+    /// <param name="value">候选文本。</param><returns>规范值或空值。</returns>
     private static string? NormalizeLevel(string? value)
     {
         if (string.IsNullOrWhiteSpace(value))
@@ -132,10 +134,13 @@ public static class CodingAgentThinkingSelector
             "medium" or "med" => "medium",
             "high" => "high",
             "xhigh" or "extrahigh" or "extra-high" => "xhigh",
+            "max" => "max",
             _ => null
         };
     }
 
+    /// <summary>【CodingAgent】【推理选择】格式化候选等级的说明。</summary>
+    /// <param name="level">规范等级。</param><returns>选择器说明。</returns>
     private static string FormatDescription(string level) => level switch
     {
         "off" => "No reasoning",
@@ -143,10 +148,13 @@ public static class CodingAgentThinkingSelector
         "low" => "Light reasoning (~2k tokens)",
         "medium" => "Moderate reasoning (~8k tokens)",
         "high" => "Deep reasoning (~16k tokens)",
-        "xhigh" => "Maximum reasoning (~32k tokens)",
+        "xhigh" => "Extra-high reasoning (~32k tokens)",
+        "max" => "Maximum reasoning",
         _ => string.Empty
     };
 
+    /// <summary>【CodingAgent】【推理选择】格式化当前选中等级。</summary>
+    /// <param name="level">当前等级。</param><returns>规范文本。</returns>
     private static string FormatThinkingLevel(ThinkingLevel? level) => level switch
     {
         null => "off",
@@ -155,6 +163,7 @@ public static class CodingAgentThinkingSelector
         ThinkingLevel.Medium => "medium",
         ThinkingLevel.High => "high",
         ThinkingLevel.ExtraHigh => "xhigh",
+        ThinkingLevel.Max => "max",
         _ => "off"
     };
 }

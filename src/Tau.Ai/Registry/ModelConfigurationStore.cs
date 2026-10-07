@@ -3,16 +3,22 @@ using System.Text.Json;
 
 namespace Tau.Ai.Registry;
 
-public sealed class ModelConfigurationStore
+public sealed partial class ModelConfigurationStore
 {
     private readonly string[] _searchPaths;
+
+    /// <summary>【AI】【配置诊断】最近一次文件读取或元数据校验错误，不包含配置值。</summary>
+    public string? Error { get; internal set; }
 
     public ModelConfigurationStore(IEnumerable<string>? searchPaths = null)
     {
         _searchPaths = searchPaths?.ToArray() ?? GetDefaultSearchPaths().ToArray();
     }
 
-    internal void ApplyTo(Dictionary<string, Dictionary<string, Model>> models)
+    /// <summary>【AI】【模型配置】将配置应用到指定能力的目录，避免同名模型跨类型覆盖。</summary>
+    /// <param name="models">按 provider 和模型标识组织的可变目录。</param>
+    /// <param name="modelType">当前目录的能力类型，默认聊天。</param>
+    internal void ApplyTo(Dictionary<string, Dictionary<string, Model>> models, string modelType = ModelTypes.Chat)
     {
         var doc = LoadDocument();
         if (doc is null)
@@ -34,14 +40,20 @@ public sealed class ModelConfigurationStore
                     continue;
                 }
 
-                ApplyProvider(providerProp.Name, providerProp.Value, models);
+                ApplyProvider(providerProp.Name, providerProp.Value, models, modelType);
             }
         }
     }
 
+    /// <summary>【AI】【请求配置】解析目标模型的配置和环境变量，隔离同名不同类型。</summary>
+    /// <param name="model">请求模型。</param>
+    /// <param name="env">本次环境覆盖。</param>
+    /// <param name="allowLegacyUntypedModels">旧图像入口是否允许回退到未声明类型的配置。</param>
+    /// <returns>解析后的请求配置。</returns>
     internal ModelRequestConfiguration ResolveRequestConfiguration(
         Model model,
-        IReadOnlyDictionary<string, string>? env = null)
+        IReadOnlyDictionary<string, string>? env = null,
+        bool allowLegacyUntypedModels = false)
     {
         var doc = LoadDocument();
         if (doc is null)
@@ -57,34 +69,7 @@ public sealed class ModelConfigurationStore
                 return ModelRequestConfiguration.Empty;
             }
 
-            JsonElement? overrideConfig = null;
-            JsonElement? configuredModel = null;
-            IReadOnlyDictionary<string, string>? configuredEnv = ParseRequestOptionEnv(providerConfig);
-
-            if (providerConfig.TryGetProperty("modelOverrides", out var overrides) &&
-                overrides.ValueKind == JsonValueKind.Object &&
-                TryGetObjectProperty(overrides, model.Id, out var matchingOverrideConfig))
-            {
-                overrideConfig = matchingOverrideConfig;
-                configuredEnv = ProviderEnvironment.Merge(configuredEnv, ParseRequestOptionEnv(matchingOverrideConfig));
-            }
-
-            if (providerConfig.TryGetProperty("models", out var configuredModels) &&
-                configuredModels.ValueKind == JsonValueKind.Array)
-            {
-                foreach (var candidateModel in configuredModels.EnumerateArray())
-                {
-                    if (candidateModel.ValueKind == JsonValueKind.Object &&
-                        TryGetString(candidateModel, "id", out var modelId) &&
-                        model.Id.Equals(modelId, StringComparison.OrdinalIgnoreCase))
-                    {
-                        configuredModel = candidateModel;
-                        configuredEnv = ProviderEnvironment.Merge(configuredEnv, ParseRequestOptionEnv(candidateModel));
-                        break;
-                    }
-                }
-            }
-
+            var (overrideConfig, configuredModel, configuredEnv) = SelectRequestConfigurationLayers(providerConfig, model, allowLegacyUntypedModels);
             var effectiveEnv = ProviderEnvironment.Merge(configuredEnv, env);
             var apiKey = ResolveConfigValue(GetString(providerConfig, "apiKey"), effectiveEnv);
             var authHeader = GetBool(providerConfig, "authHeader") ?? false;
@@ -111,6 +96,54 @@ public sealed class ModelConfigurationStore
         }
     }
 
+    /// <summary>【AI】【请求环境】只合并匹配模型的环境字典，不执行密钥或请求头配置命令。</summary>
+    /// <param name="model">请求模型及能力类型。</param><param name="env">优先级最高的调用环境。</param>
+    /// <returns>独立环境字典；没有配置时为空。</returns>
+    public IReadOnlyDictionary<string, string>? GetRequestEnvironment(Model model, IReadOnlyDictionary<string, string>? env = null)
+    {
+        using var document = LoadDocument();
+        IReadOnlyDictionary<string, string>? configured = null;
+        if (document is not null && TryGetProviders(document.RootElement, out var providers) &&
+            TryGetObjectProperty(providers, model.Provider, out var provider))
+            configured = SelectRequestConfigurationLayers(provider, model, false).Environment;
+        return ProviderEnvironment.Merge(configured, env);
+    }
+
+    /// <summary>【AI】【配置分层】统一选择提供方、模型覆盖及模型本体，保持环境和真实请求的优先级一致。</summary>
+    /// <param name="provider">提供方配置对象。</param><param name="model">请求模型。</param>
+    /// <param name="allowLegacyUntypedModels">是否接受旧无类型模型。</param><returns>覆盖层、本体层及合并环境。</returns>
+    private static (JsonElement? Override, JsonElement? Model, IReadOnlyDictionary<string, string>? Environment) SelectRequestConfigurationLayers(
+        JsonElement provider, Model model, bool allowLegacyUntypedModels)
+    {
+        JsonElement? selectedOverride = null, selectedModel = null;
+        var environment = ParseRequestOptionEnv(provider);
+        // 1. 【AI】【覆盖环境】仅合并同名且能力类型匹配的覆盖
+        if (provider.TryGetProperty("modelOverrides", out var overrides) && overrides.ValueKind == JsonValueKind.Object &&
+            TryGetObjectProperty(overrides, model.Id, out var candidateOverride) && MatchesModelType(candidateOverride, model, isOverride: true))
+        {
+            selectedOverride = candidateOverride;
+            environment = ProviderEnvironment.Merge(environment, ParseRequestOptionEnv(candidateOverride));
+        }
+        // 2. 【AI】【模型环境】模型本体覆盖提供方和 override，旧图像入口优先选择显式类型
+        if (provider.TryGetProperty("models", out var models) && models.ValueKind == JsonValueKind.Array)
+        {
+            var candidates = models.EnumerateArray().Where(candidate => candidate.ValueKind == JsonValueKind.Object);
+            if (allowLegacyUntypedModels) candidates = candidates.OrderBy(candidate => candidate.TryGetProperty("type", out _) ? 0 : 1);
+            foreach (var candidate in candidates)
+            {
+                if (!TryGetString(candidate, "id", out var id) || !model.Id.Equals(id, StringComparison.OrdinalIgnoreCase) ||
+                    !(MatchesModelType(candidate, model) || allowLegacyUntypedModels && !candidate.TryGetProperty("type", out _))) continue;
+                selectedModel = candidate;
+                environment = ProviderEnvironment.Merge(environment, ParseRequestOptionEnv(candidate));
+                break;
+            }
+        }
+        return (selectedOverride, selectedModel, environment);
+    }
+
+    /// <summary>【AI】【配置检查】按模型类型检查认证配置的存在性，不执行命令或读取密钥值。</summary>
+    /// <param name="model">待检查模型。</param>
+    /// <returns>认证头、密钥及命令来源的配置状态。</returns>
     internal ModelRequestConfigurationStatus InspectRequestConfigurationStatus(Model model)
     {
         var doc = LoadDocument();
@@ -140,7 +173,8 @@ public sealed class ModelConfigurationStore
 
             if (providerConfig.TryGetProperty("modelOverrides", out var overrides) &&
                 overrides.ValueKind == JsonValueKind.Object &&
-                TryGetObjectProperty(overrides, model.Id, out var overrideConfig))
+                TryGetObjectProperty(overrides, model.Id, out var overrideConfig) &&
+                MatchesModelType(overrideConfig, model, isOverride: true))
             {
                 var overrideHeaders = ParseStringDictionary(overrideConfig, "headers");
                 var overrideOptionHeaders = ParseRequestOptionHeaders(overrideConfig);
@@ -158,7 +192,8 @@ public sealed class ModelConfigurationStore
                 {
                     if (configuredModel.ValueKind == JsonValueKind.Object &&
                         TryGetString(configuredModel, "id", out var modelId) &&
-                        model.Id.Equals(modelId, StringComparison.OrdinalIgnoreCase))
+                        model.Id.Equals(modelId, StringComparison.OrdinalIgnoreCase) &&
+                        MatchesModelType(configuredModel, model))
                     {
                         var modelHeaders = ParseStringDictionary(configuredModel, "headers");
                         var modelOptionHeaders = ParseRequestOptionHeaders(configuredModel);
@@ -237,6 +272,9 @@ public sealed class ModelConfigurationStore
         }
     }
 
+    /// <summary>【AI】【协议注册】只为聊天配置注册动态 OpenAI 兼容协议。</summary>
+    /// <param name="providerConfig">provider 配置。</param>
+    /// <param name="registrations">待补充的协议注册表。</param>
     private static void AddDynamicProviderRegistrations(
         JsonElement providerConfig,
         Dictionary<string, DynamicProviderRegistration> registrations)
@@ -264,7 +302,8 @@ public sealed class ModelConfigurationStore
 
         foreach (var configuredModel in configuredModels.EnumerateArray())
         {
-            if (configuredModel.ValueKind != JsonValueKind.Object)
+            if (configuredModel.ValueKind != JsonValueKind.Object ||
+                (GetString(configuredModel, "type") ?? ModelTypes.Chat) != ModelTypes.Chat)
             {
                 continue;
             }
@@ -286,11 +325,18 @@ public sealed class ModelConfigurationStore
         }
     }
 
-    private static void ApplyProvider(
+    /// <summary>【AI】【模型配置】按 provider、单模型覆盖、自定义模型的顺序应用目录配置。</summary>
+    /// <param name="providerName">provider 标识。</param>
+    /// <param name="providerConfig">provider 配置对象。</param>
+    /// <param name="models">可变目录。</param>
+    /// <param name="modelType">目标能力类型。</param>
+    internal static void ApplyProvider(
         string providerName,
         JsonElement providerConfig,
-        Dictionary<string, Dictionary<string, Model>> models)
+        Dictionary<string, Dictionary<string, Model>> models,
+        string modelType)
     {
+        ValidateProviderMetadata(providerConfig);
         var providerApi = ModelApiNames.Normalize(GetString(providerConfig, "api"));
         var providerBaseUrl = GetString(providerConfig, "baseUrl");
         var providerHeaders = ParseStringDictionary(providerConfig, "headers");
@@ -316,9 +362,12 @@ public sealed class ModelConfigurationStore
         }
 
         ApplyModelOverrides(providerConfig, bucket);
-        ApplyCustomModels(providerName, providerConfig, bucket, providerApi, providerBaseUrl, providerHeaders, providerCompat);
+        ApplyCustomModels(providerName, providerConfig, bucket, providerApi, providerBaseUrl, providerHeaders, providerCompat, modelType);
     }
 
+    /// <summary>应用按标识指定的覆盖，显式 type 仅作用于该类型，缺省作用于已有同名条目。</summary>
+    /// <param name="providerConfig">provider 配置。</param>
+    /// <param name="bucket">同一类型的模型集合。</param>
     private static void ApplyModelOverrides(JsonElement providerConfig, Dictionary<string, Model> bucket)
     {
         if (!providerConfig.TryGetProperty("modelOverrides", out var overrides) ||
@@ -330,7 +379,8 @@ public sealed class ModelConfigurationStore
         foreach (var overrideProp in overrides.EnumerateObject())
         {
             if (overrideProp.Value.ValueKind != JsonValueKind.Object ||
-                !bucket.TryGetValue(overrideProp.Name, out var existing))
+                !bucket.TryGetValue(overrideProp.Name, out var existing) ||
+                !MatchesModelType(overrideProp.Value, existing, isOverride: true))
             {
                 continue;
             }
@@ -339,6 +389,15 @@ public sealed class ModelConfigurationStore
         }
     }
 
+    /// <summary>【AI】【模型配置】创建匹配类型的自定义条目，保留图像输出能力。</summary>
+    /// <param name="providerName">provider 标识。</param>
+    /// <param name="providerConfig">provider 配置。</param>
+    /// <param name="bucket">当前类型的模型集合。</param>
+    /// <param name="providerApi">默认协议。</param>
+    /// <param name="providerBaseUrl">默认地址。</param>
+    /// <param name="providerHeaders">默认请求头。</param>
+    /// <param name="providerCompat">默认兼容设置。</param>
+    /// <param name="modelType">目标能力类型。</param>
     private static void ApplyCustomModels(
         string providerName,
         JsonElement providerConfig,
@@ -346,7 +405,8 @@ public sealed class ModelConfigurationStore
         string? providerApi,
         string? providerBaseUrl,
         IDictionary<string, string>? providerHeaders,
-        ModelCompatibility? providerCompat)
+        ModelCompatibility? providerCompat,
+        string modelType)
     {
         if (!providerConfig.TryGetProperty("models", out var configuredModels) ||
             configuredModels.ValueKind != JsonValueKind.Array)
@@ -354,16 +414,29 @@ public sealed class ModelConfigurationStore
             return;
         }
 
-        var defaultApi = providerApi ?? bucket.Values.FirstOrDefault()?.Api ?? ModelApiNames.OpenAiChatCompletions;
+        var defaultApi = providerApi ?? bucket.Values.FirstOrDefault()?.Api ?? modelType switch
+        {
+            ModelTypes.Image => "openrouter-images",
+            ModelTypes.Classifier => "typesafe-system-one",
+            _ => ModelApiNames.OpenAiChatCompletions
+        };
         foreach (var configuredModel in configuredModels.EnumerateArray())
         {
             if (configuredModel.ValueKind != JsonValueKind.Object ||
-                !TryGetString(configuredModel, "id", out var modelId))
+                !TryGetString(configuredModel, "id", out var modelId) ||
+                (GetString(configuredModel, "type") ?? ModelTypes.Chat) != modelType)
             {
                 continue;
             }
 
-            var model = new Model
+            var api = ModelApiNames.Normalize(GetString(configuredModel, "api")) ?? defaultApi;
+            Model model = modelType switch
+            {
+                ModelTypes.Image => new ImagesModel { Id = modelId!, Name = modelId!, Provider = providerName, Api = api, OutputModalities = ParseOutputModalities(configuredModel) ?? ["image"] },
+                ModelTypes.Classifier => new ClassifierModel { Id = modelId!, Name = modelId!, Provider = providerName, Api = api },
+                _ => new Model { Id = modelId!, Name = modelId!, Provider = providerName, Api = api }
+            };
+            model = model with
             {
                 Id = modelId!,
                 Name = GetString(configuredModel, "name") ?? modelId!,
@@ -373,6 +446,8 @@ public sealed class ModelConfigurationStore
                 Reasoning = GetBool(configuredModel, "reasoning") ?? false,
                 ThinkingLevelMap = ParseThinkingLevelMap(configuredModel),
                 InputModalities = ParseInputModalities(configuredModel),
+                InputLimits = ParseInputLimits(configuredModel),
+                PromptCache = ParsePromptCache(configuredModel),
                 Cost = ParseCost(configuredModel, fallback: null) ?? new ModelCost(0m, 0m, 0m, 0m),
                 ContextWindow = GetInt(configuredModel, "contextWindow") ?? 128_000,
                 MaxOutputTokens = GetInt(configuredModel, "maxTokens") ?? GetInt(configuredModel, "maxOutputTokens") ?? 16_384,
@@ -385,14 +460,24 @@ public sealed class ModelConfigurationStore
         }
     }
 
+    /// <summary>覆盖模型字段并保留模型的实际能力类型。</summary>
+    /// <param name="model">原始模型。</param>
+    /// <param name="overrideConfig">覆盖配置。</param>
+    /// <returns>应用配置后的模型副本。</returns>
     private static Model ApplyModelOverride(Model model, JsonElement overrideConfig)
     {
+        if (model is ImagesModel image && ParseOutputModalities(overrideConfig) is { } output)
+            model = image with { OutputModalities = output };
         return model with
         {
             Name = GetString(overrideConfig, "name") ?? model.Name,
+            Api = ModelApiNames.Normalize(GetString(overrideConfig, "api")) ?? model.Api,
+            BaseUrl = GetString(overrideConfig, "baseUrl") ?? model.BaseUrl,
             Reasoning = GetBool(overrideConfig, "reasoning") ?? model.Reasoning,
             ThinkingLevelMap = ParseThinkingLevelMap(overrideConfig) ?? model.ThinkingLevelMap,
             InputModalities = TryGetInputModalities(overrideConfig, out var input) ? input : model.InputModalities,
+            InputLimits = MergeInputLimits(model.InputLimits, ParseInputLimits(overrideConfig)),
+            PromptCache = MergePromptCache(model.PromptCache, ParsePromptCache(overrideConfig)),
             Cost = ParseCost(overrideConfig, model.Cost) ?? model.Cost,
             ContextWindow = GetInt(overrideConfig, "contextWindow") ?? model.ContextWindow,
             MaxOutputTokens = GetInt(overrideConfig, "maxTokens") ?? GetInt(overrideConfig, "maxOutputTokens") ?? model.MaxOutputTokens,
@@ -402,6 +487,45 @@ public sealed class ModelConfigurationStore
         };
     }
 
+    /// <summary>判断配置条目是否匹配模型能力。</summary>
+    /// <param name="config">配置对象。</param>
+    /// <param name="model">目标模型。</param>
+    /// <param name="isOverride">覆盖条目缺少 type 时是否允许匹配所有已有类型。</param>
+    /// <returns>匹配时返回 true。</returns>
+    private static bool MatchesModelType(JsonElement config, Model model, bool isOverride = false) =>
+        config.ValueKind == JsonValueKind.Object &&
+        ((isOverride && !config.TryGetProperty("type", out _)) ||
+         (GetString(config, "type") ?? ModelTypes.Chat) == ModelTypes.GetModelType(model));
+
+    /// <summary>读取图像输出模态，兼容配置短名称与 .NET 字段名称。</summary>
+    /// <param name="config">模型配置。</param>
+    /// <returns>输出模态；未配置时返回 null。</returns>
+    private static IReadOnlyList<string>? ParseOutputModalities(JsonElement config)
+    {
+        if (!config.TryGetProperty("output", out var output) && !config.TryGetProperty("outputModalities", out output)) return null;
+        return output.ValueKind == JsonValueKind.Array
+            ? output.EnumerateArray().Where(item => item.ValueKind == JsonValueKind.String).Select(item => item.GetString()!).ToArray()
+            : null;
+    }
+
+    /// <summary>【AI】【模型配置】为非聊天能力建立配置后的目录，支持新增 provider 和模型。</summary>
+    /// <param name="models">内置模型。</param>
+    /// <param name="type">目标能力类型。</param>
+    /// <returns>覆盖完成的同类型目录。</returns>
+    internal IReadOnlyList<Model> ApplyToModels(IEnumerable<Model> models, string type)
+    {
+        var providers = new Dictionary<string, Dictionary<string, Model>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var model in models.Where(model => ModelTypes.GetModelType(model) == type))
+        {
+            if (!providers.TryGetValue(model.Provider, out var bucket)) providers[model.Provider] = bucket = new(StringComparer.OrdinalIgnoreCase);
+            bucket[model.Id] = model;
+        }
+        ApplyTo(providers, type);
+        return providers.Values.SelectMany(bucket => bucket.Values).ToArray();
+    }
+
+    /// <summary>【AI】【价格读取】读取已校验费率和分层阈值，覆盖缺省费率继承基础模型。</summary>
+    /// <param name="element">含 cost 的模型配置。</param><param name="fallback">基础费率。</param><returns>合并后的价格。</returns>
     private static ModelCost? ParseCost(JsonElement element, ModelCost? fallback)
     {
         if (!element.TryGetProperty("cost", out var cost) || cost.ValueKind != JsonValueKind.Object)
@@ -413,9 +537,19 @@ public sealed class ModelConfigurationStore
             GetDecimal(cost, "input") ?? fallback?.InputPerMillion ?? 0m,
             GetDecimal(cost, "output") ?? fallback?.OutputPerMillion ?? 0m,
             GetDecimal(cost, "cacheRead") ?? fallback?.CacheReadPerMillion ?? 0m,
-            GetDecimal(cost, "cacheWrite") ?? fallback?.CacheWritePerMillion ?? 0m);
+            GetDecimal(cost, "cacheWrite") ?? fallback?.CacheWritePerMillion ?? 0m,
+            cost.TryGetProperty("tiers", out var tiers) && tiers.ValueKind == JsonValueKind.Array
+                ? tiers.EnumerateArray().Where(tier => tier.ValueKind == JsonValueKind.Object).Select(tier => new ModelCostTier(
+                    GetDecimal(tier, "input") ?? 0m, GetDecimal(tier, "output") ?? 0m,
+                    GetDecimal(tier, "cacheRead") ?? 0m, GetDecimal(tier, "cacheWrite") ?? 0m,
+                    GetDouble(tier, "inputTokensAbove") ?? 0)).ToArray()
+                : fallback?.Tiers);
     }
 
+    /// <summary>【AI】【模型配置】读取供应商或模型的显式兼容能力，缺省值保留为 null 以便继承。</summary>
+    /// <param name="element">供应商或模型 JSON。</param>
+    /// <param name="propertyName">兼容配置的属性名。</param>
+    /// <returns>解析后的能力覆盖；没有配置时为空。</returns>
     private static ModelCompatibility? ParseCompat(JsonElement element, string propertyName)
     {
         if (!element.TryGetProperty(propertyName, out var compat) || compat.ValueKind != JsonValueKind.Object)
@@ -436,6 +570,11 @@ public sealed class ModelConfigurationStore
             AllowedFallbackModels = ParseFallbackModels(compat),
             SupportsStore = GetBool(compat, "supportsStore"),
             SupportsDeveloperRole = GetBool(compat, "supportsDeveloperRole"),
+            SupportsMidConvoSystemMessages = GetBool(compat, "supportsMidConvoSystemMessages"),
+            SupportsMidConvoToolAdditions = GetBool(compat, "supportsMidConvoToolAdditions"),
+            SupportsMidConvoToolChanges = GetBool(compat, "supportsMidConvoToolChanges"),
+            SupportsAdditionalTools = GetBool(compat, "supportsAdditionalTools"),
+            SupportsToolSearch = GetBool(compat, "supportsToolSearch"),
             SupportsReasoningEffort = GetBool(compat, "supportsReasoningEffort"),
             ReasoningEffortMap = ParseStringDictionary(compat, "reasoningEffortMap") ?? ParseStringDictionary(element, "thinkingLevelMap"),
             SupportsUsageInStreaming = GetBool(compat, "supportsUsageInStreaming"),
@@ -450,15 +589,28 @@ public sealed class ModelConfigurationStore
             VercelGatewayRouting = ParseVercelGatewayRouting(compat, "vercelGatewayRouting"),
             ZaiToolStream = GetBool(compat, "zaiToolStream"),
             SupportsStrictMode = GetBool(compat, "supportsStrictMode"),
+            SupportsOpenAiGrammarTools = GetBool(compat, "supportsOpenAIGrammarTools") ?? GetBool(compat, "supportsOpenAiGrammarTools"),
+            SupportsStrictTools = GetBool(compat, "supportsStrictTools"),
             CacheControlFormat = GetString(compat, "cacheControlFormat"),
             SendSessionAffinityHeaders = GetBool(compat, "sendSessionAffinityHeaders"),
+            SessionAffinityFormat = GetString(compat, "sessionAffinityFormat"),
+            VllmPriority = GetDouble(compat, "vllmPriority"),
             SupportsLongCacheRetention = GetBool(compat, "supportsLongCacheRetention"),
             SupportsTemperature = GetBool(compat, "supportsTemperature"),
             ForceAdaptiveThinking = GetBool(compat, "forceAdaptiveThinking"),
+            SupportsMidConvoEffort = GetBool(compat, "supportsMidConvoEffort"),
             SupportsEagerToolInputStreaming = GetBool(compat, "supportsEagerToolInputStreaming"),
             SupportsCacheControlOnTools = GetBool(compat, "supportsCacheControlOnTools"),
             AllowEmptySignature = GetBool(compat, "allowEmptySignature"),
-            SupportsDisabledThinking = ParseSupportsDisabledThinking(element)
+            SupportsDisabledThinking = ParseSupportsDisabledThinking(element),
+            SupportsExplicitPromptCacheMode = GetBool(compat, "supportsExplicitPromptCacheMode"),
+            SupportsMaxOutputTokens = GetBool(compat, "supportsMaxOutputTokens"),
+            SupportsToolReferences = GetBool(compat, "supportsToolReferences"),
+            SupportsDeferredTools = GetBool(compat, "supportsDeferredTools"),
+            ThinkingTokenBudgetField = GetString(compat, "thinkingTokenBudgetField"),
+            SupportsThinkingTokenBudget = GetBool(compat, "supportsThinkingTokenBudget"),
+            ChatTemplateKwargs = ParseObjectDictionary(compat, "chatTemplateKwargs", preserveCase: true),
+            ChatTemplateArgs = ParseObjectDictionary(compat, "chatTemplateArgs", preserveCase: true)
         };
     }
 
@@ -479,6 +631,9 @@ public sealed class ModelConfigurationStore
             AllowedFallbackModels = MergeFallbackModels(baseCompat.AllowedFallbackModels, overrideCompat.AllowedFallbackModels),
             SupportsStore = overrideCompat.SupportsStore ?? baseCompat.SupportsStore,
             SupportsDeveloperRole = overrideCompat.SupportsDeveloperRole ?? baseCompat.SupportsDeveloperRole,
+            SupportsMidConvoSystemMessages = overrideCompat.SupportsMidConvoSystemMessages ?? baseCompat.SupportsMidConvoSystemMessages,
+            SupportsMidConvoToolAdditions = overrideCompat.SupportsMidConvoToolAdditions ?? baseCompat.SupportsMidConvoToolAdditions,
+            SupportsMidConvoToolChanges = overrideCompat.SupportsMidConvoToolChanges ?? baseCompat.SupportsMidConvoToolChanges,
             SupportsReasoningEffort = overrideCompat.SupportsReasoningEffort ?? baseCompat.SupportsReasoningEffort,
             ReasoningEffortMap = MergeStringDictionaries(baseCompat.ReasoningEffortMap, overrideCompat.ReasoningEffortMap),
             SupportsUsageInStreaming = overrideCompat.SupportsUsageInStreaming ?? baseCompat.SupportsUsageInStreaming,
@@ -495,9 +650,12 @@ public sealed class ModelConfigurationStore
             SupportsStrictMode = overrideCompat.SupportsStrictMode ?? baseCompat.SupportsStrictMode,
             CacheControlFormat = overrideCompat.CacheControlFormat ?? baseCompat.CacheControlFormat,
             SendSessionAffinityHeaders = overrideCompat.SendSessionAffinityHeaders ?? baseCompat.SendSessionAffinityHeaders,
+            SessionAffinityFormat = overrideCompat.SessionAffinityFormat ?? baseCompat.SessionAffinityFormat,
+            VllmPriority = overrideCompat.VllmPriority ?? baseCompat.VllmPriority,
             SupportsLongCacheRetention = overrideCompat.SupportsLongCacheRetention ?? baseCompat.SupportsLongCacheRetention,
             SupportsTemperature = overrideCompat.SupportsTemperature ?? baseCompat.SupportsTemperature,
             ForceAdaptiveThinking = overrideCompat.ForceAdaptiveThinking ?? baseCompat.ForceAdaptiveThinking,
+            SupportsMidConvoEffort = overrideCompat.SupportsMidConvoEffort ?? baseCompat.SupportsMidConvoEffort,
             SupportsEagerToolInputStreaming = overrideCompat.SupportsEagerToolInputStreaming ?? baseCompat.SupportsEagerToolInputStreaming,
             SupportsCacheControlOnTools = overrideCompat.SupportsCacheControlOnTools ?? baseCompat.SupportsCacheControlOnTools,
             AllowEmptySignature = overrideCompat.AllowEmptySignature ?? baseCompat.AllowEmptySignature,
@@ -511,7 +669,9 @@ public sealed class ModelConfigurationStore
             SupportsStrictTools = overrideCompat.SupportsStrictTools ?? baseCompat.SupportsStrictTools,
             SupportsDeferredTools = overrideCompat.SupportsDeferredTools ?? baseCompat.SupportsDeferredTools,
             ThinkingTokenBudgetField = overrideCompat.ThinkingTokenBudgetField ?? baseCompat.ThinkingTokenBudgetField,
-            ChatTemplateArgs = MergeObjectDictionaries(baseCompat.ChatTemplateArgs, overrideCompat.ChatTemplateArgs)
+            SupportsThinkingTokenBudget = overrideCompat.SupportsThinkingTokenBudget ?? baseCompat.SupportsThinkingTokenBudget,
+            ChatTemplateKwargs = MergeObjectDictionaries(baseCompat.ChatTemplateKwargs, overrideCompat.ChatTemplateKwargs, preserveCase: true),
+            ChatTemplateArgs = MergeObjectDictionaries(baseCompat.ChatTemplateArgs, overrideCompat.ChatTemplateArgs, preserveCase: true)
         };
     }
 
@@ -628,14 +788,17 @@ public sealed class ModelConfigurationStore
         return result.Count == 0 ? null : result;
     }
 
-    private static IDictionary<string, object>? ParseObjectDictionary(JsonElement element, string propertyName)
+    /// <summary>【AI】【对象读取】复制对象字段，模板参数按区分大小写的 JSON 键语义保留。</summary>
+    /// <param name="element">父对象。</param><param name="propertyName">属性名。</param>
+    /// <param name="preserveCase">是否将不同大小写的键保留为独立参数。</param><returns>参数字典或空值。</returns>
+    private static IDictionary<string, object>? ParseObjectDictionary(JsonElement element, string propertyName, bool preserveCase = false)
     {
         if (!element.TryGetProperty(propertyName, out var value) || value.ValueKind != JsonValueKind.Object)
         {
             return null;
         }
 
-        var result = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+        var result = new Dictionary<string, object>(preserveCase ? StringComparer.Ordinal : StringComparer.OrdinalIgnoreCase);
         foreach (var prop in value.EnumerateObject())
         {
             result[prop.Name] = prop.Value.Clone();
@@ -791,6 +954,9 @@ public sealed class ModelConfigurationStore
             ProjectId: overrideOptions.ProjectId ?? baseOptions.ProjectId);
     }
 
+    /// <summary>【AI】【模型配置】解析通用模式、Responses 扁平函数及旧式嵌套函数选择。</summary>
+    /// <param name="options">模型或提供方请求选项。</param>
+    /// <returns>规范化工具选择；缺失或无效时为 null。</returns>
     private static ModelToolChoiceConfiguration? ParseToolChoice(JsonElement options)
     {
         if (!options.TryGetProperty("toolChoice", out var toolChoice))
@@ -807,11 +973,10 @@ public sealed class ModelConfigurationStore
         }
 
         if (toolChoice.ValueKind == JsonValueKind.Object &&
-            string.Equals(GetString(toolChoice, "type"), "function", StringComparison.Ordinal) &&
-            toolChoice.TryGetProperty("function", out var function) &&
-            function.ValueKind == JsonValueKind.Object)
+            string.Equals(GetString(toolChoice, "type"), "function", StringComparison.Ordinal))
         {
-            var name = GetString(function, "name");
+            var name = toolChoice.TryGetProperty("function", out var function) && function.ValueKind == JsonValueKind.Object
+                ? GetString(function, "name") : GetString(toolChoice, "name");
             return string.IsNullOrWhiteSpace(name)
                 ? null
                 : new ModelToolChoiceConfiguration("function", FunctionName: name);
@@ -1010,9 +1175,13 @@ public sealed class ModelConfigurationStore
         return result;
     }
 
+    /// <summary>【AI】【对象合并】按层覆盖字段，模板参数保留大小写不同的键。</summary>
+    /// <param name="baseValues">基础参数。</param><param name="overrideValues">覆盖参数。</param>
+    /// <param name="preserveCase">是否区分大小写。</param><returns>合并后的参数。</returns>
     private static IDictionary<string, object>? MergeObjectDictionaries(
         IDictionary<string, object>? baseValues,
-        IDictionary<string, object>? overrideValues)
+        IDictionary<string, object>? overrideValues,
+        bool preserveCase = false)
     {
         if (baseValues is null || baseValues.Count == 0)
         {
@@ -1024,7 +1193,7 @@ public sealed class ModelConfigurationStore
             return baseValues;
         }
 
-        var result = new Dictionary<string, object>(baseValues, StringComparer.OrdinalIgnoreCase);
+        var result = new Dictionary<string, object>(baseValues, preserveCase ? StringComparer.Ordinal : StringComparer.OrdinalIgnoreCase);
         foreach (var (key, value) in overrideValues)
         {
             result[key] = value;
@@ -1043,8 +1212,11 @@ public sealed class ModelConfigurationStore
                providerCompat is not null;
     }
 
-    private JsonDocument? LoadDocument()
+    /// <summary>【AI】【模型配置】读取支持注释的文件，整份拒绝无效结构及元数据并保留可查询诊断。</summary>
+    /// <returns>调用方释放的文档；文件缺失或无效时为空。</returns>
+    private JsonDocument? LoadFileDocument()
     {
+        Error = null;
         var path = _searchPaths.FirstOrDefault(File.Exists);
         if (path is null)
         {
@@ -1053,10 +1225,18 @@ public sealed class ModelConfigurationStore
 
         try
         {
-            return JsonDocument.Parse(File.ReadAllText(path));
+            var document = JsonDocument.Parse(File.ReadAllText(path), new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip });
+            try
+            {
+                // 1. 【AI】【配置校验】先验证所有条目，再向目录或请求配置提供完整文档
+                ValidateFileConfiguration(document.RootElement);
+                return document;
+            }
+            catch { document.Dispose(); throw; }
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
         {
+            Error = $"Failed to load models.json: {ex.Message}\n\nFile: {path}";
             return null;
         }
     }
@@ -1281,14 +1461,22 @@ public sealed class ModelConfigurationStore
         };
     }
 
+    /// <summary>【AI】【整数读取】读取可表示整数，兼容合法的小数和指数表示。</summary>
+    /// <param name="element">父对象。</param><param name="propertyName">字段名。</param><returns>整数或空值。</returns>
     private static int? GetInt(JsonElement element, string propertyName)
     {
         return element.TryGetProperty(propertyName, out var property) &&
                property.ValueKind == JsonValueKind.Number &&
-               property.TryGetInt32(out var value)
-            ? value
+               property.TryGetDecimal(out var value) && value == decimal.Truncate(value) && value >= int.MinValue && value <= int.MaxValue
+            ? (int)value
             : null;
     }
+
+    /// <summary>【AI】【兼容数值】读取可表示的浮点值，保留显式零和小数优先级。</summary>
+    /// <param name="element">父对象。</param><param name="propertyName">属性名。</param><returns>有限数值或空值。</returns>
+    private static double? GetDouble(JsonElement element, string propertyName) =>
+        element.TryGetProperty(propertyName, out var property) && property.ValueKind == JsonValueKind.Number &&
+        property.TryGetDouble(out var value) && double.IsFinite(value) ? value : null;
 
     private static decimal? GetDecimal(JsonElement element, string propertyName)
     {

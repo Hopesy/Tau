@@ -73,7 +73,7 @@ public sealed class AgentPublicApiCompileSampleTests
         Assert.Equal("harness done", ReadText(harnessAssistant.Content));
         Assert.Contains(publicHarnessEvents, static evt => evt is AgentHarnessSavePointEvent);
         Assert.Equal(
-            ["message", "message"],
+            ["message", "message", "message"],
             (await publicHarness.Session.GetBranchAsync()).Select(static entry => entry.Type));
 
         var agent = new Tau.AgentCore.Agent(new AgentOptions
@@ -95,7 +95,8 @@ public sealed class AgentPublicApiCompileSampleTests
             LogContext = new TauRuntimeLogContext("sample-correlation", "sample-session", "sample-message"),
             GetApiKeyAsync = (_, _) => Task.FromResult<string?>(null),
             PrepareNextTurnAsync = (_, _) => Task.FromResult<AgentLoopTurnUpdate?>(null),
-            ShouldStopAfterTurnAsync = (_, _) => Task.FromResult(false)
+            PrepareRequestAsync = (_, _) => Task.FromResult<AgentRequestUpdate?>(null),
+            FinishTurnAsync = (_, _) => Task.FromResult<AgentTurnDecision?>(null)
         });
 
         using var subscription = agent.Subscribe((evt, _) =>
@@ -150,7 +151,8 @@ public sealed class AgentPublicApiCompileSampleTests
                 SystemPrompt: "low-level system",
                 Tools: [tool],
                 Reasoning: ThinkingLevel.Low)),
-            ShouldStopAfterTurnAsync = (_, _) => Task.FromResult(false)
+            PrepareRequestAsync = (_, _) => Task.FromResult<AgentRequestUpdate?>(null),
+            FinishTurnAsync = (_, _) => Task.FromResult<AgentTurnDecision?>(null)
         };
         Assert.NotNull(lowLevelRuntime.State);
         Assert.Equal(ToolExecutionMode.Sequential, lowLevelConfig.DefaultExecutionMode);

@@ -821,6 +821,11 @@ public sealed class AgentHarness<TMetadata>
         });
         runningAgent = agent;
 
+        // 1. 【AgentCore】【Harness 基线】每轮重新生成的提示属于完整替换，保留历史工具声明
+        agent.SystemPrompt = beforeAgentStart.SystemPrompt;
+        // 2. 【AgentCore】【Harness 恢复】旧历史补入基线后偏移持久化游标，避免把旧尾部再次追加
+        if (context.Messages.Count > 0) persistedMessageCount += agent.State.Messages.Count - context.Messages.Count;
+
         var events = new List<AgentEvent>();
         using var subscription = agent.Subscribe(async (evt, token) =>
         {
@@ -1025,23 +1030,7 @@ public sealed class AgentHarness<TMetadata>
 
     private ProviderRegistry CreateHookedProviderRegistry(string sessionId)
     {
-        var registry = new ProviderRegistry();
-        var registered = ProviderRegistry.RegisteredApis.ToArray();
-        foreach (var api in registered)
-        {
-            registry.Register(
-                api,
-                new AgentHarnessHookProvider(ProviderRegistry.Get(api), this, sessionId));
-        }
-
-        if (!registered.Contains(_model.Api, StringComparer.OrdinalIgnoreCase))
-        {
-            registry.Register(
-                _model.Api,
-                new AgentHarnessHookProvider(ProviderRegistry.Get(_model.Api), this, sessionId));
-        }
-
-        return registry;
+        return ProviderRegistry.CreateSessionCopy(provider => new AgentHarnessHookProvider(provider, this, sessionId));
     }
 
     private async Task<SimpleStreamOptions> EmitBeforeProviderRequestHookAsync(
@@ -1229,6 +1218,8 @@ public sealed class AgentHarness<TMetadata>
             Signal = options.Signal,
             OnResponse = options.OnResponse,
             OnPayload = options.OnPayload,
+            TransformHeaders = options.TransformHeaders,
+            OnProviderStreamEvent = options.OnProviderStreamEvent,
             Transport = options.Transport,
             CacheRetention = options.CacheRetention,
             SessionId = options.SessionId,
@@ -1628,6 +1619,8 @@ public sealed class AgentHarness<TMetadata>
         string sessionId) : IStreamProvider
     {
         public string Api => inner.Api;
+
+        public bool SupportsTranscriptContext => inner.SupportsTranscriptContext;
 
         public AssistantMessageStream Stream(Model model, LlmContext context, StreamOptions options)
         {

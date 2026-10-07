@@ -1,3 +1,5 @@
+using System.Buffers;
+using System.Text;
 using Tau.Tui.Abstractions;
 
 namespace Tau.Tui.Runtime;
@@ -10,19 +12,31 @@ public interface ITuiRawInputReader
 public sealed class TuiDecodedKeyReader(ITuiRawInputReader reader) : IConsoleInputEventReader, IDisposable
 {
     private readonly ITuiRawInputReader _reader = reader ?? throw new ArgumentNullException(nameof(reader));
+    private readonly Queue<ConsoleKeyInfo> _legacyTextKeys = new();
 
+    /// <summary>【Tui】【控制台兼容读取】旧接口逐个返回 UTF-16 字符，完整事件接口保持一次文本输入的原子性。</summary>
+    /// <param name="cancellationToken">读取取消信号。</param><returns>下一个控制台字符或按键。</returns>
     public async ValueTask<ConsoleKeyInfo> ReadKeyAsync(CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (_legacyTextKeys.TryDequeue(out var pending)) return pending;
         while (true)
         {
             var inputEvent = await ReadInputEventAsync(cancellationToken).ConfigureAwait(false);
             if (inputEvent.Kind == ConsoleInputEventKind.KeyPress)
             {
+                if (inputEvent.Text is { Length: > 0 } text)
+                {
+                    foreach (var character in text) _legacyTextKeys.Enqueue(new(character, ConsoleKey.NoName, false, false, false));
+                    return _legacyTextKeys.Dequeue();
+                }
                 return inputEvent.Key;
             }
         }
     }
 
+    /// <summary>【Tui】【完整输入解码】保持粘贴、可打印 Unicode 文本及快捷键协议身份。</summary>
+    /// <param name="cancellationToken">读取取消信号。</param><returns>下一个完整输入事件。</returns>
     public async ValueTask<ConsoleInputEvent> ReadInputEventAsync(CancellationToken cancellationToken = default)
     {
         while (true)
@@ -35,9 +49,32 @@ public sealed class TuiDecodedKeyReader(ITuiRawInputReader reader) : IConsoleInp
 
             if (TuiConsoleKeyInfoMapper.TryMapInput(input, out var key))
             {
-                return ConsoleInputEvent.KeyPress(key);
+                return ConsoleInputEvent.KeyPress(key, input);
             }
+            // 1. 【Tui】【Unicode 文本】非 BMP 字符和输入法一次提交的文本不能截断为单个 char
+            if (!TuiKeyDecoder.IsKeyRelease(input))
+            {
+                var printable = TuiKeyDecoder.DecodePrintableKey(input) ?? input;
+                if (IsPrintableText(printable)) return ConsoleInputEvent.TextInput(printable, input);
+            }
+            // 1. 【Tui】【完整修饰键】保留 ConsoleKeyInfo 无法表示的已识别协议，默认键值不会插入普通字符
+            if (!TuiKeyDecoder.IsKeyRelease(input) && TuiKeyDecoder.ParseKey(input) is not null)
+                return ConsoleInputEvent.KeyPress(default, input);
         }
+    }
+
+    /// <summary>【Tui】【文本校验】只接收完整 Unicode 标量，过滤控制序列和未配对代理字符。</summary>
+    /// <param name="text">候选文本。</param><returns>是否全部可作为普通文本输入。</returns>
+    private static bool IsPrintableText(string text)
+    {
+        if (text.Length == 0) return false;
+        var remaining = text.AsSpan();
+        while (!remaining.IsEmpty)
+        {
+            if (Rune.DecodeFromUtf16(remaining, out var rune, out var consumed) != OperationStatus.Done || Rune.IsControl(rune)) return false;
+            remaining = remaining[consumed..];
+        }
+        return true;
     }
 
     internal static bool TryParseBracketedPaste(string input, out string text)
@@ -125,9 +162,13 @@ public sealed class TuiStreamRawInputReader : ITuiRawInputReader, IDisposable
         _available.Release();
     }
 
+    /// <summary>【Tui】【UTF-8 输入流】跨字节读取保留解码状态，再把完整文本交给终端序列分帧。</summary>
+    /// <param name="bufferSize">每次读取的最大字节数。</param><returns>输入流泵任务。</returns>
     private async Task PumpAsync(int bufferSize)
     {
         var buffer = new byte[bufferSize];
+        var decoder = Encoding.UTF8.GetDecoder();
+        var characters = new char[Encoding.UTF8.GetMaxCharCount(bufferSize)];
         try
         {
             while (!_disposed.IsCancellationRequested)
@@ -136,8 +177,13 @@ public sealed class TuiStreamRawInputReader : ITuiRawInputReader, IDisposable
                 if (read == 0)
                     break;
 
-                _sequenceBuffer.Process(buffer.AsSpan(0, read));
+                // 1. 【Tui】【字节分包】中文和表情可跨任意字节边界，不能对每个分包独立解码
+                var count = decoder.GetChars(buffer.AsSpan(0, read), characters, flush: false);
+                if (count > 0) _sequenceBuffer.Process(new string(characters, 0, count));
             }
+
+            var remaining = decoder.GetChars(ReadOnlySpan<byte>.Empty, characters, flush: true);
+            if (remaining > 0) _sequenceBuffer.Process(new string(characters, 0, remaining));
 
             foreach (var pending in _sequenceBuffer.Flush())
             {
@@ -184,6 +230,8 @@ public sealed class TuiStreamRawInputReader : ITuiRawInputReader, IDisposable
 
 public static class TuiConsoleKeyInfoMapper
 {
+    /// <summary>【Tui】【控制台兼容映射】保留可打印字符和可表示的修饰键，无法表示的按键交由原始事件处理。</summary>
+    /// <param name="input">原始终端输入。</param><param name="key">控制台按键。</param><returns>是否能表示。</returns>
     public static bool TryMapInput(string input, out ConsoleKeyInfo key)
     {
         key = default;
@@ -201,14 +249,17 @@ public static class TuiConsoleKeyInfoMapper
         var printable = TuiKeyDecoder.DecodePrintableKey(input);
         if (!string.IsNullOrEmpty(printable))
         {
-            key = CreatePrintableKey(printable[0], ConsoleModifiers.None);
+            if (printable.Length != 1 || char.IsSurrogate(printable[0])) return false;
+            var identity = TuiKeyDecoder.ParseKey(input);
+            var modifiers = TryMapKeyId(identity, input, out var mapped) ? mapped.Modifiers : ConsoleModifiers.None;
+            key = CreatePrintableKey(printable[0], modifiers);
             return true;
         }
 
         // 【终端输入】【Unicode 映射】非控制字符（包括中文）不是键盘协议序列，直接作为普通字符交给输入编辑器
-        if (input.Length == 1 && !char.IsControl(input[0]))
+        if (input.Length == 1 && !char.IsControl(input[0]) && !char.IsSurrogate(input[0]))
         {
-            key = CreatePrintableKey(input[0], ConsoleModifiers.None);
+            key = CreatePrintableKey(input[0], input[0] is >= 'A' and <= 'Z' ? ConsoleModifiers.Shift : ConsoleModifiers.None);
             return true;
         }
 
@@ -216,6 +267,9 @@ public static class TuiConsoleKeyInfoMapper
         return TryMapKeyId(keyId, input, out key);
     }
 
+    /// <summary>【Tui】【键名映射】把可表示的命名键转换为控制台按键，不忽略未知或 Super 修饰键。</summary>
+    /// <param name="keyId">按键名称。</param><param name="rawInput">兼容调用方提供的原始输入。</param>
+    /// <param name="key">映射结果。</param><returns>是否能表示。</returns>
     public static bool TryMapKeyId(string? keyId, string? rawInput, out ConsoleKeyInfo key)
     {
         key = default;
@@ -234,6 +288,7 @@ public static class TuiConsoleKeyInfoMapper
         var modifiers = ConsoleModifiers.None;
         foreach (var modifier in parts[..^1])
         {
+            if (modifier.ToLowerInvariant() is not ("shift" or "alt" or "ctrl")) return false;
             modifiers |= modifier.ToLowerInvariant() switch
             {
                 "shift" => ConsoleModifiers.Shift,

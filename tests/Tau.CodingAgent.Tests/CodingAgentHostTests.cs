@@ -4,6 +4,7 @@ using Tau.AgentCore.Harness;
 using Tau.AgentCore.Runtime;
 using Tau.Ai;
 using Tau.CodingAgent.Runtime;
+using Tau.CodingAgent.Tools;
 using Tau.Tui.Abstractions;
 using Tau.Tui.Components;
 using Tau.Tui.Rendering;
@@ -11,8 +12,39 @@ using Tau.Tui.Runtime;
 
 namespace Tau.CodingAgent.Tests;
 
-public class CodingAgentHostTests
+public partial class CodingAgentHostTests
 {
+    /// <summary>【CodingAgent】【命令显示】原生进度为完整快照，终态替换快照并按结构化退出码显示状态。</summary>
+    /// <param name="name">原生 Shell 名称。</param><returns>异步测试任务。</returns>
+    [Theory]
+    [InlineData("bash")]
+    [InlineData("powershell")]
+    public async Task NativeShellSnapshots_ReplaceOutputAndShowFinalStatus(string name)
+    {
+        var terminal = new FakeTerminal();
+        terminal.QueueInput("run command"); terminal.QueueInput("exit");
+        var session = new InteractiveConsoleSession(terminal);
+        var host = new CodingAgentHost(session, new FakeCodingAgentRunner((_, _) => Events()));
+        await host.RunAsync();
+        var entry = Assert.Single(session.Transcript, item => item is { Kind: TranscriptEntryKind.Tool, Key: "native-shell" });
+        Assert.Contains("final-output", entry.Text);
+        Assert.DoesNotContain("partial-output", entry.Text);
+        Assert.Contains("(exit 9)", entry.Text);
+
+        /// <summary>【CodingAgent】【测试事件】发送两个完整快照及不同的最终结果。</summary>
+        /// <returns>模拟命令事件流。</returns>
+        async IAsyncEnumerable<AgentEvent> Events()
+        {
+            yield return new ToolExecutionStartEvent("native-shell", name, """{"command":"test"}""");
+            yield return new ToolExecutionUpdateEvent("native-shell", new ToolUpdate("partial-output", Details: new ShellToolDetails()), name);
+            yield return new ToolExecutionUpdateEvent("native-shell", new ToolUpdate("partial-output-more", Details: new ShellToolDetails()), name);
+            yield return new ToolExecutionEndEvent("native-shell", new ToolResult([new TextContent("final-output")], IsError: true)
+            { StructuredContent = JsonDocument.Parse("""{"exit_code":9}""").RootElement.Clone() }, name);
+            yield return new AgentEndEvent();
+            await Task.CompletedTask;
+        }
+    }
+
     [Fact]
     public async Task RunAsync_ExitInput_ShowsWelcomeAndGoodbye_WithoutInvokingRunner()
     {
@@ -1220,7 +1252,7 @@ public class CodingAgentHostTests
         terminal.QueueInput("exit");
         var sessionPath = Path.Combine(directory, "session.json");
         var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
-        var extensionStore = new CodingAgentExtensionCommandStore(
+        using var extensionStore = new CodingAgentExtensionCommandStore(
             cwd: directory,
             userExtensionsDirectory: Path.Combine(directory, "missing-user-extensions"),
             javaScriptRuntime: new CodingAgentJavaScriptExtensionRuntime(directory, nodeExecutable: "node"));
@@ -1618,7 +1650,7 @@ public class CodingAgentHostTests
         keyReader.EnqueueRaw(new ConsoleKeyInfo('\r', ConsoleKey.Enter, shift: false, alt: false, control: false));
         var editor = new InteractiveInputEditor(keyReader, new CapturingRenderer());
         var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
-        var extensionStore = new CodingAgentExtensionCommandStore(
+        using var extensionStore = new CodingAgentExtensionCommandStore(
             cwd: directory,
             userExtensionsDirectory: Path.Combine(directory, "missing-user-extensions"),
             javaScriptRuntime: new CodingAgentJavaScriptExtensionRuntime(directory, nodeExecutable: "node"));
@@ -1694,7 +1726,7 @@ public class CodingAgentHostTests
         keyReader.EnqueueRaw(new ConsoleKeyInfo('\r', ConsoleKey.Enter, shift: false, alt: false, control: false));
         var editor = new InteractiveInputEditor(keyReader, new CapturingRenderer());
         var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
-        var extensionStore = new CodingAgentExtensionCommandStore(
+        using var extensionStore = new CodingAgentExtensionCommandStore(
             cwd: directory,
             userExtensionsDirectory: Path.Combine(directory, "missing-user-extensions"),
             javaScriptRuntime: new CodingAgentJavaScriptExtensionRuntime(directory, nodeExecutable: "node"));
@@ -1766,7 +1798,7 @@ public class CodingAgentHostTests
         keyReader.EnqueueRaw(new ConsoleKeyInfo('\r', ConsoleKey.Enter, shift: false, alt: false, control: false));
         var editor = new InteractiveInputEditor(keyReader, new CapturingRenderer());
         var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
-        var extensionStore = new CodingAgentExtensionCommandStore(
+        using var extensionStore = new CodingAgentExtensionCommandStore(
             cwd: directory,
             userExtensionsDirectory: Path.Combine(directory, "missing-user-extensions"),
             javaScriptRuntime: new CodingAgentJavaScriptExtensionRuntime(directory, nodeExecutable: "node"));
@@ -1832,7 +1864,7 @@ public class CodingAgentHostTests
         var terminal = new FakeTerminal();
         terminal.QueueInput("exit");
         var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
-        var extensionStore = new CodingAgentExtensionCommandStore(
+        using var extensionStore = new CodingAgentExtensionCommandStore(
             cwd: directory,
             userExtensionsDirectory: Path.Combine(directory, "missing-user-extensions"),
             javaScriptRuntime: new CodingAgentJavaScriptExtensionRuntime(directory, nodeExecutable: "node"));
@@ -1890,7 +1922,7 @@ public class CodingAgentHostTests
         terminal.QueueInput("think");
         terminal.QueueInput("exit");
         var runner = new FakeCodingAgentRunner((_, _) => GetEvents());
-        var extensionStore = new CodingAgentExtensionCommandStore(
+        using var extensionStore = new CodingAgentExtensionCommandStore(
             cwd: directory,
             userExtensionsDirectory: Path.Combine(directory, "missing-user-extensions"),
             javaScriptRuntime: new CodingAgentJavaScriptExtensionRuntime(directory, nodeExecutable: "node"));
@@ -1966,7 +1998,7 @@ public class CodingAgentHostTests
         keyReader.EnqueueRaw(new ConsoleKeyInfo('\r', ConsoleKey.Enter, shift: false, alt: false, control: false));
         var editor = new InteractiveInputEditor(keyReader, new CapturingRenderer());
         var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
-        var extensionStore = new CodingAgentExtensionCommandStore(
+        using var extensionStore = new CodingAgentExtensionCommandStore(
             cwd: directory,
             userExtensionsDirectory: Path.Combine(directory, "missing-user-extensions"),
             javaScriptRuntime: new CodingAgentJavaScriptExtensionRuntime(directory, nodeExecutable: "node"));
@@ -2586,17 +2618,12 @@ public class CodingAgentHostTests
     }
 
     [Fact]
-    public async Task RunAsync_PasteImageAction_SendsClipboardImageToRunner()
+    public async Task RunAsync_PasteImageAction_InsertsPathWithoutSending()
     {
         var terminal = new FakeTerminal();
         var keyReader = new ScriptedKeyReader();
         keyReader.EnqueueRaw(new ConsoleKeyInfo('\x16', ConsoleKey.V, shift: false, alt: false, control: true));
-        foreach (var ch in "exit")
-        {
-            keyReader.EnqueueRaw(new ConsoleKeyInfo(ch, ConsoleKey.NoName, shift: false, alt: false, control: false));
-        }
-
-        keyReader.EnqueueRaw(new ConsoleKeyInfo('\r', ConsoleKey.Enter, shift: false, alt: false, control: false));
+        keyReader.EnqueueRaw(new ConsoleKeyInfo('\x03', ConsoleKey.C, shift: false, alt: false, control: true));
         var editor = new InteractiveInputEditor(keyReader, new CapturingRenderer());
         var clipboard = new FakeCodingAgentClipboard
         {
@@ -2604,16 +2631,16 @@ public class CodingAgentHostTests
         };
         var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
         var host = new CodingAgentHost(new InteractiveConsoleSession(terminal, editor), runner, clipboard: clipboard);
-
-        await host.RunAsync();
-
-        Assert.Empty(runner.Inputs);
-        var content = Assert.Single(runner.ContentInputs);
-        Assert.Equal("[Clipboard image]", Assert.IsType<TextContent>(content[0]).Text);
-        var image = Assert.IsType<ImageContent>(content[1]);
-        Assert.Equal("image/png", image.MimeType);
-        Assert.Equal(Convert.ToBase64String(clipboard.Image.Bytes), image.Data);
-        Assert.Contains("status> pasted clipboard image", terminal.FlattenedText());
+        var path = Path.Combine(Path.GetTempPath(), $"tau-clipboard-test-{Guid.NewGuid():N}.png");
+        host.ClipboardImagePathFactory = _ => path;
+        try
+        {
+            await host.RunAsync();
+            Assert.Empty(runner.Inputs); Assert.Empty(runner.ContentInputs);
+            Assert.Equal(path, editor.GetExpandedDraft()); Assert.Equal(clipboard.Image.Bytes, File.ReadAllBytes(path));
+            Assert.Equal(["files", "image"], clipboard.Reads);
+        }
+        finally { File.Delete(path); }
     }
 
     [Fact]
@@ -3128,8 +3155,13 @@ public class CodingAgentHostTests
         }
     }
 
-    [Fact]
-    public async Task RunAsync_StartupNotice_RendersCollapsedChangelogAndUpdatesVersion()
+    /// <summary>有无系统基线的新会话都应显示启动更新提示。</summary>
+    /// <param name="withBaseline">是否预置系统声明。</param>
+    /// <returns>测试任务。</returns>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RunAsync_StartupNotice_RendersCollapsedChangelogAndUpdatesVersion(bool withBaseline)
     {
         var directory = Path.Combine(Path.GetTempPath(), "tau-startup-changelog-host-" + Guid.NewGuid().ToString("N"));
         var changelog = Path.Combine(directory, "feature-release-notes.md");
@@ -3152,6 +3184,7 @@ public class CodingAgentHostTests
         terminal.QueueInput("exit");
 
         var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        if (withBaseline) runner.MutableMessages.Add(new SystemMessage("baseline"));
         var host = new CodingAgentHost(
             new InteractiveConsoleSession(terminal),
             runner,
@@ -3328,6 +3361,27 @@ public class CodingAgentHostTests
         Assert.Null(runner.LastCompactInstructions);
         Assert.Equal(["short task"], runner.Inputs);
         Assert.DoesNotContain("auto-compacted session", terminal.FlattenedText());
+    }
+
+    /// <summary>基线不算对话，只有零至一条用户输入时不自动压缩。</summary>
+    /// <param name="withInput">是否加入一条用户输入。</param>
+    /// <returns>测试任务。</returns>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RunAsync_AutoCompactionIgnoresBaselineForMinimumConversation(bool withInput)
+    {
+        var terminal = new FakeTerminal();
+        terminal.QueueInput("task");
+        terminal.QueueInput("exit");
+        var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        runner.MutableMessages.Add(new SystemMessage(new string('x', 1000)));
+        if (withInput) runner.MutableMessages.Add(new UserMessage("one"));
+        var host = new CodingAgentHost(new InteractiveConsoleSession(terminal), runner,
+            autoCompaction: new CodingAgentAutoCompactionOptions(1, "unexpected compaction"));
+        await host.RunAsync();
+        Assert.Null(runner.LastCompactInstructions);
+        Assert.Equal(["task"], runner.Inputs);
     }
 
     private static int CountOccurrences(string value, string needle)

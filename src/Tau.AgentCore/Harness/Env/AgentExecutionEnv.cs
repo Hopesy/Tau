@@ -637,7 +637,10 @@ public sealed class SystemAgentExecutionEnv : IAgentExecutionEnv
         }
     }
 
-    private static async Task<AgentShellConfig> ResolveShellAsync(
+    /// <summary>【AgentCore】【命令解释器】按显式路径、平台默认位置和 PATH 查找 Bash，供会话工具共享解析规则。</summary>
+    /// <param name="customShellPath">可选的 Bash 可执行文件。</param><param name="cancellationToken">取消信号。</param>
+    /// <returns>可执行文件、参数及命令传输方式。</returns>
+    public static async Task<AgentShellConfig> ResolveShellAsync(
         string? customShellPath,
         CancellationToken cancellationToken)
     {
@@ -825,12 +828,14 @@ public sealed class SystemAgentExecutionEnv : IAgentExecutionEnv
         }
     }
 
-    private sealed record AgentShellConfig(
+    /// <summary>【AgentCore】【命令配置】解释器路径、固定参数和命令传输方式。</summary>
+    public sealed record AgentShellConfig(
         string Path,
         string[] Arguments,
         AgentShellCommandTransport CommandTransport);
 
-    private enum AgentShellCommandTransport
+    /// <summary>【AgentCore】【命令传输】普通解释器接受参数，旧版 WSL Bash 从标准输入读取命令。</summary>
+    public enum AgentShellCommandTransport
     {
         Arguments,
         Stdin

@@ -4,6 +4,19 @@ namespace Tau.Tui.Tests;
 
 public sealed class InputHistoryStoreTests
 {
+    /// <summary>【TUI】【会话恢复】历史输入可回看且去重，不重复写入全局记录；后续新输入仍正常保存。</summary>
+    [Fact]
+    public void RestoredHistoryRemainsInMemoryWithoutDuplicatingPersistentEntries()
+    {
+        var store = new InMemoryStore([]);
+        var history = new InputHistory(store);
+        history.AddRestored("restored");
+        history.AddRestored("restored");
+        history.Add("new");
+        Assert.Equal(2, history.Count);
+        Assert.Equal("restored", history.Peek(1));
+        Assert.Equal(["new"], store.AppendedEntries);
+    }
     [Fact]
     public void InMemoryStore_LoadsExistingEntriesIntoHistory()
     {

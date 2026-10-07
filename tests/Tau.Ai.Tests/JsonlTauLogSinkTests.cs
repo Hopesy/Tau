@@ -4,6 +4,7 @@ using Tau.Ai.Observability;
 
 namespace Tau.Ai.Tests;
 
+[Collection("ProcessEnvironment")]
 public class JsonlTauLogSinkTests
 {
     [Fact]

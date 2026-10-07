@@ -5,6 +5,7 @@ namespace Tau.AgentCore.Platform;
 
 public sealed record AgentRunResult
 {
+    /// <summary>应用层完整会话快照；本次新增消息由 Events 中的 AgentEndEvent 提供。</summary>
     public required IReadOnlyList<ChatMessage> Messages { get; init; }
     public required IReadOnlyList<AgentEvent> Events { get; init; }
     public required TauRuntimeLogContext LogContext { get; init; }

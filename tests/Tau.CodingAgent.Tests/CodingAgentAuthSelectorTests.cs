@@ -28,7 +28,7 @@ public sealed class CodingAgentAuthSelectorTests
             item.Description == "configured via environment");
         Assert.Contains(selector.FilteredItems, item =>
             item.Value == "google" &&
-            item.Label == "Google Gemini" &&
+            item.Label == "Google" &&
             item.Description == "missing via none, login available");
         Assert.Contains(selector.FilteredItems, item =>
             item.Value == "anthropic" &&

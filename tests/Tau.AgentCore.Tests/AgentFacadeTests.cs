@@ -7,6 +7,32 @@ namespace Tau.AgentCore.Tests;
 
 public sealed class AgentFacadeTests
 {
+    /// <summary>【AgentCore】【空闲等待】验证开始事件取得的等待任务在运行结束后完成</summary>
+    /// <returns>异步验证任务</returns>
+    [Fact]
+    public async Task WaitForIdleAsync_CapturedAtAgentStartCompletesAfterRun()
+    {
+        var agent = CreateAgent(new BlockingProvider());
+        Task? earlyWait = null;
+        agent.Subscribe(evt =>
+        {
+            if (evt is AgentStartEvent)
+            {
+                earlyWait = agent.WaitForIdleAsync();
+            }
+        });
+
+        var run = agent.PromptAsync("hello");
+        Assert.NotNull(earlyWait);
+        Assert.False(earlyWait.IsCompleted);
+        agent.Abort();
+        await run.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.True(earlyWait.IsCompletedSuccessfully);
+        await earlyWait.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.False(agent.State.IsStreaming);
+    }
+
     [Fact]
     public async Task PromptAsync_AddsPromptAndEmitsMessageLifecycle()
     {
@@ -20,6 +46,7 @@ public sealed class AgentFacadeTests
         Assert.Equal(["hello"], Assert.Single(provider.Calls).UserTexts);
         Assert.Collection(
             agent.State.Messages,
+            message => Assert.Equal("system", Assert.IsType<SystemMessage>(message).Content),
             message => Assert.Equal("hello", ReadText(Assert.IsType<UserMessage>(message))),
             message => Assert.Equal("turn 1", ReadText(Assert.IsType<AssistantMessage>(message))));
 
@@ -64,6 +91,7 @@ public sealed class AgentFacadeTests
         Assert.Equal(["first", "queued steering"], provider.Calls[1].UserTexts);
         Assert.Collection(
             agent.State.Messages,
+            message => Assert.Equal("system", Assert.IsType<SystemMessage>(message).Content),
             message => Assert.Equal("first", ReadText(Assert.IsType<UserMessage>(message))),
             message => Assert.Equal("turn 1", ReadText(Assert.IsType<AssistantMessage>(message))),
             message => Assert.Equal("queued steering", ReadText(Assert.IsType<UserMessage>(message))),
@@ -111,6 +139,7 @@ public sealed class AgentFacadeTests
         Assert.Contains(events.OfType<MessageEndEvent>(), evt => evt.Message is ToolResultMessage);
         Assert.Collection(
             agent.State.Messages,
+            message => Assert.IsType<SystemMessage>(message),
             message => Assert.Equal("use tool", ReadText(Assert.IsType<UserMessage>(message))),
             message => Assert.IsType<AssistantMessage>(message),
             message => Assert.Equal("hello", ReadText(Assert.IsType<ToolResultMessage>(message))),
@@ -133,6 +162,7 @@ public sealed class AgentFacadeTests
 
         Assert.Collection(
             agent.State.Messages,
+            message => Assert.Equal("system", Assert.IsType<SystemMessage>(message).Content),
             message => Assert.Equal("hello", ReadText(Assert.IsType<UserMessage>(message))),
             message =>
             {
@@ -146,7 +176,9 @@ public sealed class AgentFacadeTests
 
         var end = Assert.IsType<AgentEndEvent>(events.Last());
         Assert.Equal("boom", end.ErrorMessage);
-        var failure = Assert.Single(end.Messages);
+        Assert.Equal(2, end.Messages.Count);
+        Assert.IsType<UserMessage>(end.Messages[0]);
+        var failure = end.Messages[1];
         var failureAssistant = Assert.IsType<AssistantMessage>(failure);
         Assert.Equal("boom", failureAssistant.ErrorMessage);
         Assert.Equal(StopReason.Error, failureAssistant.StopReason);
@@ -170,6 +202,7 @@ public sealed class AgentFacadeTests
 
         Assert.Collection(
             agent.State.Messages,
+            message => Assert.Equal("system", Assert.IsType<SystemMessage>(message).Content),
             message => Assert.Equal("hello", ReadText(Assert.IsType<UserMessage>(message))),
             message =>
             {
@@ -183,7 +216,9 @@ public sealed class AgentFacadeTests
 
         var end = Assert.IsType<AgentEndEvent>(events.Last());
         Assert.Equal("Operation canceled.", end.ErrorMessage);
-        var failure = Assert.Single(end.Messages);
+        Assert.Equal(2, end.Messages.Count);
+        Assert.IsType<UserMessage>(end.Messages[0]);
+        var failure = end.Messages[1];
         var failureAssistant = Assert.IsType<AssistantMessage>(failure);
         Assert.Equal("Operation canceled.", failureAssistant.ErrorMessage);
         Assert.Equal(StopReason.Aborted, failureAssistant.StopReason);
@@ -200,7 +235,7 @@ public sealed class AgentFacadeTests
 
         agent.Reset();
 
-        Assert.Empty(agent.State.Messages);
+        Assert.Equal("system", Assert.IsType<SystemMessage>(Assert.Single(agent.State.Messages)).Content);
         Assert.False(agent.HasQueuedMessages);
         Assert.Equal("system", agent.State.SystemPrompt);
         Assert.Equal("test-model", agent.State.Model?.Id);

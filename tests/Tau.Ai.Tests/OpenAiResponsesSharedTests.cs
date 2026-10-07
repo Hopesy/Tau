@@ -94,7 +94,7 @@ public sealed class OpenAiResponsesSharedTests
                 {
                     Api = "openai-responses",
                     Provider = "openai",
-                    Model = "gpt-5.4"
+                    Model = "other-model"
                 },
                 new ToolResultMessage("call_1|fc_1", [new TextContent($"tool {low} {emoji}")])
             ]

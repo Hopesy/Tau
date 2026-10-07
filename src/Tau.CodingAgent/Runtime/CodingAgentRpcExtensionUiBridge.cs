@@ -12,6 +12,7 @@ public sealed class CodingAgentRpcExtensionUiBridge
     private int _uiPromptDepth;
     private string? _activeUiPromptKind;
     private string? _activeUiPromptTitle;
+    private bool _closed;
 
     internal void Attach(Func<object, CancellationToken, Task> writeRequestAsync)
     {
@@ -20,7 +21,20 @@ public sealed class CodingAgentRpcExtensionUiBridge
         lock (_gate)
         {
             _writeRequestAsync = writeRequestAsync;
+            _closed = false;
         }
+    }
+
+    /// <summary>【CodingAgent】【交互关闭】输入断开后取消当前和后续交互请求，避免宿主退出时永久等待。</summary>
+    internal void Close()
+    {
+        IPendingExtensionUiRequest[] pending;
+        lock (_gate)
+        {
+            _closed = true;
+            pending = _pending.Values.ToArray();
+        }
+        foreach (var request in pending) request.TryCompleteDefault();
     }
 
     /// <summary>
@@ -326,6 +340,7 @@ public sealed class CodingAgentRpcExtensionUiBridge
         TimeSpan? timeout,
         CancellationToken cancellationToken)
     {
+        lock (_gate) if (_closed) return defaultValue;
         if (cancellationToken.IsCancellationRequested)
         {
             return defaultValue;
@@ -350,6 +365,7 @@ public sealed class CodingAgentRpcExtensionUiBridge
         lock (_gate)
         {
             _pending[id] = pending;
+            if (_closed) pending.TryCompleteDefault();
         }
 
         CancellationTokenRegistration cancellationRegistration = default;

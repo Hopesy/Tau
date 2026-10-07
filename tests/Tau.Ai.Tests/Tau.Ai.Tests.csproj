@@ -19,6 +19,12 @@
   </ItemGroup>
 
   <ItemGroup>
+    <None Include="..\..\src\Tau.Ai\Registry\classifier-models.sources.json" Link="CatalogFixtures\classifier-models.sources.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\src\Tau.Ai\Registry\generated-classifier-models.seed.json" Link="CatalogFixtures\generated-classifier-models.seed.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\tools\Tau.ClassifierCatalogGenerator\Tau.ClassifierCatalogGenerator.csproj" />
     <ProjectReference Include="..\..\src\Tau.Ai\Tau.Ai.csproj">
       <SkipGetTargetFrameworkProperties>true</SkipGetTargetFrameworkProperties>
     </ProjectReference>

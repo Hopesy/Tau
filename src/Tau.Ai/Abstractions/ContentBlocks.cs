@@ -21,4 +21,6 @@ public sealed record ImageContent(string Data, string MimeType) : ContentBlock("
 public sealed record ToolCallContent(string Id, string Name, string Arguments) : ContentBlock("toolCall")
 {
     public string? ThoughtSignature { get; init; }
+    /// <summary>【AI】【工具命名空间】Responses 动态加载工具所属空间，仅同模型请求回放。</summary>
+    public string? Namespace { get; init; }
 }

@@ -32,6 +32,7 @@ public sealed class BedrockProvider : IStreamProvider
 
     public AssistantMessageStream Stream(Model model, LlmContext context, StreamOptions options)
     {
+        options = StreamOptionHelpers.WithCacheDefaults(options);
         var stream = new AssistantMessageStream();
         _ = Task.Run(async () =>
         {
@@ -53,6 +54,7 @@ public sealed class BedrockProvider : IStreamProvider
 
     public AssistantMessageStream StreamSimple(Model model, LlmContext context, SimpleStreamOptions options)
     {
+        options = SimpleTokenOptions.WithContextLimit(model, context, options);
         var bedrockOptions = new BedrockOptions
         {
             Temperature = options.Temperature,
@@ -62,7 +64,9 @@ public sealed class BedrockProvider : IStreamProvider
             Signal = options.Signal,
             OnResponse = options.OnResponse,
             OnPayload = options.OnPayload,
-            CacheRetention = options.CacheRetention,
+            TransformHeaders = options.TransformHeaders,
+            OnProviderStreamEvent = options.OnProviderStreamEvent,
+            CacheRetention = StreamOptionHelpers.ResolveCacheRetention(options),
             SessionId = options.SessionId,
             Headers = options.Headers,
             Timeout = options.Timeout,
@@ -109,6 +113,7 @@ public sealed class BedrockProvider : IStreamProvider
         ApplyHeaders(request, model.Headers);
         ApplyHeaders(request, options.Headers);
 
+        await StreamOptionHelpers.ApplyHeadersCallbackAsync(options, model, request, protectBedrockAuth: true).ConfigureAwait(false);
         var skipAuth = string.Equals(ProviderEnvironment.GetValue("AWS_BEDROCK_SKIP_AUTH", options.Env), "1", StringComparison.Ordinal);
         if (!skipAuth)
         {
@@ -157,6 +162,16 @@ public sealed class BedrockProvider : IStreamProvider
 
             await foreach (var message in BedrockEventStreamParser.ParseAsync(responseStream, requestTimeout.Token))
             {
+                if (options.OnProviderStreamEvent is not null && message.Payload.Length > 0)
+                {
+                    using var document = JsonDocument.Parse(message.Payload);
+                    var eventName = message.EventType ?? message.MessageType ?? "unknown";
+                    var data = document.RootElement.ValueKind == JsonValueKind.Object && document.RootElement.TryGetProperty(eventName, out _)
+                        ? document.RootElement.Clone()
+                        : JsonSerializer.SerializeToElement(new Dictionary<string, JsonElement> { [eventName] = document.RootElement.Clone() },
+                            BedrockJsonContext.Default.DictionaryStringJsonElement);
+                    await options.OnProviderStreamEvent(data, model).ConfigureAwait(false);
+                }
                 parser.ParseMessage(message);
                 if (parser.Completed)
                 {
@@ -188,6 +203,8 @@ public sealed class BedrockProvider : IStreamProvider
             Signal = options.Signal,
             OnResponse = options.OnResponse,
             OnPayload = options.OnPayload,
+            TransformHeaders = options.TransformHeaders,
+            OnProviderStreamEvent = options.OnProviderStreamEvent,
             CacheRetention = options.CacheRetention,
             SessionId = options.SessionId,
             Headers = options.Headers,
@@ -448,9 +465,11 @@ internal readonly record struct BedrockCredentialResolution(BedrockAwsCredential
 
 [JsonSourceGenerationOptions(DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]
 [JsonSerializable(typeof(Dictionary<string, object>))]
+[JsonSerializable(typeof(Dictionary<string, JsonElement>))]
 [JsonSerializable(typeof(Dictionary<string, string>))]
 [JsonSerializable(typeof(List<object>))]
 [JsonSerializable(typeof(JsonElement))]
+[JsonSerializable(typeof(byte[]))]
 [JsonSerializable(typeof(string))]
 [JsonSerializable(typeof(bool))]
 [JsonSerializable(typeof(object))]

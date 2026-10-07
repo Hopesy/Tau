@@ -3,7 +3,7 @@ using Tau.Tui.Runtime;
 
 namespace Tau.Tui.Tests;
 
-public sealed class InteractiveInputEditorTests
+public sealed partial class InteractiveInputEditorTests
 {
     [Fact]
     public async Task ReadLineAsync_AppendsCharactersAndCommitsOnEnter()

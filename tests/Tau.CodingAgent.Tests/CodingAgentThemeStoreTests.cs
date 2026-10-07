@@ -5,6 +5,32 @@ namespace Tau.CodingAgent.Tests;
 
 public class CodingAgentThemeStoreTests
 {
+    /// <summary>【CodingAgent】【主题来源】最具体的资源元数据优先，来源字段在真实主题文件路径上完整保留。</summary>
+    [Fact]
+    public void SourceInfo_PrefersSpecificMetadataAndPreservesBuiltinIdentity()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "tau-theme-sources-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var file = Path.Combine(directory, "custom.json");
+        File.WriteAllText(file, CreateThemeJson("custom", "#112233"));
+        try
+        {
+            var store = new CodingAgentThemeStore(cwd: directory, userThemesDirectory: Path.Combine(directory, "missing"), explicitPaths: [file])
+            {
+                SourceInfosProvider = () => new Dictionary<string, CodingAgentSourceInfo>
+                {
+                    [directory] = new(directory, "npm:package", "user", "package", directory),
+                    [file] = new(file, "extension:discover", BaseDir: directory)
+                }
+            };
+            var themes = store.LoadStatus().Themes;
+            var custom = Assert.Single(themes, theme => theme.Name == "custom").SourceInfo;
+            Assert.Equal(new(file, "extension:discover", BaseDir: directory), custom);
+            Assert.Equal("builtin:theme:dark", Assert.Single(themes, theme => theme.Name == "dark").SourceInfo.Path);
+        }
+        finally { Directory.Delete(directory, recursive: true); }
+    }
+
     [Fact]
     public void LoadStatus_LoadsBuiltInProjectExplicitAndExtensionThemesWithLastWriterWins()
     {

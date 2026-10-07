@@ -13,6 +13,13 @@ public sealed class SystemConsoleKeyReader : IConsoleKeyReader, IDisposable
 
     private readonly IConsoleKeyReader? _rawReader;
     private readonly IDisposable? _rawMode;
+    private readonly Func<bool> _keyAvailable = static () => Console.KeyAvailable;
+    private readonly Func<ConsoleKeyInfo> _readKey = static () => Console.ReadKey(intercept: true);
+
+    /// <summary>【TUI】【控制台按键】注入非阻塞就绪检查，便于验证 Windows 默认输入取消。</summary>
+    /// <param name="keyAvailable">按键是否就绪。</param><param name="readKey">读取已就绪按键。</param>
+    internal SystemConsoleKeyReader(Func<bool> keyAvailable, Func<ConsoleKeyInfo> readKey)
+    { _keyAvailable = keyAvailable; _readKey = readKey; }
 
     public SystemConsoleKeyReader()
     {
@@ -34,8 +41,19 @@ public sealed class SystemConsoleKeyReader : IConsoleKeyReader, IDisposable
             return _rawReader.ReadKeyAsync(cancellationToken);
         }
 
-        cancellationToken.ThrowIfCancellationRequested();
-        return ValueTask.FromResult(Console.ReadKey(intercept: true));
+        return ReadConsoleKeyAsync(cancellationToken);
+    }
+
+    /// <summary>【TUI】【控制台取消】只在有按键时调用同步读取，等待期间响应外部提示取消。</summary>
+    /// <param name="token">取消信号。</param><returns>一个按键。</returns>
+    private async ValueTask<ConsoleKeyInfo> ReadConsoleKeyAsync(CancellationToken token)
+    {
+        while (true)
+        {
+            token.ThrowIfCancellationRequested();
+            if (_keyAvailable()) { token.ThrowIfCancellationRequested(); return _readKey(); }
+            await Task.Delay(20, token).ConfigureAwait(false);
+        }
     }
 
     public static SystemConsoleKeyReader CreateRaw(
@@ -147,11 +165,16 @@ public sealed class SystemTuiConsoleRawModeController : ITuiConsoleRawModeContro
 
 public sealed class SystemConsoleInteractiveRenderer : IInteractiveRenderer
 {
+    private bool _continueCurrentLine;
     private int _promptLength;
     private int _lastRenderedLength;
     private int _renderStartTop;
     private int _lastRenderedLineCount = 1;
     private int _lastRenderedFinalColumn;
+
+    /// <summary>【TUI】【输入重绘】可选择从已经输出的提示末尾开始首次编辑，避免覆盖宿主提示文本。</summary>
+    /// <param name="continueCurrentLine">首次渲染是否保留当前行已有内容。</param>
+    public SystemConsoleInteractiveRenderer(bool continueCurrentLine = false) => _continueCurrentLine = continueCurrentLine;
 
     public int WindowWidth => SafeGetWindowWidth();
 
@@ -171,6 +194,13 @@ public sealed class SystemConsoleInteractiveRenderer : IInteractiveRenderer
 
             Console.Write(prompt);
             _renderStartTop = SafeGetCursorTop();
+            if (_continueCurrentLine)
+            {
+                try { _promptLength = Console.CursorLeft; }
+                catch { }
+                _lastRenderedFinalColumn = _promptLength;
+                _continueCurrentLine = false;
+            }
         }
         finally
         {

@@ -2,6 +2,7 @@ using Tau.Ai.Auth;
 using Tau.Ai.Auth.OAuth;
 using Tau.Ai.Providers.Anthropic;
 using Tau.Ai.Providers.Bedrock;
+using Tau.Ai.Providers.Cloudflare;
 using Tau.Ai.Providers.Google;
 using Tau.Ai.Providers.Mistral;
 using Tau.Ai.Providers.OpenAi;
@@ -17,7 +18,7 @@ namespace Tau.Ai.Providers;
 /// <summary>
 /// Registers built-in providers with lazy initialization.
 /// </summary>
-public static class BuiltInProviders
+public static partial class BuiltInProviders
 {
     private static readonly HashSet<string> BuiltInApiNames = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -99,70 +100,95 @@ public static class BuiltInProviders
     /// <param name="configurationStore">可选模型配置覆盖。</param>
     /// <param name="authResolver">可选认证解析器。</param>
     /// <param name="httpClient">可选共享 HTTP 客户端。</param>
+    /// <param name="credentialStore">可选统一凭据存储，保留 OAuth 结构化目录字段。</param>
+    /// <param name="modelsStore">可选动态模型目录存储。</param>
     /// <returns>可直接用于模型查找、认证和流式请求的集合。</returns>
     public static Models CreateBuiltInModels(
         ModelConfigurationStore? configurationStore = null,
         ProviderAuthResolver? authResolver = null,
-        HttpClient? httpClient = null)
+        HttpClient? httpClient = null,
+        IProviderCredentialStore? credentialStore = null,
+        Registry.ModelsStore? modelsStore = null)
     {
-        var effectiveAuthResolver = authResolver ?? new ProviderAuthResolver(configurationStore: configurationStore);
+        var effectiveConfiguration = configurationStore ?? new ModelConfigurationStore();
+        var effectiveAuthResolver = authResolver ?? new ProviderAuthResolver(configurationStore: effectiveConfiguration);
         var registry = new ProviderRegistry();
-        RegisterAll(registry, configurationStore, httpClient);
-        var catalog = new ModelCatalog(effectiveAuthResolver, configurationStore);
+        RegisterAll(registry, effectiveConfiguration, httpClient);
+        var catalog = new ModelCatalog(effectiveAuthResolver, effectiveConfiguration);
+        var imageCatalog = new ImageModelCatalog();
+        var images = effectiveConfiguration.ApplyToModels(imageCatalog.GetProviders().SelectMany(imageCatalog.GetModels), ModelTypes.Image);
+        var classifiers = effectiveConfiguration.ApplyToModels(GeneratedBuiltInClassifierModels.Models, ModelTypes.Classifier);
         var providers = new List<ProviderDefinition>();
-        foreach (var providerId in catalog.GetProviders())
+        foreach (var providerId in catalog.GetProviders().Concat(images.Select(model => model.Provider)).Concat(classifiers.Select(model => model.Provider))
+                     .Concat(BuiltInProviderNames.All.Keys).Distinct(StringComparer.OrdinalIgnoreCase))
         {
-            var models = catalog.GetModels(providerId);
-            if (models.Count == 0)
+            var chatModels = catalog.GetModels(providerId);
+            var imageModels = images.Where(model => model.Provider.Equals(providerId, StringComparison.OrdinalIgnoreCase)).ToArray();
+            var classifierModels = classifiers.Where(model => model.Provider.Equals(providerId, StringComparison.OrdinalIgnoreCase)).ToArray();
+            IReadOnlyList<Model> models = [.. chatModels, .. imageModels, .. classifierModels];
+            // 1. 【AI】【内置能力】按所属 provider 选择聊天实现，再独立注册图像和分类协议
+            var implementation = registry.TryGet(providerId) ?? (chatModels.FirstOrDefault() is { } chat ? registry.TryGet(chat.Api) : null);
+            var imageImplementations = new Dictionary<string, IImagesProvider>();
+            if (imageModels.Any(model => model.Api == "openrouter-images")) imageImplementations["openrouter-images"] = new OpenRouterImagesProvider(httpClient);
+            var classifierImplementations = new Dictionary<string, IClassifierProvider>();
+            if (classifierModels.Any(model => model.Api == "typesafe-system-one")) classifierImplementations["typesafe-system-one"] = new TypeSafe.TypeSafeSystemOneProvider(httpClient);
+            if (classifierModels.Any(model => model.Api == "cloudflare-workers-ai-system-one")) classifierImplementations["cloudflare-workers-ai-system-one"] = new CloudflareWorkersAiSystemOneProvider(httpClient);
+            var providerAuth = CreateProviderAuth(providerId, effectiveAuthResolver);
+            if (implementation is null && imageImplementations.Count == 0 && classifierImplementations.Count == 0 && providerAuth is null)
             {
                 continue;
             }
 
-            // provider id 优先于模型 api：同一协议下的不同 provider 需要各自的默认地址、认证和请求变换
-            var implementation = registry.TryGet(providerId) ?? registry.TryGet(models[0].Api);
-            if (implementation is null)
-            {
-                continue;
-            }
-
-            Func<CancellationToken, Task<IReadOnlyList<Model>>>? refreshModels = null;
+            ProviderDefinition? definition = null;
+            Func<RefreshModelsContext, Task>? refreshWithContext = null;
             if (implementation is RadiusProvider radius)
             {
-                refreshModels = cancellationToken => radius.RefreshModelsAsync(
-                    providerId,
-                    effectiveAuthResolver.ResolveApiKey(providerId),
-                    allowNetwork: true,
-                    cancellationToken);
+                refreshWithContext = context => radius.RefreshModelsAsync(providerId, context, refreshed =>
+                {
+                    // 2. 【AI】【目录刷新】动态条目覆盖基线后应用配置，保留提供方的其他能力
+                    definition!.SetModels([.. effectiveConfiguration.ApplyToModels(RadiusProvider.MergeModels(chatModels, refreshed), ModelTypes.Chat)
+                        .Where(model => model.Provider.Equals(providerId, StringComparison.OrdinalIgnoreCase)), .. imageModels, .. classifierModels]);
+                });
             }
 
-            var providerAuth = CreateProviderAuth(providerId, effectiveAuthResolver);
-
-            providers.Add(new ProviderDefinition(
+            definition = new ProviderDefinition(
                 providerId,
                 implementation,
                 models,
-                providerId,
-                refreshModels: refreshModels,
-                auth: providerAuth));
+                BuiltInProviderNames.TryGet(providerId) ?? providerId,
+                auth: providerAuth,
+                images: imageImplementations,
+                classifiers: classifierImplementations,
+                filterModelsWithCredential: providerId == "github-copilot" ? (values, credential) => GitHubCopilotModelAccess.Filter(values,
+                    credential is ProviderCredential.OAuth oauth ? oauth.Value.Properties : null) : null,
+                filterAllModels: providerId == "github-copilot" ? (values, credential) => GitHubCopilotModelAccess.Filter(values,
+                    credential is ProviderCredential.OAuth oauth ? oauth.Value.Properties : null) : null,
+                refreshWithContext: refreshWithContext);
+            providers.Add(definition);
         }
 
-        return new Models(providers, effectiveAuthResolver);
+        return new Models(providers, effectiveAuthResolver, credentialStore, effectiveConfiguration, modelsStore);
     }
 
     /// <summary>
-    /// 为没有独立 OAuth 流程的内置 provider 创建环境/API-key 认证定义。
+    /// 【AI】【内置认证】创建提供方支持的密钥、云凭据及 OAuth 定义。
     /// </summary>
     /// <param name="providerId">provider id。</param>
     /// <param name="authResolver">兼容 auth.json、models.json 和环境变量的旧解析器。</param>
-    /// <returns>provider 自有认证定义；需要保留专用 OAuth 行为时返回 null。</returns>
+    /// <returns>提供方支持的认证方式；专用 OAuth 实现不可用时返回空值。</returns>
     private static ProviderAuthDefinition? CreateProviderAuth(string providerId, ProviderAuthResolver authResolver)
     {
+        if (providerId == "openai-codex") return CreateOAuthAuth(providerId, authResolver) is { } codex ? new(oauth: codex) : null;
+        if (providerId.Equals("cloudflare-workers-ai", StringComparison.OrdinalIgnoreCase)) return CloudflareWorkersAiAuth.Create(authResolver);
         var displayName = providerId switch
         {
-            "amazon-bedrock" => "Amazon Bedrock credentials",
+            "amazon-bedrock" => "AWS credentials or bearer token",
             "google-vertex" => "Google Cloud credentials",
+            "cloudflare-ai-gateway" => "Cloudflare API key",
+            "github-copilot" => "GitHub Copilot token",
             "radius" => "Radius API key",
-            _ => $"{providerId} API key"
+            "meta" => "Meta Model API key",
+            _ => $"{BuiltInProviderNames.TryGet(providerId) ?? providerId} API key"
         };
 
         var apiKey = new ApiKeyAuthDefinition(
@@ -172,7 +198,7 @@ public static class BuiltInProviders
                 var key = context.Credential?.Key;
                 if (string.IsNullOrWhiteSpace(key))
                 {
-                    key = authResolver.ResolveApiKey(providerId, env: context.Environment);
+                    key = authResolver.ResolveApiKey(providerId, env: ProviderEnvironment.Merge(context.Credential?.Env, context.Environment));
                 }
 
                 if (string.IsNullOrWhiteSpace(key))
@@ -206,7 +232,7 @@ public static class BuiltInProviders
                 var key = context.Credential?.Key;
                 if (string.IsNullOrWhiteSpace(key))
                 {
-                    key = authResolver.ResolveApiKey(providerId, env: context.Environment);
+                    key = authResolver.ResolveApiKey(providerId, env: ProviderEnvironment.Merge(context.Credential?.Env, context.Environment));
                 }
 
                 return Task.FromResult<ProviderAuthStatus?>(new ProviderAuthStatus(
@@ -217,7 +243,13 @@ public static class BuiltInProviders
                     CanLogin: true,
                     string.IsNullOrWhiteSpace(key) ? "No credentials found." : "Credentials are available."));
             },
-            login: async interaction => new ApiKeyCredential(await interaction.PromptAsync($"Enter {displayName}").ConfigureAwait(false)));
+            login: providerId switch
+            {
+                "amazon-bedrock" => LoginBedrockAsync,
+                "google-vertex" => LoginVertexAsync,
+                "cloudflare-ai-gateway" => LoginCloudflareGatewayAsync,
+                _ => interaction => LoginWithApiKeyAsync(interaction, displayName)
+            });
 
         return new ProviderAuthDefinition(apiKey: apiKey, oauth: CreateOAuthAuth(providerId, authResolver));
     }
@@ -234,66 +266,93 @@ public static class BuiltInProviders
             return null;
         }
 
+        return CreateOAuthAuth(oauthProvider);
+    }
+
+    /// <summary>【AI】【OAuth 适配】将指定实现转换为保留原生元数据和登录选项的提供方认证定义。</summary>
+    /// <param name="oauthProvider">指定网关或内置 OAuth 实现。</param><returns>统一认证定义。</returns>
+    private static OAuthAuthDefinition CreateOAuthAuth(IOAuthProvider oauthProvider)
+    {
         return new OAuthAuthDefinition(
             oauthProvider.Name,
             login: async interaction =>
             {
                 var callbacks = new AuthInteractionCallbacks(interaction);
                 var credentials = await oauthProvider.LoginAsync(callbacks, interaction.CancellationToken).ConfigureAwait(false);
-                return new ProviderOAuthCredential(credentials.Refresh, credentials.Access, credentials.ExpiresAt, credentials.Metadata);
+                return ProviderOAuthCredential.FromOAuth(credentials);
             },
             refresh: async (credential, cancellationToken) =>
             {
-                var credentials = new OAuthCredentials
-                {
-                    Refresh = credential.Refresh,
-                    Access = credential.Access,
-                    ExpiresAt = credential.ExpiresAt,
-                    Metadata = credential.Metadata ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-                };
+                var credentials = credential.ToOAuth();
                 var refreshed = await oauthProvider.RefreshTokenAsync(credentials, cancellationToken).ConfigureAwait(false);
-                return new ProviderOAuthCredential(refreshed.Refresh, refreshed.Access, refreshed.ExpiresAt, refreshed.Metadata);
+                return ProviderOAuthCredential.FromOAuth(refreshed);
             },
             toAuth: credential =>
             {
-                var credentials = new OAuthCredentials
-                {
-                    Refresh = credential.Refresh,
-                    Access = credential.Access,
-                    ExpiresAt = credential.ExpiresAt,
-                    Metadata = credential.Metadata ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-                };
-                var token = oauthProvider.GetApiKey(credentials);
-                if (providerId is "anthropic" or "github-copilot")
-                {
-                    return Task.FromResult(new ProviderAuthResult(
-                        EnvironmentApiKeyResolver.AuthenticatedMarker,
-                        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-                        {
-                            ["Authorization"] = $"Bearer {token}"
-                        },
-                        Source: "OAuth"));
-                }
-
-                return Task.FromResult(new ProviderAuthResult(token, Source: "OAuth"));
-            });
+                var auth = oauthProvider.ResolveAuth(credential.ToOAuth());
+                return Task.FromResult(auth with { Source = auth.Source ?? "OAuth" });
+            },
+            loginWithOptions: async (interaction, options) => ProviderOAuthCredential.FromOAuth(
+                await oauthProvider.LoginAsync(new AuthInteractionCallbacks(interaction), options, interaction.CancellationToken).ConfigureAwait(false)))
+            { IsSubscription = oauthProvider.IsSubscription, LoginLabel = oauthProvider.LoginLabel };
     }
 
     /// <summary>把 Models 交互回调桥接到旧 OAuth 登录回调接口。</summary>
     private sealed class AuthInteractionCallbacks(AuthInteraction interaction) : IOAuthLoginCallbacks
     {
-        public void OnAuth(string url, string? instructions = null) => interaction.Notify(
-            string.IsNullOrWhiteSpace(instructions) ? url : $"{url}\n{instructions}");
+        /// <summary>【AI】【OAuth 交互】保留授权链接通知类型，便于宿主打开浏览器。</summary>
+        /// <param name="url">地址。</param><param name="instructions">说明。</param>
+        public void OnAuth(string url, string? instructions = null) => interaction.Notify(new ProviderAuthNotification("auth_url", Url: url, Instructions: instructions));
 
+        /// <summary>【AI】【OAuth 交互】读取具有占位符与空值策略的输入。</summary>
+        /// <param name="message">提示。</param><param name="placeholder">占位符。</param><param name="allowEmpty">允许空值。</param><returns>输入。</returns>
         public Task<string> OnPromptAsync(string message, string? placeholder = null, bool allowEmpty = false) =>
-            interaction.PromptAsync(string.IsNullOrWhiteSpace(placeholder) ? message : $"{message} ({placeholder})");
+            OnPromptAsync(message, placeholder, allowEmpty, interaction.CancellationToken);
 
-        public void OnProgress(string message) => interaction.Notify(message);
+        /// <summary>【AI】【OAuth 交互】传递单次输入取消信号，使回调成功后能够关闭手动输入。</summary>
+        /// <param name="message">提示。</param><param name="placeholder">占位符。</param><param name="allowEmpty">允许空值。</param>
+        /// <param name="token">输入信号。</param><returns>输入。</returns>
+        public Task<string> OnPromptAsync(string message, string? placeholder, bool allowEmpty, CancellationToken token) =>
+            interaction.PromptAsync(new ProviderAuthPrompt("text", message, placeholder, Signal: token) { AllowEmpty = allowEmpty });
+
+        /// <summary>【AI】【OAuth 交互】使用宿主秘密输入通道。</summary>
+        /// <param name="message">提示。</param><param name="placeholder">占位符。</param><param name="token">取消信号。</param><returns>输入。</returns>
+        public Task<string> OnSecretPromptAsync(string message, string? placeholder, CancellationToken token) =>
+            interaction.PromptAsync(new ProviderAuthPrompt("secret", message, placeholder, Signal: token));
+
+        /// <summary>【AI】【OAuth 交互】保留选择项和设备授权通知。</summary>
+        /// <param name="message">提示。</param><param name="options">候选项。</param><returns>选中标识。</returns>
+        public Task<string?> OnSelectAsync(string message, IReadOnlyList<OAuthSelectOption> options) => OnSelectAsync(message, options, interaction.CancellationToken);
+
+        /// <summary>【AI】【选择提示取消】将选择提示的独立信号送到 SDK 宿主。</summary>
+        /// <param name="message">提示。</param><param name="options">候选项。</param><param name="token">提示信号。</param><returns>选中 ID。</returns>
+        public async Task<string?> OnSelectAsync(string message, IReadOnlyList<OAuthSelectOption> options, CancellationToken token) =>
+            await interaction.PromptAsync(new ProviderAuthPrompt("select", message, Options: options.Select(option => new ProviderAuthSelectOption(option.Id, option.Label, option.Description)).ToArray(), Signal: token)).WaitAsync(token).ConfigureAwait(false);
+
+        /// <summary>【AI】【OAuth 说明】保留 info 类型与可交互链接集合。</summary><param name="message">说明。</param><param name="links">链接集合。</param>
+        public void OnInfo(string message, IReadOnlyList<ProviderAuthInfoLink>? links = null) => interaction.Notify(new ProviderAuthNotification("info", message, Links: links));
+
+        /// <summary>【AI】【OAuth 交互】发布设备验证码与轮询元数据。</summary>
+        /// <param name="userCode">验证码。</param><param name="verificationUri">授权地址。</param><param name="intervalSeconds">轮询间隔。</param><param name="expiresInSeconds">期限。</param>
+        public void OnDeviceCode(string userCode, string verificationUri, int? intervalSeconds = null, int? expiresInSeconds = null) =>
+            interaction.Notify(new ProviderAuthNotification("device_code", UserCode: userCode, VerificationUri: verificationUri, IntervalSeconds: intervalSeconds, ExpiresInSeconds: expiresInSeconds));
+
+        /// <summary>【AI】【OAuth 交互】将原始小数和大数秒值传给类型化 SDK 宿主。</summary><param name="notification">完整设备码通知。</param>
+        public void OnDeviceCode(OAuthDeviceCodeNotification notification) => interaction.Notify(new ProviderAuthNotification("device_code",
+            UserCode: notification.UserCode, VerificationUri: notification.VerificationUri, IntervalSeconds: notification.IntervalSeconds, ExpiresInSeconds: notification.ExpiresInSeconds));
+
+        /// <summary>【AI】【OAuth 交互】发布认证进度。</summary><param name="message">消息。</param>
+        public void OnProgress(string message) => interaction.Notify(new ProviderAuthNotification("progress", message));
 
         /// <summary>通过 Models 交互回调读取手工粘贴的 OAuth 授权码。</summary>
         /// <returns>授权码或完整重定向 URL。</returns>
         public Task<string>? OnManualCodeInputAsync() =>
-            interaction.PromptAsync("Paste the authorization code or full redirect URL:");
+            interaction.PromptAsync(new ProviderAuthPrompt("manual_code", "Paste the authorization code or full redirect URL:", Signal: interaction.CancellationToken));
+
+        /// <summary>【AI】【OAuth 交互】保留可取消手动授权码提示的类型与占位符。</summary>
+        /// <param name="message">提示。</param><param name="placeholder">占位符。</param><param name="token">提示信号。</param><returns>输入。</returns>
+        public Task<string> OnManualCodeInputAsync(string message, string? placeholder, CancellationToken token) =>
+            interaction.PromptAsync(new ProviderAuthPrompt("manual_code", message, placeholder, Signal: token));
     }
 
     public static void RegisterOpenRouterImages(ImagesProviderRegistry registry, HttpClient? httpClient = null)
@@ -365,6 +424,7 @@ public static class BuiltInProviders
     private sealed class ProviderAlias(string api, IStreamProvider inner) : IStreamProvider
     {
         public string Api => api;
+        public bool SupportsTranscriptContext => inner.SupportsTranscriptContext;
         public AssistantMessageStream Stream(Model model, LlmContext context, StreamOptions options) => inner.Stream(model with { Api = inner.Api }, context, options);
         public AssistantMessageStream StreamSimple(Model model, LlmContext context, SimpleStreamOptions options) => inner.StreamSimple(model with { Api = inner.Api }, context, options);
         public AssistantMessageStream FetchDeferred(Model model, DeferredHandle handle, DeferredFetchOptions options) => inner.FetchDeferred(model with { Api = inner.Api }, handle with { Api = inner.Api }, options);
@@ -506,11 +566,31 @@ public static class BuiltInProviders
 
         public string Api => _providerId;
 
-        public AssistantMessageStream Stream(Model model, LlmContext context, StreamOptions options) =>
-            Resolve(model, options).Stream(PrepareModel(model, options), context, PrepareOptions(options));
+        public bool SupportsTranscriptContext => true;
 
-        public AssistantMessageStream StreamSimple(Model model, LlmContext context, SimpleStreamOptions options) =>
-            Resolve(model, options).StreamSimple(PrepareModel(model, options), context, PrepareSimpleOptions(options));
+        /// <summary>【AI】【协议路由】在选定实际协议后按其能力转换上下文。</summary>
+        /// <param name="model">请求模型。</param>
+        /// <param name="context">保留声明的上下文。</param>
+        /// <param name="options">流选项。</param>
+        /// <returns>目标协议事件流。</returns>
+        public AssistantMessageStream Stream(Model model, LlmContext context, StreamOptions options)
+        {
+            var provider = Resolve(model, options);
+            return provider.Stream(PrepareModel(model, options), provider.SupportsTranscriptContext
+                ? context : Transcript.ResolveContext(context), PrepareOptions(options));
+        }
+
+        /// <summary>【AI】【协议路由】为简化入口保留目标协议可处理的系统声明。</summary>
+        /// <param name="model">请求模型。</param>
+        /// <param name="context">保留声明的上下文。</param>
+        /// <param name="options">简化选项。</param>
+        /// <returns>目标协议事件流。</returns>
+        public AssistantMessageStream StreamSimple(Model model, LlmContext context, SimpleStreamOptions options)
+        {
+            var provider = Resolve(model, options);
+            return provider.StreamSimple(PrepareModel(model, options), provider.SupportsTranscriptContext
+                ? context : Transcript.ResolveContext(context), PrepareSimpleOptions(options));
+        }
 
         public AssistantMessageStream FetchDeferred(Model model, DeferredHandle handle, DeferredFetchOptions options) =>
             Resolve(model, options).FetchDeferred(PrepareModel(model, options), PrepareHandle(model, handle), options);

@@ -288,13 +288,17 @@ public sealed class ImagesModels
         }
     }
 
+    /// <summary>【AI】【图像配置】合并旧图像入口配置，并兼容未声明 type 的历史模型条目。</summary>
+    /// <param name="model">目标图像模型。</param>
+    /// <param name="options">显式请求选项。</param>
+    /// <returns>包含认证、环境和默认请求参数的选项。</returns>
     private ImagesOptions ResolveOptions(ImagesModel model, ImagesOptions options)
     {
-        var requestConfig = _configurationStore.ResolveRequestConfiguration(model, options.Env);
+        var requestConfig = _configurationStore.ResolveRequestConfiguration(model, options.Env, allowLegacyUntypedModels: true);
         var env = ProviderEnvironment.Merge(requestConfig.Options.Env, options.Env);
         if (env is not null)
         {
-            requestConfig = _configurationStore.ResolveRequestConfiguration(model, env);
+            requestConfig = _configurationStore.ResolveRequestConfiguration(model, env, allowLegacyUntypedModels: true);
             env = ProviderEnvironment.Merge(requestConfig.Options.Env, options.Env);
         }
 

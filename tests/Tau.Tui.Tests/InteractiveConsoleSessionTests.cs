@@ -6,6 +6,43 @@ namespace Tau.Tui.Tests;
 
 public class InteractiveConsoleSessionTests
 {
+    /// <summary>【TUI】【条目渲染】同一自定义条目重绘替换正文，返回空组件时可以删除且不影响普通消息。</summary>
+    [Fact]
+    public void KeyedCustomEntriesUpdateAndCanBeHidden()
+    {
+        var session = new InteractiveConsoleSession(new FakeTerminal());
+        session.WriteCustomMessage("unkeyed message");
+        session.WriteCustomMessage("collapsed", "entry:one");
+        session.WriteCustomMessage("expanded", "entry:one");
+        Assert.Equal(2, session.Transcript.Count);
+        Assert.Equal("expanded", Assert.Single(session.Transcript, entry => entry.Key == "entry:one").Text);
+        session.RemoveTranscriptEntry(TranscriptEntryKind.Custom, "entry:one");
+        Assert.Equal("unkeyed message", Assert.Single(session.Transcript).Text);
+    }
+    /// <summary>【TUI】【显示重置】清除旧流式行及键控工具，保留草稿并允许新会话重用工具标识。</summary>
+    /// <param name="customClear">是否使用宿主清屏回调。</param>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ResetTranscriptClearsStreamingAndKeyedEntriesButPreservesDraft(bool customClear)
+    {
+        var terminal = new FakeTerminal();
+        var cleared = 0;
+        var session = new InteractiveConsoleSession(terminal, clearScreenAction: customClear ? () => cleared++ : null);
+        session.SetDraft("unfinished input");
+        session.WriteToolComponent(new TuiBashExecution("old command"), key: "shared");
+        session.WriteAssistantText("old partial answer");
+        session.ResetTranscript();
+        Assert.Empty(session.Transcript);
+        Assert.Empty(session.SnapshotMessages());
+        Assert.Equal("unfinished input", session.GetDraft());
+        Assert.Equal(customClear ? 1 : 0, cleared);
+        session.WriteToolComponent(new TuiBashExecution("new command"), key: "shared");
+        session.WriteAssistantText("new answer");
+        session.CompleteAssistantTurn();
+        Assert.Equal(2, session.Transcript.Count);
+        Assert.DoesNotContain(session.Transcript, entry => entry.Text.Contains("old", StringComparison.Ordinal));
+    }
     private const string PromptZoneStart = "\u001b]133;A\u0007";
     private const string PromptZoneEnd = "\u001b]133;B\u0007";
     private const string PromptZoneFinal = "\u001b]133;C\u0007";

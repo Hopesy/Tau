@@ -71,6 +71,13 @@ public static class ContextOverflowDetector
         return MatchesAny(errorMessage, OverflowPatterns);
     }
 
+    /// <summary>【Ai】【截断恢复】判断输出是否在达到原始期望上限前异常结束。</summary>
+    /// <param name="message">提供方助手响应。</param>
+    /// <param name="desiredMaxOutput">上下文钳制之前的原始最大输出 token 数。</param>
+    /// <returns>是否允许一次压缩重试。</returns>
+    public static bool IsRecoverableLength(AssistantMessage message, int desiredMaxOutput) =>
+        message.StopReason == StopReason.MaxTokens && desiredMaxOutput > 0 && message.Usage is { } usage && usage.OutputTokens < desiredMaxOutput;
+
     public static IReadOnlyList<string> GetOverflowPatternSources() => [.. OverflowPatterns];
 
     private static bool MatchesAny(string value, IReadOnlyList<string> patterns) =>

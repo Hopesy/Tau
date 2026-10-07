@@ -8,6 +8,105 @@ namespace Tau.AgentCore.Tests;
 
 public sealed class AgentRuntimeContractTests
 {
+    /// <summary>【AgentCore】【工具进度】顺序及并行模式均在工具等待期间对外发布进度。</summary>
+    /// <param name="mode">工具执行模式。</param>
+    /// <returns>异步测试任务。</returns>
+    [Theory]
+    [InlineData(ToolExecutionMode.Sequential)]
+    [InlineData(ToolExecutionMode.Parallel)]
+    public async Task RunAsync_StreamsUpdatesBeforeToolCompletes(ToolExecutionMode mode)
+    {
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var tool = new RecordingTool("progress", """{"type":"object"}""")
+        {
+            ExecuteAsyncOverride = async (_, _, ct, onUpdate) =>
+            {
+                await onUpdate!(new ToolUpdate("waiting"));
+                await release.Task.WaitAsync(ct);
+                return new ToolResult([new TextContent("released")]);
+            }
+        };
+        var runtime = new AgentRuntime();
+        var config = CreateConfig(new ScriptedProvider(
+            new AssistantMessage([new ToolCallContent("call", "progress", "{}")]),
+            new AssistantMessage([new TextContent("done")])), [tool]) with { DefaultExecutionMode = mode };
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var observed = new List<AgentEvent>();
+        await foreach (var evt in runtime.RunAsync(config, timeout.Token))
+        {
+            observed.Add(evt);
+            if (evt is ToolExecutionUpdateEvent)
+            {
+                Assert.False(timeout.IsCancellationRequested);
+                Assert.DoesNotContain(observed, candidate => candidate is ToolExecutionEndEvent);
+                release.TrySetResult();
+            }
+        }
+        Assert.Single(observed.OfType<ToolExecutionUpdateEvent>());
+        Assert.False(Assert.Single(observed.OfType<ToolExecutionEndEvent>()).Result.IsError);
+    }
+
+    /// <summary>【AgentCore】【截断响应】验证输出受限时拒绝整个工具批次并允许模型重新调用</summary>
+    /// <param name="mode">默认工具执行模式</param>
+    /// <returns>异步验证任务</returns>
+    [Theory]
+    [InlineData(ToolExecutionMode.Sequential)]
+    [InlineData(ToolExecutionMode.Parallel)]
+    public async Task RunAsync_TruncatedResponseRejectsToolsBeforePreparation(ToolExecutionMode mode)
+    {
+        var tool = new RecordingTool("echo", """{"type":"object"}""");
+        var runtime = new AgentRuntime();
+        runtime.AddMessage(new UserMessage("use tool"));
+        var config = CreateConfig(new ScriptedProvider(
+            new AssistantMessage([
+                new ToolCallContent("cut-1", "echo", "{}"),
+                new ToolCallContent("cut-2", "echo", "{\"unfinished\":")
+            ]) { StopReason = StopReason.MaxTokens },
+            new AssistantMessage([new TextContent("recovered")]) { StopReason = StopReason.EndTurn }),
+            [tool], [new ThrowingInterceptor(before: true)]) with { DefaultExecutionMode = mode };
+
+        var events = await CollectAsync(runtime.RunAsync(config));
+
+        Assert.False(tool.Executed);
+        Assert.Equal(2, events.OfType<ToolExecutionStartEvent>().Count());
+        Assert.Equal(2, events.OfType<ToolExecutionEndEvent>().Count());
+        var rejected = runtime.State.Messages.OfType<ToolResultMessage>().ToArray();
+        Assert.Equal(["cut-1", "cut-2"], rejected.Select(message => message.ToolCallId));
+        Assert.All(rejected, message =>
+        {
+            Assert.True(message.IsError);
+            Assert.Contains("output token limit", ReadText(message));
+            Assert.Contains("Re-issue the tool call", ReadText(message));
+        });
+        Assert.Equal("recovered", ReadText(Assert.IsType<AssistantMessage>(runtime.State.Messages.Last())));
+        Assert.Empty(runtime.State.PendingToolCalls);
+    }
+
+    /// <summary>【AgentCore】【工具结果】验证工具详情和身份信息保留到消息历史及回合事件</summary>
+    /// <returns>异步验证任务</returns>
+    [Fact]
+    public async Task RunAsync_PreservesToolResultMetadata()
+    {
+        var details = new { Marker = "preserve-me" };
+        var tool = new RecordingTool("echo", """{"type":"object"}""")
+        {
+            ExecuteAsyncOverride = (_, _, _, _) => Task.FromResult(new ToolResult([new TextContent("ok")], Details: details))
+        };
+        var runtime = new AgentRuntime();
+        var before = DateTimeOffset.UtcNow;
+        var events = await CollectAsync(runtime.RunAsync(CreateConfig(new ScriptedProvider(
+            new AssistantMessage([new ToolCallContent("tool-1", "echo", "{}")]),
+            new AssistantMessage([new TextContent("done")])), [tool])));
+
+        var message = Assert.Single(runtime.State.Messages.OfType<ToolResultMessage>());
+        Assert.Equal("echo", message.ToolName);
+        Assert.Same(details, message.Details);
+        Assert.NotNull(message.Timestamp);
+        Assert.InRange(message.Timestamp.Value, before, DateTimeOffset.UtcNow);
+        Assert.Same(message, Assert.Single(events.OfType<TurnEndEvent>().First().ToolResults));
+        Assert.Contains(events.OfType<MessageEndEvent>(), evt => ReferenceEquals(evt.Message, message));
+    }
+
     [Fact]
     public async Task RunAsync_InvalidSchemaProducesToolResultAndCarriesTurnAndEndPayloads()
     {
@@ -49,7 +148,7 @@ public sealed class AgentRuntimeContractTests
         Assert.Null(end.ErrorMessage);
         Assert.Collection(
             end.Messages,
-            message => Assert.Equal("use tool", ReadText(Assert.IsType<UserMessage>(message))),
+            message => Assert.IsType<SystemMessage>(message),
             message => Assert.IsType<AssistantMessage>(message),
             message => Assert.True(Assert.IsType<ToolResultMessage>(message).IsError),
             message => Assert.Equal("done", ReadText(Assert.IsType<AssistantMessage>(message))));
@@ -69,10 +168,9 @@ public sealed class AgentRuntimeContractTests
 
         var end = Assert.IsType<AgentEndEvent>(events.Last());
         Assert.Same(end.Messages[0], result[0]);
-        Assert.Same(end.Messages[1], result[1]);
+        Assert.Single(result);
         Assert.Collection(
             result,
-            message => Assert.Equal("hello", ReadText(Assert.IsType<UserMessage>(message))),
             message => Assert.Equal("done", ReadText(Assert.IsType<AssistantMessage>(message))));
     }
 
@@ -165,7 +263,7 @@ public sealed class AgentRuntimeContractTests
 
         var agentEnd = Assert.IsType<AgentEndEvent>(events.Last());
         Assert.Same(agentEnd.Messages[0], result[0]);
-        Assert.Same(agentEnd.Messages[1], result[1]);
+        Assert.Single(result);
         var assistant = Assert.IsType<AssistantMessage>(result.Last());
         Assert.Equal("Operation canceled.", assistant.ErrorMessage);
         Assert.Equal(StopReason.Aborted, assistant.StopReason);
@@ -374,7 +472,7 @@ public sealed class AgentRuntimeContractTests
         var end = Assert.IsType<AgentEndEvent>(events.Last());
         Assert.Collection(
             end.Messages,
-            message => Assert.Equal("use tool", ReadText(Assert.IsType<UserMessage>(message))),
+            message => Assert.IsType<SystemMessage>(message),
             message => Assert.IsType<AssistantMessage>(message),
             message => Assert.Equal("terminal tool result", ReadText(Assert.IsType<ToolResultMessage>(message))));
         var toolEnd = Assert.Single(events.OfType<ToolExecutionEndEvent>());
@@ -409,7 +507,6 @@ public sealed class AgentRuntimeContractTests
         var end = Assert.IsType<AgentEndEvent>(events.Last());
         Assert.Collection(
             end.Messages,
-            message => Assert.Equal("hello", ReadText(Assert.IsType<UserMessage>(message))),
             message => Assert.Equal("done", ReadText(Assert.IsType<AssistantMessage>(message))));
     }
 

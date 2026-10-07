@@ -211,6 +211,44 @@ public sealed class AgentCompactionSummariesTests
         Assert.Empty(provider.Calls);
     }
 
+    /// <summary>摘要被截断或调用工具时拒绝生成可保存的检查点。</summary>
+    /// <param name="toolCall">是否返回工具调用。</param>
+    /// <returns>异步测试任务。</returns>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task GenerateSummary_RejectsIncompleteOrToolResponses(bool toolCall)
+    {
+        var provider = new RecordingSummaryProvider((_, _) => new AssistantMessage(toolCall
+            ? [new ToolCallContent("call", "read", "{}")] : [new TextContent("partial")])
+            { StopReason = toolCall ? StopReason.ToolUse : StopReason.MaxTokens });
+        var error = await Assert.ThrowsAsync<AgentSummaryException>(() => AgentCompactionSummaries.GenerateSummaryAsync(
+            [new UserMessage("history")], CreateOptions(provider)));
+        Assert.Contains(toolCall ? "attempted to call a tool" : "summary is incomplete", error.Message);
+    }
+
+    /// <summary>拆分回合没有新增历史时保留旧摘要，同时禁止摘要写入缓存并保留路由标识。</summary>
+    /// <returns>异步测试任务。</returns>
+    [Fact]
+    public async Task Compact_KeepsPreviousHistoryAndDisablesCacheWrites()
+    {
+        var provider = new RecordingSummaryProvider((_, options) =>
+        {
+            Assert.Equal(CacheRetention.None, options.CacheRetention);
+            Assert.Equal("summary-session", options.SessionId);
+            return new AssistantMessage([new TextContent("turn summary")]) { StopReason = StopReason.EndTurn };
+        });
+        var preparation = new AgentCompactionPreparation("kept", [], [new UserMessage("turn input")], true, 100,
+            "previous summary", AgentCompaction.CreateFileOperations(), new());
+        var result = await AgentCompactionSummaries.CompactAsync(preparation, CreateOptions(provider) with
+        {
+            StreamOptions = new() { CacheRetention = CacheRetention.Long, SessionId = "summary-session" }
+        });
+        Assert.StartsWith("previous summary\n\n---", result.Summary);
+        Assert.Contains("turn summary", result.Summary);
+        Assert.Single(provider.Calls);
+    }
+
     private static Model CreateModel(string api) =>
         new()
         {

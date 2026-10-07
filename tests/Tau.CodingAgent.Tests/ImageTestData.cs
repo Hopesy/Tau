@@ -82,13 +82,14 @@ internal static class ImageTestData
         return webp.ToArray();
     }
 
+    /// <summary>【CodingAgent】【方向夹具】向真实 JPEG 插入 EXIF 方向，保留完整可解码像素。</summary>
+    /// <param name="width">宽度。</param><param name="height">高度。</param><param name="orientation">EXIF 方向。</param><returns>完整 JPEG 字节。</returns>
     public static byte[] CreateJpegWithExifOrientation(int width, int height, ushort orientation)
     {
         using var jpeg = new MemoryStream();
         jpeg.Write([0xff, 0xd8]);
         WriteJpegSegment(jpeg, 0xe1, CreateExifOrientationData(orientation));
-        WriteJpegSegment(jpeg, 0xc0, CreateSof0Data(width, height));
-        jpeg.Write([0xff, 0xd9]);
+        jpeg.Write(CreateJpeg(width, height).AsSpan(2));
         return jpeg.ToArray();
     }
 

@@ -5,6 +5,18 @@ namespace Tau.CodingAgent.Tests;
 
 public class CodingAgentThinkingSelectorTests
 {
+    /// <summary>【CodingAgent】【推理入口】命令行、模型范围后缀和选择器均保留 max 等级。</summary>
+    [Fact]
+    public void MaximumThinkingLevelSurvivesInputAndSelection()
+    {
+        Assert.Equal("max", CodingAgentCliArguments.Parse(["--thinking", "max"]).Thinking);
+        Assert.True(CodingAgentScopedModelPatterns.TryNormalizeThinkingLevel("max", out var level));
+        Assert.Equal("max", level);
+        var selector = CodingAgentThinkingSelector.CreateSelectList(new(ThinkingLevel.Max, ["off", "high", "max"]));
+        Assert.Equal("max", selector.SelectedItem?.Value);
+        Assert.Equal("Maximum reasoning", selector.SelectedItem?.Description);
+    }
+
     [Fact]
     public void CreateSelectList_UsesAvailableLevelsDescriptionsAndCurrentSelection()
     {
@@ -46,7 +58,7 @@ public class CodingAgentThinkingSelectorTests
             item =>
             {
                 Assert.Equal("xhigh", item.Value);
-                Assert.Equal("Maximum reasoning (~32k tokens)", item.Description);
+                Assert.Equal("Extra-high reasoning (~32k tokens)", item.Description);
             });
     }
 

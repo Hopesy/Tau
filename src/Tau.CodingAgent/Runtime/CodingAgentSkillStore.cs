@@ -9,7 +9,10 @@ public sealed record CodingAgentSkill(
     string FilePath,
     string BaseDirectory,
     string Scope,
-    bool DisableModelInvocation);
+    bool DisableModelInvocation)
+{
+    public CodingAgentSourceInfo SourceInfo { get; init; } = CodingAgentSourceInfo.ForResource(FilePath, Scope, BaseDirectory);
+}
 
 public sealed class CodingAgentSkillStore
 {
@@ -20,13 +23,22 @@ public sealed class CodingAgentSkillStore
     private readonly IReadOnlyList<string> _explicitPaths;
     private readonly Func<IReadOnlyList<string>>? _additionalPathsProvider;
     private readonly bool _includeDefaults;
+    private readonly string _homeDirectory;
+    public bool IsProjectTrusted { get; set; } = true;
+    public Func<IReadOnlyDictionary<string, CodingAgentSourceInfo>>? SourceInfosProvider { get; set; }
+    internal Func<Func<string, string, bool>>? AutoResourceFilterProvider { get; set; }
 
+    /// <summary>【CodingAgent】【技能资源】绑定自动发现目录、显式路径和可重载的附加资源。</summary>
+    /// <param name="cwd">项目目录。</param><param name="userSkillsDirectory">全局技能目录。</param>
+    /// <param name="explicitPaths">显式加载路径。</param><param name="additionalPathsProvider">包或扩展提供的路径。</param>
+    /// <param name="includeDefaults">是否自动发现默认技能。</param><param name="homeDirectory">共享用户技能的主目录。</param>
     public CodingAgentSkillStore(
         string? cwd = null,
         string? userSkillsDirectory = null,
         IReadOnlyList<string>? explicitPaths = null,
         Func<IReadOnlyList<string>>? additionalPathsProvider = null,
-        bool includeDefaults = true)
+        bool includeDefaults = true,
+        string? homeDirectory = null)
     {
         _cwd = string.IsNullOrWhiteSpace(cwd) ? Environment.CurrentDirectory : Path.GetFullPath(cwd);
         _userSkillsDirectory = string.IsNullOrWhiteSpace(userSkillsDirectory)
@@ -35,15 +47,30 @@ public sealed class CodingAgentSkillStore
         _explicitPaths = explicitPaths ?? GetConfiguredSkillPaths();
         _additionalPathsProvider = additionalPathsProvider;
         _includeDefaults = includeDefaults;
+        _homeDirectory = Path.GetFullPath(homeDirectory ?? Environment.GetEnvironmentVariable("HOME") ?? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
     }
 
+    /// <summary>【CodingAgent】【技能加载】发现并去重技能，同时应用包、扩展或显式路径的来源元数据。</summary>
+    /// <returns>按名称排序的当前技能。</returns>
     public IReadOnlyList<CodingAgentSkill> Load()
     {
         var skills = new List<CodingAgentSkill>();
         if (_includeDefaults)
         {
+            if (IsProjectTrusted)
+            {
+                skills.AddRange(LoadFromDirectory(Path.Combine(_cwd, ".tau", "skills"), "project"));
+                // 1. 【CodingAgent】【共享技能】从当前目录向上发现 .agents，遇到仓库根后停止，最近目录优先
+                for (var directory = new DirectoryInfo(_cwd); directory is not null; directory = directory.Parent)
+                {
+                    if (!directory.FullName.Equals(_homeDirectory, OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
+                        skills.AddRange(LoadFromDirectory(Path.Combine(directory.FullName, ".agents", "skills"), "project"));
+                    var git = Path.Combine(directory.FullName, ".git");
+                    if (Directory.Exists(git) || File.Exists(git)) break;
+                }
+            }
             skills.AddRange(LoadFromDirectory(_userSkillsDirectory, "user"));
-            skills.AddRange(LoadFromDirectory(Path.Combine(_cwd, ".tau", "skills"), "project"));
+            skills.AddRange(LoadFromDirectory(Path.Combine(_homeDirectory, ".agents", "skills"), "user"));
         }
 
         foreach (var path in GetExplicitPaths())
@@ -63,9 +90,13 @@ public sealed class CodingAgentSkillStore
             }
         }
 
+        var sources = SourceInfosProvider?.Invoke();
+        var filter = AutoResourceFilterProvider?.Invoke();
         return skills
+            .Where(skill => filter?.Invoke(skill.FilePath, skill.Scope) != false)
             .GroupBy(static skill => skill.Name, StringComparer.Ordinal)
             .Select(static group => group.First())
+            .Select(skill => skill with { SourceInfo = CodingAgentSourceInfo.ResolveResource(skill.SourceInfo, sources) })
             .OrderBy(static skill => skill.Name, StringComparer.Ordinal)
             .ToArray();
     }
@@ -123,7 +154,11 @@ public sealed class CodingAgentSkillStore
         return true;
     }
 
-    public static string FormatForSystemPrompt(IReadOnlyList<CodingAgentSkill> skills)
+    /// <summary>【CodingAgent】【技能提示】列出允许模型调用的技能，并使用当前可用工具的名称指导加载。</summary>
+    /// <param name="skills">已加载技能。</param>
+    /// <param name="fileReadTool">读取技能文件的工具名称。</param>
+    /// <returns>技能指令和 XML 列表，没有可见技能时返回空字符串。</returns>
+    public static string FormatForSystemPrompt(IReadOnlyList<CodingAgentSkill> skills, string fileReadTool = "read")
     {
         var visibleSkills = skills
             .Where(static skill => !skill.DisableModelInvocation)
@@ -137,7 +172,9 @@ public sealed class CodingAgentSkillStore
         builder.AppendLine();
         builder.AppendLine();
         builder.AppendLine("The following skills provide specialized instructions for specific tasks.");
-        builder.AppendLine("Use the read_file tool to load a skill file when the task matches its description.");
+        builder.AppendLine(fileReadTool is "bash" or "shell"
+            ? $"Use {fileReadTool} to load a skill's file when the task matches its description."
+            : $"Use the {fileReadTool} tool to load a skill's file when the task matches its description.");
         builder.AppendLine("When a skill file references a relative path, resolve it against the skill directory and use that absolute path in tool commands.");
         builder.AppendLine();
         builder.AppendLine("<available_skills>");
@@ -152,7 +189,7 @@ public sealed class CodingAgentSkillStore
         }
 
         builder.Append("</available_skills>");
-        return builder.ToString();
+        return builder.ToString().Replace("\r\n", "\n", StringComparison.Ordinal);
     }
 
     private IEnumerable<CodingAgentSkill> LoadFromDirectory(string directory, string scope)

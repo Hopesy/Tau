@@ -145,7 +145,11 @@ public sealed record CompactionSessionEntry(
     object? Details = null,
     bool FromHook = false,
     IReadOnlyList<ChatMessage>? RetainedTail = null,
-    Usage? Usage = null) : SessionTreeEntry("compaction", Id, ParentId, Timestamp);
+    Usage? Usage = null) : SessionTreeEntry("compaction", Id, ParentId, Timestamp)
+{
+    /// <summary>【AgentCore】【压缩基线】压缩时的有效系统声明，重建上下文时位于摘要之前。</summary>
+    public SystemMessage? SystemMessage { get; init; }
+}
 
 public sealed record CustomSessionEntry(
     string Id,

@@ -48,10 +48,11 @@ public sealed class CodingAgentAutocompleteProviderFactoryTests
             }
             """);
 
+        using var extensionStore = new CodingAgentExtensionCommandStore(cwd: temp.Path);
         var provider = CodingAgentAutocompleteProviderFactory.Create(
             new CodingAgentPromptTemplateStore(cwd: temp.Path),
             new CodingAgentSkillStore(cwd: temp.Path),
-            new CodingAgentExtensionCommandStore(cwd: temp.Path),
+            extensionStore,
             basePath: temp.Path);
 
         var modelSuggestions = await provider.GetSuggestionsAsync("/mod", 4);

@@ -1,5 +1,4 @@
 using System.ComponentModel;
-using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using Tau.AgentCore;
@@ -21,7 +20,18 @@ public sealed record CodingAgentJavaScriptExtensionTool(
     JsonElement ParameterSchema,
     bool HasHandler,
     bool HasPrepareArguments,
-    string? ExecutionMode);
+    string? ExecutionMode)
+{
+    public bool HasPrepareLoadout { get; init; }
+    public string? PromptSnippet { get; init; }
+    public IReadOnlyList<string> PromptGuidelines { get; init; } = [];
+    public string Exposure { get; init; } = "direct";
+    public bool? DefaultActive { get; init; }
+    public JsonElement? OutputSchema { get; init; }
+    public JsonElement? Namespace { get; init; }
+    public JsonElement? Annotations { get; init; }
+    public ConstrainedSamplingConfig? ConstrainedSampling { get; init; }
+}
 
 public sealed record CodingAgentJavaScriptExtensionFlag(
     string Name,
@@ -61,21 +71,32 @@ public sealed record CodingAgentJavaScriptExtensionLoadResult(
     IReadOnlyList<string> EventHandlerTypes,
     IReadOnlyList<CodingAgentJavaScriptExtensionMessageRenderer> MessageRenderers,
     CodingAgentJavaScriptExtensionUnsupportedRegistrations Unsupported,
-    string? Error);
+    string? Error)
+{
+    /// <summary>【CodingAgent】【条目渲染注册】模块登记的非消息条目渲染器。</summary>
+    public IReadOnlyList<CodingAgentJavaScriptExtensionMessageRenderer> EntryRenderers { get; init; } = [];
+    public bool HasMarkdownTransformer { get; init; }
+}
 
 public sealed record CodingAgentJavaScriptExtensionInvokeResult(
     bool Success,
     IReadOnlyList<string> RunnerMessages,
     IReadOnlyList<CodingAgentJavaScriptExtensionCustomMessage> CustomMessages,
     string? StatusMessage,
-    string? Error);
+    string? Error)
+{
+    internal IReadOnlyList<CodingAgentExtensionMessageDelivery> MessageActions { get; init; } = [];
+}
 
 public sealed record CodingAgentJavaScriptExtensionShortcutInvokeResult(
     bool Success,
     IReadOnlyList<string> RunnerMessages,
     IReadOnlyList<CodingAgentJavaScriptExtensionCustomMessage> CustomMessages,
     string? StatusMessage,
-    string? Error);
+    string? Error)
+{
+    internal IReadOnlyList<CodingAgentExtensionMessageDelivery> MessageActions { get; init; } = [];
+}
 
 public sealed record CodingAgentJavaScriptExtensionUiAction(
     string Method,
@@ -97,10 +118,15 @@ public sealed record CodingAgentJavaScriptExtensionUiAction(
 
 public sealed record CodingAgentJavaScriptExtensionToolInvokeResult(
     bool Success,
-    IReadOnlyList<string> Content,
+    IReadOnlyList<ContentBlock> Content,
     bool IsError,
     JsonElement? Details,
-    string? Error);
+    string? Error)
+{
+    public Usage? Usage { get; init; }
+    public JsonElement? StructuredContent { get; init; }
+    public bool Terminate { get; init; }
+}
 
 public sealed record CodingAgentJavaScriptExtensionToolPrepareResult(
     bool Success,
@@ -117,29 +143,44 @@ public sealed record CodingAgentJavaScriptExtensionToolCallEventResult(
 
 public sealed record CodingAgentJavaScriptExtensionToolResultEventResult(
     bool Success,
-    IReadOnlyList<string> Content,
+    IReadOnlyList<ContentBlock> Content,
     bool IsError,
     JsonElement? Details,
-    string? Error);
+    string? Error)
+{
+    public Usage? Usage { get; init; }
+    public JsonElement? StructuredContent { get; init; }
+}
 
 public sealed record CodingAgentJavaScriptExtensionEventEmitResult(
     bool Success,
     IReadOnlyList<string> HandlerErrors,
     ChatMessage? ReplacementMessage,
-    string? Error);
+    string? Error)
+{
+    /// <summary>按处理器顺序转换后的事件，供上下文及协议回调继续传递。</summary>
+    public JsonElement? TransformedEvent { get; init; }
+}
 
 public sealed record CodingAgentJavaScriptExtensionMessageRenderResult(
     bool Success,
     IReadOnlyList<string> Lines,
     string? Error);
 
-public sealed class CodingAgentJavaScriptExtensionRuntime
+public sealed partial class CodingAgentJavaScriptExtensionRuntime : IDisposable
 {
     public const string NodeExecutableEnvironmentVariable = "TAU_CODING_AGENT_NODE";
 
-    private const string ResultPrefix = "__TAU_EXTENSION_RESULT__";
-    private const string UiRequestPrefix = "__TAU_EXTENSION_UI_REQUEST__";
-    private const string UiResponsePrefix = "__TAU_EXTENSION_UI_RESPONSE__";
+    private static readonly Lazy<string> NodeScript = new(ReadNodeScript);
+    private readonly object _processGate = new();
+    private CodingAgentNodeProcess? _process;
+    private readonly HashSet<CodingAgentNodeProcess> _retiredProcesses = [];
+    private long _processGeneration;
+    private long _resetGeneration;
+
+    /// <summary>【CodingAgent】【扩展代次】标识重载前启动的异步工作，防止旧工作重新启动已停止的进程。</summary>
+    internal long ResetGeneration => Volatile.Read(ref _resetGeneration);
+    private bool _disposed;
 
     private static readonly TimeSpan DefaultTimeout = TimeSpan.FromSeconds(5);
 
@@ -149,10 +190,43 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
     private IReadOnlyDictionary<string, object> _flagValues = EmptyFlagValues;
     private CodingAgentRpcExtensionUiBridge? _extensionUiBridge;
     private string _extensionMode = "print";
+    private CodingAgentExtensionSessionBridge? _sessionBridge;
+    internal CodingAgentExtensionCommandStore? SessionCommands { get; set; }
+    internal CodingAgentTreeSessionController? TreeController => _sessionBridge?.TreeController;
+
+    /// <summary>【CodingAgent】【扩展绑定】把所有命令、工具和事件调用连接到当前会话。</summary>
+    /// <param name="runner">当前运行器。</param>
+    /// <param name="tree">可选 JSONL 控制器。</param>
+    /// <param name="flat">可选平面会话存储。</param>
+    public void BindSession(ICodingAgentRunner runner, CodingAgentTreeSessionController? tree = null, CodingAgentSessionStore? flat = null)
+    {
+        ArgumentNullException.ThrowIfNull(runner);
+        lock (_processGate)
+        {
+            if (_sessionBridge?.Matches(runner, tree, flat) == true) return;
+            _sessionBridge?.StopBackgroundDelivery(detach: true);
+            _sessionBridge = new CodingAgentExtensionSessionBridge(runner, tree, flat, _cwd);
+            _sessionBridge.ConfigureReplacement(this);
+            if (runner is RuntimeCodingAgentRunner runtime)
+            {
+                runtime.BindExtensionProviders(this);
+                runtime.EnableStateNotifications();
+            }
+        }
+    }
+
+    /// <summary>【CodingAgent】【扩展会话】应用工作进程发出的元数据操作，未绑定时明确报错。</summary>
+    /// <param name="action">带调用和会话标识的元数据操作。</param>
+    private void ApplySessionAction(JsonElement action) =>
+        (_sessionBridge ?? throw new InvalidOperationException("Extension session is not initialized.")).Apply(action);
 
     private static readonly IReadOnlyDictionary<string, object> EmptyFlagValues =
         new Dictionary<string, object>(StringComparer.Ordinal);
 
+    /// <summary>【CodingAgent】【扩展生命周期】创建按需启动的持久扩展运行时</summary>
+    /// <param name="cwd">工作目录；为空时使用当前目录</param>
+    /// <param name="nodeExecutable">Node 路径；为空时读取环境配置</param>
+    /// <param name="timeout">单次执行时限；用户交互等待不计入时限</param>
     public CodingAgentJavaScriptExtensionRuntime(
         string? cwd = null,
         string? nodeExecutable = null,
@@ -163,23 +237,27 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
             ? Environment.GetEnvironmentVariable(NodeExecutableEnvironmentVariable)
             : nodeExecutable;
         _timeout = timeout ?? DefaultTimeout;
+        if (_timeout != Timeout.InfiniteTimeSpan && (_timeout <= TimeSpan.Zero || _timeout.TotalMilliseconds > uint.MaxValue - 1))
+        {
+            throw new ArgumentOutOfRangeException(nameof(timeout));
+        }
     }
 
-    /// <summary>
-    /// Seeds resolved CLI flag values that are injected into every extension invocation before the
-    /// extension factory runs. Values supplied here win over <c>registerFlag</c> defaults, matching
-    /// upstream <c>applyExtensionFlagValues</c>. Boolean flags use <see cref="bool"/>, string flags use
-    /// <see cref="string"/>.
-    /// </summary>
+    /// <summary>【CodingAgent】【扩展参数】设置后续请求可读取的 CLI 标志值</summary>
+    /// <param name="flagValues">布尔或字符串标志值；覆盖扩展默认值</param>
     public void SetFlagValues(IReadOnlyDictionary<string, object> flagValues)
     {
         _flagValues = flagValues ?? EmptyFlagValues;
     }
 
+    /// <summary>【CodingAgent】【扩展交互】关联宿主编辑器交互桥接器</summary>
+    /// <param name="extensionUiBridge">桥接器；为空时停用交互</param>
+    /// <param name="mode">宿主模式名称</param>
     public void SetExtensionUiBridge(CodingAgentRpcExtensionUiBridge? extensionUiBridge, string mode = "tui")
     {
         _extensionUiBridge = extensionUiBridge;
-        _extensionMode = extensionUiBridge is null || string.IsNullOrWhiteSpace(mode) ? "print" : mode;
+        _extensionMode = mode is "json" or "rpc" ? mode
+            : extensionUiBridge is null || string.IsNullOrWhiteSpace(mode) ? "print" : mode;
     }
 
     public CodingAgentJavaScriptExtensionLoadResult Load(string filePath)
@@ -208,6 +286,8 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
                     ReadString(root, "error") ?? "javascript extension load failed");
             }
 
+            ApplyProviderRegistrations(ReadOptionalJsonElement(root, "providers"));
+            ApplyMcpServers(ReadOptionalJsonElement(root, "mcpServers"));
             return new CodingAgentJavaScriptExtensionLoadResult(
                 true,
                 ReadCommands(root),
@@ -217,7 +297,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
                 ReadStringArray(root, "eventHandlers"),
                 ReadMessageRenderers(root),
                 ReadUnsupported(root),
-                null);
+                null) { EntryRenderers = ReadMessageRenderers(root, "entryRenderers"), HasMarkdownTransformer = ReadBool(root, "hasMarkdownTransformer") };
         }
         catch (JsonException ex)
         {
@@ -291,12 +371,20 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
         }
     }
 
+    /// <summary>【CodingAgent】【扩展命令】执行命令并传递宿主取消信号。</summary>
+    /// <param name="filePath">扩展路径。</param>
+    /// <param name="commandName">命令名称。</param>
+    /// <param name="args">命令文本参数。</param>
+    /// <param name="cancellationToken">请求取消信号。</param>
+    /// <param name="deferMessageRendering">是否由宿主在完成消息事件中渲染自定义内容。</param>
+    /// <returns>命令状态及消息操作。</returns>
     public CodingAgentJavaScriptExtensionInvokeResult Invoke(
         string filePath,
         string commandName,
-        string args)
+        string args,
+        CancellationToken cancellationToken = default, bool deferMessageRendering = false)
     {
-        var execution = Execute(BuildPayload("invoke", filePath, _cwd, commandName, args));
+        var execution = Execute(BuildPayload("invoke", filePath, _cwd, commandName, args, deferMessageRendering: deferMessageRendering), cancellationToken);
         if (!execution.Success)
         {
             return new CodingAgentJavaScriptExtensionInvokeResult(false, [], [], null, execution.Error);
@@ -313,7 +401,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
                     [],
                     [],
                     null,
-                    ReadString(root, "error") ?? "javascript extension command failed");
+                    ReadString(root, "error") ?? "javascript extension command failed") { MessageActions = ReadMessageActions(root, filePath) };
             }
 
             DispatchUiActions(root);
@@ -322,7 +410,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
                 ReadRunnerMessages(root),
                 ReadCustomMessages(root),
                 ReadString(root, "returnText"),
-                null);
+                null) { MessageActions = ReadMessageActions(root, filePath) };
         }
         catch (JsonException ex)
         {
@@ -335,11 +423,17 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
         }
     }
 
+    /// <summary>【CodingAgent】【扩展快捷键】调用快捷键处理器并支持协作取消。</summary>
+    /// <param name="filePath">扩展路径。</param>
+    /// <param name="shortcut">快捷键标识。</param>
+    /// <param name="cancellationToken">取消信号。</param>
+    /// <param name="deferMessageRendering">是否交由完成消息事件渲染。</param>
+    /// <returns>快捷键产生的状态和消息。</returns>
     public CodingAgentJavaScriptExtensionShortcutInvokeResult InvokeShortcut(
         string filePath,
-        string shortcut)
+        string shortcut, CancellationToken cancellationToken = default, bool deferMessageRendering = false)
     {
-        var execution = Execute(BuildPayload("invokeShortcut", filePath, _cwd, shortcut: shortcut));
+        var execution = Execute(BuildPayload("invokeShortcut", filePath, _cwd, shortcut: shortcut, deferMessageRendering: deferMessageRendering), cancellationToken);
         if (!execution.Success)
         {
             return new CodingAgentJavaScriptExtensionShortcutInvokeResult(false, [], [], null, execution.Error);
@@ -356,7 +450,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
                     [],
                     [],
                     null,
-                    ReadString(root, "error") ?? "javascript extension shortcut failed");
+                    ReadString(root, "error") ?? "javascript extension shortcut failed") { MessageActions = ReadMessageActions(root, filePath) };
             }
 
             DispatchUiActions(root);
@@ -365,7 +459,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
                 ReadRunnerMessages(root),
                 ReadCustomMessages(root),
                 ReadString(root, "returnText"),
-                null);
+                null) { MessageActions = ReadMessageActions(root, filePath) };
         }
         catch (JsonException ex)
         {
@@ -378,19 +472,42 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
         }
     }
 
+    /// <summary>【CodingAgent】【扩展工具】执行工具并向第三个参数及上下文提供相同的 AbortSignal。</summary>
+    /// <param name="filePath">扩展路径。</param>
+    /// <param name="toolName">工具名称。</param>
+    /// <param name="toolCallId">调用标识。</param>
+    /// <param name="args">结构化参数。</param>
+    /// <param name="cancellationToken">执行取消信号。</param>
+    /// <param name="onUpdate">实时工具进度回调。</param>
+    /// <returns>工具结果。</returns>
     public CodingAgentJavaScriptExtensionToolInvokeResult ExecuteTool(
         string filePath,
         string toolName,
         string toolCallId,
-        JsonElement args)
+        JsonElement args,
+        CancellationToken cancellationToken = default,
+        Func<ToolUpdate, Task>? onUpdate = null) =>
+        ExecuteToolAsync(filePath, toolName, toolCallId, args, cancellationToken, onUpdate).GetAwaiter().GetResult();
+
+    /// <summary>【CodingAgent】【扩展工具】异步等待工具响应和进度，避免占用线程池等待 Node 进程。</summary>
+    /// <param name="filePath">扩展路径。</param>
+    /// <param name="toolName">工具名称。</param>
+    /// <param name="toolCallId">调用标识。</param>
+    /// <param name="args">结构化参数。</param>
+    /// <param name="cancellationToken">执行取消信号。</param>
+    /// <param name="onUpdate">实时工具进度回调。</param>
+    /// <returns>工具结果。</returns>
+    public async Task<CodingAgentJavaScriptExtensionToolInvokeResult> ExecuteToolAsync(
+        string filePath, string toolName, string toolCallId, JsonElement args,
+        CancellationToken cancellationToken = default, Func<ToolUpdate, Task>? onUpdate = null)
     {
-        var execution = Execute(BuildPayload(
+        var execution = await ExecuteAsync(BuildPayload(
             "executeTool",
             filePath,
             _cwd,
             toolName: toolName,
             toolCallId: toolCallId,
-            toolArgs: args));
+            toolArgs: args), cancellationToken, onUpdate is null ? null : update => onUpdate(ReadToolUpdate(update))).ConfigureAwait(false);
         if (!execution.Success)
         {
             return new CodingAgentJavaScriptExtensionToolInvokeResult(false, [], true, null, execution.Error);
@@ -411,12 +528,13 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
             }
 
             DispatchUiActions(root);
+            DispatchMessageActions(root, filePath);
             return new CodingAgentJavaScriptExtensionToolInvokeResult(
                 true,
-                ReadStringArray(root, "content"),
+                ReadContentBlocks(root.GetProperty("content"), preserveEmpty: true),
                 ReadBool(root, "isError"),
                 root.TryGetProperty("details", out var details) ? details.Clone() : null,
-                null);
+                null) { Usage = ReadToolUsage(root), StructuredContent = ReadOptionalJsonElement(root, "structuredContent"), Terminate = ReadBool(root, "terminate") };
         }
         catch (JsonException ex)
         {
@@ -429,17 +547,23 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
         }
     }
 
+    /// <summary>【CodingAgent】【参数准备】调用扩展参数预处理器，宿主取消时解除等待。</summary>
+    /// <param name="filePath">扩展路径。</param>
+    /// <param name="toolName">工具名称。</param>
+    /// <param name="args">原始参数。</param>
+    /// <param name="cancellationToken">取消信号。</param>
+    /// <returns>规范化参数或错误。</returns>
     public CodingAgentJavaScriptExtensionToolPrepareResult PrepareToolArguments(
         string filePath,
         string toolName,
-        JsonElement args)
+        JsonElement args, CancellationToken cancellationToken = default)
     {
         var execution = Execute(BuildPayload(
             "prepareToolArguments",
             filePath,
             _cwd,
             toolName: toolName,
-            toolArgs: args));
+            toolArgs: args), cancellationToken);
         if (!execution.Success)
         {
             return new CodingAgentJavaScriptExtensionToolPrepareResult(false, null, execution.Error);
@@ -479,11 +603,18 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
         }
     }
 
+    /// <summary>【CodingAgent】【工具调用事件】允许扩展拦截或修改工具参数，并支持取消等待。</summary>
+    /// <param name="filePath">扩展路径。</param>
+    /// <param name="toolName">工具名称。</param>
+    /// <param name="toolCallId">工具调用标识。</param>
+    /// <param name="args">调用参数。</param>
+    /// <param name="cancellationToken">取消信号。</param>
+    /// <returns>阻止决定或修改后的参数。</returns>
     public CodingAgentJavaScriptExtensionToolCallEventResult EmitToolCall(
         string filePath,
         string toolName,
         string toolCallId,
-        JsonElement args)
+        JsonElement args, CancellationToken cancellationToken = default, string? parentToolCallId = null)
     {
         var execution = Execute(BuildPayload(
             "emitToolCall",
@@ -491,7 +622,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
             _cwd,
             toolName: toolName,
             toolCallId: toolCallId,
-            toolArgs: args));
+            toolArgs: args, parentToolCallId: parentToolCallId), cancellationToken);
         if (!execution.Success)
         {
             return new CodingAgentJavaScriptExtensionToolCallEventResult(false, false, false, null, null, execution.Error);
@@ -513,6 +644,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
             }
 
             DispatchUiActions(root);
+            DispatchMessageActions(root, filePath);
             return new CodingAgentJavaScriptExtensionToolCallEventResult(
                 true,
                 ReadBool(root, "block"),
@@ -533,12 +665,20 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
         }
     }
 
+    /// <summary>【CodingAgent】【工具结果事件】允许扩展修改工具结果，并支持取消等待。</summary>
+    /// <param name="filePath">扩展路径。</param>
+    /// <param name="toolName">工具名称。</param>
+    /// <param name="toolCallId">工具调用标识。</param>
+    /// <param name="args">调用参数。</param>
+    /// <param name="result">原始结果。</param>
+    /// <param name="cancellationToken">取消信号。</param>
+    /// <returns>扩展处理后的结果。</returns>
     public CodingAgentJavaScriptExtensionToolResultEventResult EmitToolResult(
         string filePath,
         string toolName,
         string toolCallId,
         JsonElement args,
-        ToolResult result)
+        ToolResult result, CancellationToken cancellationToken = default, string? parentToolCallId = null)
     {
         var execution = Execute(BuildPayload(
             "emitToolResult",
@@ -547,7 +687,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
             toolName: toolName,
             toolCallId: toolCallId,
             toolArgs: args,
-            toolResult: result));
+            toolResult: result, parentToolCallId: parentToolCallId), cancellationToken);
         if (!execution.Success)
         {
             return new CodingAgentJavaScriptExtensionToolResultEventResult(false, [], result.IsError, null, execution.Error);
@@ -568,12 +708,13 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
             }
 
             DispatchUiActions(root);
+            DispatchMessageActions(root, filePath);
             return new CodingAgentJavaScriptExtensionToolResultEventResult(
                 true,
-                ReadStringArray(root, "content"),
+                ReadContentBlocks(root.GetProperty("content"), preserveEmpty: true),
                 ReadBool(root, "isError"),
                 root.TryGetProperty("details", out var details) ? details.Clone() : null,
-                null);
+                null) { Usage = ReadToolUsage(root), StructuredContent = ReadOptionalJsonElement(root, "structuredContent") };
         }
         catch (JsonException ex)
         {
@@ -586,15 +727,47 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
         }
     }
 
+    /// <summary>【CodingAgent】【扩展事件】发布生命周期或请求事件，并允许等待中的处理器协作取消。</summary>
+    /// <param name="filePath">扩展路径。</param>
+    /// <param name="extensionEvent">事件 JSON。</param>
+    /// <param name="cancellationToken">请求取消信号。</param>
+    /// <returns>替换消息、转换事件及处理器错误。</returns>
     public CodingAgentJavaScriptExtensionEventEmitResult EmitEvent(
         string filePath,
-        JsonElement extensionEvent)
+        JsonElement extensionEvent,
+        CancellationToken cancellationToken = default) => EmitEventCore(filePath, extensionEvent, cancellationToken);
+
+    /// <summary>【CodingAgent】【代次事件】只向启动异步任务时的扩展代次发送通知。</summary>
+    /// <param name="filePath">扩展文件。</param>
+    /// <param name="extensionEvent">事件 JSON。</param>
+    /// <param name="generation">启动任务时的重载代次。</param>
+    /// <param name="cancellationToken">事件取消信号。</param>
+    /// <returns>执行结果；代次变化后拒绝创建或调用进程。</returns>
+    internal CodingAgentJavaScriptExtensionEventEmitResult EmitEventForGeneration(string filePath, JsonElement extensionEvent,
+        long generation, CancellationToken cancellationToken) => EmitEventCore(filePath, extensionEvent, cancellationToken, generation);
+
+    /// <summary>【CodingAgent】【事件执行】解析扩展结果并投递界面与消息动作。</summary>
+    /// <param name="filePath">扩展文件。</param>
+    /// <param name="extensionEvent">事件 JSON。</param>
+    /// <param name="cancellationToken">事件取消信号。</param>
+    /// <param name="generation">可选重载代次限制。</param>
+    /// <returns>处理结果与转换事件。</returns>
+    private CodingAgentJavaScriptExtensionEventEmitResult EmitEventCore(string filePath, JsonElement extensionEvent,
+        CancellationToken cancellationToken, long? generation = null) =>
+        EmitEventAsync(filePath, extensionEvent, cancellationToken, generation).GetAwaiter().GetResult();
+
+    /// <summary>【CodingAgent】【异步事件】等待处理器完成，允许处理器重入模型和会话操作。</summary>
+    /// <param name="filePath">扩展文件。</param><param name="extensionEvent">事件 JSON。</param>
+    /// <param name="cancellationToken">取消信号。</param><param name="generation">可选重载代次。</param>
+    /// <returns>处理结果。</returns>
+    internal async Task<CodingAgentJavaScriptExtensionEventEmitResult> EmitEventAsync(string filePath, JsonElement extensionEvent,
+        CancellationToken cancellationToken, long? generation = null)
     {
-        var execution = Execute(BuildPayload(
+        var execution = await ExecuteAsync(BuildPayload(
             "emitEvent",
             filePath,
             _cwd,
-            extensionEvent: extensionEvent));
+            extensionEvent: extensionEvent), cancellationToken, expectedGeneration: generation).ConfigureAwait(false);
         if (!execution.Success)
         {
             return new CodingAgentJavaScriptExtensionEventEmitResult(false, [], null, execution.Error);
@@ -614,11 +787,15 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
             }
 
             DispatchUiActions(root);
+            DispatchMessageActions(root, filePath);
             return new CodingAgentJavaScriptExtensionEventEmitResult(
                 true,
                 ReadStringArray(root, "handlerErrors"),
                 ReadReplacementMessage(root),
-                null);
+                null)
+            {
+                TransformedEvent = ReadOptionalJsonElement(root, "transformedEvent")
+            };
         }
         catch (JsonException ex)
         {
@@ -630,182 +807,139 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
         }
     }
 
-    private ProcessExecutionResult Execute(string payloadJson)
+    /// <summary>【CodingAgent】【扩展调用】在共享工作进程中执行请求，失败后返回可诊断的结果</summary>
+    /// <param name="payloadJson">调用参数 JSON</param>
+    /// <param name="cancellationToken">当前请求的协作取消信号</param>
+    /// <param name="onUpdate">工具中间结果回调</param>
+    /// <param name="expectedGeneration">异步事件所属重载代次；为空时使用当前代次</param>
+    /// <returns>执行结果或错误信息</returns>
+    private ProcessExecutionResult Execute(string payloadJson, CancellationToken cancellationToken = default,
+        Func<JsonElement, Task>? onUpdate = null, long? expectedGeneration = null) =>
+        ExecuteAsync(payloadJson, cancellationToken, onUpdate, expectedGeneration).GetAwaiter().GetResult();
+
+    /// <summary>【CodingAgent】【扩展调用】异步等待共享工作进程，保留请求取消、进度排空和代次校验。</summary>
+    /// <param name="payloadJson">调用参数 JSON。</param>
+    /// <param name="cancellationToken">当前请求的协作取消信号。</param>
+    /// <param name="onUpdate">工具中间结果回调。</param>
+    /// <param name="expectedGeneration">异步事件所属重载代次。</param>
+    /// <param name="timeout">覆盖脚本时限，流式提供方由自身取消信号管理。</param>
+    /// <returns>执行结果或错误信息。</returns>
+    private async Task<ProcessExecutionResult> ExecuteAsync(string payloadJson, CancellationToken cancellationToken = default,
+        Func<JsonElement, Task>? onUpdate = null, long? expectedGeneration = null, TimeSpan? timeout = null)
     {
-        var executable = string.IsNullOrWhiteSpace(_nodeExecutable) ? "node" : _nodeExecutable!;
-        var scriptDirectory = Path.Combine(Path.GetTempPath(), "tau-node-extension-" + Guid.NewGuid().ToString("N"));
-        string? scriptPath = null;
         try
         {
-            Directory.CreateDirectory(scriptDirectory);
-            scriptPath = Path.Combine(scriptDirectory, "runtime.cjs");
-            File.WriteAllText(scriptPath, NodeScript, Encoding.UTF8);
+            CodingAgentNodeProcess process;
+            // 1. 【CodingAgent】【扩展生命周期】只对进程创建加锁，执行期间允许 UI 事件回调重入
+            lock (_processGate)
+            {
+                ObjectDisposedException.ThrowIf(_disposed, this);
+                cancellationToken.ThrowIfCancellationRequested();
+                if (expectedGeneration is { } expected && expected != _resetGeneration)
+                    return ProcessExecutionResult.Failed("Extension runtime has been reloaded.");
+                if (_process is null || _process.IsStopped)
+                {
+                    if (_process is { } previousProcess) { previousProcess.Dispose(); _retiredProcesses.Add(previousProcess); }
+                    var executable = string.IsNullOrWhiteSpace(_nodeExecutable) ? "node" : _nodeExecutable;
+                    var generation = Interlocked.Increment(ref _processGeneration);
+                    _process = new CodingAgentNodeProcess(executable, _cwd, NodeScript.Value, HandleRuntimeUiRequestAsync,
+                        action => { EnsureProcessGeneration(generation); ApplySessionAction(action); },
+                        (request, token, onProgress) =>
+                        {
+                            EnsureProcessGeneration(generation);
+                            if (ReadString(request, "operation") == "publishProviderModels") return Task.FromResult(HandleProviderPublication(request));
+                            if (ReadString(request, "operation") == "providerAuthCallback") return HandleProviderAuthCallbackAsync(request, token);
+                            if (ReadString(request, "operation") == "providerAuthDeviceId") return Task.FromResult(HandleProviderDeviceId(request, token));
+                            return (_sessionBridge ?? throw new InvalidOperationException("Extension session is not initialized.")).HandleRuntimeRequestAsync(request, token, onProgress);
+                        },
+                        action => { if (generation == Volatile.Read(ref _processGeneration)) DispatchBackgroundActions(action); });
+                }
+                process = _process;
+            }
+            return ProcessExecutionResult.Succeeded(await process.ExecuteAsync(payloadJson, timeout ?? _timeout, cancellationToken, onUpdate).ConfigureAwait(false));
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or Win32Exception or NotSupportedException)
         {
-            TryDeleteDirectory(scriptDirectory);
-            return ProcessExecutionResult.Failed($"node extension runtime script unavailable: {ex.Message}");
-        }
-
-        using var process = new Process();
-        process.StartInfo = new ProcessStartInfo(executable)
-        {
-            UseShellExecute = false,
-            RedirectStandardInput = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            CreateNoWindow = true
-        };
-        process.StartInfo.ArgumentList.Add(scriptPath!);
-        if (Directory.Exists(_cwd))
-        {
-            process.StartInfo.WorkingDirectory = _cwd;
-        }
-
-        try
-        {
-            process.Start();
-        }
-        catch (Exception ex) when (ex is InvalidOperationException or Win32Exception)
-        {
-            TryDeleteDirectory(scriptDirectory);
             return ProcessExecutionResult.Failed($"node extension runtime unavailable: {ex.Message}");
         }
-
-        process.StandardInput.WriteLine(payloadJson);
-        process.StandardInput.Flush();
-        var resultCompletion = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var stdoutTask = PumpNodeStdoutAsync(process, resultCompletion);
-        var stderrTask = process.StandardError.ReadToEndAsync();
-        if (!process.WaitForExit((int)_timeout.TotalMilliseconds))
-        {
-            TryKill(process);
-            Task.WaitAll([stdoutTask, stderrTask], TimeSpan.FromSeconds(1));
-            TryDeleteDirectory(scriptDirectory);
-            return ProcessExecutionResult.Failed("node extension runtime timed out");
-        }
-
-        try
-        {
-            process.StandardInput.Close();
-        }
-        catch (InvalidOperationException)
-        {
-        }
-
-        Task.WaitAll([stdoutTask, stderrTask], TimeSpan.FromSeconds(1));
-        var stderr = stderrTask.Result;
-        var resultJson = resultCompletion.Task.IsCompletedSuccessfully
-            ? resultCompletion.Task.Result
-            : null;
-        TryDeleteDirectory(scriptDirectory);
-        if (resultJson is null)
-        {
-            var suffix = process.ExitCode == 0
-                ? "runtime did not return a result"
-                : $"runtime exited with code {process.ExitCode}";
-            if (!string.IsNullOrWhiteSpace(stderr))
-            {
-                suffix = $"{suffix}: {TrimForDiagnostic(stderr)}";
-            }
-
-            return ProcessExecutionResult.Failed($"invalid node extension runtime output: {suffix}");
-        }
-
-        return ProcessExecutionResult.Succeeded(resultJson);
     }
 
-    private async Task PumpNodeStdoutAsync(
-        Process process,
-        TaskCompletionSource<string?> resultCompletion)
+    /// <summary>【CodingAgent】【进程隔离】拒绝重载前工作进程延迟发出的状态写入和宿主调用。</summary>
+    /// <param name="generation">创建工作进程时捕获的代次。</param>
+    private void EnsureProcessGeneration(long generation)
     {
-        try
-        {
-            while (await process.StandardOutput.ReadLineAsync().ConfigureAwait(false) is { } line)
-            {
-                if (line.StartsWith(ResultPrefix, StringComparison.Ordinal))
-                {
-                    resultCompletion.TrySetResult(line[ResultPrefix.Length..]);
-                    continue;
-                }
-
-                if (line.StartsWith(UiRequestPrefix, StringComparison.Ordinal))
-                {
-                    await HandleRuntimeUiRequestAsync(process, line[UiRequestPrefix.Length..]).ConfigureAwait(false);
-                }
-            }
-
-            resultCompletion.TrySetResult(null);
-        }
-        catch (Exception ex)
-        {
-            resultCompletion.TrySetException(ex);
-        }
+        if (generation != Volatile.Read(ref _processGeneration)) throw new InvalidOperationException("Extension runtime has been reloaded.");
     }
 
-    private async Task HandleRuntimeUiRequestAsync(Process process, string requestJson)
+    /// <summary>【CodingAgent】【扩展交互】向宿主请求选择、确认或文本输入，并构造带标识的响应</summary>
+    /// <param name="root">交互请求参数</param>
+    /// <param name="cancellationToken">进程停止时触发的取消信号</param>
+    /// <returns>编辑器输入或取消结果的 JSON</returns>
+    private async Task<string> HandleRuntimeUiRequestAsync(JsonElement root, CancellationToken cancellationToken)
     {
-        string? response = null;
-        try
+        var id = ReadString(root, "id");
+        if (ReadBool(root, "background") && (_sessionBridge is null || ReadString(root, "sessionId") != _sessionBridge.Snapshot().Header.Id))
+            return JsonSerializer.Serialize(new { id, cancelled = true });
+        var title = ReadString(root, "title");
+        var bridge = _extensionUiBridge;
+        TimeSpan? timeout = root.TryGetProperty("timeout", out var timeoutValue) && timeoutValue.TryGetDouble(out var milliseconds)
+            && double.IsFinite(milliseconds) && milliseconds > 0 ? TimeSpan.FromMilliseconds(milliseconds) : null;
+        object? value = null;
+        if (bridge is not null && !string.IsNullOrWhiteSpace(title))
         {
-            using var document = JsonDocument.Parse(requestJson);
-            var root = document.RootElement;
-            var id = ReadString(root, "id");
-            var method = ReadString(root, "method");
-            if (string.IsNullOrWhiteSpace(id))
+            // 1. 【CodingAgent】【扩展交互】所有对话共用请求关联、取消和 UI 生命周期事件
+            value = ReadString(root, "method") switch
             {
-                return;
-            }
-
-            if (method == "editor" && _extensionUiBridge is not null)
-            {
-                var title = ReadString(root, "title");
-                var prefill = ReadString(root, "prefill");
-                var value = string.IsNullOrWhiteSpace(title)
-                    ? null
-                    : await _extensionUiBridge.EditorAsync(title, prefill, cancellationToken: CancellationToken.None)
-                        .ConfigureAwait(false);
-                response = JsonSerializer.Serialize(new
-                {
-                    id,
-                    cancelled = value is null,
-                    value
-                });
-            }
-            else
-            {
-                response = JsonSerializer.Serialize(new
-                {
-                    id,
-                    cancelled = true
-                });
-            }
+                "editor" => await bridge.EditorAsync(title, ReadString(root, "prefill"), timeout, cancellationToken).ConfigureAwait(false),
+                "input" => await bridge.InputAsync(title, ReadString(root, "placeholder"), timeout, cancellationToken).ConfigureAwait(false),
+                "select" => await bridge.SelectAsync(title, ReadStringArray(root, "options"), timeout, cancellationToken).ConfigureAwait(false),
+                "confirm" => await bridge.ConfirmAsync(title, ReadString(root, "message") ?? "", timeout, cancellationToken).ConfigureAwait(false),
+                _ => null
+            };
         }
-        catch (JsonException)
-        {
-            return;
-        }
-
-        if (!string.IsNullOrWhiteSpace(response))
-        {
-            await process.StandardInput.WriteLineAsync(UiResponsePrefix + response).ConfigureAwait(false);
-            await process.StandardInput.FlushAsync().ConfigureAwait(false);
-        }
+        return JsonSerializer.Serialize(new { id, cancelled = value is null, value });
     }
 
-    private static void TryDeleteDirectory(string path)
+    /// <summary>【CodingAgent】【扩展加载】从程序集读取 Node 脚本，保证发布后可独立运行</summary>
+    /// <returns>完整运行时脚本</returns>
+    private static string ReadNodeScript()
     {
-        try
+        using var stream = typeof(CodingAgentJavaScriptExtensionRuntime).Assembly.GetManifestResourceStream(
+            "Tau.CodingAgent.Runtime.JavaScript.extension-runtime.cjs")
+            ?? throw new InvalidOperationException("embedded node extension runtime script unavailable");
+        using var reader = new StreamReader(stream);
+        return reader.ReadToEnd();
+    }
+
+    /// <summary>【CodingAgent】【扩展重载】终止当前进程，下次调用重新初始化全部扩展及依赖</summary>
+    public void Reset()
+    {
+        CodingAgentNodeProcess? process;
+        lock (_processGate)
         {
-            if (Directory.Exists(path))
-            {
-                Directory.Delete(path, recursive: true);
-            }
+            Interlocked.Increment(ref _resetGeneration);
+            Interlocked.Increment(ref _processGeneration);
+            process = _process;
+            _process = null;
+            if (process is not null) _retiredProcesses.Add(process);
         }
-        catch
-        {
-            // Temporary script cleanup is best-effort; extension execution should not fail after Node completed.
-        }
+        _sessionBridge?.StopBackgroundDelivery();
+        process?.Dispose();
+        ApplyProviderRegistrations(null);
+        ApplyMcpServers(null);
+    }
+
+    /// <summary>【CodingAgent】【扩展生命周期】释放进程和交互资源，后续请求返回失败</summary>
+    public void Dispose()
+    {
+        lock (_processGate) _disposed = true;
+        Reset();
+        CodingAgentNodeProcess[] retired;
+        lock (_processGate) { retired = _retiredProcesses.ToArray(); _retiredProcesses.Clear(); }
+        foreach (var process in retired) process.DrainHostRequestsAsync().GetAwaiter().GetResult();
+        _sessionBridge?.StopBackgroundDelivery(detach: true);
+        _sessionBridge?.DrainStateNotifications();
+        _extensionUiBridge = null;
     }
 
     private string BuildPayload(
@@ -825,16 +959,33 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
         bool? messageDisplay = null,
         object? messageDetails = null,
         DateTimeOffset? messageTimestamp = null,
-        bool? expanded = null)
+        bool? expanded = null, bool deferMessageRendering = false, string? parentToolCallId = null)
     {
         using var stream = new MemoryStream();
         using (var writer = new Utf8JsonWriter(stream))
         {
             writer.WriteStartObject();
             writer.WriteString("mode", mode);
+            if (mode is "load" or "refreshProvider") WriteFactoryProviderDefaults(writer);
+            writer.WriteNumber("extensionGeneration", ResetGeneration);
             writer.WriteString("filePath", Path.GetFullPath(filePath));
             writer.WriteString("cwd", cwd);
             writer.WriteString("extensionMode", _extensionMode);
+            writer.WritePropertyName("extensionSources"); writer.WriteStartObject();
+            foreach (var source in _extensionSources)
+            {
+                writer.WritePropertyName(source.Key);
+                source.Value.WriteTo(writer);
+            }
+            writer.WriteEndObject();
+            writer.WriteBoolean("deferMessageRendering", deferMessageRendering);
+            if (mode is not ("load" or "providerAuth" or "modelRegistryCallback" or "capabilityProvider") && _sessionBridge is { } sessionBridge)
+            {
+                writer.WritePropertyName("session");
+                JsonSerializer.Serialize(writer, sessionBridge.Snapshot(), CodingAgentTreeSessionJsonContext.Default.CodingAgentExtensionSessionSnapshot);
+                writer.WritePropertyName("runtime");
+                sessionBridge.WriteRuntimeSnapshot(writer);
+            }
             if (commandName is not null)
             {
                 writer.WriteString("commandName", commandName);
@@ -859,6 +1010,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
             {
                 writer.WriteString("toolCallId", toolCallId);
             }
+            if (parentToolCallId is not null) writer.WriteString("parentToolCallId", parentToolCallId);
 
             if (toolArgs.HasValue)
             {
@@ -941,10 +1093,16 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
         return Encoding.UTF8.GetString(stream.ToArray());
     }
 
-    private static void WriteToolResult(Utf8JsonWriter writer, ToolResult result)
+    /// <summary>【CodingAgent】【工具协议】写入内容、详情及程序调用元数据。</summary>
+    /// <param name="writer">JSON 写入器。</param>
+    /// <param name="result">工具结果。</param>
+    internal static void WriteToolResult(Utf8JsonWriter writer, ToolResult result)
     {
         writer.WriteStartObject();
         writer.WriteBoolean("isError", result.IsError);
+        if (result.Terminate) writer.WriteBoolean("terminate", true);
+        if (result.StructuredContent is { } structured) { writer.WritePropertyName("structuredContent"); structured.WriteTo(writer); }
+        if (result.Usage is { } usage) { writer.WritePropertyName("usage"); WriteToolUsage(writer, usage); }
         writer.WritePropertyName("content");
         WriteContentBlocks(writer, result.Content);
         if (result.Details is not null)
@@ -967,6 +1125,7 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
                 case TextContent text:
                     writer.WriteString("type", "text");
                     writer.WriteString("text", text.Text);
+                    if (text.TextSignature is not null) writer.WriteString("textSignature", text.TextSignature);
                     break;
                 case ImageContent image:
                     writer.WriteString("type", "image");
@@ -1057,6 +1216,9 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
         return commands.ToArray();
     }
 
+    /// <summary>【CodingAgent】【工具定义】读取工具参数、输出结构和会话访问元数据。</summary>
+    /// <param name="root">模块注册结果。</param>
+    /// <returns>模块注册的工具定义。</returns>
     private static IReadOnlyList<CodingAgentJavaScriptExtensionTool> ReadTools(JsonElement root)
     {
         if (!root.TryGetProperty("tools", out var toolsElement) ||
@@ -1086,7 +1248,16 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
                 ReadParameterSchema(tool),
                 ReadBool(tool, "hasHandler"),
                 ReadBool(tool, "hasPrepareArguments"),
-                ReadString(tool, "executionMode")));
+                ReadString(tool, "executionMode"))
+                {
+                    HasPrepareLoadout = ReadBool(tool, "hasPrepareLoadout"),
+                    PromptSnippet = ReadString(tool, "promptSnippet"), PromptGuidelines = ReadStringArray(tool, "promptGuidelines"),
+                    Exposure = ReadString(tool, "exposure") ?? "direct", DefaultActive = ReadOptionalBool(tool, "defaultActive"),
+                    OutputSchema = ReadOptionalJsonElement(tool, "outputSchema"), Namespace = ReadOptionalJsonElement(tool, "namespace"),
+                    Annotations = ReadOptionalJsonElement(tool, "annotations"),
+                    ConstrainedSampling = tool.TryGetProperty("constrainedSampling", out var sampling) && sampling.ValueKind == JsonValueKind.Object
+                        ? JsonSerializer.Deserialize(sampling, CodingAgentTreeSessionJsonContext.Default.ConstrainedSamplingConfig) : null
+                });
         }
 
         return tools.ToArray();
@@ -1167,9 +1338,11 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
         return shortcuts.ToArray();
     }
 
-    private static IReadOnlyList<CodingAgentJavaScriptExtensionMessageRenderer> ReadMessageRenderers(JsonElement root)
+    /// <summary>【CodingAgent】【渲染器元数据】读取消息或条目渲染器的类型和函数有效性。</summary>
+    /// <param name="root">运行时返回对象。</param><param name="property">注册表字段。</param><returns>渲染器描述列表。</returns>
+    private static IReadOnlyList<CodingAgentJavaScriptExtensionMessageRenderer> ReadMessageRenderers(JsonElement root, string property = "messageRenderers")
     {
-        if (!root.TryGetProperty("messageRenderers", out var renderersElement) ||
+        if (!root.TryGetProperty(property, out var renderersElement) ||
             renderersElement.ValueKind != JsonValueKind.Array)
         {
             return [];
@@ -1214,40 +1387,8 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
     /// <returns>可识别的会话消息；role 缺失或不支持时返回 <see langword="null"/>。</returns>
     private static ChatMessage? ReadChatMessage(JsonElement message)
     {
-        var role = ReadString(message, "role");
-        if (string.IsNullOrWhiteSpace(role))
-        {
-            return null;
-        }
-
-        var content = message.TryGetProperty("content", out var contentElement)
-            ? ReadContentBlocks(contentElement)
-            : [new TextContent(string.Empty)];
-
-        return role switch
-        {
-            "user" => new UserMessage(content),
-            "assistant" => new AssistantMessage(content)
-            {
-                ErrorMessage = ReadString(message, "errorMessage"),
-                StopReason = ReadAssistantStopReason(message)
-            },
-            "toolResult" => new ToolResultMessage(
-                ReadString(message, "toolCallId") ?? string.Empty,
-                content,
-                ReadOptionalBool(message, "isError") ?? false)
-            {
-                ToolName = ReadString(message, "toolName")
-            },
-            "custom" when !string.IsNullOrWhiteSpace(ReadString(message, "customType")) =>
-                new AgentCustomMessage(
-                    ReadString(message, "customType")!,
-                    content,
-                    ReadOptionalBool(message, "display") ?? true,
-                    ReadOptionalJsonElement(message, "details"),
-                    ReadUnixMilliseconds(message, "timestamp")),
-            _ => null
-        };
+        var stored = JsonSerializer.Deserialize(message, CodingAgentSessionJsonContext.Default.CodingAgentSessionMessage);
+        return stored is null ? null : CodingAgentSessionStore.ToMessage(stored);
     }
 
     /// <summary>
@@ -1291,13 +1432,14 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
         var messages = new List<string>();
         foreach (var action in actionsElement.EnumerateArray())
         {
-            if (action.ValueKind != JsonValueKind.Object ||
-                !string.Equals(ReadString(action, "type"), "sendMessage", StringComparison.Ordinal))
+            if (action.ValueKind != JsonValueKind.Object || ReadString(action, "type") is not ("sendMessage" or "userMessage"))
             {
                 continue;
             }
 
-            var message = ReadString(action, "message");
+            var message = ReadString(action, "type") == "userMessage" && action.TryGetProperty("content", out var content)
+                ? string.Join("\n", ReadContentBlocks(content).OfType<TextContent>().Select(block => block.Text))
+                : ReadString(action, "message");
             if (!string.IsNullOrWhiteSpace(message))
             {
                 messages.Add(message);
@@ -1354,7 +1496,11 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
             : null;
     }
 
-    private static IReadOnlyList<ContentBlock> ReadContentBlocks(JsonElement contentElement)
+    /// <summary>【CodingAgent】【内容转换】读取文字及图片，并按调用方约定保留空工具内容。</summary>
+    /// <param name="contentElement">字符串或内容块数组。</param>
+    /// <param name="preserveEmpty">是否保留空数组，不插入占位文字。</param>
+    /// <returns>可在运行器及会话中使用的内容块。</returns>
+    private static IReadOnlyList<ContentBlock> ReadContentBlocks(JsonElement contentElement, bool preserveEmpty = false)
     {
         if (contentElement.ValueKind == JsonValueKind.String)
         {
@@ -1390,7 +1536,8 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
                         blocks.Add(new TextContent(
                             ReadString(item, "text") ??
                             ReadString(item, "content") ??
-                            (string.IsNullOrWhiteSpace(type) ? item.ToString() : $"[{type}]")));
+                            (string.IsNullOrWhiteSpace(type) ? item.ToString() : $"[{type}]"))
+                            { TextSignature = ReadString(item, "textSignature") });
                     }
                     break;
                 default:
@@ -1399,7 +1546,18 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
             }
         }
 
-        return blocks.Count == 0 ? [new TextContent(string.Empty)] : blocks.ToArray();
+        return blocks.Count == 0 && !preserveEmpty ? [new TextContent(string.Empty)] : blocks.ToArray();
+    }
+
+    /// <summary>【CodingAgent】【工具进度】从独立进度帧恢复内容块、错误状态和任意结构化详情。</summary>
+    /// <param name="update">进度 JSON 对象。</param>
+    /// <returns>交给工具执行器的中间结果。</returns>
+    private static ToolUpdate ReadToolUpdate(JsonElement update)
+    {
+        var content = ReadContentBlocks(update.GetProperty("content"), preserveEmpty: true);
+        return new ToolUpdate(string.Join("\n", content.OfType<TextContent>().Select(static block => block.Text)),
+            content, ReadBool(update, "isError"), update.TryGetProperty("details", out var details) ? details.Clone() : null, ReadBool(update, "terminate"))
+            { Usage = ReadToolUsage(update), StructuredContent = ReadOptionalJsonElement(update, "structuredContent") };
     }
 
     private static JsonElement? ReadOptionalJsonElement(JsonElement root, string propertyName)
@@ -1633,21 +1791,6 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
             ReadInt(unsupported, "providers"));
     }
 
-    private static string? ExtractResultJson(string stdout)
-    {
-        string? result = null;
-        using var reader = new StringReader(stdout);
-        while (reader.ReadLine() is { } line)
-        {
-            if (line.StartsWith(ResultPrefix, StringComparison.Ordinal))
-            {
-                result = line[ResultPrefix.Length..];
-            }
-        }
-
-        return string.IsNullOrWhiteSpace(result) ? null : result;
-    }
-
     private static string? ReadString(JsonElement element, string propertyName)
     {
         if (!element.TryGetProperty(propertyName, out var property))
@@ -1700,23 +1843,6 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
             : 0;
     }
 
-    private static void TryKill(Process process)
-    {
-        try
-        {
-            process.Kill(entireProcessTree: true);
-        }
-        catch (Exception ex) when (ex is InvalidOperationException or Win32Exception)
-        {
-        }
-    }
-
-    private static string TrimForDiagnostic(string value)
-    {
-        var trimmed = value.Trim();
-        return trimmed.Length <= 300 ? trimmed : trimmed[..300];
-    }
-
     private static CodingAgentJavaScriptExtensionUnsupportedRegistrations EmptyUnsupported { get; } = new(0, 0, 0, 0, 0, 0);
 
     private sealed record ProcessExecutionResult(
@@ -1729,1049 +1855,5 @@ public sealed class CodingAgentJavaScriptExtensionRuntime
         public static ProcessExecutionResult Failed(string error) => new(false, string.Empty, error);
     }
 
-    private const string NodeScript = """
-        const fs = require("node:fs");
-        const path = require("node:path");
-        const moduleApi = require("node:module");
-        const readline = require("node:readline");
-        const { fileURLToPath, pathToFileURL } = require("node:url");
-        const resultPrefix = "__TAU_EXTENSION_RESULT__";
-        const uiRequestPrefix = "__TAU_EXTENSION_UI_REQUEST__";
-        const uiResponsePrefix = "__TAU_EXTENSION_UI_RESPONSE__";
-        let extensionImportHookInstalled = false;
-        let input = "";
-        let mainStarted = false;
-        let uiRequestCounter = 0;
-        const pendingUiResponses = new Map();
 
-        process.stdin.setEncoding("utf8");
-        const inputLines = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
-        inputLines.on("line", line => {
-          if (!mainStarted) {
-            mainStarted = true;
-            input = line;
-            main().catch(error => write({ ok: false, error: formatError(error) }));
-            return;
-          }
-
-          if (line.startsWith(uiResponsePrefix)) {
-            handleUiResponse(line.slice(uiResponsePrefix.length));
-          }
-        });
-        inputLines.on("close", () => {
-          if (!mainStarted) {
-            mainStarted = true;
-            input = "{}";
-            main().catch(error => write({ ok: false, error: formatError(error) }));
-          }
-        });
-
-        function write(result) {
-          process.stdout.write(resultPrefix + JSON.stringify(result) + "\n");
-          process.stdout.write("", () => process.exit(result && result.ok === false ? 1 : 0));
-        }
-
-        function requestUi(request) {
-          if (!request || typeof request !== "object") {
-            return Promise.resolve(undefined);
-          }
-
-          const id = "ui-" + (++uiRequestCounter);
-          return new Promise(resolve => {
-            pendingUiResponses.set(id, resolve);
-            process.stdout.write(uiRequestPrefix + JSON.stringify({ id, ...request }) + "\n");
-          });
-        }
-
-        function handleUiResponse(responseJson) {
-          let response;
-          try {
-            response = JSON.parse(responseJson || "{}");
-          } catch {
-            return;
-          }
-
-          const id = response && typeof response.id === "string" ? response.id : "";
-          const resolve = pendingUiResponses.get(id);
-          if (!resolve) return;
-          pendingUiResponses.delete(id);
-          resolve(response);
-        }
-
-        function formatError(error) {
-          return error && error.message ? String(error.message) : String(error);
-        }
-
-        function isTypeScriptFile(filePath) {
-          return typeof filePath === "string" && filePath.toLowerCase().endsWith(".ts");
-        }
-
-        function mergeSchemaOptions(schema, options) {
-          const result = { ...schema };
-          if (options && typeof options === "object") Object.assign(result, options);
-          return result;
-        }
-
-        const typeBoxModuleSource = String.raw`
-        function mergeSchemaOptions(schema, options) {
-          const result = { ...schema };
-          if (options && typeof options === "object") Object.assign(result, options);
-          return result;
-        }
-        function markOptional(schema) {
-          const result = { ...(schema || {}) };
-          Object.defineProperty(result, "__tauOptional", { value: true, enumerable: false });
-          return result;
-        }
-        function stripOptional(schema) {
-          const result = { ...(schema || {}) };
-          return result;
-        }
-        function literalType(value) {
-          if (value === null) return "null";
-          if (Array.isArray(value)) return "array";
-          return typeof value;
-        }
-        export const Type = {
-          Any(options = {}) { return mergeSchemaOptions({}, options); },
-          Unknown(options = {}) { return mergeSchemaOptions({}, options); },
-          Null(options = {}) { return mergeSchemaOptions({ type: "null" }, options); },
-          String(options = {}) { return mergeSchemaOptions({ type: "string" }, options); },
-          Number(options = {}) { return mergeSchemaOptions({ type: "number" }, options); },
-          Integer(options = {}) { return mergeSchemaOptions({ type: "integer" }, options); },
-          Boolean(options = {}) { return mergeSchemaOptions({ type: "boolean" }, options); },
-          Literal(value, options = {}) { return mergeSchemaOptions({ const: value, enum: [value], type: literalType(value) }, options); },
-          Array(items = {}, options = {}) { return mergeSchemaOptions({ type: "array", items }, options); },
-          Union(items = [], options = {}) { return mergeSchemaOptions({ anyOf: items }, options); },
-          Optional(schema = {}) { return markOptional(schema); },
-          Record(_keySchema = {}, valueSchema = {}, options = {}) {
-            return mergeSchemaOptions({ type: "object", additionalProperties: stripOptional(valueSchema) }, options);
-          },
-          Object(properties = {}, options = {}) {
-            const normalized = {};
-            const required = [];
-            for (const [key, value] of Object.entries(properties || {})) {
-              const propertySchema = stripOptional(value);
-              normalized[key] = propertySchema;
-              if (!value || value.__tauOptional !== true) required.push(key);
-            }
-            const schema = { type: "object", properties: normalized };
-            if (required.length > 0) schema.required = required;
-            return mergeSchemaOptions(schema, options);
-          }
-        };
-        export default { Type };
-        `;
-
-        const piAiModuleSource = typeBoxModuleSource + String.raw`
-        const apiProviders = new Map();
-        const modelRegistry = new Map();
-        const oauthRegistryKey = Symbol.for("@tau/pi-ai/oauth-registry");
-        const oauthProviders = globalThis[oauthRegistryKey] ??= new Map();
-        export function registerApiProvider(provider, sourceId) {
-          if (provider && provider.api) apiProviders.set(provider.api, { provider, sourceId });
-        }
-        export function getApiProvider(api) { return apiProviders.get(api)?.provider; }
-        export function getApiProviders() { return Array.from(apiProviders.values(), entry => entry.provider); }
-        export function unregisterApiProviders(sourceId) {
-          for (const [api, entry] of apiProviders.entries()) if (entry.sourceId === sourceId) apiProviders.delete(api);
-        }
-        export function clearApiProviders() { apiProviders.clear(); }
-        export function registerModel(provider, model) {
-          if (!modelRegistry.has(provider)) modelRegistry.set(provider, new Map());
-          modelRegistry.get(provider).set(model.id, { ...model, provider });
-        }
-        export function getModel(provider, modelId) { return modelRegistry.get(provider)?.get(modelId); }
-        export function getProviders() { return Array.from(modelRegistry.keys()); }
-        export function getModels(provider) { return Array.from(modelRegistry.get(provider)?.values() ?? []); }
-        export function calculateCost(model, usage) {
-          const cost = usage.cost ?? {};
-          const rates = model?.cost ?? {};
-          cost.input = ((rates.input ?? 0) / 1000000) * (usage.input ?? 0);
-          cost.output = ((rates.output ?? 0) / 1000000) * (usage.output ?? 0);
-          cost.cacheRead = ((rates.cacheRead ?? 0) / 1000000) * (usage.cacheRead ?? 0);
-          cost.cacheWrite = ((rates.cacheWrite ?? 0) / 1000000) * (usage.cacheWrite ?? 0);
-          cost.total = cost.input + cost.output + cost.cacheRead + cost.cacheWrite;
-          usage.cost = cost;
-          return cost;
-        }
-        export function supportsXhigh(model) {
-          const id = String(model?.id ?? "");
-          return id.includes("gpt-5.2") || id.includes("gpt-5.3") || id.includes("gpt-5.4") ||
-            id.includes("opus-4-6") || id.includes("opus-4.6") ||
-            id.includes("opus-4-7") || id.includes("opus-4.7");
-        }
-        export function modelsAreEqual(a, b) { return !!a && !!b && a.id === b.id && a.provider === b.provider; }
-        export function getOAuthProvider(id) { return oauthProviders.get(id); }
-        export function registerOAuthProvider(provider) { if (provider && provider.id) oauthProviders.set(provider.id, provider); }
-        export function unregisterOAuthProvider(id) { oauthProviders.delete(id); }
-        export function resetOAuthProviders() { oauthProviders.clear(); }
-        export function getOAuthProviders() { return Array.from(oauthProviders.values()); }
-        export function getOAuthProviderInfoList() {
-          return getOAuthProviders().map(provider => ({ id: provider.id, name: provider.name, available: true }));
-        }
-        export async function refreshOAuthToken(providerId, credentials) {
-          const provider = getOAuthProvider(providerId);
-          if (!provider || typeof provider.refreshToken !== "function") throw new Error("Unknown OAuth provider: " + providerId);
-          return provider.refreshToken(credentials);
-        }
-        export async function getOAuthApiKey(providerId, credentials) {
-          const provider = getOAuthProvider(providerId);
-          const credential = credentials ? credentials[providerId] : undefined;
-          if (!provider || !credential) return null;
-          if (typeof provider.getApiKey !== "function") return null;
-          return { newCredentials: credential, apiKey: provider.getApiKey(credential) };
-        }
-        `;
-
-        const piAiOAuthModuleSource = String.raw`
-        const oauthRegistryKey = Symbol.for("@tau/pi-ai/oauth-registry");
-        const providers = globalThis[oauthRegistryKey] ??= new Map();
-        export function getOAuthProvider(id) { return providers.get(id); }
-        export function registerOAuthProvider(provider) { if (provider && provider.id) providers.set(provider.id, provider); }
-        export function unregisterOAuthProvider(id) { providers.delete(id); }
-        export function resetOAuthProviders() { providers.clear(); }
-        export function getOAuthProviders() { return Array.from(providers.values()); }
-        export function getOAuthProviderInfoList() {
-          return getOAuthProviders().map(provider => ({ id: provider.id, name: provider.name, available: true }));
-        }
-        export async function refreshOAuthToken(providerId, credentials) {
-          const provider = getOAuthProvider(providerId);
-          if (!provider || typeof provider.refreshToken !== "function") throw new Error("Unknown OAuth provider: " + providerId);
-          return provider.refreshToken(credentials);
-        }
-        export async function getOAuthApiKey(providerId, credentials) {
-          const provider = getOAuthProvider(providerId);
-          const credential = credentials ? credentials[providerId] : undefined;
-          if (!provider || !credential) return null;
-          if (typeof provider.getApiKey !== "function") return null;
-          return { newCredentials: credential, apiKey: provider.getApiKey(credential) };
-        }
-        `;
-
-        const piAgentCoreModuleSource = String.raw`
-        export const ToolExecutionMode = Object.freeze({ Sequential: "sequential", Parallel: "parallel" });
-        export class EventStream {
-          constructor() { this.events = []; }
-          push(event) { this.events.push(event); }
-          async *[Symbol.asyncIterator]() { for (const event of this.events) yield event; }
-        }
-        export class Agent {
-          constructor(options = {}) { this.options = options; }
-        }
-        `;
-
-        const piTuiModuleSource = String.raw`
-        export class Container {
-          constructor() { this.children = []; }
-          addChild(child) { this.children.push(child); return child; }
-          clear() { this.children = []; }
-          render(width = 80) { return this.children.flatMap(child => typeof child?.render === "function" ? child.render(width) : []); }
-        }
-        export class Text {
-          constructor(text = "", paddingX = 1, paddingY = 1) { this.text = String(text ?? ""); this.paddingX = paddingX; this.paddingY = paddingY; }
-          setText(text) { this.text = String(text ?? ""); }
-          render() { return this.text.trim().length === 0 ? [] : [this.text]; }
-        }
-        export class Spacer { constructor(lines = 1) { this.lines = lines; } render() { return Array.from({ length: Math.max(0, this.lines) }, () => ""); } }
-        export class Box extends Container {}
-        export class Markdown extends Text {}
-        export class TruncatedText extends Text {}
-        export class Input extends Text {}
-        export class Loader extends Text {}
-        export class CancellableLoader extends Loader {}
-        export class SelectList extends Container {}
-        export class SettingsList extends Container {}
-        export class Image extends Text {}
-        export class TUI {}
-        export class ProcessTerminal {}
-        export class KeybindingsManager { matches() { return false; } }
-        export const CURSOR_MARKER = "";
-        export const TUI_KEYBINDINGS = {};
-        export function getKeybindings() { return new KeybindingsManager(); }
-        export function setKeybindings() {}
-        export function matchesKey(actual, expected) { return actual === expected; }
-        export function parseKey(value) { return String(value ?? ""); }
-        export function visibleWidth(value) { return String(value ?? "").replace(/\x1b\[[0-9;]*m/g, "").length; }
-        export function truncateToWidth(value, width) { return String(value ?? "").slice(0, Math.max(0, width)); }
-        export function wrapTextWithAnsi(value) { return [String(value ?? "")]; }
-        export function fuzzyMatch(query, value) { return String(value ?? "").toLowerCase().includes(String(query ?? "").toLowerCase()) ? { score: 1 } : undefined; }
-        export function fuzzyFilter(items, query) { return (items ?? []).filter(item => fuzzyMatch(query, String(item))); }
-        export function getCapabilities() { return {}; }
-        export function getImageDimensions() { return undefined; }
-        export function imageFallback() { return ""; }
-        `;
-
-        const piCodingAgentModuleSource = String.raw`
-        export function defineTool(tool) { return tool; }
-        export function createEventBus() {
-          const listeners = new Map();
-          return {
-            on(type, handler) {
-              const list = listeners.get(type) ?? [];
-              list.push(handler);
-              listeners.set(type, list);
-              return () => listeners.set(type, (listeners.get(type) ?? []).filter(candidate => candidate !== handler));
-            },
-            async emit(type, payload) {
-              for (const handler of listeners.get(type) ?? []) await handler(payload);
-            }
-          };
-        }
-        export class ModelRegistry {}
-        export class SessionManager {}
-        export class CustomEditor {
-          constructor(...args) { this.args = args; this.actionHandlers = new Map(); }
-          onAction(action, handler) { this.actionHandlers.set(action, handler); }
-          handleInput() {}
-          getText() { return ""; }
-          isShowingAutocomplete() { return false; }
-          render() { return []; }
-          dispose() {}
-        }
-        export function createSyntheticSourceInfo(path, options = {}) { return { path, ...options }; }
-        `;
-
-        const virtualModuleSources = new Map([
-          ["@sinclair/typebox", typeBoxModuleSource],
-          ["@mariozechner/pi-agent-core", piAgentCoreModuleSource],
-          ["@mariozechner/pi-tui", piTuiModuleSource],
-          ["@mariozechner/pi-ai", piAiModuleSource],
-          ["@mariozechner/pi-ai/oauth", piAiOAuthModuleSource],
-          ["@mariozechner/pi-coding-agent", piCodingAgentModuleSource]
-        ]);
-
-        function virtualModuleUrl(specifier) {
-          const source = virtualModuleSources.get(specifier);
-          return source === undefined
-            ? undefined
-            : "data:text/javascript;charset=utf-8," + encodeURIComponent(source);
-        }
-
-        function hasModuleSyntax(source) {
-          return /(^|\s)(import|export)\s/.test(source);
-        }
-
-        function readNearestPackageType(directory) {
-          let current = directory;
-          while (current && current !== path.dirname(current)) {
-            const packageJsonPath = path.join(current, "package.json");
-            try {
-              const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
-              if (packageJson && packageJson.type === "module") return "module";
-              if (packageJson && packageJson.type === "commonjs") return "commonjs";
-            } catch {
-            }
-            current = path.dirname(current);
-          }
-          return undefined;
-        }
-
-        function inferTypeScriptFormat(url, source) {
-          const packageType = readNearestPackageType(path.dirname(fileURLToPath(url)));
-          if (packageType === "module" || packageType === "commonjs") return packageType;
-          return hasModuleSyntax(source) ? "module" : "commonjs";
-        }
-
-        function installExtensionImportHook(requireHooks) {
-          if (extensionImportHookInstalled) return;
-          if (typeof moduleApi.registerHooks !== "function") {
-            if (requireHooks) {
-              throw new Error("typescript extension runtime unavailable: Node.js module hooks are not available");
-            }
-            return;
-          }
-
-          moduleApi.registerHooks({
-            resolve(specifier, context, nextResolve) {
-              const url = virtualModuleUrl(specifier);
-              if (url) {
-                return { url, shortCircuit: true };
-              }
-              return nextResolve(specifier, context);
-            },
-            load(url, context, nextLoad) {
-              const parsed = new URL(url);
-              if (parsed.protocol === "file:" && parsed.pathname.toLowerCase().endsWith(".ts")) {
-                if (typeof moduleApi.stripTypeScriptTypes !== "function") {
-                  throw new Error("typescript extension runtime unavailable: Node.js type stripping hooks are not available");
-                }
-                const source = fs.readFileSync(parsed, "utf8");
-                const stripped = moduleApi.stripTypeScriptTypes(source, { mode: "strip", sourceUrl: url });
-                return {
-                  format: inferTypeScriptFormat(url, source),
-                  shortCircuit: true,
-                  source: stripped
-                };
-              }
-
-              return nextLoad(url, context);
-            }
-          });
-          extensionImportHookInstalled = true;
-        }
-
-        function toText(value) {
-          if (value === undefined || value === null) return "";
-          if (typeof value === "string") return value;
-          if (Array.isArray(value)) {
-            return value.map(item => toText(item)).filter(Boolean).join("\n");
-          }
-          if (typeof value === "object") {
-            if (typeof value.text === "string") return value.text;
-            if (typeof value.content === "string") return value.content;
-            if (typeof value.message === "string") return value.message;
-            return JSON.stringify(value);
-          }
-          return String(value);
-        }
-
-        function normalizeToolContent(value) {
-          const text = toText(value);
-          return text.length === 0 ? [] : [text];
-        }
-
-        function normalizeToolEventContent(value) {
-          if (!Array.isArray(value)) return normalizeToolContent(value);
-          return value.map(item => toText(item)).filter(text => text.length > 0);
-        }
-
-        function normalizeContentBlocks(value) {
-          if (!Array.isArray(value)) return [];
-          return value.map(item => {
-            if (item && typeof item === "object") return item;
-            return { type: "text", text: toText(item) };
-          });
-        }
-
-        function normalizeMessageContent(value) {
-          if (Array.isArray(value)) return normalizeContentBlocks(value);
-          if (value && typeof value === "object" && typeof value.type === "string") return normalizeContentBlocks([value]);
-          if (value === undefined || value === null) return [];
-          return [{ type: "text", text: toText(value) }];
-        }
-
-        function normalizeAgentMessage(value, fallbackRole = undefined) {
-          if (!value || typeof value !== "object") return undefined;
-          const role = String(value.role ?? fallbackRole ?? "");
-          if (!role) return undefined;
-          const message = {
-            role,
-            content: normalizeMessageContent(value.content)
-          };
-          if (role === "custom") {
-            message.customType = String(value.customType ?? "");
-            message.display = value.display !== false;
-            if (Object.prototype.hasOwnProperty.call(value, "details")) message.details = value.details;
-            message.timestamp = typeof value.timestamp === "number" ? value.timestamp : Date.now();
-          } else if (role === "toolResult") {
-            message.toolCallId = String(value.toolCallId ?? "");
-            message.isError = value.isError === true;
-            if (typeof value.toolName === "string") message.toolName = value.toolName;
-          } else if (role === "assistant") {
-            if (typeof value.stopReason === "string") message.stopReason = value.stopReason;
-            if (typeof value.errorMessage === "string") message.errorMessage = value.errorMessage;
-          }
-          return message;
-        }
-
-        function normalizeCustomMessageContent(value) {
-          if (typeof value === "string") return value;
-          if (Array.isArray(value)) return normalizeContentBlocks(value);
-          return toText(value);
-        }
-
-        function normalizeToolResult(value) {
-          if (value && typeof value === "object") {
-            const content = Object.prototype.hasOwnProperty.call(value, "content")
-              ? normalizeToolContent(value.content)
-              : normalizeToolContent(value);
-            return {
-              content,
-              isError: value.isError === true,
-              details: Object.prototype.hasOwnProperty.call(value, "details") ? value.details : undefined
-            };
-          }
-
-          return {
-            content: normalizeToolContent(value),
-            isError: false,
-            details: undefined
-          };
-        }
-
-        function normalizeStringArray(value) {
-          if (value === undefined || value === null) return undefined;
-          if (!Array.isArray(value)) return undefined;
-          return value.map(item => toText(item));
-        }
-
-        const themeProxy = {
-          fg(_name, text) { return toText(text); },
-          bg(_name, text) { return toText(text); },
-          style(_name, text) { return toText(text); },
-          bold(text) { return toText(text); },
-          dim(text) { return toText(text); },
-          italic(text) { return toText(text); },
-          underline(text) { return toText(text); }
-        };
-
-        function normalizeComponentLines(v) {
-          if (v == null) return undefined;
-          if (typeof v === "function") v = v(undefined, themeProxy, {});
-          if (v && typeof v.render === "function") v = v.render(120);
-          if (Array.isArray(v)) return v.map(toText);
-          const text = toText(v);
-          return text ? text.split(/\r?\n/) : [];
-        }
-
-        function normalizeIndicator(o) {
-          if (o == null) return { frames: undefined, intervalMs: undefined };
-          const frames = normalizeStringArray(o.frames) ?? [];
-          const n = Number(o.intervalMs);
-          return { frames, intervalMs: Number.isFinite(n) ? Math.max(0, Math.trunc(n)) : undefined };
-        }
-
-        const supportedEventNames = new Set([
-          "tool_call",
-          "tool_result",
-          "session_start",
-          "agent_start",
-          "agent_end",
-          "turn_start",
-          "turn_end",
-          "message_start",
-          "message_update",
-          "message_end",
-          "tool_execution_start",
-          "tool_execution_update",
-          "tool_execution_end",
-          "ui_prompt_start",
-          "ui_prompt_end"
-        ]);
-
-        function addHandler(handlerMap, unsupported, eventName, handler) {
-          const key = String(eventName ?? "");
-          if (!supportedEventNames.has(key) || typeof handler !== "function") {
-            unsupported.handlers++;
-            return () => {};
-          }
-
-          const handlers = handlerMap.get(key) ?? [];
-          handlers.push(handler);
-          handlerMap.set(key, handlers);
-          return () => {
-            const current = handlerMap.get(key) ?? [];
-            const index = current.indexOf(handler);
-            if (index >= 0) current.splice(index, 1);
-          };
-        }
-
-        function createApi(commandMap, toolMap, flagMap, shortcutMap, flagValues, handlerMap, messageRendererMap, unsupported, actions, payload) {
-          const recordMessage = (value, options = undefined) => {
-            if (value && typeof value === "object" && !Array.isArray(value) && Object.prototype.hasOwnProperty.call(value, "customType")) {
-              const delivery = options && typeof options === "object" ? options : {};
-              const deliverAs = delivery.deliverAs === "steer" || delivery.deliverAs === "followUp" || delivery.deliverAs === "nextTurn"
-                ? delivery.deliverAs
-                : undefined;
-              actions.push({
-                type: "customMessage",
-                customType: String(value.customType ?? ""),
-                content: Object.prototype.hasOwnProperty.call(value, "content") ? normalizeCustomMessageContent(value.content) : "",
-                display: value.display !== false,
-                details: Object.prototype.hasOwnProperty.call(value, "details") ? value.details : undefined,
-                triggerTurn: delivery.triggerTurn === true,
-                deliverAs,
-                timestamp: Date.now()
-              });
-              return;
-            }
-
-            const message = toText(value);
-            if (message.trim().length > 0) actions.push({ type: "sendMessage", message });
-          };
-          return {
-            registerCommand(name, options = {}) {
-              const key = String(name ?? "");
-              commandMap.set(key, { name: key, options: options || {} });
-            },
-            registerTool(tool = {}) {
-              const key = String(tool && tool.name !== undefined ? tool.name : "");
-              toolMap.set(key, tool || {});
-            },
-            registerFlag(name, options = {}) {
-              const key = String(name ?? "");
-              const flagOptions = options || {};
-              flagMap.set(key, { name: key, options: flagOptions });
-              if (Object.prototype.hasOwnProperty.call(flagOptions, "default") && !flagValues.has(key)) {
-                const defaultValue = flagOptions.default;
-                if (typeof defaultValue === "boolean" || typeof defaultValue === "string") {
-                  flagValues.set(key, defaultValue);
-                }
-              }
-            },
-            registerShortcut(shortcut, options = {}) {
-              const key = String(shortcut ?? "");
-              shortcutMap.set(key, { shortcut: key, options: options || {} });
-            },
-            registerMessageRenderer(customType, renderer) {
-              const key = String(customType ?? "");
-              messageRendererMap.set(key, renderer);
-            },
-            registerProvider() { unsupported.providers++; },
-            unregisterProvider() { unsupported.providers++; },
-            on(eventName, handler) { return addHandler(handlerMap, unsupported, eventName, handler); },
-            getFlag(name) {
-              const key = String(name ?? "");
-              if (!flagMap.has(key)) return undefined;
-              return flagValues.get(key);
-            },
-            sendMessage: recordMessage,
-            sendUserMessage: recordMessage,
-            appendEntry() {},
-            setSessionName() {},
-            getSessionName() { return undefined; },
-            setLabel() {},
-            getActiveTools() { return []; },
-            getAllTools() {
-              return Array.from(toolMap.values()).map(tool => ({
-                name: String(tool && tool.name !== undefined ? tool.name : ""),
-                label: typeof tool?.label === "string" ? tool.label : String(tool && tool.name !== undefined ? tool.name : ""),
-                description: typeof tool?.description === "string" ? tool.description : "",
-                parameters: tool?.parameters && typeof tool.parameters === "object" ? tool.parameters : { type: "object" }
-              }));
-            },
-            setActiveTools() {},
-            getCommands() {
-              return Array.from(commandMap.values()).map(command => ({
-                name: command.name,
-                description: typeof command.options.description === "string" ? command.options.description : ""
-              }));
-            },
-            setModel() { return Promise.resolve(false); },
-            getThinkingLevel() { return undefined; },
-            setThinkingLevel() {},
-            exec() { return Promise.reject(new Error("extension exec is not supported by Tau javascript runtime baseline")); },
-            events: {
-              on(eventName, handler) { return addHandler(handlerMap, unsupported, eventName, handler); },
-              emit() {}
-            },
-            cwd: payload.cwd
-          };
-        }
-
-        function createUiContext(actions, payload) {
-          const addUiAction = (method, fields = {}) => {
-            actions.push({ type: "ui", method, ...fields });
-          };
-          return {
-            select: async () => undefined,
-            confirm: async () => false,
-            input: async () => undefined,
-            notify: (message, type) => addUiAction("notify", {
-              message: toText(message),
-              notifyType: typeof type === "string" ? type : undefined
-            }),
-            onTerminalInput: () => () => {},
-            setStatus: (key, text) => addUiAction("setStatus", {
-              statusKey: String(key ?? ""),
-              statusText: text === undefined ? undefined : toText(text)
-            }),
-            setWorkingMessage: message => addUiAction("setWorkingMessage", {
-              workingMessage: message === undefined ? undefined : toText(message)
-            }),
-            setWorkingIndicator: options => {
-              const indicator = normalizeIndicator(options);
-              addUiAction("setWorkingIndicator", {
-                workingIndicatorFrames: indicator.frames,
-                workingIndicatorIntervalMs: indicator.intervalMs
-              });
-            },
-            setHiddenThinkingLabel: label => addUiAction("setHiddenThinkingLabel", {
-              hiddenThinkingLabel: label === undefined ? undefined : toText(label)
-            }),
-            setWidget: (key, content, options = {}) => {
-              const widgetLines = normalizeStringArray(content);
-              if (content === undefined || widgetLines !== undefined) {
-                addUiAction("setWidget", {
-                  widgetKey: String(key ?? ""),
-                  widgetLines,
-                  widgetPlacement: typeof options?.placement === "string" ? options.placement : undefined
-                });
-              }
-            },
-            setFooter: footer => addUiAction("setFooter", {
-              footerLines: normalizeComponentLines(footer)
-            }),
-            setHeader: header => addUiAction("setHeader", {
-              headerLines: normalizeComponentLines(header)
-            }),
-            setTitle: title => addUiAction("setTitle", { title: toText(title) }),
-            custom: async () => undefined,
-            pasteToEditor(text) { this.setEditorText(text); },
-            setEditorText: text => addUiAction("set_editor_text", { text: toText(text) }),
-            getEditorText: () => "",
-            editor: async (title, prefill) => {
-              if (payload.hasExtensionUi !== true) return undefined;
-              const response = await requestUi({
-                method: "editor",
-                title: toText(title),
-                prefill: prefill === undefined ? undefined : toText(prefill)
-              });
-              if (!response || response.cancelled === true) return undefined;
-              return typeof response.value === "string" ? response.value : undefined;
-            }
-          };
-        }
-
-        function createCommandContext(api, payload, actions) {
-          return {
-            ui: createUiContext(actions, payload),
-            hasUI: payload.hasExtensionUi === true,
-            mode: typeof payload.extensionMode === "string" ? payload.extensionMode : (payload.hasExtensionUi === true ? "tui" : "print"),
-            cwd: payload.cwd,
-            sessionManager: {},
-            modelRegistry: {},
-            model: undefined,
-            isIdle: () => true,
-            signal: undefined,
-            abort: () => {},
-            hasPendingMessages: () => false,
-            shutdown: () => {},
-            getContextUsage: () => undefined,
-            compact: () => {},
-            getSystemPrompt: () => "",
-            waitForIdle: async () => {},
-            newSession: async () => ({ cancelled: false }),
-            fork: async () => ({ cancelled: false }),
-            navigateTree: async () => ({ cancelled: false }),
-            switchSession: async () => ({ cancelled: false }),
-            reload: async () => {},
-            sendMessage: api.sendMessage,
-            sendUserMessage: api.sendUserMessage
-          };
-        }
-
-        async function loadFactory(filePath) {
-          installExtensionImportHook(isTypeScriptFile(filePath));
-          const url = pathToFileURL(filePath).href + "?tauCacheBust=" + Date.now() + "-" + Math.random();
-          const module = await import(url);
-          let factory = module.default;
-          if (factory && typeof factory !== "function" && typeof factory.default === "function") {
-            factory = factory.default;
-          }
-          if (typeof factory !== "function") {
-            throw new Error("Extension does not export a valid factory function");
-          }
-          return factory;
-        }
-
-        async function renderCustomMessageActions(actions, messageRendererMap) {
-          for (const action of actions) {
-            if (!action || action.type !== "customMessage" || action.display === false) continue;
-            const key = String(action.customType ?? "");
-            const renderer = messageRendererMap.get(key);
-            if (typeof renderer !== "function") continue;
-            try {
-              const message = {
-                role: "custom",
-                customType: key,
-                content: Object.prototype.hasOwnProperty.call(action, "content") ? action.content : "",
-                display: action.display !== false,
-                details: Object.prototype.hasOwnProperty.call(action, "details") ? action.details : undefined,
-                timestamp: typeof action.timestamp === "number" ? action.timestamp : Date.now()
-              };
-              const rendered = await renderer(message, { expanded: true }, themeProxy);
-              const lines = normalizeComponentLines(rendered) ?? [];
-              if (lines.length > 0) action.renderedLines = lines;
-            } catch {
-            }
-          }
-        }
-
-        async function main() {
-          const payload = JSON.parse(input || "{}");
-          const commandMap = new Map();
-          const toolMap = new Map();
-          const flagMap = new Map();
-          const shortcutMap = new Map();
-          const flagValues = new Map();
-          if (payload.flagValues && typeof payload.flagValues === "object") {
-            for (const key of Object.keys(payload.flagValues)) {
-              const value = payload.flagValues[key];
-              if (typeof value === "boolean" || typeof value === "string") {
-                flagValues.set(key, value);
-              }
-            }
-          }
-          const handlerMap = new Map();
-          const messageRendererMap = new Map();
-          const unsupported = { tools: 0, flags: 0, shortcuts: 0, handlers: 0, messageRenderers: 0, providers: 0 };
-          const actions = [];
-          const api = createApi(commandMap, toolMap, flagMap, shortcutMap, flagValues, handlerMap, messageRendererMap, unsupported, actions, payload);
-          const factory = await loadFactory(payload.filePath);
-          await factory(api);
-
-          const commands = Array.from(commandMap.values()).map(command => ({
-            name: command.name,
-            description: typeof command.options.description === "string" ? command.options.description : "",
-            argumentHint: typeof command.options.argumentHint === "string" ? command.options.argumentHint : undefined,
-            hasHandler: typeof command.options.handler === "function"
-          }));
-
-          const tools = Array.from(toolMap.values()).map(tool => ({
-            name: String(tool && tool.name !== undefined ? tool.name : ""),
-            label: typeof tool?.label === "string" ? tool.label : String(tool && tool.name !== undefined ? tool.name : ""),
-            description: typeof tool?.description === "string" ? tool.description : "",
-            parameters: tool?.parameters && typeof tool.parameters === "object" ? tool.parameters : { type: "object" },
-            hasHandler: typeof tool?.execute === "function",
-            hasPrepareArguments: typeof tool?.prepareArguments === "function",
-            executionMode: typeof tool?.executionMode === "string" ? tool.executionMode : undefined
-          }));
-
-          const flags = Array.from(flagMap.values()).map(flag => {
-            const defaultValue = flag.options && Object.prototype.hasOwnProperty.call(flag.options, "default")
-              ? flag.options.default
-              : undefined;
-            return {
-              name: flag.name,
-              description: typeof flag.options?.description === "string" ? flag.options.description : "",
-              type: flag.options?.type === "boolean" || flag.options?.type === "string" ? flag.options.type : "",
-              default: typeof defaultValue === "boolean" || typeof defaultValue === "string" ? defaultValue : undefined
-            };
-          });
-
-          const shortcuts = Array.from(shortcutMap.values()).map(shortcut => ({
-            shortcut: shortcut.shortcut,
-            description: typeof shortcut.options?.description === "string" ? shortcut.options.description : "",
-            hasHandler: typeof shortcut.options?.handler === "function"
-          }));
-
-          const eventHandlers = Array.from(handlerMap.entries())
-            .filter(entry => entry[1].length > 0)
-            .map(entry => entry[0]);
-
-          const messageRenderers = Array.from(messageRendererMap.entries()).map(([customType, renderer]) => ({
-            customType,
-            hasRenderer: typeof renderer === "function"
-          }));
-
-          if (payload.mode === "load") {
-            write({ ok: true, commands, tools, flags, shortcuts, eventHandlers, messageRenderers, unsupported });
-            return;
-          }
-
-          if (payload.mode === "renderMessage") {
-            const key = String(payload.customType ?? "");
-            const renderer = messageRendererMap.get(key);
-            if (typeof renderer !== "function") {
-              write({ ok: false, error: "Extension message renderer was not registered: " + key });
-              return;
-            }
-
-            const message = {
-              role: "custom",
-              customType: key,
-              content: normalizeContentBlocks(payload.messageContent),
-              display: payload.messageDisplay !== false,
-              details: Object.prototype.hasOwnProperty.call(payload, "messageDetails") ? payload.messageDetails : undefined,
-              timestamp: typeof payload.messageTimestamp === "number" ? payload.messageTimestamp : Date.now()
-            };
-
-            const rendered = await renderer(message, { expanded: payload.expanded === true }, themeProxy);
-            write({ ok: true, lines: normalizeComponentLines(rendered) ?? [] });
-            return;
-          }
-
-          if (payload.mode === "invokeShortcut") {
-            const shortcut = shortcutMap.get(String(payload.shortcut ?? ""));
-            if (!shortcut) {
-              write({ ok: false, error: "Extension shortcut was not registered: " + String(payload.shortcut ?? "") });
-              return;
-            }
-            if (typeof shortcut.options.handler !== "function") {
-              write({ ok: false, error: "Extension shortcut has no handler: " + shortcut.shortcut });
-              return;
-            }
-
-            const returnValue = await shortcut.options.handler(createCommandContext(api, payload, actions));
-            const returnText = returnValue === undefined || returnValue === null ? undefined : toText(returnValue);
-            await renderCustomMessageActions(actions, messageRendererMap);
-            write({ ok: true, actions, returnText, unsupported });
-            return;
-          }
-
-          if (payload.mode === "emitToolCall") {
-            const handlers = handlerMap.get("tool_call") ?? [];
-            const event = {
-              type: "tool_call",
-              toolName: String(payload.toolName ?? ""),
-              toolCallId: String(payload.toolCallId ?? ""),
-              input: payload.toolArgs && typeof payload.toolArgs === "object" ? payload.toolArgs : {}
-            };
-
-            let result = undefined;
-            for (const handler of handlers) {
-              const handlerResult = await handler(event, createCommandContext(api, payload, actions));
-              if (handlerResult) {
-                result = handlerResult;
-                if (result.block) break;
-              }
-            }
-
-            write({
-              ok: true,
-              block: result && result.block === true,
-              reason: result && typeof result.reason === "string" ? result.reason : undefined,
-              terminate: result && result.terminate === true,
-              input: event.input,
-              actions
-            });
-            return;
-          }
-
-          if (payload.mode === "emitToolResult") {
-            const handlers = handlerMap.get("tool_result") ?? [];
-            const event = {
-              type: "tool_result",
-              toolName: String(payload.toolName ?? ""),
-              toolCallId: String(payload.toolCallId ?? ""),
-              input: payload.toolArgs && typeof payload.toolArgs === "object" ? payload.toolArgs : {},
-              content: normalizeContentBlocks(payload.toolResult?.content),
-              details: payload.toolResult && Object.prototype.hasOwnProperty.call(payload.toolResult, "details")
-                ? payload.toolResult.details
-                : undefined,
-              isError: payload.toolResult?.isError === true
-            };
-
-            for (const handler of handlers) {
-              try {
-                const handlerResult = await handler(event, createCommandContext(api, payload, actions));
-                if (!handlerResult) continue;
-                if (Object.prototype.hasOwnProperty.call(handlerResult, "content")) {
-                  event.content = normalizeContentBlocks(handlerResult.content);
-                }
-                if (Object.prototype.hasOwnProperty.call(handlerResult, "details")) {
-                  event.details = handlerResult.details;
-                }
-                if (Object.prototype.hasOwnProperty.call(handlerResult, "isError")) {
-                  event.isError = handlerResult.isError === true;
-                }
-              } catch {
-              }
-            }
-
-            write({
-              ok: true,
-              content: normalizeToolEventContent(event.content),
-              isError: event.isError,
-              details: event.details,
-              actions
-            });
-            return;
-          }
-
-          if (payload.mode === "emitEvent") {
-            const event = payload.event && typeof payload.event === "object" ? payload.event : { type: "" };
-            const eventType = String(event.type ?? "");
-            const handlers = handlerMap.get(eventType) ?? [];
-            const handlerErrors = [];
-            if (eventType === "message_end") {
-              let currentEvent = {
-                ...event,
-                message: normalizeAgentMessage(event.message)
-              };
-              let replacementMessage = undefined;
-              for (const handler of handlers) {
-                try {
-                  const handlerResult = await handler(currentEvent, createCommandContext(api, payload, actions));
-                  if (!handlerResult || !Object.prototype.hasOwnProperty.call(handlerResult, "message")) continue;
-                  const replacement = normalizeAgentMessage(handlerResult.message, currentEvent.message?.role);
-                  if (!replacement) continue;
-                  if (replacement.role !== currentEvent.message?.role) {
-                    handlerErrors.push("message_end handlers must return a message with the same role");
-                    continue;
-                  }
-                  currentEvent = { ...currentEvent, message: replacement };
-                  replacementMessage = replacement;
-                } catch (error) {
-                  handlerErrors.push(formatError(error));
-                }
-              }
-
-              write({ ok: true, handlerErrors, actions, unsupported, replacementMessage });
-              return;
-            }
-
-            for (const handler of handlers) {
-              try {
-                await handler(event, createCommandContext(api, payload, actions));
-              } catch (error) {
-                handlerErrors.push(formatError(error));
-              }
-            }
-
-            write({ ok: true, handlerErrors, actions, unsupported });
-            return;
-          }
-
-          if (payload.mode === "prepareToolArguments") {
-            const tool = toolMap.get(String(payload.toolName ?? ""));
-            if (!tool) {
-              write({ ok: false, error: "Extension tool was not registered: " + String(payload.toolName ?? "") });
-              return;
-            }
-
-            if (typeof tool.prepareArguments !== "function") {
-              write({ ok: true, preparedArgs: payload.toolArgs === undefined ? {} : payload.toolArgs });
-              return;
-            }
-
-            const preparedArgs = await tool.prepareArguments(payload.toolArgs === undefined ? {} : payload.toolArgs);
-            write({ ok: true, preparedArgs: preparedArgs === undefined ? {} : preparedArgs });
-            return;
-          }
-
-          if (payload.mode === "executeTool") {
-            const tool = toolMap.get(String(payload.toolName ?? ""));
-            if (!tool) {
-              write({ ok: false, error: "Extension tool was not registered: " + String(payload.toolName ?? "") });
-              return;
-            }
-            if (typeof tool.execute !== "function") {
-              write({ ok: false, error: "Extension tool has no execute handler: " + String(tool.name ?? payload.toolName ?? "") });
-              return;
-            }
-
-            const onUpdate = update => {
-              const message = toText(update);
-              if (message.trim().length > 0) actions.push({ type: "toolUpdate", message });
-            };
-            const returnValue = await tool.execute(
-              String(payload.toolCallId ?? ""),
-              payload.toolArgs && typeof payload.toolArgs === "object" ? payload.toolArgs : {},
-              undefined,
-              onUpdate,
-              createCommandContext(api, payload, actions));
-            const result = normalizeToolResult(returnValue);
-            write({ ok: true, content: result.content, isError: result.isError, details: result.details, actions, unsupported });
-            return;
-          }
-
-          const command = commandMap.get(String(payload.commandName ?? ""));
-          if (!command) {
-            write({ ok: false, error: "Extension command was not registered: " + String(payload.commandName ?? "") });
-            return;
-          }
-          if (typeof command.options.handler !== "function") {
-            write({ ok: false, error: "Extension command has no handler: " + command.name });
-            return;
-          }
-
-          const returnValue = await command.options.handler(String(payload.args ?? ""), createCommandContext(api, payload, actions));
-          const returnText = returnValue === undefined || returnValue === null ? undefined : toText(returnValue);
-          await renderCustomMessageActions(actions, messageRendererMap);
-          write({ ok: true, actions, returnText, unsupported });
-        }
-        """;
 }

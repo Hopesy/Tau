@@ -1,9 +1,8 @@
-using System.Diagnostics;
 using System.Text;
 
 namespace Tau.CodingAgent.Runtime;
 
-public sealed class SystemCodingAgentClipboard : ICodingAgentClipboard
+public sealed partial class SystemCodingAgentClipboard : ICodingAgentClipboard
 {
     private const int ListTimeoutMs = 1_000;
     private const int ReadTimeoutMs = 3_000;
@@ -39,40 +38,11 @@ public sealed class SystemCodingAgentClipboard : ICodingAgentClipboard
             (static () => Path.Combine(Path.GetTempPath(), $"tau-clipboard-{Guid.NewGuid():N}.png"));
     }
 
-    public async Task SetTextAsync(string text, CancellationToken cancellationToken = default)
-    {
-        if (OperatingSystem.IsWindows())
-        {
-            await RunClipboardCommandAsync("clip.exe", null, text, cancellationToken).ConfigureAwait(false);
-            return;
-        }
-
-        if (OperatingSystem.IsMacOS())
-        {
-            await RunClipboardCommandAsync("pbcopy", null, text, cancellationToken).ConfigureAwait(false);
-            return;
-        }
-
-        var failures = new List<string>();
-        foreach (var candidate in new[] { ("wl-copy", (string?)null), ("xclip", "-selection clipboard") })
-        {
-            try
-            {
-                await RunClipboardCommandAsync(candidate.Item1, candidate.Item2, text, cancellationToken).ConfigureAwait(false);
-                return;
-            }
-            catch (Exception ex) when (ex is InvalidOperationException or IOException)
-            {
-                failures.Add($"{candidate.Item1}: {ex.Message}");
-            }
-        }
-
-        throw new InvalidOperationException(
-            $"No clipboard command succeeded. Install wl-copy or xclip. {string.Join("; ", failures)}");
-    }
-
+    /// <summary>【CodingAgent】【图片读取】区分后端不可用与空剪贴板，仅在允许的分支回退，最后转换不支持的图片格式。</summary>
+    /// <param name="cancellationToken">取消信号。</param><returns>图片或空引用。</returns>
     public async Task<CodingAgentClipboardImage?> ReadImageAsync(CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         if (HasEnv("TERMUX_VERSION"))
         {
             return null;
@@ -82,29 +52,21 @@ public sealed class SystemCodingAgentClipboard : ICodingAgentClipboard
         if (_platform == CodingAgentClipboardPlatform.Linux)
         {
             var wsl = IsWsl();
-            var wayland = IsWaylandSession(_environment);
-
-            if (wayland || wsl)
-            {
-                image = await ReadImageViaWlPasteAsync(cancellationToken).ConfigureAwait(false) ??
-                    await ReadImageViaXclipAsync(cancellationToken).ConfigureAwait(false);
-            }
-
-            if (image is null && wsl)
-            {
-                image = await ReadImageViaPowerShellAsync(wsl: true, cancellationToken).ConfigureAwait(false);
-            }
-
-            if (image is null && !wayland)
-            {
-                image = await ReadImageViaXclipAsync(cancellationToken).ConfigureAwait(false);
-            }
+            var result = new ClipboardImageReadResult(false, null);
+            if (IsWaylandSession(_environment) || wsl)
+                result = await ReadImageViaWlPasteAsync(cancellationToken).ConfigureAwait(false);
+            if (!result.Available) result = await ReadImageViaXclipAsync(cancellationToken).ConfigureAwait(false);
+            image = result.Image;
+            if (image is null && wsl) image = await ReadImageViaPowerShellAsync(wsl: true, cancellationToken).ConfigureAwait(false);
+            if (image is null && !result.Available) image = await ReadNativeImageAsync(cancellationToken).ConfigureAwait(false);
         }
         else if (_platform == CodingAgentClipboardPlatform.Windows)
         {
             image = await ReadImageViaPowerShellAsync(wsl: false, cancellationToken).ConfigureAwait(false);
         }
+        else image = await ReadNativeImageAsync(cancellationToken).ConfigureAwait(false);
 
+        cancellationToken.ThrowIfCancellationRequested();
         if (image is null)
         {
             return null;
@@ -113,11 +75,6 @@ public sealed class SystemCodingAgentClipboard : ICodingAgentClipboard
         if (IsSupportedImageMimeType(image.MimeType))
         {
             return new CodingAgentClipboardImage(image.Bytes, BaseMimeType(image.MimeType));
-        }
-
-        if (!BaseMimeType(image.MimeType).StartsWith("image/", StringComparison.Ordinal))
-        {
-            return null;
         }
 
         var converted = CodingAgentImageConverter.ConvertToPng(Convert.ToBase64String(image.Bytes), image.MimeType);
@@ -140,7 +97,9 @@ public sealed class SystemCodingAgentClipboard : ICodingAgentClipboard
             _ => null
         };
 
-    private async Task<CodingAgentClipboardImage?> ReadImageViaWlPasteAsync(CancellationToken cancellationToken)
+    /// <summary>【CodingAgent】【Wayland 图片】工具失败才允许回退，成功列出但没有图片或数据为空表示空剪贴板。</summary>
+    /// <param name="cancellationToken">取消信号。</param><returns>可用性及图片。</returns>
+    private async Task<ClipboardImageReadResult> ReadImageViaWlPasteAsync(CancellationToken cancellationToken)
     {
         var list = await _runner.RunAsync(
             "wl-paste",
@@ -149,15 +108,16 @@ public sealed class SystemCodingAgentClipboard : ICodingAgentClipboard
             ListTimeoutMs,
             MaxBufferBytes,
             cancellationToken).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
         if (!list.Ok)
         {
-            return null;
+            return new(false, null);
         }
 
         var selectedType = SelectPreferredImageMimeType(SplitLines(list.Stdout));
         if (selectedType is null)
         {
-            return null;
+            return new(true, null);
         }
 
         var data = await _runner.RunAsync(
@@ -167,12 +127,13 @@ public sealed class SystemCodingAgentClipboard : ICodingAgentClipboard
             ReadTimeoutMs,
             MaxBufferBytes,
             cancellationToken).ConfigureAwait(false);
-        return data.Ok && data.Stdout.Length > 0
-            ? new CodingAgentClipboardImage(data.Stdout, BaseMimeType(selectedType))
-            : null;
+        cancellationToken.ThrowIfCancellationRequested();
+        return new(data.Ok, data.Ok && data.Stdout.Length > 0 ? new(data.Stdout, BaseMimeType(selectedType)) : null);
     }
 
-    private async Task<CodingAgentClipboardImage?> ReadImageViaXclipAsync(CancellationToken cancellationToken)
+    /// <summary>【CodingAgent】【X11 图片】只读取 TARGETS 声明的首选图片，不探测未声明格式或旧剪贴板内容。</summary>
+    /// <param name="cancellationToken">取消信号。</param><returns>可用性及图片。</returns>
+    private async Task<ClipboardImageReadResult> ReadImageViaXclipAsync(CancellationToken cancellationToken)
     {
         var targets = await _runner.RunAsync(
             "xclip",
@@ -182,27 +143,18 @@ public sealed class SystemCodingAgentClipboard : ICodingAgentClipboard
             MaxBufferBytes,
             cancellationToken).ConfigureAwait(false);
 
-        var candidateTypes = targets.Ok ? SplitLines(targets.Stdout) : [];
-        var preferred = candidateTypes.Count > 0 ? SelectPreferredImageMimeType(candidateTypes) : null;
-        var tryTypes = CreateDistinctTypes(preferred is null ? SupportedImageMimeTypes : [preferred, .. SupportedImageMimeTypes]);
-
-        foreach (var mimeType in tryTypes)
-        {
-            var data = await _runner.RunAsync(
-                "xclip",
-                ["-selection", "clipboard", "-t", mimeType, "-o"],
-                stdin: null,
-                ReadTimeoutMs,
-                MaxBufferBytes,
-                cancellationToken).ConfigureAwait(false);
-            if (data.Ok && data.Stdout.Length > 0)
-            {
-                return new CodingAgentClipboardImage(data.Stdout, BaseMimeType(mimeType));
-            }
-        }
-
-        return null;
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!targets.Ok) return new(false, null);
+        var preferred = SelectPreferredImageMimeType(SplitLines(targets.Stdout));
+        if (preferred is null) return new(true, null);
+        var data = await _runner.RunAsync("xclip", ["-selection", "clipboard", "-t", preferred, "-o"], null,
+            ReadTimeoutMs, MaxBufferBytes, cancellationToken).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+        return new(data.Ok, data.Ok && data.Stdout.Length > 0 ? new(data.Stdout, BaseMimeType(preferred)) : null);
     }
+
+    /// <summary>【CodingAgent】【后端结果】显式保留不可用与内容为空的区别。</summary>
+    private sealed record ClipboardImageReadResult(bool Available, CodingAgentClipboardImage? Image);
 
     private async Task<CodingAgentClipboardImage?> ReadImageViaPowerShellAsync(
         bool wsl,
@@ -270,7 +222,17 @@ public sealed class SystemCodingAgentClipboard : ICodingAgentClipboard
         }
     }
 
-    private bool IsWsl() => HasEnv("WSL_DISTRO_NAME") || HasEnv("WSLENV");
+    /// <summary>【CodingAgent】【WSL 识别】优先读取环境标识，缺失时检查内核版本。</summary><returns>是否运行在 WSL。</returns>
+    private bool IsWsl()
+    {
+        if (HasEnv("WSL_DISTRO_NAME") || HasEnv("WSLENV")) return true;
+        try
+        {
+            var version = KernelVersionReader();
+            return version.Contains("microsoft", StringComparison.OrdinalIgnoreCase) || version.Contains("wsl", StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return false; }
+    }
 
     private bool HasEnv(string name) => HasEnvironmentValue(_environment, name);
 
@@ -309,12 +271,6 @@ public sealed class SystemCodingAgentClipboard : ICodingAgentClipboard
         return normalized.FirstOrDefault(static item => item.Base.StartsWith("image/", StringComparison.Ordinal))?.Raw;
     }
 
-    private static IReadOnlyList<string> CreateDistinctTypes(IEnumerable<string> mimeTypes) =>
-        mimeTypes
-            .Where(static mimeType => !string.IsNullOrWhiteSpace(mimeType))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToArray();
-
     private static bool IsSupportedImageMimeType(string mimeType) =>
         SupportedImageMimeTypes.Contains(BaseMimeType(mimeType), StringComparer.Ordinal);
 
@@ -330,45 +286,6 @@ public sealed class SystemCodingAgentClipboard : ICodingAgentClipboard
 
     private static string GetEnvironmentValue(IReadOnlyDictionary<string, string?> environment, string name) =>
         environment.TryGetValue(name, out var value) ? value ?? string.Empty : string.Empty;
-
-    private static async Task RunClipboardCommandAsync(
-        string fileName,
-        string? arguments,
-        string text,
-        CancellationToken cancellationToken)
-    {
-        using var process = new Process();
-        process.StartInfo = new ProcessStartInfo
-        {
-            FileName = fileName,
-            Arguments = arguments ?? string.Empty,
-            RedirectStandardInput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
-
-        try
-        {
-            process.Start();
-        }
-        catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or FileNotFoundException)
-        {
-            throw new InvalidOperationException($"{fileName} is not available", ex);
-        }
-
-        await process.StandardInput.WriteAsync(text.AsMemory(), cancellationToken).ConfigureAwait(false);
-        await process.StandardInput.FlushAsync(cancellationToken).ConfigureAwait(false);
-        process.StandardInput.Close();
-
-        var stderr = await process.StandardError.ReadToEndAsync(cancellationToken).ConfigureAwait(false);
-        await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
-        if (process.ExitCode != 0)
-        {
-            throw new InvalidOperationException(
-                $"{fileName} exited with code {process.ExitCode}: {stderr.Trim()}");
-        }
-    }
 
     private static IReadOnlyDictionary<string, string?> CaptureEnvironment()
     {
@@ -426,79 +343,4 @@ internal interface ICodingAgentClipboardCommandRunner
         int timeoutMs,
         int maxBufferBytes,
         CancellationToken cancellationToken);
-}
-
-internal sealed class SystemCodingAgentClipboardCommandRunner : ICodingAgentClipboardCommandRunner
-{
-    public async Task<CodingAgentClipboardCommandResult> RunAsync(
-        string fileName,
-        IReadOnlyList<string> arguments,
-        byte[]? stdin,
-        int timeoutMs,
-        int maxBufferBytes,
-        CancellationToken cancellationToken)
-    {
-        using var process = new Process();
-        process.StartInfo = new ProcessStartInfo
-        {
-            FileName = fileName,
-            RedirectStandardInput = stdin is not null,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
-        foreach (var argument in arguments)
-        {
-            process.StartInfo.ArgumentList.Add(argument);
-        }
-
-        try
-        {
-            process.Start();
-        }
-        catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or FileNotFoundException)
-        {
-            return new CodingAgentClipboardCommandResult(false, [], ex.Message);
-        }
-
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(timeoutMs);
-
-        if (stdin is not null)
-        {
-            await process.StandardInput.BaseStream.WriteAsync(stdin, timeout.Token).ConfigureAwait(false);
-            await process.StandardInput.BaseStream.FlushAsync(timeout.Token).ConfigureAwait(false);
-            process.StandardInput.Close();
-        }
-
-        using var output = new MemoryStream();
-        var copyOutput = process.StandardOutput.BaseStream.CopyToAsync(output, timeout.Token);
-        var readError = process.StandardError.ReadToEndAsync(timeout.Token);
-
-        try
-        {
-            await process.WaitForExitAsync(timeout.Token).ConfigureAwait(false);
-            await copyOutput.ConfigureAwait(false);
-            var stderr = await readError.ConfigureAwait(false);
-            if (output.Length > maxBufferBytes)
-            {
-                return new CodingAgentClipboardCommandResult(false, [], "output exceeded max buffer");
-            }
-
-            return new CodingAgentClipboardCommandResult(process.ExitCode == 0, output.ToArray(), stderr);
-        }
-        catch (OperationCanceledException)
-        {
-            try
-            {
-                process.Kill(entireProcessTree: true);
-            }
-            catch (InvalidOperationException)
-            {
-            }
-
-            return new CodingAgentClipboardCommandResult(false, [], "command timed out");
-        }
-    }
 }

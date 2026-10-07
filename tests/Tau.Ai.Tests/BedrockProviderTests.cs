@@ -10,6 +10,43 @@ namespace Tau.Ai.Tests;
 [Collection("BedrockEnvironment")]
 public sealed class BedrockProviderTests
 {
+    /// <summary>【AI】【Bedrock观察】自定义头参与签名，保留字段不能被回调伪造，原始事件按协议名称包裹。</summary>
+    /// <returns>异步测试任务。</returns>
+    [Fact]
+    public async Task Stream_TransformsHeadersBeforeSigningAndObservesRawEvents()
+    {
+        var seen = new List<JsonElement>();
+        using var handler = new OpenAiResponsesProviderTests.StubHandler(request =>
+        {
+            Assert.Equal("trace", request.Headers.GetValues("X-Synthetic").Single());
+            var authorization = request.Headers.GetValues("Authorization").Single();
+            Assert.StartsWith("AWS4-HMAC-SHA256", authorization);
+            Assert.Contains("x-synthetic", authorization);
+            Assert.DoesNotContain("forged", authorization);
+            Assert.DoesNotContain("forged", request.Headers.GetValues("x-amz-date"));
+            return EventStreamResponse(EventJson("messageStart", """{"role":"assistant"}"""), EventJson("messageStop", """{"stopReason":"end_turn"}"""));
+        });
+        using var client = new HttpClient(handler);
+        var provider = new BedrockProvider(client);
+        var result = await provider.Stream(BuildModel(), new() { Messages = [new UserMessage("hi")] }, new BedrockOptions
+        {
+            Region = "us-east-1",
+            Env = new Dictionary<string, string> { ["AWS_ACCESS_KEY_ID"] = "synthetic-id", ["AWS_SECRET_ACCESS_KEY"] = "synthetic-secret", ["AWS_BEDROCK_SKIP_AUTH"] = "0",
+                ["AWS_BEARER_TOKEN_BEDROCK"] = "" },
+            TransformHeaders = (headers, _) =>
+            {
+                headers["X-Synthetic"] = "trace";
+                headers["Authorization"] = "forged";
+                headers["x-amz-date"] = "forged";
+                return ValueTask.FromResult<IDictionary<string, string?>?>(headers);
+            },
+            OnProviderStreamEvent = (data, _) => { seen.Add(data); return ValueTask.CompletedTask; }
+        }).ResultAsync;
+        Assert.True(result.StopReason != StopReason.Error, result.ErrorMessage);
+        Assert.Equal("assistant", seen[0].GetProperty("messageStart").GetProperty("role").GetString());
+        Assert.Equal("end_turn", seen[1].GetProperty("messageStop").GetProperty("stopReason").GetString());
+    }
+
     [Fact]
     public void RegisterAll_UsesDedicatedBedrockProvider()
     {

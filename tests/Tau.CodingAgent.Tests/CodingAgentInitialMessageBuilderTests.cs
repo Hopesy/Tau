@@ -115,7 +115,7 @@ public sealed class CodingAgentInitialMessageBuilderTests
     [InlineData("-ne", "extensions")]
     [InlineData("-ns", "skills")]
     [InlineData("-np", "prompts")]
-    [InlineData("-nt", "themes")]
+    [InlineData("--no-themes", "themes")]
     public void Parse_RecognizesResourceToggleShortFlags(string flag, string kind)
     {
         var parsed = CodingAgentCliArguments.Parse([flag]);
@@ -268,7 +268,7 @@ public sealed class CodingAgentInitialMessageBuilderTests
 
         Assert.False(parsed.NoTools);
         Assert.NotNull(parsed.Tools);
-        Assert.Equal(["read_file", "shell", "glob", "ls"], parsed.Tools);
+        Assert.Equal(["read", "bash", "find", "ls"], parsed.Tools);
         Assert.Empty(parsed.Diagnostics);
     }
 
@@ -278,20 +278,35 @@ public sealed class CodingAgentInitialMessageBuilderTests
         var parsed = CodingAgentCliArguments.Parse(["--tools=read,read,edit"]);
 
         Assert.NotNull(parsed.Tools);
-        Assert.Equal(["read_file", "edit_file"], parsed.Tools);
+        Assert.Equal(["read", "edit"], parsed.Tools);
         Assert.Empty(parsed.Diagnostics);
     }
 
     [Fact]
-    public void Parse_WarnsOnUnknownToolName()
+    public void Parse_PreservesExtensionToolNames()
     {
         var parsed = CodingAgentCliArguments.Parse(["--tools", "read,bogus"]);
 
         Assert.NotNull(parsed.Tools);
-        Assert.Equal(["read_file"], parsed.Tools);
-        var diagnostic = Assert.Single(parsed.Diagnostics);
-        Assert.Equal("warning", diagnostic.Type);
-        Assert.Contains("Unknown tool \"bogus\"", diagnostic.Message, StringComparison.Ordinal);
+        Assert.Equal(["read", "bogus"], parsed.Tools);
+        Assert.Empty(parsed.Diagnostics);
+    }
+
+    /// <summary>【CodingAgent】【命令行工具】允许自定义工具名称，排除参数支持别名、内联值并保持空允许名单。</summary>
+    [Fact]
+    public void Parse_ToolSelectionSupportsDenylistAndEmptyAllowlist()
+    {
+        var parsed = CodingAgentCliArguments.Parse(["-nt", "--tools=", "-xt", "read,custom", "--exclude-tools=custom,edit"]);
+        Assert.True(parsed.NoTools);
+        Assert.NotNull(parsed.Tools);
+        Assert.Empty(parsed.Tools);
+        Assert.Equal(["read", "custom", "edit"], parsed.ExcludeTools);
+        Assert.Empty(parsed.Diagnostics);
+        Assert.Throws<ArgumentException>(() => CodingAgentCliArguments.Parse(["--exclude-tools"]));
+        var builtInOnly = CodingAgentCliArguments.Parse(["-nbt", "-t", "custom"]);
+        Assert.True(builtInOnly.NoBuiltInTools);
+        Assert.False(builtInOnly.NoTools);
+        Assert.Equal(["custom"], builtInOnly.Tools);
     }
 
     [Fact]
@@ -311,7 +326,7 @@ public sealed class CodingAgentInitialMessageBuilderTests
 
         Assert.True(parsed.NoTools);
         Assert.NotNull(parsed.Tools);
-        Assert.Equal(["read_file"], parsed.Tools);
+        Assert.Equal(["read"], parsed.Tools);
     }
 
     [Fact]

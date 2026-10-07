@@ -17,7 +17,16 @@ public sealed record CodingAgentTreeSessionSnapshot(
     string? LeafId,
     int EntryCount)
 {
-    public CodingAgentSessionSnapshot ToFlatSnapshot() => new(Messages, Provider, Model, Name);
+    /// <summary>保存的思考等级，null 表示历史分支未记录。</summary>
+    public string? ThinkingLevel { get; init; }
+
+    /// <summary>【CodingAgent】【模型恢复】保留完整父链，以便结合当前目录恢复虚拟或物理选择。</summary>
+    internal IReadOnlyList<CodingAgentTreeSessionEntry>? BranchEntries { get; init; }
+
+    /// <summary>【CodingAgent】【会话恢复】转换为运行器快照，保留分支思考等级。</summary>
+    /// <returns>平面会话快照。</returns>
+    public CodingAgentSessionSnapshot ToFlatSnapshot() => new(Messages, Provider, Model, Name)
+        { ThinkingLevel = ThinkingLevel, BranchEntries = BranchEntries };
 }
 
 public sealed record CodingAgentTreeSessionSummary(
@@ -134,9 +143,11 @@ public sealed class CodingAgentTreeSessionController
 {
     private readonly CodingAgentCompactionRetentionOptions _compactionRetention;
     private int _persistedMessageCount;
+    private bool _persistedHasSystemBaseline;
     private string? _persistedProvider;
     private string? _persistedModel;
     private string? _persistedName;
+    private string? _persistedThinkingLevel;
 
     public CodingAgentTreeSessionController(
         CodingAgentTreeSessionStore store,
@@ -149,7 +160,19 @@ public sealed class CodingAgentTreeSessionController
 
     public CodingAgentTreeSessionStore Store { get; private set; }
 
+    /// <summary>【CodingAgent】【存储替换】采用已验证的新存储，同时重置消息和声明的持久化游标。</summary>
+    /// <param name="store">独立的新会话或已打开的目标会话。</param>
+    /// <returns>新会话的当前上下文。</returns>
+    internal CodingAgentTreeSessionSnapshot Adopt(CodingAgentTreeSessionStore store)
+    {
+        var snapshot = store.LoadCurrentBranchSnapshot();
+        Store = store;
+        MarkSnapshot(snapshot);
+        return snapshot;
+    }
+
     public string Path => Store.Path;
+    internal Tau.AgentCore.Harness.AgentCompactionSettings CompactionSettings => new(KeepRecentTokens: _compactionRetention.KeepRecentTokens);
 
     public static CodingAgentTreeSessionController OpenOrCreate(
         string? path = null,
@@ -163,9 +186,24 @@ public sealed class CodingAgentTreeSessionController
         return snapshot;
     }
 
+    /// <summary>【CodingAgent】【会话同步】追加运行器的新消息，并调整旧会话补入基线后的保存游标。</summary>
+    /// <param name="runner">当前运行器。</param>
     public void SyncFromRunner(ICodingAgentRunner runner)
     {
+        lock (Store.SyncRoot) SyncFromRunnerCore(runner);
+    }
+
+    /// <summary>【CodingAgent】【会话同步】持有存储锁时同步消息与元数据，避免扩展写入与流式保存交错。</summary>
+    /// <param name="runner">当前运行器。</param>
+    private void SyncFromRunnerCore(ICodingAgentRunner runner)
+    {
         var messages = runner.Messages;
+        // 1. 【CodingAgent】【会话同步】旧历史补入的开场仅用于运行，不能让原有尾部被重复追加
+        if (_persistedMessageCount > 0 && !_persistedHasSystemBaseline && messages.FirstOrDefault() is SystemMessage)
+        {
+            _persistedMessageCount++;
+            _persistedHasSystemBaseline = true;
+        }
         if (messages.Count < _persistedMessageCount)
         {
             Store.StartNew(runner.Model.Provider, runner.Model.Id, runner.SessionName);
@@ -173,6 +211,7 @@ public sealed class CodingAgentTreeSessionController
             _persistedProvider = runner.Model.Provider;
             _persistedModel = runner.Model.Id;
             _persistedName = NormalizeName(runner.SessionName);
+            _persistedThinkingLevel = null;
         }
 
         if (!string.Equals(_persistedProvider, runner.Model.Provider, StringComparison.OrdinalIgnoreCase) ||
@@ -190,13 +229,25 @@ public sealed class CodingAgentTreeSessionController
             _persistedName = sessionName;
         }
 
+        // 2. 【CodingAgent】【思考等级】在新消息之前记录变更，确保分叉只恢复目标分支上的等级
+        var thinkingLevel = CodingAgentThinkingLevels.Format(runner.ThinkingLevel);
+        if (!string.Equals(_persistedThinkingLevel, thinkingLevel, StringComparison.Ordinal))
+        {
+            Store.AppendThinkingLevelChange(thinkingLevel);
+            _persistedThinkingLevel = thinkingLevel;
+        }
+
         if (messages.Count > _persistedMessageCount)
         {
             Store.AppendMessages(messages, _persistedMessageCount);
             _persistedMessageCount = messages.Count;
+            _persistedHasSystemBaseline = messages.FirstOrDefault() is SystemMessage;
         }
     }
 
+    /// <summary>【CodingAgent】【新会话】建立新树并重置声明与消息的保存游标。</summary>
+    /// <param name="runner">当前运行器。</param>
+    /// <param name="parentSession">可选父会话路径。</param>
     public void StartNewFromRunner(ICodingAgentRunner runner, string? parentSession = null)
     {
         if (!string.IsNullOrWhiteSpace(parentSession))
@@ -206,38 +257,53 @@ public sealed class CodingAgentTreeSessionController
 
         Store.StartNew(runner.Model.Provider, runner.Model.Id, runner.SessionName);
         _persistedMessageCount = 0;
+        _persistedHasSystemBaseline = false;
         _persistedProvider = runner.Model.Provider;
         _persistedModel = runner.Model.Id;
         _persistedName = NormalizeName(runner.SessionName);
+        _persistedThinkingLevel = CodingAgentThinkingLevels.Format(runner.ThinkingLevel);
+        Store.AppendThinkingLevelChange(_persistedThinkingLevel);
     }
 
+    /// <summary>【CodingAgent】【会话替换】保存运行器的完整会话并同步声明游标。</summary>
+    /// <param name="runner">提供完整会话的运行器。</param>
     public void ReplaceWithRunnerSession(ICodingAgentRunner runner)
     {
         Store.StartNew(runner.Model.Provider, runner.Model.Id, runner.SessionName);
+        _persistedThinkingLevel = CodingAgentThinkingLevels.Format(runner.ThinkingLevel);
+        Store.AppendThinkingLevelChange(_persistedThinkingLevel);
         Store.AppendMessages(runner.Messages, 0);
         _persistedMessageCount = runner.Messages.Count;
+        _persistedHasSystemBaseline = runner.Messages.FirstOrDefault() is SystemMessage;
         _persistedProvider = runner.Model.Provider;
         _persistedModel = runner.Model.Id;
         _persistedName = NormalizeName(runner.SessionName);
     }
 
+    /// <summary>【CodingAgent】【压缩同步】保存运行器的摘要与基线，并恢复存储保留的近期对话。</summary>
+    /// <param name="runner">完成压缩的运行器。</param>
+    /// <param name="result">压缩结果。</param>
+    /// <returns>压缩条目标识。</returns>
     public string RecordCompaction(ICodingAgentRunner runner, CodingAgentCompactionResult result)
     {
+        if (result.StoredEntryId is { } storedId) return storedId;
         var firstKeptEntryId = string.IsNullOrWhiteSpace(result.FirstKeptEntryId)
             ? Store.FindCompactionFirstKeptEntryId(
                 _compactionRetention.KeepRecentTokens,
                 _compactionRetention.KeepRecentMessages)
             : result.FirstKeptEntryId;
-        var turnPrefixSummary = Store.CreateSplitTurnPrefixSummary(firstKeptEntryId);
+        var turnPrefixSummary = result.UsesPreparedBoundary ? null : Store.CreateSplitTurnPrefixSummary(firstKeptEntryId);
         var id = Store.AppendCompaction(
             result.Summary,
             firstKeptEntryId,
             result.TokensBefore,
             result.FromHook,
-            turnPrefixSummary);
+            turnPrefixSummary,
+            Transcript.GetCurrentSystemMessage(runner.Messages), result.Details, result.Usage);
 
         var snapshot = Store.LoadCurrentBranchSnapshot();
-        runner.RestoreSession(snapshot.ToFlatSnapshot());
+        if (runner is RuntimeCodingAgentRunner runtime) runtime.RestoreCompactedSession(snapshot.ToFlatSnapshot());
+        else runner.RestoreSession(snapshot.ToFlatSnapshot());
         MarkSnapshot(snapshot);
         return id;
     }
@@ -254,7 +320,7 @@ public sealed class CodingAgentTreeSessionController
             result.Summary,
             result.ReadFiles,
             result.ModifiedFiles,
-            result.FromHook);
+            result.FromHook, result.Usage);
         var snapshot = Store.LoadCurrentBranchSnapshot();
         MarkSnapshot(snapshot);
         return snapshot;
@@ -270,7 +336,7 @@ public sealed class CodingAgentTreeSessionController
             result.Summary,
             result.ReadFiles,
             result.ModifiedFiles,
-            result.FromHook);
+            result.FromHook, result.Usage);
         if (!string.IsNullOrWhiteSpace(label))
         {
             Store.AppendLabelChange(summaryEntryId, label);
@@ -293,13 +359,14 @@ public sealed class CodingAgentTreeSessionController
             result.Summary,
             result.ReadFiles,
             result.ModifiedFiles,
-            result.FromHook);
+            result.FromHook, result.Usage);
         if (!string.IsNullOrWhiteSpace(label))
         {
             Store.AppendLabelChange(summaryEntryId, label);
         }
 
         Store.AppendSessionInfo(NormalizeName(runner.SessionName), runner.Model.Provider, runner.Model.Id);
+        Store.AppendThinkingLevelChange(CodingAgentThinkingLevels.Format(runner.ThinkingLevel));
         var snapshot = Store.LoadCurrentBranchSnapshot();
         MarkSnapshot(snapshot);
         return snapshot;
@@ -376,6 +443,10 @@ public sealed class CodingAgentTreeSessionController
     public CodingAgentSessionUsageSummary GetCurrentBranchUsageSummary() =>
         Store.GetCurrentBranchUsageSummary();
 
+    /// <summary>【CodingAgent】【会话计费】取得全部原始记录的总用量。</summary>
+    /// <returns>全部分支和摘要的计费用量。</returns>
+    public CodingAgentSessionUsageSummary GetSessionUsageSummary() => Store.GetSessionUsageSummary();
+
     public CodingAgentTreeFoldState? LoadTreeFoldState() => Store.LoadTreeFoldState();
 
     public string FormatTree(int maxEntries = 24) => Store.FormatTree(maxEntries);
@@ -396,24 +467,29 @@ public sealed class CodingAgentTreeSessionController
     public CodingAgentForkTarget? GetForkTarget(string entryId) =>
         Store.GetForkTarget(entryId);
 
+    /// <summary>【CodingAgent】【保存游标】记录已持久化分支的消息数和基线状态。</summary>
+    /// <param name="snapshot">刚加载或保存的分支。</param>
     private void MarkSnapshot(CodingAgentTreeSessionSnapshot snapshot)
     {
         _persistedMessageCount = snapshot.Messages.Count;
+        _persistedHasSystemBaseline = snapshot.Messages.FirstOrDefault() is SystemMessage;
         _persistedProvider = snapshot.Provider;
         _persistedModel = snapshot.Model;
         _persistedName = NormalizeName(snapshot.Name);
+        _persistedThinkingLevel = snapshot.ThinkingLevel;
     }
 
     private static string? NormalizeName(string? name) =>
         string.IsNullOrWhiteSpace(name) ? null : name.Trim();
 }
 
-public sealed class CodingAgentTreeSessionStore
+public sealed partial class CodingAgentTreeSessionStore
 {
     public const int CurrentVersion = 3;
     private const string SessionType = "session";
     private const string MessageType = "message";
     private const string ModelChangeType = "model_change";
+    private const string ThinkingLevelChangeType = "thinking_level_change";
     private const string SessionInfoType = "session_info";
     private const string LabelType = "label";
     private const string CompactionType = "compaction";
@@ -548,25 +624,7 @@ public sealed class CodingAgentTreeSessionStore
     public CodingAgentSessionUsageSummary GetCurrentBranchUsageSummary()
     {
         var state = ReadState();
-        var branch = state.GetBranch(state.LeafId);
-        var messages = new List<ChatMessage>();
-        foreach (var entry in branch)
-        {
-            if (entry.Type != MessageType ||
-                entry.Message is null ||
-                !string.Equals(entry.Message.Role, "assistant", StringComparison.OrdinalIgnoreCase))
-            {
-                continue;
-            }
-
-            var message = CodingAgentSessionStore.ToMessage(entry.Message);
-            if (message is not null)
-            {
-                messages.Add(message);
-            }
-        }
-
-        return CodingAgentSessionUsageSummary.FromMessages(messages);
+        return CodingAgentSessionUsageSummary.FromEntries(state.GetBranch(state.LeafId));
     }
 
     public IReadOnlyList<string> AppendMessages(IReadOnlyList<ChatMessage> messages, int startIndex)
@@ -583,14 +641,7 @@ public sealed class CodingAgentTreeSessionStore
         for (var i = startIndex; i < messages.Count; i++)
         {
             var id = CreateEntryId(ids);
-            var entry = new CodingAgentTreeSessionEntry
-            {
-                Type = MessageType,
-                Id = id,
-                ParentId = parentId,
-                Timestamp = DateTimeOffset.UtcNow,
-                Message = CodingAgentSessionStore.FromMessage(messages[i])
-            };
+            var entry = CreateMessageEntry(messages[i], id, parentId);
             AppendEntry(entry);
             appended.Add(id);
             ids.Add(id);
@@ -614,6 +665,24 @@ public sealed class CodingAgentTreeSessionStore
             Model = model
         };
         AppendEntry(entry);
+        return id;
+    }
+
+    /// <summary>【CodingAgent】【思考等级】按上游 JSONL 格式追加当前分支的思考等级变更。</summary>
+    /// <param name="thinkingLevel">合法等级，包括明确关闭的 off。</param>
+    /// <returns>追加条目的标识。</returns>
+    public string AppendThinkingLevelChange(string thinkingLevel)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(thinkingLevel);
+        if (!CodingAgentThinkingLevels.TryParse(thinkingLevel, out var level))
+            throw new ArgumentException("Invalid thinking level.", nameof(thinkingLevel));
+        var state = ReadState();
+        var id = CreateEntryId(state.EntryIds);
+        AppendEntry(new CodingAgentTreeSessionEntry
+        {
+            Type = ThinkingLevelChangeType, Id = id, ParentId = state.LeafId,
+            Timestamp = DateTimeOffset.UtcNow, ThinkingLevel = CodingAgentThinkingLevels.Format(level)
+        });
         return id;
     }
 
@@ -660,12 +729,23 @@ public sealed class CodingAgentTreeSessionStore
         return state.LabelsById.TryGetValue(target.Id, out var label) ? label : null;
     }
 
+    /// <summary>【CodingAgent】【压缩保存】保存摘要及当前分支的有效系统声明。</summary>
+    /// <param name="summary">压缩摘要。</param>
+    /// <param name="firstKeptEntryId">保留消息起点。</param>
+    /// <param name="tokensBefore">压缩前的 token 估算。</param>
+    /// <param name="fromHook">是否由扩展生成。</param>
+    /// <param name="turnPrefixSummary">被拆分回合的前缀摘要。</param>
+    /// <param name="systemMessage">运行器提供的有效声明；为空时从存储分支计算。</param>
+    /// <param name="details">摘要生成器或扩展附加的 JSON 数据。</param>
+    /// <param name="usage">摘要模型请求的标准用量数据。</param>
+    /// <returns>新压缩条目的标识。</returns>
     public string AppendCompaction(
         string summary,
         string? firstKeptEntryId,
         int tokensBefore,
         bool fromHook = false,
-        string? turnPrefixSummary = null)
+        string? turnPrefixSummary = null,
+        SystemMessage? systemMessage = null, JsonElement? details = null, JsonElement? usage = null)
     {
         if (string.IsNullOrWhiteSpace(summary))
         {
@@ -674,13 +754,18 @@ public sealed class CodingAgentTreeSessionStore
 
         var state = ReadState();
         var id = CreateEntryId(state.EntryIds);
+        var system = systemMessage ?? Transcript.GetCurrentSystemMessage(BuildSnapshotMessages(state.GetBranch(state.LeafId)));
+        var timestamp = DateTimeOffset.UtcNow;
         var entry = new CodingAgentTreeSessionEntry
         {
             Type = CompactionType,
             Id = id,
             ParentId = state.LeafId,
-            Timestamp = DateTimeOffset.UtcNow,
+            Timestamp = timestamp,
+            SystemMessage = system is null ? null : CodingAgentSessionStore.FromMessage(system with { Timestamp = timestamp }),
             Summary = summary.Trim(),
+            Details = details?.Clone(),
+            Usage = usage?.Clone(),
             FirstKeptEntryId = NormalizeName(firstKeptEntryId) ?? string.Empty,
             TokensBefore = Math.Max(0, tokensBefore),
             FromHook = fromHook ? true : null,
@@ -696,7 +781,7 @@ public sealed class CodingAgentTreeSessionStore
         string summary,
         IReadOnlyList<string>? readFiles = null,
         IReadOnlyList<string>? modifiedFiles = null,
-        bool fromHook = false)
+        bool fromHook = false, JsonElement? usage = null)
     {
         if (string.IsNullOrWhiteSpace(summary))
         {
@@ -714,8 +799,9 @@ public sealed class CodingAgentTreeSessionStore
             Id = id,
             ParentId = targetId,
             Timestamp = DateTimeOffset.UtcNow,
-            FromId = targetId ?? "root",
+            FromId = state.LeafId ?? "root",
             Summary = summary.Trim(),
+            Usage = usage?.Clone(),
             ReadFiles = NormalizeStringList(readFiles),
             ModifiedFiles = NormalizeStringList(modifiedFiles),
             FromHook = fromHook ? true : null
@@ -785,6 +871,10 @@ public sealed class CodingAgentTreeSessionStore
         return state.TreeFoldState;
     }
 
+    /// <summary>【CodingAgent】【压缩边界】在普通对话中选择保留起点，系统声明由压缩基线承载。</summary>
+    /// <param name="retainRecentTokenCount">尾部 token 预算。</param>
+    /// <param name="retainRecentMessageCount">尾部消息数。</param>
+    /// <returns>保留起点；无需尾部时为空。</returns>
     public string? FindCompactionFirstKeptEntryId(int retainRecentTokenCount, int retainRecentMessageCount)
     {
         if (retainRecentTokenCount <= 0 && retainRecentMessageCount <= 0)
@@ -806,7 +896,7 @@ public sealed class CodingAgentTreeSessionStore
 
         var messageEntries = branch
             .Skip(boundaryIndex + 1)
-            .Where(static entry => entry.Type == MessageType && entry.Message is not null)
+            .Where(static entry => entry.Type == MessageType && entry.Message is not null && entry.Message.Role != "system")
             .ToArray();
 
         var tokenCutPoint = FindTokenRetentionCutPoint(messageEntries, retainRecentTokenCount);
@@ -1084,9 +1174,9 @@ public sealed class CodingAgentTreeSessionStore
         string summary,
         IReadOnlyList<string>? readFiles = null,
         IReadOnlyList<string>? modifiedFiles = null,
-        bool fromHook = false)
+        bool fromHook = false, JsonElement? usage = null)
     {
-        return AppendBranchSummary(entryId, summary, readFiles, modifiedFiles, fromHook);
+        return AppendBranchSummary(entryId, summary, readFiles, modifiedFiles, fromHook, usage);
     }
 
     public IReadOnlyList<ChatMessage> CollectBranchSummaryMessages(string? targetEntryId)
@@ -1467,6 +1557,11 @@ public sealed class CodingAgentTreeSessionStore
 
         switch (entry.Type)
         {
+            case "custom_message":
+                lines.Add($"custom type: {entry.CustomType}");
+                lines.Add($"display: {entry.Display == true}");
+                AppendIfPresent(lines, "preview", PreviewCustomMessage(entry));
+                break;
             case MessageType when entry.Message is not null:
                 lines.Add($"message role: {entry.Message.Role}");
                 AppendIfPresent(lines, "tool call id", entry.Message.ToolCallId);
@@ -1476,6 +1571,10 @@ public sealed class CodingAgentTreeSessionStore
 
             case ModelChangeType:
                 lines.Add($"model: {FormatProviderModel(entry.Provider, entry.Model)}");
+                break;
+
+            case ThinkingLevelChangeType:
+                lines.Add($"thinking level: {entry.ThinkingLevel}");
                 break;
 
             case SessionInfoType:
@@ -1552,6 +1651,10 @@ public sealed class CodingAgentTreeSessionStore
 
         switch (entry.Type)
         {
+            case "custom_message":
+                sections.Add(new CodingAgentTreeMetadataSectionSnapshot("Custom message",
+                    BuildSectionLines(("custom type", entry.CustomType), ("display", (entry.Display == true).ToString()), ("preview", PreviewCustomMessage(entry)))));
+                break;
             case MessageType when entry.Message is not null:
                 sections.Add(new CodingAgentTreeMetadataSectionSnapshot(
                     "Message",
@@ -1566,6 +1669,11 @@ public sealed class CodingAgentTreeSessionStore
                 sections.Add(new CodingAgentTreeMetadataSectionSnapshot(
                     "Model",
                     BuildSectionLines(("model", FormatProviderModel(entry.Provider, entry.Model)))));
+                break;
+
+            case ThinkingLevelChangeType:
+                sections.Add(new CodingAgentTreeMetadataSectionSnapshot(
+                    "Thinking", BuildSectionLines(("thinking level", entry.ThinkingLevel))));
                 break;
 
             case SessionInfoType:
@@ -1870,19 +1978,35 @@ public sealed class CodingAgentTreeSessionStore
             throw new JsonException("missing coding agent tree session header");
         }
 
-        return new TreeState(header, entries);
+        var result = new TreeState(header, entries);
+        if (_hasNativeLeaf) result.LeafId = _nativeLeaf;
+        return result;
     }
 
+    /// <summary>【CodingAgent】【会话恢复】按分支恢复模型和消息，并读取整个会话最新的显示名称。</summary>
+    /// <param name="state">包含所有分支的会话状态。</param>
+    /// <param name="branch">当前选中的父链条目。</param>
+    /// <returns>供运行器恢复的会话快照。</returns>
     private CodingAgentTreeSessionSnapshot BuildSnapshot(TreeState state, IReadOnlyList<CodingAgentTreeSessionEntry> branch)
     {
         string? provider = null;
         string? model = null;
-        string? name = null;
+        // 1. 【CodingAgent】【会话名称】名称属于整个会话，切换到改名前的分支也不能恢复旧名称
+        var name = NormalizeName(state.Entries.LastOrDefault(entry =>
+            entry.Type == SessionInfoType && !string.Equals(entry.Action, "branch", StringComparison.OrdinalIgnoreCase))?.Name);
+        string? thinkingLevel = null;
 
+        // 2. 【CodingAgent】【分支恢复】模型和思考等级仍按当前分支的变更记录恢复
         foreach (var entry in branch)
         {
             switch (entry.Type)
             {
+                case ThinkingLevelChangeType:
+                    if (!string.IsNullOrWhiteSpace(entry.ThinkingLevel) &&
+                        CodingAgentThinkingLevels.TryParse(entry.ThinkingLevel, out var parsedLevel))
+                        thinkingLevel = CodingAgentThinkingLevels.Format(parsedLevel);
+                    break;
+
                 case ModelChangeType:
                     provider = entry.Provider ?? provider;
                     model = entry.Model ?? model;
@@ -1894,13 +2018,13 @@ public sealed class CodingAgentTreeSessionStore
                         break;
                     }
 
-                    name = NormalizeName(entry.Name);
                     provider = entry.Provider ?? provider;
                     model = entry.Model ?? model;
                     break;
             }
         }
 
+        // 3. 【CodingAgent】【消息恢复】只有参与上下文的条目进入运行器消息
         var messages = BuildSnapshotMessages(branch);
         return new CodingAgentTreeSessionSnapshot(
             messages,
@@ -1910,65 +2034,27 @@ public sealed class CodingAgentTreeSessionStore
             state.Header.Id,
             _path,
             state.LeafId,
-            state.Entries.Count);
+            state.Entries.Count) { ThinkingLevel = thinkingLevel, BranchEntries = branch.ToArray() };
     }
 
-    private static IReadOnlyList<ChatMessage> BuildSnapshotMessages(IReadOnlyList<CodingAgentTreeSessionEntry> branch)
-    {
-        var messages = new List<ChatMessage>();
-        var compactionIndex = -1;
-        for (var i = branch.Count - 1; i >= 0; i--)
-        {
-            if (branch[i].Type == CompactionType)
-            {
-                compactionIndex = i;
-                break;
-            }
-        }
+    /// <summary>【CodingAgent】【分支恢复】恢复最新压缩基线、摘要、普通尾部及压缩后的系统增量。</summary>
+    /// <param name="branch">从根到当前叶节点的条目。</param>
+    /// <returns>可供运行器恢复的消息。</returns>
+    private static IReadOnlyList<ChatMessage> BuildSnapshotMessages(IReadOnlyList<CodingAgentTreeSessionEntry> branch) =>
+        ProjectBranch(branch, legacyMessages: true).Messages;
 
-        if (compactionIndex < 0)
-        {
-            foreach (var entry in branch)
-            {
-                AppendSnapshotMessage(messages, entry);
-            }
-
-            return messages;
-        }
-
-        var compaction = branch[compactionIndex];
-        messages.Add(CodingAgentCompactionMessages.CreateSummaryMessage(
-            compaction.Summary ?? string.Empty,
-            compaction.TurnPrefixSummary));
-
-        if (!string.IsNullOrWhiteSpace(compaction.FirstKeptEntryId))
-        {
-            var foundFirstKept = false;
-            for (var i = 0; i < compactionIndex; i++)
-            {
-                var entry = branch[i];
-                if (entry.Id.Equals(compaction.FirstKeptEntryId, StringComparison.OrdinalIgnoreCase))
-                {
-                    foundFirstKept = true;
-                }
-
-                if (foundFirstKept)
-                {
-                    AppendSnapshotMessage(messages, entry);
-                }
-            }
-        }
-
-        for (var i = compactionIndex + 1; i < branch.Count; i++)
-        {
-            AppendSnapshotMessage(messages, branch[i]);
-        }
-
-        return messages;
-    }
-
+    /// <summary>【CodingAgent】【消息还原】把普通消息、自定义消息及分支摘要追加到投影结果。</summary>
+    /// <param name="messages">接收还原消息的集合。</param>
+    /// <param name="entry">当前原始条目。</param>
     private static void AppendSnapshotMessage(ICollection<ChatMessage> messages, CodingAgentTreeSessionEntry entry)
     {
+        if (entry.Type == "custom_message" && entry.CustomType is not null)
+        {
+            messages.Add(new Tau.AgentCore.Harness.AgentCustomMessage(entry.CustomType,
+                entry.Content is { } content ? ReadProjectedContent(content) : [], entry.Display ?? false,
+                entry.Details?.Clone(), entry.Timestamp));
+            return;
+        }
         if (entry.Type == BranchSummaryType && !string.IsNullOrWhiteSpace(entry.Summary))
         {
             messages.Add(CodingAgentCompactionMessages.CreateBranchSummaryMessage(entry.Summary, entry.FromId));
@@ -2027,6 +2113,9 @@ public sealed class CodingAgentTreeSessionStore
         return entries;
     }
 
+    /// <summary>【CodingAgent】【分支摘要】收集分支对话，系统声明不作为摘要内容。</summary>
+    /// <param name="entries">目标分支条目。</param>
+    /// <returns>参与摘要的消息。</returns>
     private static IReadOnlyList<ChatMessage> BuildBranchSummaryMessages(
         IReadOnlyList<CodingAgentTreeSessionEntry> entries)
     {
@@ -2035,10 +2124,13 @@ public sealed class CodingAgentTreeSessionStore
         {
             switch (entry.Type)
             {
+                case "custom_message":
+                    AppendSnapshotMessage(messages, entry);
+                    break;
                 case MessageType when entry.Message is not null &&
                                       !string.Equals(entry.Message.Role, "toolResult", StringComparison.OrdinalIgnoreCase):
                     var message = CodingAgentSessionStore.ToMessage(entry.Message);
-                    if (message is not null)
+                    if (message is not null and not SystemMessage)
                     {
                         messages.Add(message);
                     }
@@ -2058,9 +2150,25 @@ public sealed class CodingAgentTreeSessionStore
         return messages;
     }
 
+    /// <summary>【CodingAgent】【会话追加】完整写入一行，兼容没有末尾换行的外部会话文件。</summary>
+    /// <param name="entry">待追加的不可变条目。</param>
     private void AppendEntry(CodingAgentTreeSessionEntry entry)
     {
-        File.AppendAllText(_path, SerializeJsonlLine(entry, CodingAgentTreeSessionJsonContext.Default.CodingAgentTreeSessionEntry) + "\n");
+        var json = SerializeJsonlLine(entry, CodingAgentTreeSessionJsonContext.Default.CodingAgentTreeSessionEntry);
+        using var stream = new FileStream(_path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read);
+        // 1. 【CodingAgent】【行边界】先检查最后一个字节，避免有效历史与新记录拼成损坏的 JSON
+        if (stream.Length > 0)
+        {
+            stream.Seek(-1, SeekOrigin.End);
+            var last = stream.ReadByte();
+            if (last is not ('\n' or '\r')) stream.WriteByte((byte)'\n');
+        }
+        // 2. 【CodingAgent】【条目保存】同一个句柄内追加 UTF-8，不重写已有历史
+        using var writer = new StreamWriter(stream, new System.Text.UTF8Encoding(false));
+        writer.Write(json);
+        writer.Write('\n');
+        writer.Flush();
+        _hasNativeLeaf = false;
     }
 
     private string SerializeJsonlLine<T>(T value, JsonTypeInfo<T> jsonTypeInfo)
@@ -2130,10 +2238,14 @@ public sealed class CodingAgentTreeSessionStore
             "coding-agent-sessions");
     }
 
+    /// <summary>【CodingAgent】【会话发现】同时搜索新的项目专属目录、旧目录和当前会话同级目录。</summary>
+    /// <param name="currentPath">当前会话文件，可为空。</param>
+    /// <returns>去重的搜索目录。</returns>
     private static IReadOnlyList<string> GetSessionSearchDirectories(string? currentPath = null)
     {
         var directories = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
+            CodingAgentSessionTarget.GetDefaultSessionDirectory(),
             System.IO.Path.Combine(Environment.CurrentDirectory, ".tau", "coding-agent-sessions")
         };
 
@@ -2148,6 +2260,7 @@ public sealed class CodingAgentTreeSessionStore
             var currentDirectory = System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(currentPath));
             if (!string.IsNullOrWhiteSpace(currentDirectory))
             {
+                directories.Add(currentDirectory);
                 directories.Add(System.IO.Path.Combine(currentDirectory, "coding-agent-sessions"));
             }
         }
@@ -2305,7 +2418,7 @@ public sealed class CodingAgentTreeSessionStore
                    string.Equals(entry.Message?.Role, "user", StringComparison.OrdinalIgnoreCase);
         }
 
-        var isSettingsEntry = entry.Type is LabelType or ModelChangeType or SessionInfoType or TreeStateType;
+        var isSettingsEntry = entry.Type is LabelType or ModelChangeType or ThinkingLevelChangeType or SessionInfoType or TreeStateType;
         if (isSettingsEntry)
         {
             return false;
@@ -2348,6 +2461,8 @@ public sealed class CodingAgentTreeSessionStore
             entry.Type,
             entry.Id
         };
+        if (!string.IsNullOrEmpty(entry.CustomType)) parts.Add(entry.CustomType);
+        if (entry.Type == "custom_message" && entry.Content is { } customContent) parts.Add(FormatContentPreview(ReadProjectedContent(customContent)));
 
         if (!string.IsNullOrWhiteSpace(entry.ParentId))
         {
@@ -2538,7 +2653,10 @@ public sealed class CodingAgentTreeSessionStore
         return entry.Type switch
         {
             MessageType when entry.Message is not null => $"message {entry.Message.Role} {PreviewMessage(entry.Message)}",
+            "custom_message" => $"custom message {entry.CustomType} {PreviewCustomMessage(entry)}",
+            "custom" => $"custom {entry.CustomType}",
             ModelChangeType => $"model {entry.Provider}/{entry.Model}",
+            ThinkingLevelChangeType => $"thinking {entry.ThinkingLevel}",
             CompactionType => $"compaction {entry.TokensBefore.GetValueOrDefault()} tokens {PreviewText(entry.Summary)}",
             BranchSummaryType => $"branch summary from {ShortId(entry.FromId)} {PreviewText(entry.Summary)}",
             AutoRetryStartType => $"auto-retry start {entry.Attempt.GetValueOrDefault()}/{entry.MaxAttempts.GetValueOrDefault()} {entry.DelayMs.GetValueOrDefault()}ms {PreviewText(entry.ErrorMessage)}",
@@ -2646,7 +2764,7 @@ public sealed class CodingAgentTreeSessionStore
         public IReadOnlyList<CodingAgentTreeSessionEntry> Entries { get; }
         public IReadOnlyDictionary<string, CodingAgentTreeSessionEntry> ById { get; }
         public ISet<string> EntryIds { get; }
-        public string? LeafId { get; }
+        public string? LeafId { get; set; }
         public IReadOnlyDictionary<string, string> LabelsById { get; }
         public IReadOnlyDictionary<string, string> LabelTimestampsById { get; }
         public CodingAgentTreeFoldState? TreeFoldState { get; }
@@ -2749,13 +2867,36 @@ internal sealed class CodingAgentTreeSessionHeader
 
 internal sealed class CodingAgentTreeSessionEntry
 {
+    private string? _model;
+    public JsonElement? Content { get; init; }
+    public JsonElement? Details { get; init; }
+    public JsonElement? Usage { get; init; }
+    public string? Kind { get; init; }
+    public string? Note { get; init; }
+    public bool? Display { get; init; }
+    private JsonElement? _replacement;
+    /// <summary>【CodingAgent】【编辑协议】省略操作在读取后再次序列化时仍输出显式 null。</summary>
+    public JsonElement? Replacement
+    {
+        get => _replacement ?? (Type == "context_edit" ? JsonSerializer.SerializeToElement((string?)null, CodingAgentSessionJsonContext.Default.String) : null);
+        init => _replacement = value;
+    }
+    public string? CustomType { get; init; }
+    public JsonElement? Data { get; init; }
+    public string? ThinkingLevel { get; init; }
     public string Type { get; init; } = string.Empty;
     public string Id { get; init; } = string.Empty;
     public string? ParentId { get; init; }
     public DateTimeOffset Timestamp { get; init; }
     public CodingAgentSessionMessage? Message { get; init; }
+    public CodingAgentSessionMessage? SystemMessage { get; init; }
     public string? Provider { get; init; }
-    public string? Model { get; init; }
+    [JsonIgnore]
+    public string? Model { get => _model; init => _model = value; }
+    [JsonPropertyName("modelId")]
+    public string? CanonicalModel { get => Type == "usage" ? null : _model; init => _model = value; }
+    [JsonPropertyName("model")]
+    public string? LegacyModel { get => Type == "usage" ? _model : null; init => _model ??= value; }
     public string? Name { get; init; }
     public string? Action { get; init; }
     public string? TargetId { get; init; }
@@ -2777,6 +2918,12 @@ internal sealed class CodingAgentTreeSessionEntry
     public string? FinalError { get; init; }
     public List<string>? CollapsedEntryIds { get; init; }
 
+    /// <summary>【CodingAgent】【分支克隆】重映射条目标识并保留压缩系统声明。</summary>
+    /// <param name="id">新标识。</param>
+    /// <param name="parentId">新父标识。</param>
+    /// <param name="targetId">可选重映射目标。</param>
+    /// <param name="firstKeptEntryId">可选重映射保留起点。</param>
+    /// <returns>克隆后的条目。</returns>
     public CodingAgentTreeSessionEntry Clone(
         string id,
         string? parentId,
@@ -2785,12 +2932,23 @@ internal sealed class CodingAgentTreeSessionEntry
         new()
         {
             Type = Type,
+            CustomType = CustomType,
+            Data = Data,
+            Replacement = Replacement,
+            Content = Content,
+            Details = Details,
+            Usage = Usage,
+            Kind = Kind,
+            Note = Note,
+            Display = Display,
             Id = id,
             ParentId = parentId,
             Timestamp = Timestamp,
             Message = Message,
+            SystemMessage = SystemMessage,
             Provider = Provider,
             Model = Model,
+            ThinkingLevel = ThinkingLevel,
             Name = Name,
             Action = Action,
             TargetId = targetId ?? TargetId,
@@ -2817,7 +2975,11 @@ internal sealed class CodingAgentTreeSessionEntry
 [JsonSourceGenerationOptions(
     PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase,
     WriteIndented = false,
+    Converters = [typeof(CodingAgentPiSessionMessageConverter)],
     DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]
 [JsonSerializable(typeof(CodingAgentTreeSessionHeader))]
 [JsonSerializable(typeof(CodingAgentTreeSessionEntry))]
+[JsonSerializable(typeof(CodingAgentExtensionSessionSnapshot))]
+[JsonSerializable(typeof(Model))]
+[JsonSerializable(typeof(CodingAgentSystemPromptOptions))]
 internal sealed partial class CodingAgentTreeSessionJsonContext : JsonSerializerContext;

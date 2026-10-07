@@ -1,3 +1,6 @@
+using System.Text.Json;
+using Tau.Ai.Serialization;
+
 namespace Tau.Ai.Registry;
 
 /// <summary>可持久化 provider 动态模型目录的条目。</summary>
@@ -35,19 +38,27 @@ public interface IModelsStore : ModelsStore { }
 /// <summary>线程安全的内存模型目录存储。</summary>
 public sealed class InMemoryModelsStore : IModelsStore
 {
-    private readonly Dictionary<string, ModelsStoreEntry> _entries = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, byte[]> _entries = new(StringComparer.OrdinalIgnoreCase);
     /// <inheritdoc />
     public Task<ModelsStoreEntry?> ReadAsync(string providerId, ModelsStoreOperationOptions? options = null)
     {
         options?.CancellationToken.ThrowIfCancellationRequested();
-        lock (_entries) return Task.FromResult(_entries.TryGetValue(providerId, out var value) ? value with { Models = value.Models.ToArray() } : null);
+        byte[]? snapshot;
+        lock (_entries) _entries.TryGetValue(providerId, out snapshot);
+        // 1. 【AI】【目录存储】从独立快照恢复，防止调用方修改嵌套字典污染缓存
+        return Task.FromResult(snapshot is null ? null : JsonSerializer.Deserialize(snapshot, TauAiJsonContext.Default.ModelsStoreEntry));
     }
     /// <inheritdoc />
     public Task WriteAsync(string providerId, ModelsStoreEntry entry, ModelsStoreOperationOptions? options = null)
     {
         options?.CancellationToken.ThrowIfCancellationRequested();
         ArgumentNullException.ThrowIfNull(entry);
-        lock (_entries) _entries[providerId] = entry with { Models = entry.Models.ToArray() };
+        ArgumentNullException.ThrowIfNull(entry.Models);
+        if (entry.Models.Any(model => model is null)) throw new ArgumentException("Models cannot contain null entries.", nameof(entry));
+        // 1. 【AI】【目录存储】在发布快照前完整序列化，失败时保留上一份数据
+        var snapshot = JsonSerializer.SerializeToUtf8Bytes(entry, TauAiJsonContext.Default.ModelsStoreEntry);
+        options?.CancellationToken.ThrowIfCancellationRequested();
+        lock (_entries) _entries[providerId] = snapshot;
         return Task.CompletedTask;
     }
     /// <inheritdoc />

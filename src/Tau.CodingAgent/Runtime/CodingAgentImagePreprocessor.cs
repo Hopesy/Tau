@@ -28,16 +28,20 @@ internal static class CodingAgentImagePreprocessor
     public const int DefaultMaxBase64Bytes = 4_718_592;
 
     private const int MaxDecodedPixels = 50_000_000;
-    private static readonly int[] JpegQualitySteps = [80, 85, 70, 55, 40];
     private static readonly uint[] CrcTable = CreateCrcTable();
 
+    /// <summary>【CodingAgent】【图片缩放】按像素边界和编码大小预算处理图片，逐步降低质量及尺寸。</summary>
+    /// <param name="bytes">图片字节。</param><param name="mimeType">内联格式。</param><param name="autoResizeImages">是否自动缩放。</param>
+    /// <param name="maxWidth">最大宽度。</param><param name="maxHeight">最大高度。</param><param name="maxBase64Bytes">Base64 编码预算。</param>
+    /// <param name="jpegQuality">首选 JPEG 质量。</param><returns>处理结果；无法满足限制时为空。</returns>
     public static CodingAgentImagePreprocessResult? Process(
         byte[] bytes,
         string mimeType,
         bool autoResizeImages,
         int maxWidth = DefaultMaxWidth,
         int maxHeight = DefaultMaxHeight,
-        long maxBase64Bytes = DefaultMaxBase64Bytes)
+        long maxBase64Bytes = DefaultMaxBase64Bytes,
+        int jpegQuality = 80)
     {
         var base64 = Convert.ToBase64String(bytes);
         var encodedLength = base64.Length;
@@ -57,6 +61,8 @@ internal static class CodingAgentImagePreprocessor
 
         if (encodedLength < maxBase64Bytes && IsWithinDimensions(dimensions, maxWidth, maxHeight))
         {
+            // 1. 【CodingAgent】【原图校验】体积较小也必须能够解码，不能把任意字节当作有效图片写入历史
+            if (!CanDecodeImage(bytes)) return null;
             return CreateResult(
                 base64,
                 mimeType,
@@ -73,6 +79,7 @@ internal static class CodingAgentImagePreprocessor
             maxWidth,
             maxHeight,
             maxBase64Bytes,
+            jpegQuality,
             out var resized))
         {
             return resized;
@@ -121,6 +128,14 @@ internal static class CodingAgentImagePreprocessor
             currentWidth = nextWidth;
             currentHeight = nextHeight;
         }
+    }
+
+    /// <summary>【CodingAgent】【图片校验】完整解码确认原图可用，格式错误按处理失败返回。</summary>
+    /// <param name="bytes">图片字节。</param><returns>是否能够解码。</returns>
+    private static bool CanDecodeImage(byte[] bytes)
+    {
+        try { using var image = Image.Load(bytes); return true; }
+        catch (Exception error) when (error is UnknownImageFormatException or InvalidImageContentException or NotSupportedException or InvalidOperationException or ArgumentException) { return false; }
     }
 
     public static string? FormatDimensionNote(CodingAgentImagePreprocessResult result)
@@ -186,12 +201,17 @@ internal static class CodingAgentImagePreprocessor
         return new TuiImageDimensions(width, height);
     }
 
+    /// <summary>【CodingAgent】【图片编码】使用托管后端调整方向，依次尝试 PNG 和 JPEG 编码。</summary>
+    /// <param name="bytes">原始图片。</param><param name="mimeType">格式。</param><param name="maxWidth">最大宽度。</param>
+    /// <param name="maxHeight">最大高度。</param><param name="maxBase64Bytes">编码预算。</param><param name="jpegQuality">首选质量。</param>
+    /// <param name="result">成功时的编码结果。</param><returns>是否成功编码。</returns>
     private static bool TryResizeWithImageSharp(
         byte[] bytes,
         string mimeType,
         int maxWidth,
         int maxHeight,
         long maxBase64Bytes,
+        int jpegQuality,
         out CodingAgentImagePreprocessResult? result)
     {
         result = null;
@@ -214,7 +234,7 @@ internal static class CodingAgentImagePreprocessor
             {
                 using var resized = image.Clone(context =>
                     context.Resize(currentWidth, currentHeight, KnownResamplers.Lanczos3));
-                foreach (var candidate in EncodeCandidates(resized))
+                foreach (var candidate in EncodeCandidates(resized, jpegQuality))
                 {
                     if (candidate.Data.Length < maxBase64Bytes)
                     {
@@ -260,12 +280,15 @@ internal static class CodingAgentImagePreprocessor
     private static bool IsImageSharpResizableMimeType(string mimeType) =>
         mimeType.Equals("image/png", StringComparison.OrdinalIgnoreCase) ||
         mimeType.Equals("image/jpeg", StringComparison.OrdinalIgnoreCase) ||
+        mimeType.Equals("image/gif", StringComparison.OrdinalIgnoreCase) ||
         mimeType.Equals("image/webp", StringComparison.OrdinalIgnoreCase);
 
-    private static IEnumerable<EncodedImageCandidate> EncodeCandidates(Image<Rgba32> image)
+    /// <summary>【CodingAgent】【编码候选】PNG 优先，其次按模型质量及保底质量生成 JPEG，重复质量只编码一次。</summary>
+    /// <param name="image">已缩放图像。</param><param name="jpegQuality">模型首选质量。</param><returns>按尝试顺序生成的候选。</returns>
+    private static IEnumerable<EncodedImageCandidate> EncodeCandidates(Image<Rgba32> image, int jpegQuality)
     {
         yield return EncodePngCandidate(image);
-        foreach (var quality in JpegQualitySteps)
+        foreach (var quality in new[] { jpegQuality, 85, 70, 55, 40 }.Distinct())
         {
             yield return EncodeJpegCandidate(image, quality);
         }

@@ -14,6 +14,7 @@ using Tau.Ai.Streaming;
 
 namespace Tau.Ai.Tests;
 
+[Collection("ProcessEnvironment")]
 public sealed class AiPublicApiCompileSampleTests
 {
     [Fact]

@@ -155,7 +155,10 @@ public sealed class TuiMessageDisplayOptions
     }
 }
 
-public sealed record TuiMessage(TuiMessageRole Role, string Text);
+public sealed record TuiMessage(TuiMessageRole Role, string Text)
+{
+    public Func<string, int, string>? MarkdownTransform { get; init; }
+}
 
 public sealed class TuiMessageArea : ITuiComponent
 {
@@ -252,7 +255,7 @@ public sealed class TuiMessageArea : ITuiComponent
 
         if (message.Role == TuiMessageRole.Thinking && displayOptions.ThinkingPanelRenderer is { } panelRenderer)
         {
-            output.AddRange(panelRenderer(text, width));
+            output.AddRange(panelRenderer(message.MarkdownTransform?.Invoke(text, Math.Max(1, width - 4)) ?? text, width));
             return;
         }
 
@@ -274,7 +277,7 @@ public sealed class TuiMessageArea : ITuiComponent
         if (displayOptions.RenderMarkdown &&
             message.Role is TuiMessageRole.User or TuiMessageRole.Assistant or TuiMessageRole.Thinking)
         {
-            var markdownLines = new TuiMarkdown(text).Render(contentWidth);
+            var markdownLines = new TuiMarkdown(text, transform: message.MarkdownTransform).Render(contentWidth);
             for (var i = 0; i < markdownLines.Count; i++)
             {
                 var lead = i == 0 ? prefix : new string(' ', prefixWidth);

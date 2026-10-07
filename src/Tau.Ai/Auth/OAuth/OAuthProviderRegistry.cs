@@ -23,7 +23,7 @@ public sealed class OAuthProviderRegistry
 
     public IReadOnlyList<OAuthProviderInfo> GetProviderInfoList() =>
         _providers.Values
-            .Select(provider => new OAuthProviderInfo(provider.Id, provider.Name, true, provider.UsesCallbackServer))
+            .Select(provider => new OAuthProviderInfo(provider.Id, provider.Name, true, provider.UsesCallbackServer) { IsSubscription = provider.IsSubscription, LoginLabel = provider.LoginLabel })
             .ToArray();
 
     public void Register(IOAuthProvider provider)

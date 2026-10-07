@@ -23,19 +23,20 @@ public sealed class GoogleVertexProvider : IStreamProvider
     public AssistantMessageStream Stream(Model model, LlmContext context, StreamOptions options)
     {
         var stream = new AssistantMessageStream();
+        var parser = GoogleStreamParser.Create(model, Api, stream);
         _ = Task.Run(async () =>
         {
             try
             {
-                await StreamInternalAsync(model, context, options, stream, reasoning: null).ConfigureAwait(false);
+                await StreamInternalAsync(model, context, options, stream, parser, reasoning: null).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (options.Signal.IsCancellationRequested)
             {
-                StreamOptionHelpers.PushAborted(stream, model, Api);
+                parser.PushError(StreamOptionHelpers.AbortedErrorMessage, StopReason.Aborted);
             }
             catch (Exception ex)
             {
-                stream.Push(new ErrorEvent(ex.Message));
+                parser.PushError(ex.Message);
             }
         });
         return stream;
@@ -43,20 +44,22 @@ public sealed class GoogleVertexProvider : IStreamProvider
 
     public AssistantMessageStream StreamSimple(Model model, LlmContext context, SimpleStreamOptions options)
     {
+        options = SimpleTokenOptions.WithContextLimit(model, context, options);
         var stream = new AssistantMessageStream();
+        var parser = GoogleStreamParser.Create(model, Api, stream);
         _ = Task.Run(async () =>
         {
             try
             {
-                await StreamInternalAsync(model, context, options, stream, options.Reasoning).ConfigureAwait(false);
+                await StreamInternalAsync(model, context, options, stream, parser, options.Reasoning).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (options.Signal.IsCancellationRequested)
             {
-                StreamOptionHelpers.PushAborted(stream, model, Api);
+                parser.PushError(StreamOptionHelpers.AbortedErrorMessage, StopReason.Aborted);
             }
             catch (Exception ex)
             {
-                stream.Push(new ErrorEvent(ex.Message));
+                parser.PushError(ex.Message);
             }
         });
         return stream;
@@ -67,12 +70,10 @@ public sealed class GoogleVertexProvider : IStreamProvider
         LlmContext context,
         StreamOptions options,
         AssistantMessageStream stream,
+        GoogleStreamParser parser,
         ThinkingLevel? reasoning)
     {
-        if (StreamOptionHelpers.PushAbortedIfCanceled(options, stream, model, Api))
-        {
-            return;
-        }
+        options.Signal.ThrowIfCancellationRequested();
 
         var apiKey = options.ApiKey;
         string? accessToken = null;
@@ -82,7 +83,7 @@ public sealed class GoogleVertexProvider : IStreamProvider
             accessToken = await _accessTokenResolver.ResolveAsync(options, options.Signal).ConfigureAwait(false);
             if (string.IsNullOrWhiteSpace(accessToken) && EnvironmentApiKeyResolver.IsAuthenticatedMarker(apiKey))
             {
-                stream.Push(new ErrorEvent("Vertex ADC credentials were requested, but no access token could be resolved. Set GOOGLE_APPLICATION_CREDENTIALS or provide GOOGLE_CLOUD_API_KEY."));
+                parser.PushError("Vertex ADC credentials were requested, but no access token could be resolved. Set GOOGLE_APPLICATION_CREDENTIALS or provide GOOGLE_CLOUD_API_KEY.");
                 return;
             }
         }
@@ -108,34 +109,23 @@ public sealed class GoogleVertexProvider : IStreamProvider
             request.Headers.TryAddWithoutValidation("x-goog-api-key", apiKey);
         }
 
-        ApplyHeaders(request, model.Headers);
-        ApplyHeaders(request, options.Headers);
+        request.Headers.TryAddWithoutValidation("User-Agent", ProviderHttpHeaders.UserAgent());
+        ProviderHttpHeaders.Apply(request, model.Headers);
+        ProviderHttpHeaders.Apply(request, options.Headers);
 
         using var requestTimeout = StreamOptionHelpers.CreateRequestTimeout(options);
         try
         {
-            using var response = await _httpClient.SendAsync(
-                request,
-                HttpCompletionOption.ResponseHeadersRead,
-                requestTimeout.Token).ConfigureAwait(false);
-            await StreamOptionHelpers.InvokeResponseCallbackAsync(options, model, response).ConfigureAwait(false);
+            await StreamOptionHelpers.ApplyHeadersCallbackAsync(options, model, request).ConfigureAwait(false);
+            using var response = await ProviderHttpRetry.SendAsync(_httpClient, request, model, options, requestTimeout.Token).ConfigureAwait(false);
             if (!response.IsSuccessStatusCode)
             {
                 var errorBody = await response.Content.ReadAsStringAsync(requestTimeout.Token).ConfigureAwait(false);
-                stream.Push(new ErrorEvent($"Google Vertex API error {(int)response.StatusCode}: {errorBody}"));
+                parser.PushError($"Google Vertex API error {(int)response.StatusCode}: {errorBody}");
                 return;
             }
 
             await using var responseStream = await response.Content.ReadAsStreamAsync(requestTimeout.Token).ConfigureAwait(false);
-            var initial = new AssistantMessage
-            {
-                Api = Api,
-                Provider = model.Provider,
-                Model = model.Id,
-                Content = []
-            };
-
-            var parser = new GoogleStreamParser(initial, stream);
             parser.EmitStart();
             await foreach (var sse in SseParser.ParseAsync(responseStream, requestTimeout.Token))
             {
@@ -144,12 +134,15 @@ public sealed class GoogleVertexProvider : IStreamProvider
                     continue;
                 }
 
+                await StreamOptionHelpers.InvokeProviderStreamEventAsync(options, model, sse.Data).ConfigureAwait(false);
+                requestTimeout.Token.ThrowIfCancellationRequested();
                 if (parser.ParseChunk(sse.Data))
                 {
                     return;
                 }
             }
 
+            requestTimeout.Token.ThrowIfCancellationRequested();
             parser.EmitDone();
         }
         catch (OperationCanceledException ex) when (requestTimeout.IsTimeoutCancellation)
@@ -184,10 +177,11 @@ public sealed class GoogleVertexProvider : IStreamProvider
         Model model,
         ThinkingLevel? reasoning)
     {
+        context = Transcript.ResolveContext(context);
         context = MessageTransformer.DowngradeUnsupportedImages(context, model);
         var body = new Dictionary<string, object>
         {
-            ["contents"] = GoogleMessageConverter.ConvertMessages(context.Messages)
+            ["contents"] = GoogleMessageConverter.ConvertMessages(model, context.Messages)
         };
 
         if (!string.IsNullOrEmpty(context.SystemPrompt))
@@ -199,15 +193,7 @@ public sealed class GoogleVertexProvider : IStreamProvider
             };
         }
 
-        if (context.Tools is { Count: > 0 })
-        {
-            body["tools"] = GoogleMessageConverter.ConvertTools(context.Tools);
-        }
-
-        if (context.Tools is { Count: > 0 } && options is GoogleVertexOptions { ToolChoice: { Length: > 0 } toolChoice })
-        {
-            body["toolConfig"] = BuildToolConfig(toolChoice);
-        }
+        GoogleMessageConverter.ApplyTools(body, model, context.Tools, options);
 
         var generationConfig = new Dictionary<string, object>();
         if (options.Temperature.HasValue)
@@ -231,14 +217,11 @@ public sealed class GoogleVertexProvider : IStreamProvider
 
         if (options is GoogleVertexOptions { Thinking: { } thinking } && model.Reasoning)
         {
-            generationConfig["thinkingConfig"] = BuildThinkingConfig(model, thinking);
+            generationConfig["thinkingConfig"] = GoogleThinking.BuildConfig(model, thinking);
         }
-        else if (reasoning.HasValue && model.Reasoning)
+        else if (options is SimpleStreamOptions simple && model.Reasoning)
         {
-            generationConfig["thinkingConfig"] = BuildSimpleThinkingConfig(
-                model,
-                (options as SimpleStreamOptions)?.ThinkingBudgets,
-                reasoning.Value);
+            generationConfig["thinkingConfig"] = GoogleThinking.BuildConfig(model, GoogleThinking.ResolveSimple(model, reasoning, simple.ThinkingBudgets));
         }
 
         if (generationConfig.Count > 0)
@@ -249,152 +232,7 @@ public sealed class GoogleVertexProvider : IStreamProvider
         return body;
     }
 
-    private static Dictionary<string, object> BuildToolConfig(string toolChoice) => new()
-    {
-        ["functionCallingConfig"] = new Dictionary<string, object>
-        {
-            ["mode"] = MapToolChoice(toolChoice)
-        }
-    };
 
-    private static string MapToolChoice(string toolChoice) =>
-        toolChoice.Trim().ToLowerInvariant() switch
-        {
-            "none" => "NONE",
-            "any" => "ANY",
-            _ => "AUTO"
-        };
-
-    private static Dictionary<string, object> BuildThinkingConfig(Model model, GoogleThinkingOptions thinking)
-    {
-        if (!thinking.Enabled)
-        {
-            return GetDisabledThinkingConfig(model);
-        }
-
-        var config = new Dictionary<string, object>
-        {
-            ["includeThoughts"] = true
-        };
-
-        if (!string.IsNullOrWhiteSpace(thinking.Level))
-        {
-            config["thinkingLevel"] = NormalizeGoogleThinkingLevel(model, thinking.Level!);
-        }
-        else if (thinking.BudgetTokens.HasValue)
-        {
-            config["thinkingBudget"] = thinking.BudgetTokens.Value;
-        }
-
-        return config;
-    }
-
-    /// <summary>将 simple stream 推理级别转换为 Vertex Gemini thinkingConfig。</summary>
-    /// <param name="model">包含模型级 thinkingLevelMap 的模型。</param>
-    /// <param name="budgets">调用方自定义预算。</param>
-    /// <param name="reasoning">通用推理级别。</param>
-    /// <returns>Vertex API 可接受的 thinkingConfig。</returns>
-    private static Dictionary<string, object> BuildSimpleThinkingConfig(Model model, ThinkingBudgets? budgets, ThinkingLevel reasoning)
-    {
-        if (reasoning == ThinkingLevel.Off)
-        {
-            return GetDisabledThinkingConfig(model);
-        }
-
-        var key = StreamOptionHelpers.ToReasoningEffortName(reasoning, allowExtraHigh: false);
-        if (model.ThinkingLevelMap?.TryGetValue(key, out var mapped) == true &&
-            !string.IsNullOrWhiteSpace(mapped) &&
-            mapped!.Trim().ToLowerInvariant() is "minimal" or "low" or "medium" or "high")
-        {
-            return new Dictionary<string, object>
-            {
-                ["includeThoughts"] = true,
-                ["thinkingLevel"] = mapped.Trim().ToUpperInvariant()
-            };
-        }
-
-        return new Dictionary<string, object>
-        {
-            ["includeThoughts"] = true,
-            ["thinkingBudget"] = GetGoogleThinkingBudget(model, budgets, reasoning)
-        };
-    }
-
-    /// <summary>将 Google 专用 Thinking level 选项映射为模型声明的值。</summary>
-    /// <param name="model">目标模型。</param>
-    /// <param name="level">调用方传入的级别。</param>
-    /// <returns>大写 API 级别。</returns>
-    private static string NormalizeGoogleThinkingLevel(Model model, string level)
-    {
-        var normalized = level.Trim().ToLowerInvariant();
-        if (model.ThinkingLevelMap is not null)
-        {
-            var pair = model.ThinkingLevelMap.FirstOrDefault(item => item.Key.Equals(normalized, StringComparison.OrdinalIgnoreCase));
-            if (!string.IsNullOrWhiteSpace(pair.Value))
-            {
-                normalized = pair.Value!;
-            }
-        }
-
-        return normalized.ToUpperInvariant();
-    }
-
-    private static Dictionary<string, object> GetDisabledThinkingConfig(Model model)
-    {
-        if (GoogleProvider.IsGemini3ProModel(model.Id))
-        {
-            return new Dictionary<string, object> { ["thinkingLevel"] = "LOW" };
-        }
-
-        if (GoogleProvider.IsGemini3FlashModel(model.Id))
-        {
-            return new Dictionary<string, object> { ["thinkingLevel"] = "MINIMAL" };
-        }
-
-        return new Dictionary<string, object> { ["thinkingBudget"] = 0 };
-    }
-
-    private static int GetGoogleThinkingBudget(Model model, ThinkingBudgets? budgets, ThinkingLevel reasoning)
-    {
-        var id = model.Id;
-        if (id.Contains("2.5-pro", StringComparison.OrdinalIgnoreCase))
-        {
-            return StreamOptionHelpers.GetThinkingBudget(
-                budgets,
-                reasoning,
-                defaultMinimal: 128,
-                defaultLow: 2_048,
-                defaultMedium: 8_192,
-                defaultHigh: 32_768);
-        }
-
-        if (id.Contains("2.5-flash", StringComparison.OrdinalIgnoreCase))
-        {
-            return StreamOptionHelpers.GetThinkingBudget(
-                budgets,
-                reasoning,
-                defaultMinimal: 128,
-                defaultLow: 2_048,
-                defaultMedium: 8_192,
-                defaultHigh: 24_576);
-        }
-
-        return StreamOptionHelpers.GetCustomThinkingBudget(budgets, reasoning) ?? -1;
-    }
-
-    private static void ApplyHeaders(HttpRequestMessage request, IDictionary<string, string>? headers)
-    {
-        if (headers is null)
-        {
-            return;
-        }
-
-        foreach (var (key, value) in headers)
-        {
-            request.Headers.Remove(key);
-            request.Headers.TryAddWithoutValidation(key, value);
-        }
-    }
 }
 
 public record GoogleVertexOptions : StreamOptions

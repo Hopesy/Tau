@@ -1,139 +1,120 @@
+﻿using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Tau.AgentCore;
 using Tau.Ai;
 
 namespace Tau.CodingAgent.Tools;
 
+/// <summary>【CodingAgent】【文件编辑】按原始文件执行不相交的精确替换，并返回可审阅差异。</summary>
 public sealed class EditFileTool : IAgentTool
 {
-    public string Name => "edit_file";
-    public string Label => "Edit File";
-    public string Description => "Replace an exact string in a file with new content.";
+    private readonly string _workingDirectory;
+    private readonly ICodingAgentEditOperations _operations;
 
+    /// <summary>【CodingAgent】【工具目录】创建绑定会话目录及可选远程后端的编辑工具。</summary>
+    /// <param name="workingDirectory">会话目录。</param><param name="operations">可选编辑后端。</param>
+    public EditFileTool(string? workingDirectory = null, ICodingAgentEditOperations? operations = null)
+    {
+        _workingDirectory = CodingAgentToolPaths.CaptureWorkingDirectory(workingDirectory);
+        _operations = operations ?? new LocalCodingAgentFileOperations();
+    }
+
+    public string Name => "edit";
+    public string Label => "edit";
+    public string PromptSnippet => "Make precise file edits with exact text replacement, including multiple disjoint edits in one call";
+    public IReadOnlyList<string> PromptGuidelines =>
+    [
+        "Use edit for precise changes (edits[].oldText must match exactly)",
+        "When changing multiple separate locations in one file, use one edit call with multiple entries in edits[] instead of multiple edit calls",
+        "Each edits[].oldText is matched against the original file, not after earlier edits are applied. Do not emit overlapping or nested edits. Merge nearby changes into one edit.",
+        "Keep edits[].oldText as small as possible while still being unique in the file. Do not pad with large unchanged regions."
+    ];
+    public string Description => "Edit a single file using exact text replacement. Every edits[].oldText must match a unique, non-overlapping region of the original file. If two changes affect the same block or nearby lines, merge them into one edit instead of emitting overlapping edits. Do not include large unchanged regions just to connect distant changes.";
+    public ConstrainedSamplingConfig ConstrainedSampling => new() { Type = "json_schema", Strict = "prefer" };
     public JsonElement ParameterSchema { get; } = JsonDocument.Parse("""
-        {
-            "type": "object",
-            "properties": {
-                "path": { "type": "string", "description": "Path to the file to edit" },
-                "old_string": { "type": "string", "description": "Exact string to find and replace" },
-                "new_string": { "type": "string", "description": "Replacement string" },
-                "edits": {
-                    "description": "One replacement object or an array of replacements",
-                    "oneOf": [
-                        { "type": "object", "properties": { "oldText": { "type": "string" }, "newText": { "type": "string" } }, "required": ["oldText", "newText"] },
-                        { "type": "array", "items": { "type": "object", "properties": { "oldText": { "type": "string" }, "newText": { "type": "string" } }, "required": ["oldText", "newText"] } }
-                    ]
-                }
-            },
-            "required": ["path"]
-        }
+        {"type":"object","properties":{"path":{"type":"string","description":"Path to the file to edit (relative or absolute)"},"edits":{"type":"array","description":"One or more unique, non-overlapping replacements matched against the original file.","items":{"type":"object","properties":{"oldText":{"type":"string"},"newText":{"type":"string"}},"required":["oldText","newText"]}}},"required":["path","edits"]}
         """).RootElement.Clone();
 
-    public async Task<ToolResult> ExecuteAsync(
-        string toolCallId, JsonElement args, CancellationToken ct, Func<ToolUpdate, Task>? onUpdate)
+    /// <summary>【CodingAgent】【参数兼容】将 JSON 字符串、单对象和旧顶层替换字段规范为原生 edits 数组。</summary>
+    /// <param name="rawArgs">原始参数。</param><param name="ct">取消信号。</param><returns>独立规范参数，不修改原始调用。</returns>
+    public ValueTask<JsonElement> PrepareArgumentsAsync(JsonElement rawArgs, CancellationToken ct = default)
     {
-        var path = args.GetProperty("path").GetString()!;
-        var replacements = ReadReplacements(args);
-        if (replacements.Count == 0)
-            return new ToolResult([new TextContent("Edit input must provide old_string/new_string or edits.")], IsError: true);
-
-        if (!File.Exists(path))
-            return new ToolResult([new TextContent($"File not found: {path}")], IsError: true);
-
-        var content = await File.ReadAllTextAsync(path, ct).ConfigureAwait(false);
-        var matches = new List<(int Index, int Length, string NewText)>();
-        for (var index = 0; index < replacements.Count; index++)
+        ct.ThrowIfCancellationRequested();
+        if (rawArgs.ValueKind != JsonValueKind.Object) return new(rawArgs);
+        var args = JsonNode.Parse(rawArgs.GetRawText())!.AsObject();
+        if (args["edits"] is JsonValue value && value.TryGetValue<string>(out var text))
         {
-            var (oldText, newText) = replacements[index];
-            var occurrence = FindUniqueOccurrence(content, oldText);
-            if (occurrence is null)
-                return new ToolResult([new TextContent($"edit {index + 1} old text was not found uniquely in the file.")], IsError: true);
-            matches.Add((occurrence.Value.Index, oldText.Length, newText));
-        }
-
-        foreach (var pair in matches.OrderBy(static item => item.Index).Zip(matches.OrderBy(static item => item.Index).Skip(1)))
-        {
-            if (pair.First.Index + pair.First.Length > pair.Second.Index)
-                return new ToolResult([new TextContent("Edits overlap; merge overlapping replacements into one edit.")], IsError: true);
-        }
-
-        var updated = content;
-        foreach (var match in matches.OrderByDescending(static item => item.Index))
-            updated = updated.Remove(match.Index, match.Length).Insert(match.Index, match.NewText);
-        await File.WriteAllTextAsync(path, updated, ct).ConfigureAwait(false);
-
-        return new ToolResult([new TextContent($"Successfully edited {path} ({matches.Count} replacement{(matches.Count == 1 ? string.Empty : "s")})")]);
-    }
-
-    /// <summary>读取兼容的新旧 edit 参数并统一为替换列表。</summary>
-    /// <param name="args">工具调用参数。</param>
-    /// <returns>按调用顺序排列的旧文本与新文本。</returns>
-    private static IReadOnlyList<(string OldText, string NewText)> ReadReplacements(JsonElement args)
-    {
-        var replacements = new List<(string, string)>();
-        if (args.TryGetProperty("old_string", out var oldValue) &&
-            args.TryGetProperty("new_string", out var newValue) &&
-            oldValue.ValueKind == JsonValueKind.String && newValue.ValueKind == JsonValueKind.String)
-        {
-            replacements.Add((oldValue.GetString() ?? string.Empty, newValue.GetString() ?? string.Empty));
-        }
-
-        if (!args.TryGetProperty("edits", out var edits))
-            return replacements;
-
-        if (edits.ValueKind == JsonValueKind.Object)
-        {
-            if (TryReadReplacement(edits, out var single)) replacements.Add(single);
-        }
-        else if (edits.ValueKind == JsonValueKind.Array)
-        {
-            foreach (var edit in edits.EnumerateArray())
+            try
             {
-                if (TryReadReplacement(edit, out var replacement)) replacements.Add(replacement);
+                var parsed = JsonNode.Parse(text);
+                if (parsed is JsonArray) args["edits"] = parsed;
+                else if (IsEdit(parsed)) args["edits"] = new JsonArray(parsed);
             }
+            catch (JsonException) { }
         }
-
-        return replacements;
-    }
-
-    /// <summary>读取一个编辑对象，兼容 oldText/newText 与 old_string/new_string 字段。</summary>
-    /// <param name="edit">编辑对象。</param>
-    /// <param name="replacement">解析出的替换内容。</param>
-    /// <returns>字段完整时返回 true。</returns>
-    private static bool TryReadReplacement(JsonElement edit, out (string OldText, string NewText) replacement)
-    {
-        replacement = default;
-        if (edit.ValueKind != JsonValueKind.Object)
-            return false;
-        var oldProperty = edit.TryGetProperty("oldText", out var oldText) ? oldText : edit.TryGetProperty("old_string", out var legacyOld) ? legacyOld : default;
-        var newProperty = edit.TryGetProperty("newText", out var newText) ? newText : edit.TryGetProperty("new_string", out var legacyNew) ? legacyNew : default;
-        if (oldProperty.ValueKind != JsonValueKind.String || newProperty.ValueKind != JsonValueKind.String)
-            return false;
-        replacement = (oldProperty.GetString() ?? string.Empty, newProperty.GetString() ?? string.Empty);
-        return true;
-    }
-
-    /// <summary>查找唯一的非空旧文本匹配位置。</summary>
-    /// <param name="content">原始文件内容。</param>
-    /// <param name="oldText">待查找文本。</param>
-    /// <returns>唯一位置；未找到或重复时返回 null。</returns>
-    private static (int Index, int Length)? FindUniqueOccurrence(string content, string oldText)
-    {
-        if (string.IsNullOrEmpty(oldText)) return null;
-        var first = content.IndexOf(oldText, StringComparison.Ordinal);
-        if (first < 0 || content.IndexOf(oldText, first + oldText.Length, StringComparison.Ordinal) >= 0) return null;
-        return (first, oldText.Length);
-    }
-
-    private static int CountOccurrences(string text, string search)
-    {
-        var count = 0;
-        var index = 0;
-        while ((index = text.IndexOf(search, index, StringComparison.Ordinal)) >= 0)
+        else if (IsEdit(args["edits"])) args["edits"] = new JsonArray(args["edits"]!.DeepClone());
+        // 1. 【CodingAgent】【旧字段兼容】原生旧顶层字段与 Tau 旧 snake_case 字段都追加到规范数组
+        foreach (var (oldName, newName) in new[] { ("oldText", "newText"), ("old_string", "new_string") })
         {
-            count++;
-            index += search.Length;
+            if (args[oldName] is not JsonValue old || !old.TryGetValue<string>(out var oldText)
+                || args[newName] is not JsonValue replacement || !replacement.TryGetValue<string>(out var newText)) continue;
+            var edits = args["edits"] as JsonArray;
+            if (edits is null) { edits = []; args["edits"] = edits; }
+            edits.Add((JsonNode)new JsonObject { ["oldText"] = oldText, ["newText"] = newText });
+            args.Remove(oldName); args.Remove(newName);
         }
-        return count;
+        return new(JsonDocument.Parse(args.ToJsonString()).RootElement.Clone());
     }
+
+    /// <summary>【CodingAgent】【替换形状】判断单对象是否包含两个字符串字段。</summary>
+    /// <param name="node">待判断对象。</param><returns>是否为单个替换。</returns>
+    private static bool IsEdit(JsonNode? node) => node is JsonObject edit
+        && edit["oldText"] is JsonValue old && old.TryGetValue<string>(out _)
+        && edit["newText"] is JsonValue replacement && replacement.TryGetValue<string>(out _);
+
+    /// <summary>【CodingAgent】【文件编辑】持有文件修改队列直到所有 I/O 结束，保留 BOM 和原始换行风格。</summary>
+    /// <param name="toolCallId">调用标识。</param><param name="args">路径和替换参数。</param><param name="ct">取消信号。</param>
+    /// <param name="onUpdate">可选更新回调，本工具返回最终结果。</param><returns>替换结果与差异详情。</returns>
+    public async Task<ToolResult> ExecuteAsync(string toolCallId, JsonElement args, CancellationToken ct = default, Func<ToolUpdate, Task>? onUpdate = null)
+    {
+        args = await PrepareArgumentsAsync(args, ct).ConfigureAwait(false);
+        var displayPath = args.GetProperty("path").GetString()!;
+        var path = CodingAgentToolPaths.Resolve(displayPath, _workingDirectory);
+        if (!args.TryGetProperty("edits", out var entries) || entries.ValueKind != JsonValueKind.Array || entries.GetArrayLength() == 0)
+            return Error("Edit tool input is invalid. edits must contain at least one replacement.");
+        var edits = entries.EnumerateArray().Select(edit => new CodingAgentEdit(edit.GetProperty("oldText").GetString()!, edit.GetProperty("newText").GetString()!)).ToArray();
+        return await CodingAgentFileMutations.RunAsync(path, async () =>
+        {
+            ct.ThrowIfCancellationRequested();
+            try { await _operations.AccessAsync(path).ConfigureAwait(false); }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+            {
+                ct.ThrowIfCancellationRequested();
+                return Error($"Could not edit file: {displayPath}. {error.Message}.");
+            }
+            ct.ThrowIfCancellationRequested();
+            var bytes = await _operations.ReadFileAsync(path).ConfigureAwait(false);
+            ct.ThrowIfCancellationRequested();
+            var raw = Encoding.UTF8.GetString(bytes);
+            var bom = raw.StartsWith('\uFEFF') ? "\uFEFF" : "";
+            var content = bom.Length == 0 ? raw : raw[1..];
+            var newline = content.IndexOf('\n');
+            var crlf = newline > 0 && content[newline - 1] == '\r';
+            var original = CodingAgentEditMatching.NormalizeLines(content);
+            string updated;
+            try { updated = CodingAgentEditMatching.Apply(original, edits, displayPath); }
+            catch (InvalidOperationException error) { return Error(error.Message); }
+            ct.ThrowIfCancellationRequested();
+            // 2. 【CodingAgent】【完整写入】不把取消信号传给正在进行的文件写入，等待落盘后再检查取消并释放队列
+            await _operations.WriteFileAsync(path, bom + (crlf ? updated.Replace("\n", "\r\n", StringComparison.Ordinal) : updated)).ConfigureAwait(false);
+            ct.ThrowIfCancellationRequested();
+            var details = CodingAgentEditDiff.Create(displayPath, original, updated);
+            return new ToolResult([new TextContent($"Successfully replaced {edits.Length} block(s) in {displayPath}.")], Details: details);
+        }).ConfigureAwait(false);
+    }
+
+    /// <summary>【CodingAgent】【编辑错误】返回可让模型修正参数的错误结果。</summary>
+    /// <param name="message">错误说明。</param><returns>工具错误结果。</returns>
+    private static ToolResult Error(string message) => new([new TextContent(message)], IsError: true);
 }

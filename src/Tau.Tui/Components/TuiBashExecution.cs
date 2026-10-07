@@ -111,6 +111,14 @@ public sealed partial class TuiBashExecution : ITuiComponent
         _outputLines.AddRange(lines);
     }
 
+    /// <summary>【TUI】【命令快照】替换命令输出快照，避免把重复快照作为增量追加。</summary>
+    /// <param name="text">完整的当前可见输出。</param>
+    public void SetOutput(string? text)
+    {
+        _outputLines.Clear();
+        AppendOutput(text);
+    }
+
     public void SetComplete(
         int? exitCode,
         bool cancelled = false,

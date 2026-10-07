@@ -23,8 +23,11 @@ public sealed class OpenAiProvider : IStreamProvider
 
     public string Api => "openai-chat-completions";
 
+    public bool SupportsTranscriptContext => true;
+
     public AssistantMessageStream Stream(Model model, LlmContext context, StreamOptions options)
     {
+        options = StreamOptionHelpers.WithCacheDefaults(options);
         var stream = new AssistantMessageStream();
 
         _ = Task.Run(async () =>
@@ -48,9 +51,16 @@ public sealed class OpenAiProvider : IStreamProvider
 
     public AssistantMessageStream StreamSimple(Model model, LlmContext context, SimpleStreamOptions options)
     {
+        options = SimpleTokenOptions.WithContextLimit(model, context, options);
         return Stream(model, context, options);
     }
 
+    /// <summary>【AI】【Chat Completions】发送请求并使用相同的 grammar 映射处理历史与响应。</summary>
+    /// <param name="model">目标模型。</param>
+    /// <param name="context">会话上下文。</param>
+    /// <param name="options">生成和传输选项。</param>
+    /// <param name="stream">输出事件流。</param>
+    /// <returns>HTTP 请求与响应解析任务。</returns>
     private async Task StreamInternalAsync(
         Model model,
         LlmContext context,
@@ -65,10 +75,11 @@ public sealed class OpenAiProvider : IStreamProvider
         var baseUrl = model.BaseUrl?.TrimEnd('/') ?? "https://api.openai.com/v1";
         var url = $"{baseUrl}/chat/completions";
 
+        var grammarInputs = OpenAiMessageConverter.CreateGrammarToolInputProperties(model, context);
         var body = await StreamOptionHelpers.ApplyPayloadCallbackAsync(
             options,
             model,
-            BuildRequestBody(model, context, options)).ConfigureAwait(false);
+            BuildRequestBody(model, context, options, grammarInputs)).ConfigureAwait(false);
         var json = JsonSerializer.Serialize(body, OpenAiRequestJsonContext.Default.DictionaryStringObject);
 
         using var request = new HttpRequestMessage(HttpMethod.Post, url);
@@ -78,16 +89,16 @@ public sealed class OpenAiProvider : IStreamProvider
         if (!string.IsNullOrEmpty(apiKey))
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
 
-        ApplySessionAffinityHeader(request, model, options);
+        SessionAffinityHeaders.Apply(request, model, options, "openai-completions");
         ApplyHeaders(request, model.Headers);
         ApplyHeaders(request, options.Headers);
 
         using var requestTimeout = StreamOptionHelpers.CreateRequestTimeout(options);
         try
         {
-            using var response = await _httpClient.SendAsync(
-                request, HttpCompletionOption.ResponseHeadersRead, requestTimeout.Token).ConfigureAwait(false);
-            await StreamOptionHelpers.InvokeResponseCallbackAsync(options, model, response).ConfigureAwait(false);
+            await StreamOptionHelpers.ApplyHeadersCallbackAsync(options, model, request).ConfigureAwait(false);
+            using var response = await ProviderHttpRetry.SendAsync(_httpClient, request, model, options, requestTimeout.Token,
+                retryTransportErrors: true).ConfigureAwait(false);
 
             if (!response.IsSuccessStatusCode)
             {
@@ -98,40 +109,8 @@ public sealed class OpenAiProvider : IStreamProvider
 
             await using var responseStream = await response.Content.ReadAsStreamAsync(requestTimeout.Token).ConfigureAwait(false);
 
-            var partial = new AssistantMessage
-            {
-                Api = Api,
-                Provider = model.Provider,
-                Model = model.Id,
-                Content = []
-            };
-            stream.Push(new StartEvent(partial));
-
-            var toolCallAccumulators = new Dictionary<int, OpenAiStreamParser.ToolCallAccumulator>();
-            var contentIndex = 0;
-            var completed = false;
-
-            await foreach (var sse in SseParser.ParseAsync(responseStream, requestTimeout.Token))
-            {
-                if (sse.Data == "[DONE]")
-                    break;
-
-                completed = OpenAiStreamParser.ParseChunk(
-                    sse.Data, stream, ref partial, ref toolCallAccumulators, ref contentIndex);
-                if (completed)
-                {
-                    break;
-                }
-            }
-
-            if (!completed)
-            {
-                OpenAiStreamParser.Complete(
-                    stream,
-                    ref partial,
-                    toolCallAccumulators,
-                    ResolveCompatibility(model).SupportsFinishReason);
-            }
+            await OpenAiStreamParser.ProcessStreamAsync(responseStream, stream, model, Api,
+                grammarInputs, ResolveCompatibility(model).SupportsFinishReason, requestTimeout.Token, options.OnProviderStreamEvent).ConfigureAwait(false);
         }
         catch (OperationCanceledException ex) when (requestTimeout.IsTimeoutCancellation)
         {
@@ -139,10 +118,19 @@ public sealed class OpenAiProvider : IStreamProvider
         }
     }
 
-    private static Dictionary<string, object> BuildRequestBody(
-        Model model, LlmContext context, StreamOptions options)
+    /// <summary>【AI】【Chat Completions】按模型能力组装系统声明、工具和生成选项。</summary>
+    /// <param name="model">目标模型。</param>
+    /// <param name="context">旧式或消息式上下文。</param>
+    /// <param name="options">请求选项。</param>
+    /// <param name="grammarInputs">折叠前建立的历史语法工具输入映射。</param>
+    /// <returns>请求报文。</returns>
+    internal static Dictionary<string, object> BuildRequestBody(
+        Model model, LlmContext context, StreamOptions options, IReadOnlyDictionary<string, string> grammarInputs)
     {
         context = MessageTransformer.DowngradeUnsupportedImages(context, model);
+        context = Transcript.ResolveTranscript(context, model.Compat?.SupportsMidConvoSystemMessages == true);
+        var transcriptTools = Transcript.ResolveTranscriptTools(context.Messages,
+            model.Compat?.SupportsMidConvoSystemMessages == true && model.Compat.SupportsMidConvoToolAdditions == true);
         var compatibility = ResolveCompatibility(model);
         var cacheControl = BuildCacheControl(compatibility, options);
         var body = new Dictionary<string, object>
@@ -161,32 +149,31 @@ public sealed class OpenAiProvider : IStreamProvider
         AddPromptCacheParameters(model, compatibility, options, body);
 
         var messages = new List<object>();
+        var replay = MessageTransformer.TransformMessages(context.Messages, model, OpenAiToolCallIds.Normalize);
 
-        if (!string.IsNullOrEmpty(context.SystemPrompt))
-        {
-            messages.Add(new Dictionary<string, object>
-            {
-                ["role"] = model.Reasoning && compatibility.SupportsDeveloperRole ? "developer" : "system",
-                ["content"] = UnicodeTextSanitizer.RemoveUnpairedSurrogates(context.SystemPrompt!)
-            });
-        }
-
-        // Serialize existing messages
+        // 1. 【AI】【Chat Completions】指令与工具新增保持会话位置，旧模型已提前合并
         var converted = OpenAiMessageConverter.ConvertMessageObjects(
-            context.Messages,
+            replay,
                      supportsImages: model.InputModalities.Contains("image", StringComparer.OrdinalIgnoreCase),
                      requiresThinkingAsText: compatibility.RequiresThinkingAsText,
                      requiresToolResultName: compatibility.RequiresToolResultName,
                      requiresAssistantAfterToolResult: compatibility.RequiresAssistantAfterToolResult,
                      requiresReasoningContentOnAssistantMessages: compatibility.RequiresReasoningContentOnAssistantMessages,
-                     modelReasoning: model.Reasoning);
+                     modelReasoning: model.Reasoning,
+                     instructionRole: model.Reasoning && compatibility.SupportsDeveloperRole ? "developer" : "system",
+                     anchorsToolAdditions: transcriptTools.AnchorsAdditions,
+                     supportsStrictMode: compatibility.SupportsStrictMode,
+                     supportsOpenAiGrammarTools: model.Compat?.SupportsOpenAiGrammarTools == true,
+                     grammarToolInputProperties: grammarInputs,
+                     provider: model.Provider);
         foreach (var msg in converted)
             messages.Add(msg);
 
         List<object>? tools = null;
-        if (context.Tools is { Count: > 0 })
+        if (transcriptTools.RequestTools is { Count: > 0 })
         {
-            tools = OpenAiMessageConverter.ConvertToolObjects(context.Tools, compatibility.SupportsStrictMode);
+            tools = OpenAiMessageConverter.ConvertToolObjects(transcriptTools.RequestTools, compatibility.SupportsStrictMode,
+                model.Compat?.SupportsOpenAiGrammarTools == true);
             if (compatibility.ZaiToolStream)
             {
                 body["tool_stream"] = true;
@@ -216,8 +203,9 @@ public sealed class OpenAiProvider : IStreamProvider
             body["top_p"] = options.TopP.Value;
 
         AddToolChoice(options, body);
-        AddReasoning(model, options, compatibility, body);
-        AddRouting(model, compatibility, body);
+        if (model.Compat?.VllmPriority is { } priority) body["priority"] = priority;
+        OpenAiReasoning.Apply(model, options, body);
+        AddRouting(compatibility, body);
         StreamOptionHelpers.ApplySamplingParams(body, model, options);
 
         return body;
@@ -308,6 +296,8 @@ public sealed class OpenAiProvider : IStreamProvider
         }
     }
 
+    /// <summary>【AI】【缓存边界】从末尾查找可缓存的用户、助手或工具结果正文，空正文继续向前查找。</summary>
+    /// <param name="messages">已转换的会话消息。</param><param name="cacheControl">缓存策略。</param>
     private static void AddCacheControlToLastConversationMessage(
         List<object> messages,
         IReadOnlyDictionary<string, object> cacheControl)
@@ -321,7 +311,7 @@ public sealed class OpenAiProvider : IStreamProvider
             }
 
             var roleText = Convert.ToString(role);
-            if (roleText is "user" or "assistant" &&
+            if (roleText is "user" or "assistant" or "tool" &&
                 AddCacheControlToTextContent(message, cacheControl))
             {
                 return;
@@ -391,8 +381,15 @@ public sealed class OpenAiProvider : IStreamProvider
         return false;
     }
 
+    /// <summary>【AI】【工具选择】保留简化入口的显式策略，并转换原生函数选择对象。</summary>
+    /// <param name="options">原生或简化选项。</param><param name="body">待发送请求体。</param>
     private static void AddToolChoice(StreamOptions options, Dictionary<string, object> body)
     {
+        if (options is SimpleStreamOptions { ToolChoice: { } simpleChoice })
+        {
+            body["tool_choice"] = simpleChoice;
+            return;
+        }
         if (options is not OpenAiOptions { ToolChoice: { } toolChoice })
         {
             return;
@@ -408,67 +405,6 @@ public sealed class OpenAiProvider : IStreamProvider
                 }
             }
             : toolChoice.Kind;
-    }
-
-    private static void AddReasoning(
-        Model model,
-        StreamOptions options,
-        ResolvedOpenAiCompatibility compatibility,
-        Dictionary<string, object> body)
-    {
-        if (!model.Reasoning)
-        {
-            return;
-        }
-
-        var effort = ResolveReasoningEffort(model, options, compatibility);
-        if (string.IsNullOrWhiteSpace(effort))
-        {
-            return;
-        }
-
-        switch (compatibility.ThinkingFormat)
-        {
-            case "zai":
-            case "qwen":
-                body["enable_thinking"] = true;
-                break;
-            case "qwen-chat-template":
-                body["chat_template_kwargs"] = new Dictionary<string, object>
-                {
-                    ["enable_thinking"] = true,
-                    ["preserve_thinking"] = true
-                };
-                break;
-            case "openrouter":
-                body["reasoning"] = new Dictionary<string, object> { ["effort"] = effort };
-                break;
-            case "deepseek":
-                body["thinking"] = new Dictionary<string, object> { ["type"] = "enabled" };
-                break;
-            default:
-                if (compatibility.SupportsReasoningEffort)
-                {
-                    body["reasoning_effort"] = effort;
-                }
-                break;
-        }
-    }
-
-    private static string? ResolveReasoningEffort(
-        Model model,
-        StreamOptions options,
-        ResolvedOpenAiCompatibility compatibility)
-    {
-        if (options is OpenAiOptions { ReasoningEffort: { } effort } &&
-            !string.IsNullOrWhiteSpace(effort))
-        {
-            return MapReasoningEffort(effort, model, compatibility.ReasoningEffortMap);
-        }
-
-        return options is SimpleStreamOptions { Reasoning: { } reasoning }
-            ? MapReasoningEffort(reasoning, model, compatibility.ReasoningEffortMap)
-            : null;
     }
 
     private static void ApplyHeaders(HttpRequestMessage request, IDictionary<string, string>? headers)
@@ -490,31 +426,29 @@ public sealed class OpenAiProvider : IStreamProvider
         }
     }
 
+    /// <summary>【AI】【网关路由】显式路由配置适用于代理地址，保留已配置的空数组。</summary>
+    /// <param name="compatibility">显式路由配置。</param><param name="body">请求体。</param>
     private static void AddRouting(
-        Model model,
         ResolvedOpenAiCompatibility compatibility,
         Dictionary<string, object> body)
     {
-        var baseUrl = model.BaseUrl ?? string.Empty;
-        if (baseUrl.Contains("openrouter.ai", StringComparison.OrdinalIgnoreCase) &&
-            compatibility.OpenRouterRouting is { Count: > 0 })
+        if (compatibility.OpenRouterRouting is not null)
         {
             body["provider"] = compatibility.OpenRouterRouting;
         }
 
-        if (!baseUrl.Contains("ai-gateway.vercel.sh", StringComparison.OrdinalIgnoreCase) ||
-            compatibility.VercelGatewayRouting is not { } routing)
+        if (compatibility.VercelGatewayRouting is not { } routing)
         {
             return;
         }
 
         var gateway = new Dictionary<string, object>();
-        if (routing.Only is { Count: > 0 })
+        if (routing.Only is not null)
         {
             gateway["only"] = routing.Only.ToArray();
         }
 
-        if (routing.Order is { Count: > 0 })
+        if (routing.Order is not null)
         {
             gateway["order"] = routing.Order.ToArray();
         }
@@ -528,49 +462,15 @@ public sealed class OpenAiProvider : IStreamProvider
         }
     }
 
-    private static string MapReasoningEffort(
-        ThinkingLevel level,
-        Model model,
-        IReadOnlyDictionary<string, string> reasoningEffortMap)
-    {
-        var normalized = level == ThinkingLevel.ExtraHigh && !ModelCatalog.SupportsXhigh(model)
-            ? "high"
-            : level switch
-            {
-                ThinkingLevel.Minimal => "minimal",
-                ThinkingLevel.Low => "low",
-                ThinkingLevel.Medium => "medium",
-                ThinkingLevel.High => "high",
-                ThinkingLevel.ExtraHigh => "xhigh",
-                _ => "medium"
-            };
-
-        return MapReasoningEffort(normalized, model, reasoningEffortMap);
-    }
-
-    private static string MapReasoningEffort(
-        string effort,
-        Model model,
-        IReadOnlyDictionary<string, string> reasoningEffortMap)
-    {
-        var normalized = effort.Trim().ToLowerInvariant();
-        if (normalized == "xhigh" && !ModelCatalog.SupportsXhigh(model))
-        {
-            normalized = "high";
-        }
-
-        return reasoningEffortMap.TryGetValue(normalized, out var mapped) ? mapped : normalized;
-    }
-
+    /// <summary>【AI】【兼容投影】将自动检测及显式覆盖后的能力转换为请求组装视图。</summary>
+    /// <param name="model">目标模型。</param><returns>已补足默认值的请求能力。</returns>
     private static ResolvedOpenAiCompatibility ResolveCompatibility(Model model)
     {
-        var compat = model.Compat;
+        var compat = OpenAiCompatibility.Resolve(model);
         return new ResolvedOpenAiCompatibility
         {
             SupportsStore = compat?.SupportsStore ?? false,
             SupportsDeveloperRole = compat?.SupportsDeveloperRole ?? false,
-            SupportsReasoningEffort = compat?.SupportsReasoningEffort ?? false,
-            ReasoningEffortMap = compat?.ReasoningEffortMap ?? EmptyReasoningEffortMap,
             SupportsUsageInStreaming = compat?.SupportsUsageInStreaming ?? true,
             SupportsFinishReason = compat?.SupportsFinishReason ?? true,
             MaxTokensField = string.Equals(compat?.MaxTokensField, "max_completion_tokens", StringComparison.OrdinalIgnoreCase)
@@ -580,7 +480,6 @@ public sealed class OpenAiProvider : IStreamProvider
             RequiresAssistantAfterToolResult = compat?.RequiresAssistantAfterToolResult ?? false,
             RequiresThinkingAsText = compat?.RequiresThinkingAsText ?? false,
             RequiresReasoningContentOnAssistantMessages = compat?.RequiresReasoningContentOnAssistantMessages ?? false,
-            ThinkingFormat = NormalizeThinkingFormat(compat?.ThinkingFormat),
             OpenRouterRouting = compat?.OpenRouterRouting,
             VercelGatewayRouting = compat?.VercelGatewayRouting,
             ZaiToolStream = compat?.ZaiToolStream ?? false,
@@ -591,26 +490,10 @@ public sealed class OpenAiProvider : IStreamProvider
         };
     }
 
-    private static string NormalizeThinkingFormat(string? value) =>
-        value?.Trim().ToLowerInvariant() switch
-        {
-            "openrouter" => "openrouter",
-            "deepseek" => "deepseek",
-            "zai" => "zai",
-            "qwen" => "qwen",
-            "qwen-chat-template" => "qwen-chat-template",
-            _ => "openai"
-        };
-
-    private static readonly IReadOnlyDictionary<string, string> EmptyReasoningEffortMap =
-        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-
     private sealed record ResolvedOpenAiCompatibility
     {
         public bool SupportsStore { get; init; }
         public bool SupportsDeveloperRole { get; init; }
-        public bool SupportsReasoningEffort { get; init; }
-        public IReadOnlyDictionary<string, string> ReasoningEffortMap { get; init; } = EmptyReasoningEffortMap;
         public bool SupportsUsageInStreaming { get; init; }
         public bool SupportsFinishReason { get; init; } = true;
         public string MaxTokensField { get; init; } = "max_tokens";
@@ -618,7 +501,6 @@ public sealed class OpenAiProvider : IStreamProvider
         public bool RequiresAssistantAfterToolResult { get; init; }
         public bool RequiresThinkingAsText { get; init; }
         public bool RequiresReasoningContentOnAssistantMessages { get; init; }
-        public string ThinkingFormat { get; init; } = "openai";
         public IDictionary<string, object>? OpenRouterRouting { get; init; }
         public VercelGatewayRouting? VercelGatewayRouting { get; init; }
         public bool ZaiToolStream { get; init; }
@@ -628,19 +510,12 @@ public sealed class OpenAiProvider : IStreamProvider
         public bool SupportsTemperature { get; init; } = true;
     }
 
-    private static void ApplySessionAffinityHeader(HttpRequestMessage request, Model model, StreamOptions options)
-    {
-        if (model.Compat?.SendSessionAffinityHeaders == true &&
-            !string.IsNullOrWhiteSpace(options.SessionId))
-        {
-            request.Headers.Remove("x-session-affinity");
-            request.Headers.TryAddWithoutValidation("x-session-affinity", options.SessionId);
-        }
-    }
 }
 
 public record OpenAiOptions : StreamOptions
 {
+    /// <summary>【AI】【思考预算】原生 Completions 请求的各等级自定义预算。</summary>
+    public ThinkingBudgets? ThinkingBudgets { get; init; }
     public OpenAiToolChoice? ToolChoice { get; init; }
     public string? ReasoningEffort { get; init; }
 }
@@ -695,6 +570,7 @@ public sealed record OpenAiToolChoice
 [System.Text.Json.Serialization.JsonSerializable(typeof(int))]
 [System.Text.Json.Serialization.JsonSerializable(typeof(int?))]
 [System.Text.Json.Serialization.JsonSerializable(typeof(float))]
+[System.Text.Json.Serialization.JsonSerializable(typeof(double))]
 [System.Text.Json.Serialization.JsonSerializable(typeof(float?))]
 [System.Text.Json.Serialization.JsonSerializable(typeof(decimal))]
 [System.Text.Json.Serialization.JsonSerializable(typeof(decimal?))]

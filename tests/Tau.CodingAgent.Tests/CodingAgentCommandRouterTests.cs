@@ -1108,7 +1108,7 @@ public class CodingAgentCommandRouterTests
             }
             """);
         var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
-        var extensionStore = new CodingAgentExtensionCommandStore(
+        using var extensionStore = new CodingAgentExtensionCommandStore(
             cwd: directory,
             userExtensionsDirectory: Path.Combine(directory, "missing-user-extensions"));
         var router = new CodingAgentCommandRouter(runner, extensionCommandStore: extensionStore);
@@ -1125,6 +1125,7 @@ public class CodingAgentCommandRouterTests
         }
         finally
         {
+            extensionStore.Dispose();
             Directory.Delete(directory, recursive: true);
         }
     }
@@ -1159,7 +1160,7 @@ public class CodingAgentCommandRouterTests
             }
             """);
         var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
-        var extensionStore = new CodingAgentExtensionCommandStore(
+        using var extensionStore = new CodingAgentExtensionCommandStore(
             cwd: directory,
             userExtensionsDirectory: Path.Combine(directory, "missing-user-extensions"),
             javaScriptRuntime: new CodingAgentJavaScriptExtensionRuntime(directory, nodeExecutable: "node"));
@@ -1177,6 +1178,7 @@ public class CodingAgentCommandRouterTests
         }
         finally
         {
+            extensionStore.Dispose();
             Directory.Delete(directory, recursive: true);
         }
     }
@@ -1213,7 +1215,7 @@ public class CodingAgentCommandRouterTests
             }
             """);
         var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
-        var extensionStore = new CodingAgentExtensionCommandStore(
+        using var extensionStore = new CodingAgentExtensionCommandStore(
             cwd: directory,
             userExtensionsDirectory: Path.Combine(directory, "missing-user-extensions"),
             javaScriptRuntime: new CodingAgentJavaScriptExtensionRuntime(directory, nodeExecutable: "node"));
@@ -1233,6 +1235,7 @@ public class CodingAgentCommandRouterTests
         }
         finally
         {
+            extensionStore.Dispose();
             Directory.Delete(directory, recursive: true);
         }
     }
@@ -1247,7 +1250,7 @@ public class CodingAgentCommandRouterTests
         var missingFile = Path.Combine(directory, "missing.json");
         await File.WriteAllTextAsync(badFile, "{ invalid");
         var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
-        var extensionStore = new CodingAgentExtensionCommandStore(
+        using var extensionStore = new CodingAgentExtensionCommandStore(
             cwd: directory,
             explicitPaths: [missingFile]);
         var router = new CodingAgentCommandRouter(runner, extensionCommandStore: extensionStore);
@@ -1265,6 +1268,7 @@ public class CodingAgentCommandRouterTests
         }
         finally
         {
+            extensionStore.Dispose();
             Directory.Delete(directory, recursive: true);
         }
     }
@@ -1273,7 +1277,7 @@ public class CodingAgentCommandRouterTests
     public void CommandCatalog_HelpLine_MatchesSupportedCommandNames()
     {
         Assert.Equal(
-            "commands: /help, /reload, /hotkeys, /settings, /theme, /name, /copy, /files, /export, /share, /import, /new, /session, /metadata, /tree, /label, /fork, /clone, /resume, /quit, /model, /provider, /models, /providers, /scoped-models, /prompts, /skills, /extensions, /auth, /login, /logout, /changelog, /retry, /thinking, /history, /find, /clear, /compact",
+            "commands: /help, /reload, /hotkeys, /settings, /theme, /name, /copy, /files, /export, /share, /import, /new, /session, /metadata, /tree, /label, /fork, /clone, /resume, /quit, /model, /provider, /models, /providers, /scoped-models, /prompts, /skills, /extensions, /auth, /mcp, /login, /logout, /changelog, /retry, /thinking, /history, /find, /clear, /compact",
             CodingAgentCommandCatalog.HelpLine);
         Assert.All(CodingAgentCommandCatalog.SupportedCommands, command =>
         {
@@ -1294,7 +1298,7 @@ public class CodingAgentCommandRouterTests
         Assert.True(result.Handled);
         Assert.False(result.IsError);
         Assert.Equal(
-            "commands: /help, /reload, /hotkeys, /settings, /theme, /name, /copy, /files, /export, /share, /import, /new, /session, /metadata, /tree, /label, /fork, /clone, /resume, /quit, /model, /provider, /models, /providers, /scoped-models, /prompts, /skills, /extensions, /auth, /login, /logout, /changelog, /retry, /thinking, /history, /find, /clear, /compact",
+            "commands: /help, /reload, /hotkeys, /settings, /theme, /name, /copy, /files, /export, /share, /import, /new, /session, /metadata, /tree, /label, /fork, /clone, /resume, /quit, /model, /provider, /models, /providers, /scoped-models, /prompts, /skills, /extensions, /auth, /mcp, /login, /logout, /changelog, /retry, /thinking, /history, /find, /clear, /compact",
             result.Message);
         Assert.Empty(runner.Inputs);
     }
@@ -1548,7 +1552,7 @@ public class CodingAgentCommandRouterTests
         var unavailableRouter = new CodingAgentCommandRouter(unavailableRunner);
         var noOAuthRunner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>())
         {
-            AuthStatus = new("openai", true, "auth.json api_key", false, false, "API key entry found in auth.json."),
+            AuthStatus = new("openai", true, "environment", false, false, "Environment credentials."),
             OAuthProvider = oauthProvider
         };
         var selectorCalls = 0;
@@ -1574,7 +1578,7 @@ public class CodingAgentCommandRouterTests
         Assert.Empty(unavailableRunner.LoggedOutProviders);
         Assert.True(noOAuth.Handled);
         Assert.False(noOAuth.IsError);
-        Assert.Equal("No OAuth providers logged in. Use /login first.", noOAuth.Message);
+        Assert.Equal("No providers logged in. Use /login first.", noOAuth.Message);
         Assert.Equal(0, selectorCalls);
         Assert.Empty(noOAuthRunner.LoggedOutProviders);
         Assert.Empty(cancelRunner.Inputs);
@@ -1805,7 +1809,7 @@ public class CodingAgentCommandRouterTests
             FollowUpMode: "all",
             Theme: "reload-theme"));
         var extensionResourceState = new CodingAgentExtensionResourceState();
-        var extensionStore = new CodingAgentExtensionCommandStore(
+        using var extensionStore = new CodingAgentExtensionCommandStore(
             cwd: directory,
             userExtensionsDirectory: Path.Combine(directory, "missing-user-extensions"),
             explicitPaths: []);
@@ -1891,6 +1895,7 @@ public class CodingAgentCommandRouterTests
         }
         finally
         {
+            extensionStore.Dispose();
             Directory.Delete(directory, recursive: true);
         }
     }
@@ -3183,10 +3188,16 @@ public class CodingAgentCommandRouterTests
         Assert.Contains("shared answer", html, StringComparison.Ordinal);
     }
 
-    [Fact]
-    public async Task TryHandleAsync_ShareCommandWithoutMessages_ReturnsError()
+    /// <summary>空会话和纯系统基线都不能触发会话分享。</summary>
+    /// <param name="withBaseline">是否预置系统声明。</param>
+    /// <returns>测试任务。</returns>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task TryHandleAsync_ShareCommandWithoutMessages_ReturnsError(bool withBaseline)
     {
         var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>());
+        if (withBaseline) runner.MutableMessages.Add(new SystemMessage("baseline"));
         var shareClient = new FakeShareClient();
         var router = new CodingAgentCommandRouter(runner, shareClient: shareClient);
 
@@ -3802,8 +3813,9 @@ public class CodingAgentCommandRouterTests
             Assert.Contains($"metadata: file {treePath}", result.Message, StringComparison.Ordinal);
             Assert.Contains($"cwd: {directory}", result.Message, StringComparison.Ordinal);
             Assert.Contains("parent session: none", result.Message, StringComparison.Ordinal);
-            Assert.Contains("counts: entries 4, branch entries 4, messages 2, branch messages 2, branches 0, labels 0", result.Message, StringComparison.Ordinal);
-            Assert.Contains("latest metadata (2):", result.Message, StringComparison.Ordinal);
+            Assert.Contains("counts: entries 5, branch entries 5, messages 2, branch messages 2, branches 0, labels 0", result.Message, StringComparison.Ordinal);
+            Assert.Contains("latest metadata (3):", result.Message, StringComparison.Ordinal);
+            Assert.Contains("thinking off", result.Message, StringComparison.Ordinal);
             Assert.Contains("model openai/gpt-5.4", result.Message, StringComparison.Ordinal);
             Assert.Contains("session name metadata slice", result.Message, StringComparison.Ordinal);
             Assert.Empty(runner.Inputs);
@@ -3843,7 +3855,7 @@ public class CodingAgentCommandRouterTests
             Assert.Contains($"entry: {userEntryId}", result.Message, StringComparison.Ordinal);
             Assert.Contains("type: message", result.Message, StringComparison.Ordinal);
             Assert.Contains("path: branch", result.Message, StringComparison.Ordinal);
-            Assert.Contains("depth: 1, children 1", result.Message, StringComparison.Ordinal);
+            Assert.Contains("depth: 2, children 1", result.Message, StringComparison.Ordinal);
             Assert.Contains("label: checkpoint", result.Message, StringComparison.Ordinal);
             Assert.Contains("message role: user", result.Message, StringComparison.Ordinal);
             Assert.Contains("content types: text", result.Message, StringComparison.Ordinal);
@@ -4162,6 +4174,7 @@ public class CodingAgentCommandRouterTests
             var targetEntryId = ReadMessageEntryId(treePath, "user", "root task");
             var router = new CodingAgentCommandRouter(runner, treeSessionController: tree);
 
+            var previousLeafId = tree.GetSummary().LeafId;
             var result = await router.TryHandleAsync($"/fork {targetEntryId} --summarize focus decisions");
 
             Assert.True(result.Handled);
@@ -4179,7 +4192,7 @@ public class CodingAgentCommandRouterTests
             var branchSummary = ReadBranchSummaryEntry(treePath);
             Assert.Equal("branch_summary", branchSummary.GetProperty("type").GetString());
             Assert.Equal(targetEntryId, branchSummary.GetProperty("parentId").GetString());
-            Assert.Equal(targetEntryId, branchSummary.GetProperty("fromId").GetString());
+            Assert.Equal(previousLeafId, branchSummary.GetProperty("fromId").GetString());
             Assert.Equal("branch summary body", branchSummary.GetProperty("summary").GetString());
             Assert.Equal("docs/readme.md", branchSummary.GetProperty("readFiles")[0].GetString());
             Assert.Equal("src/Branch.cs", branchSummary.GetProperty("modifiedFiles")[0].GetString());
@@ -4840,7 +4853,7 @@ public class CodingAgentCommandRouterTests
             Assert.Equal("thinking: xhigh", xhigh.Message);
             Assert.Equal("thinking: off", off.Message);
             Assert.Null(runner.ThinkingLevel);
-            Assert.Null(settingsStore.Load().DefaultThinkingLevel);
+            Assert.Equal("off", settingsStore.Load().DefaultThinkingLevel);
             Assert.Empty(runner.Inputs);
         }
         finally
@@ -4878,7 +4891,7 @@ public class CodingAgentCommandRouterTests
             Assert.False(nonReasoning.IsError);
             Assert.Equal("thinking: off", nonReasoning.Message);
             Assert.Null(runner.ThinkingLevel);
-            Assert.Null(settingsStore.Load().DefaultThinkingLevel);
+            Assert.Equal("off", settingsStore.Load().DefaultThinkingLevel);
             Assert.Empty(runner.Inputs);
         }
         finally
@@ -4916,7 +4929,7 @@ public class CodingAgentCommandRouterTests
             Assert.False(off.IsError);
             Assert.Equal("thinking: off", off.Message);
             Assert.Null(runner.ThinkingLevel);
-            Assert.Null(settingsStore.Load().DefaultThinkingLevel);
+            Assert.Equal("off", settingsStore.Load().DefaultThinkingLevel);
             Assert.Empty(runner.Inputs);
         }
         finally
@@ -4929,7 +4942,7 @@ public class CodingAgentCommandRouterTests
     }
 
     [Fact]
-    public async Task TryHandleAsync_ThinkingCommand_OffClearsRuntimeAndSettings()
+    public async Task TryHandleAsync_ThinkingCommand_OffClearsRuntimeAndPersistsOff()
     {
         var settingsPath = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-thinking-off-{Guid.NewGuid():N}.json");
         var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>())
@@ -4948,7 +4961,7 @@ public class CodingAgentCommandRouterTests
             Assert.False(result.IsError);
             Assert.Equal("thinking: off", result.Message);
             Assert.Null(runner.ThinkingLevel);
-            Assert.Null(settingsStore.Load().DefaultThinkingLevel);
+            Assert.Equal("off", settingsStore.Load().DefaultThinkingLevel);
             Assert.Empty(runner.Inputs);
         }
         finally
@@ -5049,7 +5062,7 @@ public class CodingAgentCommandRouterTests
     }
 
     [Fact]
-    public async Task TryHandleAsync_ThinkingCommand_SelectOffClearsRuntimeAndSettings()
+    public async Task TryHandleAsync_ThinkingCommand_SelectOffClearsRuntimeAndPersistsOff()
     {
         var settingsPath = Path.Combine(Path.GetTempPath(), $"tau-coding-agent-thinking-select-off-{Guid.NewGuid():N}.json");
         var runner = new FakeCodingAgentRunner((_, _) => AsyncEnumerable.Empty<AgentEvent>())
@@ -5071,7 +5084,7 @@ public class CodingAgentCommandRouterTests
             Assert.False(result.IsError);
             Assert.Equal("thinking: off", result.Message);
             Assert.Null(runner.ThinkingLevel);
-            Assert.Null(settingsStore.Load().DefaultThinkingLevel);
+            Assert.Equal("off", settingsStore.Load().DefaultThinkingLevel);
             Assert.Empty(runner.Inputs);
         }
         finally
@@ -5151,7 +5164,7 @@ public class CodingAgentCommandRouterTests
             {
                 Assert.True(result.Handled);
                 Assert.True(result.IsError);
-                Assert.Equal("usage: /thinking [current|select|cycle|off|minimal|low|medium|high|xhigh]", result.Message);
+                Assert.Equal("usage: /thinking [current|select|cycle|off|minimal|low|medium|high|xhigh|max]", result.Message);
             });
         Assert.Empty(runner.Inputs);
     }
@@ -5868,7 +5881,7 @@ public class CodingAgentCommandRouterTests
             var settings = settingsStore.Load();
             Assert.Equal("google", settings.DefaultProvider);
             Assert.Equal("gemini-2.5-pro", settings.DefaultModel);
-            Assert.Null(settings.DefaultThinkingLevel);
+            Assert.Equal("off", settings.DefaultThinkingLevel);
             Assert.Equal(["openai/gpt-5.4", "google/gemini-2.5-pro"], settings.EnabledModels);
         }
         finally

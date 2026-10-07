@@ -45,12 +45,20 @@ public sealed record TuiToolExecutionResult(
     bool IsError = false,
     object? Details = null);
 
+/// <summary>【Tui】【工具正文上下文】向宿主专用渲染器提供当前工具快照和实际可用宽度。</summary>
+/// <param name="Args">调用参数。</param><param name="Result">结果或进度快照。</param><param name="Expanded">是否展开。</param>
+/// <param name="IsPartial">是否仍在执行。</param><param name="ShowImages">是否显示图片。</param><param name="ExpandHint">当前展开按键提示。</param>
+/// <param name="Width">正文可用列数。</param>
+public sealed record TuiToolExecutionRenderContext(object? Args, TuiToolExecutionResult? Result, bool Expanded,
+    bool IsPartial, bool ShowImages, string ExpandHint, int Width);
+
 public sealed partial class TuiToolExecution : ITuiComponent
 {
     public const int DefaultPreviewLines = 20;
     private readonly string _toolName;
     private readonly string _toolCallId;
     private readonly TuiToolExecutionTheme _theme;
+    private readonly Func<TuiToolExecutionRenderContext, IReadOnlyList<string>>? _bodyRenderer;
     private object? _args;
     private bool _expanded;
     private int _previewLines = DefaultPreviewLines;
@@ -71,18 +79,21 @@ public sealed partial class TuiToolExecution : ITuiComponent
     /// <param name="theme">工具生命周期和标题的显示主题。</param>
     /// <param name="showImages">是否显示工具结果中的图片。</param>
     /// <param name="imageWidthCells">图片预览的目标列宽。</param>
+    /// <param name="bodyRenderer">可选宿主正文渲染器，返回支持 ANSI 的行；图片仍由组件统一显示。</param>
     public TuiToolExecution(
         string toolName,
         string toolCallId,
         object? args = null,
         TuiToolExecutionTheme? theme = null,
         bool showImages = true,
-        int imageWidthCells = 60)
+        int imageWidthCells = 60,
+        Func<TuiToolExecutionRenderContext, IReadOnlyList<string>>? bodyRenderer = null)
     {
         _toolName = string.IsNullOrWhiteSpace(toolName) ? "tool" : toolName.Trim();
         _toolCallId = toolCallId ?? string.Empty;
         _args = args;
         _theme = theme ?? new TuiToolExecutionTheme();
+        _bodyRenderer = bodyRenderer;
         _showImages = showImages;
         _imageWidthCells = Math.Max(1, imageWidthCells);
     }
@@ -148,10 +159,14 @@ public sealed partial class TuiToolExecution : ITuiComponent
     {
     }
 
+    /// <summary>【Tui】【工具绘制】根据当前宽度生成正文，专用渲染采用行式背景并保留原图片显示逻辑。</summary>
+    /// <param name="width">终端列数。</param><returns>完整显示行。</returns>
     public IReadOnlyList<string> Render(int width)
     {
         width = Math.Max(1, width);
-        var text = FormatToolExecution();
+        var body = _bodyRenderer is null ? FormatToolBody() : string.Join("\n", _bodyRenderer(new(
+            _args, _result, _expanded, _isPartial, _showImages, ExpandHintText(), Math.Max(1, width - 2))));
+        var text = FormatToolExecution(body);
         var imageLines = RenderImageBlocks(width);
         if (string.IsNullOrWhiteSpace(text) && imageLines.Count == 0)
         {
@@ -161,9 +176,9 @@ public sealed partial class TuiToolExecution : ITuiComponent
         var lines = new List<string>();
         if (!string.IsNullOrWhiteSpace(text))
         {
-            if (_theme.PanelRenderer is { } panelRenderer)
+            if (_bodyRenderer is null && _theme.PanelRenderer is { } panelRenderer)
             {
-                lines.AddRange(panelRenderer(FormatToolTitle(styled: false), FormatToolBody(), width));
+                lines.AddRange(panelRenderer(FormatToolTitle(styled: false), body, width));
             }
             else
             {
@@ -246,10 +261,10 @@ public sealed partial class TuiToolExecution : ITuiComponent
         return builder.ToString();
     }
 
-    private string FormatToolExecution()
+    /// <summary>【Tui】【工具文本】把已渲染正文与生命周期标题组合。</summary><param name="body">正文。</param><returns>完整文本。</returns>
+    private string FormatToolExecution(string body)
     {
         var title = FormatToolTitle(styled: true);
-        var body = FormatToolBody();
         if (body.Length == 0)
         {
             return title;

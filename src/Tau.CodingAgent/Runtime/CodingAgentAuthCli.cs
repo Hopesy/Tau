@@ -1,4 +1,5 @@
 using Tau.Ai.Auth.OAuth;
+using Tau.Tui.Runtime;
 
 namespace Tau.CodingAgent.Runtime;
 
@@ -12,16 +13,22 @@ internal static class CodingAgentAuthCli
         OAuthProviderRegistry? oauthProviders = null,
         OAuthCredentialStore? credentialStore = null,
         Func<IOAuthLoginCallbacks>? callbacksFactory = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        CodingAgentSettingsStore? settingsStore = null)
     {
         if (args.Count == 0)
         {
             return null;
         }
 
+        // 1. 【CodingAgent】【认证命令】新状态与凭据命令复用统一认证链路，旧登录命令继续使用原交互入口
+        if (CodingAgentAuthCommands.IsCommand(args))
+            return await CodingAgentAuthCommands.HandleAsync(args, output, error, token: cancellationToken,
+                oauthProviders: oauthProviders, credentialStore: credentialStore).ConfigureAwait(false);
+
         oauthProviders ??= new OAuthProviderRegistry();
         credentialStore ??= new OAuthCredentialStore();
-        callbacksFactory ??= static () => new ConsoleOAuthLoginCallbacks();
+        callbacksFactory ??= () => new ConsoleOAuthLoginCallbacks(input, output);
 
         if (args[0].Equals("login", StringComparison.OrdinalIgnoreCase))
         {
@@ -33,7 +40,8 @@ internal static class CodingAgentAuthCli
                     oauthProviders,
                     credentialStore,
                     callbacksFactory,
-                    cancellationToken)
+                    cancellationToken,
+                    settingsStore)
                 .ConfigureAwait(false);
         }
 
@@ -74,7 +82,8 @@ internal static class CodingAgentAuthCli
                     oauthProviders,
                     credentialStore,
                     callbacksFactory,
-                    cancellationToken)
+                    cancellationToken,
+                    settingsStore)
                 .ConfigureAwait(false);
         }
 
@@ -91,7 +100,8 @@ internal static class CodingAgentAuthCli
         OAuthProviderRegistry oauthProviders,
         OAuthCredentialStore credentialStore,
         Func<IOAuthLoginCallbacks> callbacksFactory,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        CodingAgentSettingsStore? settingsStore)
     {
         if (args.Count > 1)
         {
@@ -99,7 +109,9 @@ internal static class CodingAgentAuthCli
             return 1;
         }
 
-        var providerId = args.Count == 1 ? args[0] : await SelectProviderAsync(input, output, oauthProviders).ConfigureAwait(false);
+        string? providerId;
+        try { providerId = args.Count == 1 ? args[0] : await SelectProviderAsync(input, output, oauthProviders, cancellationToken).ConfigureAwait(false); }
+        catch (OperationCanceledException) { error.WriteLine("Login cancelled."); return 1; }
         if (string.IsNullOrWhiteSpace(providerId))
         {
             error.WriteLine("Invalid selection");
@@ -117,7 +129,9 @@ internal static class CodingAgentAuthCli
         output.WriteLine($"Logging in to {provider.Id}...");
         try
         {
-            var credentials = await provider.LoginAsync(callbacksFactory(), cancellationToken).ConfigureAwait(false);
+            var options = new OAuthLoginOptions(() => (settingsStore ?? CodingAgentSettingsStore.ForInstallation()).GetOrCreateDeviceId());
+            var credentials = await provider.LoginAsync(callbacksFactory(), options, cancellationToken).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
             credentialStore.Save(provider.Id, credentials);
             output.WriteLine("Credentials saved to auth.json.");
             return 0;
@@ -134,10 +148,14 @@ internal static class CodingAgentAuthCli
         }
     }
 
+    /// <summary>【CodingAgent】【提供方选择】列出旧 CLI 登录提供方，等待期间接受 Ctrl+C 取消。</summary>
+    /// <param name="input">输入。</param><param name="output">输出。</param><param name="oauthProviders">认证目录。</param>
+    /// <param name="token">取消信号。</param><returns>提供方 ID 或无效选择。</returns>
     private static async Task<string?> SelectProviderAsync(
         TextReader input,
         TextWriter output,
-        OAuthProviderRegistry oauthProviders)
+        OAuthProviderRegistry oauthProviders,
+        CancellationToken token)
     {
         var providers = oauthProviders.Providers
             .OrderBy(provider => provider.Name, StringComparer.OrdinalIgnoreCase)
@@ -156,7 +174,9 @@ internal static class CodingAgentAuthCli
 
         output.WriteLine();
         output.Write($"Enter number (1-{providers.Length}): ");
-        var choice = await input.ReadLineAsync().ConfigureAwait(false);
+        var choice = ReferenceEquals(input, Console.In)
+            ? await TuiConsoleInput.ReadLineAsync(token: token).ConfigureAwait(false)
+            : await TuiCancelableTextReader.ReadLineAsync(input, token).ConfigureAwait(false);
         if (!int.TryParse(choice, out var index) || index < 1 || index > providers.Length)
         {
             return null;
@@ -177,6 +197,8 @@ internal static class CodingAgentAuthCli
 
     private static void PrintHelp(TextWriter output)
     {
+        CodingAgentAuthCommands.PrintHelp(output);
+        output.WriteLine();
         output.WriteLine(
             """
             Usage: tau auth <command> [provider]

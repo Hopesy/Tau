@@ -52,7 +52,7 @@ public sealed class OpenAiResponsesProviderTests
         Assert.Contains(events, evt => evt is TextEndEvent);
         var done = Assert.Single(events.OfType<DoneEvent>());
         Assert.Equal("hello", Assert.IsType<TextContent>(Assert.Single(done.Message.Content)).Text);
-        Assert.Equal(new Usage(3, 4, 1), done.Message.Usage);
+        Assert.Equal(new Usage(2, 4, 1), done.Message.Usage);
         Assert.Equal(StopReason.EndTurn, done.Message.StopReason);
     }
 
@@ -104,7 +104,7 @@ public sealed class OpenAiResponsesProviderTests
             new StreamOptions { ApiKey = "test-key" }));
 
         var error = Assert.Single(events.OfType<ErrorEvent>());
-        Assert.Equal("OpenAI Responses error", error.Error);
+        Assert.Equal("Unknown error (no error details in response)", error.Error);
     }
 
     [Fact]
@@ -206,7 +206,9 @@ public sealed class OpenAiResponsesProviderTests
         using var body = JsonDocument.Parse(handler.CapturedBody);
         Assert.Equal(sessionId, body.RootElement.GetProperty("prompt_cache_key").GetString());
         Assert.False(body.RootElement.TryGetProperty("prompt_cache_retention", out _));
-        Assert.Equal(sessionId, handler.Requests[0].Headers.GetValues("x-session-affinity").Single());
+        Assert.Equal(sessionId, handler.Requests[0].Headers.GetValues("x-client-request-id").Single());
+        Assert.Equal(sessionId, handler.Requests[0].Headers.GetValues("session_id").Single());
+        Assert.False(handler.Requests[0].Headers.Contains("x-session-affinity"));
     }
 
     [Fact]
@@ -237,7 +239,7 @@ public sealed class OpenAiResponsesProviderTests
         Assert.Equal("priority", body.RootElement.GetProperty("service_tier").GetString());
         var done = Assert.Single(events.OfType<DoneEvent>());
         Assert.Equal("priority", done.Message.Usage!.Value.ServiceTier);
-        Assert.Equal(6.20m, ModelCatalog.CalculateCost(model, done.Message.Usage.Value).Total);
+        Assert.Equal(5.60m, ModelCatalog.CalculateCost(model, done.Message.Usage.Value).Total);
     }
 
     [Fact]

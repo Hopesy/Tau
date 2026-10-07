@@ -97,7 +97,7 @@ public sealed class CodingAgentSessionTargetTests
     }
 
     [Fact]
-    public void LoadInitialSnapshot_DefaultTargetKeepsFlatSessionWhenTreeIsEmpty()
+    public void LoadInitialSnapshot_DefaultTargetStartsFreshAndPreservesLegacyFlatFile()
     {
         using var temp = TempDirectory.Create();
         var previousCwd = Environment.CurrentDirectory;
@@ -114,14 +114,18 @@ public sealed class CodingAgentSessionTargetTests
                 CreateModel(),
                 "default flat");
 
-            var target = CodingAgentSessionTarget.Resolve(null);
+            var agentDirectory = Path.Combine(temp.Path, "agent");
+            var target = CodingAgentSessionTarget.Resolve(null, agentDirectory: agentDirectory);
             var snapshot = target.LoadInitialSnapshot();
 
-            Assert.NotNull(target.SessionStore);
+            Assert.Null(target.SessionStore);
             Assert.NotNull(target.TreeSessionController);
-            Assert.False(target.PreferTreeSession);
-            Assert.Equal("default flat", snapshot.Name);
-            var user = Assert.IsType<UserMessage>(Assert.Single(snapshot.Messages));
+            Assert.True(target.PreferTreeSession);
+            Assert.Empty(snapshot.Messages);
+            Assert.StartsWith(CodingAgentSessionTarget.GetDefaultSessionDirectory(temp.Path, agentDirectory), target.TreeSessionController!.Path);
+            var legacy = CodingAgentSessionTarget.Resolve(flatPath).LoadInitialSnapshot();
+            Assert.Equal("default flat", legacy.Name);
+            var user = Assert.IsType<UserMessage>(Assert.Single(legacy.Messages));
             Assert.Equal("default flat prompt", Assert.IsType<TextContent>(Assert.Single(user.Content)).Text);
         }
         finally
@@ -241,7 +245,8 @@ public sealed class CodingAgentSessionTargetTests
             var sourcePath = Path.Combine(temp.Path, "source.jsonl");
             WriteTreeSession(sourcePath, "fork prompt", "fork source");
 
-            var target = CodingAgentSessionTarget.Resolve(null, forkSessionPath: sourcePath);
+            var agentDirectory = Path.Combine(temp.Path, "agent");
+            var target = CodingAgentSessionTarget.Resolve(null, forkSessionPath: sourcePath, agentDirectory: agentDirectory);
             var snapshot = target.LoadInitialSnapshot();
 
             Assert.Null(target.SessionStore);
@@ -249,7 +254,7 @@ public sealed class CodingAgentSessionTargetTests
             Assert.True(target.PreferTreeSession);
             Assert.NotEqual(Path.GetFullPath(sourcePath), target.TreeSessionController!.Path);
             Assert.StartsWith(
-                Path.Combine(temp.Path, ".tau", "coding-agent-sessions"),
+                CodingAgentSessionTarget.GetDefaultSessionDirectory(temp.Path, agentDirectory),
                 target.TreeSessionController.Path,
                 StringComparison.OrdinalIgnoreCase);
             Assert.Equal("fork source", snapshot.Name);

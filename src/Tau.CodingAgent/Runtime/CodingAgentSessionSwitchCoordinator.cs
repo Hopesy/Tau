@@ -232,7 +232,7 @@ public sealed class CodingAgentSessionSwitchCoordinator
 
         if (decision is null)
         {
-            if (summaryMessages.Count == 0 || _sessionSwitchPrompt is null)
+            if (summaryMessages.Count == 0 || _sessionSwitchPrompt is null || _runner is RuntimeCodingAgentRunner { BranchSummarySkipPrompt: true })
             {
                 return CodingAgentSessionSwitchSummaryResult.None(
                     reason,

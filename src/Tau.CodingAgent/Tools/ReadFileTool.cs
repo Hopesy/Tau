@@ -10,15 +10,34 @@ public sealed class ReadFileTool : IAgentTool
 {
     internal const int DefaultMaxImageBase64Bytes = CodingAgentImagePreprocessor.DefaultMaxBase64Bytes;
     private readonly bool _autoResizeImages;
+    private readonly string _workingDirectory;
+    private readonly ModelImageResizeOptions? _resizeOptions;
+    private Func<Model>? CurrentModel { get; init; }
+    private Func<bool>? CurrentAutoResize { get; init; }
 
-    public ReadFileTool(bool autoResizeImages = true)
+    /// <summary>【CodingAgent】【工具目录】创建绑定会话目录的文件读取工具</summary>
+    /// <param name="autoResizeImages">是否自动缩放图片</param>
+    /// <param name="workingDirectory">会话目录；为空时捕获当前进程目录</param>
+    /// <param name="resizeOptions">没有会话模型限制时采用的缩放策略。</param>
+    public ReadFileTool(bool autoResizeImages = true, string? workingDirectory = null, ModelImageResizeOptions? resizeOptions = null)
     {
         _autoResizeImages = autoResizeImages;
+        _workingDirectory = CodingAgentToolPaths.CaptureWorkingDirectory(workingDirectory);
+        _resizeOptions = resizeOptions;
     }
 
-    public string Name => "read_file";
+    /// <summary>【CodingAgent】【读取模型上下文】为会话复制工具，读取实时模型及缩放设置，避免修改调用方共用的实例。</summary>
+    /// <param name="model">有效模型读取器。</param><param name="autoResize">缩放设置读取器。</param><returns>本会话工具副本。</returns>
+    internal ReadFileTool WithSessionContext(Func<Model> model, Func<bool> autoResize) =>
+        new(_autoResizeImages, _workingDirectory, _resizeOptions) { CurrentModel = model, CurrentAutoResize = autoResize };
+
+    public string Name => "read";
+    /// <summary>工具在系统提示中的一行简介。</summary>
+    public string PromptSnippet => "Read file contents";
+    /// <summary>启用工具时加入系统提示的使用规则。</summary>
+    public IReadOnlyList<string> PromptGuidelines => ["Use read to examine files instead of cat or sed."];
     public string Label => "Read File";
-    public string Description => "Read the contents of a file at the given path. Supports text files and images (jpg, png, gif, webp). Text output is truncated to 2000 lines or 50KB; use offset/limit for large text files.";
+    public string Description => "Read the contents of a file at the given path. Supports text files and images (jpg, png, gif, webp, bmp). Text output is truncated to 2000 lines or 50KB; use offset/limit for large text files.";
 
     public JsonElement ParameterSchema { get; } = JsonDocument.Parse("""
         {
@@ -36,10 +55,16 @@ public sealed class ReadFileTool : IAgentTool
         }
         """).RootElement.Clone();
 
+    /// <summary>【CodingAgent】【工具执行】在所属会话目录中执行工具请求</summary>
+    /// <param name="toolCallId">工具调用标识</param>
+    /// <param name="args">工具参数</param>
+    /// <param name="ct">取消信号</param>
+    /// <param name="onUpdate">增量结果回调</param>
+    /// <returns>工具执行结果</returns>
     public async Task<ToolResult> ExecuteAsync(
         string toolCallId, JsonElement args, CancellationToken ct, Func<ToolUpdate, Task>? onUpdate)
     {
-        var path = GetPathArgument(args);
+        var path = CodingAgentToolPaths.Resolve(GetPathArgument(args), _workingDirectory);
         var offset = args.TryGetProperty("offset", out var o) ? o.GetInt32() : 1;
         var limit = args.TryGetProperty("limit", out var l) ? l.GetInt32() : (int?)null;
 
@@ -50,16 +75,17 @@ public sealed class ReadFileTool : IAgentTool
         if (imageMimeType is not null)
         {
             var bytes = await File.ReadAllBytesAsync(path, ct).ConfigureAwait(false);
-            var processed = await CodingAgentImageResizeWorker.Default
-                .ProcessAsync(bytes, imageMimeType, _autoResizeImages, cancellationToken: ct)
-                .ConfigureAwait(false);
+            var model = CurrentModel?.Invoke();
+            var processed = await CodingAgentImageProcessing.ProcessAsync(new(Convert.ToBase64String(bytes), imageMimeType),
+                CurrentAutoResize?.Invoke() ?? _autoResizeImages, model?.InputLimits?.Images?.Resize ?? _resizeOptions, ct).ConfigureAwait(false);
+            var visionNote = model is not null && !model.InputModalities.Contains("image") ? "\n[Current model does not support images. The image will be omitted from this request.]" : "";
             var originalEncodedSize = EstimateBase64ByteCount(bytes.Length);
-            if (processed is null)
+            if (processed.Image is null)
             {
                 return new ToolResult(
                     [
                         new TextContent(
-                            $"Read image file [{imageMimeType}]\n[Image omitted: could not be resized below the inline image size limit.]")
+                            $"Read image file [{imageMimeType}]\n{string.Join("\n", processed.Hints)}{visionNote}")
                     ],
                     Details: ReadFileToolDetails.ForImage(
                         path,
@@ -69,29 +95,27 @@ public sealed class ReadFileTool : IAgentTool
                         imageOmitted: true));
             }
 
-            var imageText = $"Read image file [{processed.MimeType}]";
-            var dimensionNote = CodingAgentImagePreprocessor.FormatDimensionNote(processed);
-            if (dimensionNote is not null)
-            {
-                imageText += $"\n{dimensionNote}";
-            }
+            var imageText = $"Read image file [{processed.Image.MimeType}]";
+            if (processed.Hints.Count > 0) imageText += "\n" + string.Join("\n", processed.Hints);
+            imageText += visionNote;
+            var metadata = processed.ResizeResult!;
 
             return new ToolResult(
                 [
                     new TextContent(imageText),
-                    new ImageContent(processed.Data, processed.MimeType)
+                    processed.Image
                 ],
                 Details: ReadFileToolDetails.ForImage(
                     path,
-                    processed.MimeType,
-                    processed.OriginalBytes,
-                    processed.EstimatedBase64Bytes,
+                    processed.Image.MimeType,
+                    bytes.Length,
+                    metadata.EstimatedBase64Bytes,
                     imageOmitted: false,
-                    imageResized: processed.WasResized,
-                    originalWidth: processed.OriginalWidth,
-                    originalHeight: processed.OriginalHeight,
-                    width: processed.Width,
-                    height: processed.Height));
+                    imageResized: metadata.WasResized,
+                    originalWidth: metadata.OriginalWidth,
+                    originalHeight: metadata.OriginalHeight,
+                    width: metadata.Width,
+                    height: metadata.Height));
         }
 
         var text = await File.ReadAllTextAsync(path, ct).ConfigureAwait(false);

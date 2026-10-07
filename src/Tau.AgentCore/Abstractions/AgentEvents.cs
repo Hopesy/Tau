@@ -23,6 +23,9 @@ public sealed record AgentEndEvent : AgentEvent
     }
 
     public string? ErrorMessage { get; init; }
+    /// <summary>【CodingAgent】【回合恢复】会话层是否计划重试此失败请求，核心 Agent 默认不重试。</summary>
+    public bool WillRetry { get; init; }
+    /// <summary>本次运行新增的消息，包括输入、工具声明、助手及工具结果；完整历史从 Agent.State.Messages 读取。</summary>
     public IReadOnlyList<Ai.ChatMessage> Messages { get; init; }
 }
 
@@ -56,14 +59,22 @@ public sealed record MessageEndEvent(Ai.ChatMessage Message) : AgentEvent("messa
 public sealed record ToolExecutionStartEvent(
     string ToolCallId,
     string ToolName,
-    string? Args = null) : AgentEvent("tool_execution_start");
+    string? Args = null) : AgentEvent("tool_execution_start")
+{
+    /// <summary>【AgentCore】【嵌套调用】直接父工具调用标识。</summary>
+    public string? ParentToolCallId { get; init; }
+}
 
 public sealed record ToolExecutionUpdateEvent(
     string ToolCallId,
     ToolUpdate Update,
     string? ToolName = null,
     string? Args = null,
-    ToolResult? PartialResult = null) : AgentEvent("tool_execution_update");
+    ToolResult? PartialResult = null) : AgentEvent("tool_execution_update")
+{
+    /// <summary>【AgentCore】【嵌套调用】直接父工具调用标识。</summary>
+    public string? ParentToolCallId { get; init; }
+}
 
 public sealed record ToolExecutionEndEvent : AgentEvent
 {
@@ -84,4 +95,6 @@ public sealed record ToolExecutionEndEvent : AgentEvent
     public ToolResult Result { get; init; }
     public string? ToolName { get; init; }
     public bool IsError { get; init; }
+    /// <summary>【AgentCore】【嵌套调用】直接父工具调用标识。</summary>
+    public string? ParentToolCallId { get; init; }
 }

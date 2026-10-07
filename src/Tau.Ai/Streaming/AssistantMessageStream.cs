@@ -22,6 +22,8 @@ public sealed class AssistantMessageStream : EventStream<StreamEvent, AssistantM
                 Model = err.Partial?.Model,
                 ResponseId = err.Partial?.ResponseId,
                 ResponseModel = err.Partial?.ResponseModel,
+                ProviderThinkingLevel = err.Partial?.ProviderThinkingLevel,
+                ThinkingLevel = err.Partial?.ThinkingLevel,
                 RawStopReason = err.Partial?.RawStopReason,
                 EndTurn = err.Partial?.EndTurn,
                 Deferred = err.Partial?.Deferred,

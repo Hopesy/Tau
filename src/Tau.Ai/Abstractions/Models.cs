@@ -2,6 +2,9 @@ namespace Tau.Ai;
 
 public record Model
 {
+    /// <summary>模型能力类型；未指定时视为聊天模型。</summary>
+    public string? Type { get; init; }
+
     public required string Id { get; init; }
     public required string Name { get; init; }
     public required string Api { get; init; }
@@ -11,6 +14,10 @@ public record Model
     /// <summary>将通用 thinking level 映射为 provider/model 专用值；null 表示该级别不支持。</summary>
     public IReadOnlyDictionary<string, string?>? ThinkingLevelMap { get; init; }
     public IReadOnlyList<string> InputModalities { get; init; } = ["text"];
+    /// <summary>【AI】【输入元数据】请求大小、图片数量及稳定缩放配置。</summary>
+    public ModelInputLimits? InputLimits { get; init; }
+    /// <summary>【AI】【缓存元数据】各缓存级别的预计寿命，单位秒。</summary>
+    public ModelPromptCache? PromptCache { get; init; }
     public ModelCost? Cost { get; init; }
     public int? ContextWindow { get; init; }
     public int? MaxOutputTokens { get; init; }
@@ -26,6 +33,12 @@ public record ModelCompatibility
     public IReadOnlyList<ModelFallback>? AllowedFallbackModels { get; init; }
     public bool? SupportsStore { get; init; }
     public bool? SupportsDeveloperRole { get; init; }
+    /// <summary>是否原位发送会话中途的系统指令；未配置时合并到开场提示。</summary>
+    public bool? SupportsMidConvoSystemMessages { get; init; }
+    /// <summary>Chat Completions 是否原位发送新增工具；需要同时支持中途系统指令。</summary>
+    public bool? SupportsMidConvoToolAdditions { get; init; }
+    /// <summary>Anthropic 是否支持内联工具定义与移除；需要同时支持中途系统指令且存在开场工具。</summary>
+    public bool? SupportsMidConvoToolChanges { get; init; }
     public bool? SupportsReasoningEffort { get; init; }
     public IReadOnlyDictionary<string, string>? ReasoningEffortMap { get; init; }
     public bool? SupportsUsageInStreaming { get; init; }
@@ -43,9 +56,15 @@ public record ModelCompatibility
     public bool? SupportsStrictMode { get; init; }
     public string? CacheControlFormat { get; init; }
     public bool? SendSessionAffinityHeaders { get; init; }
+    /// <summary>【AI】【会话亲和】请求头格式：openai、openai-nosession 或 openrouter；未设置时按提供方检测。</summary>
+    public string? SessionAffinityFormat { get; init; }
+    /// <summary>【AI】【请求优先级】传给 vLLM 的 priority，保留显式零及分数。</summary>
+    public double? VllmPriority { get; init; }
     public bool? SupportsLongCacheRetention { get; init; }
     public bool? SupportsTemperature { get; init; }
     public bool? ForceAdaptiveThinking { get; init; }
+    /// <summary>是否支持 Anthropic 在会话中恢复并调整供应商原生 effort。</summary>
+    public bool? SupportsMidConvoEffort { get; init; }
     public bool? SupportsEagerToolInputStreaming { get; init; }
     public bool? SupportsCacheControlOnTools { get; init; }
     public bool? AllowEmptySignature { get; init; }
@@ -62,13 +81,17 @@ public record ModelCompatibility
     public bool? SupportsMaxOutputTokens { get; init; }
     /// <summary>是否支持 Anthropic tool reference 延迟工具。</summary>
     public bool? SupportsToolReferences { get; init; }
-    /// <summary>是否支持 Bedrock 严格工具 schema。</summary>
+    /// <summary>是否支持 Anthropic/Bedrock 严格工具 Schema；Anthropic 缺省不启用。</summary>
     public bool? SupportsStrictTools { get; init; }
     /// <summary>是否支持模型级 deferred tool loading。</summary>
     public bool? SupportsDeferredTools { get; init; }
     /// <summary>OpenAI-compatible 请求使用的 thinking token budget 字段名。</summary>
     public string? ThinkingTokenBudgetField { get; init; }
-    /// <summary>OpenAI-compatible chat template 参数。</summary>
+    /// <summary>【AI】【思考预算】兼容旧声明；未指定字段名时使用 thinking_token_budget。</summary>
+    public bool? SupportsThinkingTokenBudget { get; init; }
+    /// <summary>【AI】【思考模板】chat-template 格式的 chat_template_kwargs 参数。</summary>
+    public IDictionary<string, object>? ChatTemplateKwargs { get; init; }
+    /// <summary>【AI】【思考模板】Baseten 格式的 chat_template_args 参数。</summary>
     public IDictionary<string, object>? ChatTemplateArgs { get; init; }
 }
 
@@ -91,13 +114,16 @@ public record struct ModelCost(
     decimal? CacheWritePerMillion = null,
     IReadOnlyList<ModelCostTier>? Tiers = null);
 
-/// <summary>按请求累计输入 token 阈值选择的模型计费层。</summary>
+/// <summary>【AI】【分层计费】按累计输入 token 选择费率，阈值保留上游 Number 的分数与指数语义。</summary>
+/// <param name="InputPerMillion">每百万输入 token 费率。</param><param name="OutputPerMillion">每百万输出 token 费率。</param>
+/// <param name="CacheReadPerMillion">缓存读取费率。</param><param name="CacheWritePerMillion">缓存写入费率。</param>
+/// <param name="InputTokensAbove">严格大于该阈值时适用，允许有限分数。</param>
 public readonly record struct ModelCostTier(
     decimal InputPerMillion,
     decimal OutputPerMillion,
     decimal? CacheReadPerMillion,
     decimal? CacheWritePerMillion,
-    long InputTokensAbove);
+    double InputTokensAbove);
 
 public readonly record struct UsageCost(
     decimal Input,

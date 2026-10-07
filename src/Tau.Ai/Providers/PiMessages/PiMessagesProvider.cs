@@ -26,6 +26,8 @@ public sealed class PiMessagesProvider : IStreamProvider
 
     /// <summary>返回协议名称。</summary>
     public string Api => "pi-messages";
+    /// <summary>【PiMessages】【会话声明】网关接收完整 transcript，不在客户端折叠系统增量。</summary>
+    public bool SupportsTranscriptContext => true;
 
     /// <summary>
     /// 启动 pi-messages 流式请求。
@@ -41,11 +43,21 @@ public sealed class PiMessagesProvider : IStreamProvider
         return result;
     }
 
-    /// <summary>以简单选项启动 pi-messages 流。</summary>
+    /// <summary>【PiMessages】【请求入口】以简单选项启动原生会话流。</summary>
+    /// <param name="model">请求模型。</param>
+    /// <param name="context">会话上下文。</param>
+    /// <param name="options">推理、工具选择及通用选项。</param>
+    /// <returns>助手事件流。</returns>
     public AssistantMessageStream StreamSimple(Model model, LlmContext context, SimpleStreamOptions options) => Stream(model, context, options);
 
-    [System.Diagnostics.CodeAnalysis.UnconditionalSuppressMessage("Trimming", "IL2026", Justification = "pi-messages payload intentionally serializes polymorphic chat context.")]
-    [System.Diagnostics.CodeAnalysis.UnconditionalSuppressMessage("AOT", "IL3050", Justification = "pi-messages payload intentionally serializes polymorphic chat context.")]
+    /// <summary>【PiMessages】【报文传输】转换完整会话为网关 wire 数据并消费 SSE 响应。</summary>
+    /// <param name="model">请求模型。</param>
+    /// <param name="context">原始上下文。</param>
+    /// <param name="options">请求与生命周期选项。</param>
+    /// <param name="output">事件输出流。</param>
+    /// <returns>请求处理任务。</returns>
+    [System.Diagnostics.CodeAnalysis.UnconditionalSuppressMessage("Trimming", "IL2026", Justification = "Payload callbacks and tool details may contain caller-defined JSON-compatible objects.")]
+    [System.Diagnostics.CodeAnalysis.UnconditionalSuppressMessage("AOT", "IL3050", Justification = "Payload callbacks and tool details may contain caller-defined JSON-compatible objects.")]
     private async Task StreamAsync(Model model, LlmContext context, StreamOptions options, AssistantMessageStream output)
     {
         AssistantMessage? partial = null;
@@ -56,20 +68,21 @@ public sealed class PiMessagesProvider : IStreamProvider
             if (string.IsNullOrWhiteSpace(baseUrl)) throw new InvalidOperationException("pi-messages model baseUrl is required.");
             if (string.IsNullOrWhiteSpace(options.ApiKey)) throw new InvalidOperationException($"No API key provided for provider \"{model.Provider}\".");
             var typed = options as PiMessagesOptions;
+            var simple = options as SimpleStreamOptions;
             var requestOptions = new Dictionary<string, object?>
             {
                 ["temperature"] = options.Temperature,
                 ["maxTokens"] = options.MaxTokens,
-                ["reasoning"] = typed?.Reasoning is { } reasoning ? reasoning.ToString().ToLowerInvariant() : null,
+                ["reasoning"] = simple?.Reasoning switch { null or ThinkingLevel.Off => null, ThinkingLevel.ExtraHigh => "xhigh", var reasoning => reasoning.ToString()!.ToLowerInvariant() },
                 ["cacheRetention"] = ResolveCacheRetention(options),
                 ["sessionId"] = options.SessionId,
-                ["toolChoice"] = typed?.ToolChoice
+                ["toolChoice"] = simple?.ToolChoice
             };
             var body = new Dictionary<string, object>
             {
                 ["model"] = model.Id,
-                ["context"] = BuildContext(context),
-                ["options"] = requestOptions
+                ["context"] = PiMessagesContextSerializer.Convert(context, model),
+                ["options"] = requestOptions.Where(pair => pair.Value is not null).ToDictionary(pair => pair.Key, pair => pair.Value!)
             };
             var transformed = await StreamOptionHelpers.ApplyPayloadCallbackAsync(options, model, body).ConfigureAwait(false);
             var endpoint = $"{baseUrl}/messages" + (typed?.Debug == true ? "?debug=1" : string.Empty);
@@ -81,6 +94,7 @@ public sealed class PiMessagesProvider : IStreamProvider
             request.Headers.Accept.ParseAdd("text/event-stream");
             ApplyHeaders(request, model.Headers);
             ApplyHeaders(request, options.Headers);
+            await StreamOptionHelpers.ApplyHeadersCallbackAsync(options, model, request).ConfigureAwait(false);
             using var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, options.Signal).ConfigureAwait(false);
             if (options.OnResponse is not null)
             {
@@ -111,6 +125,7 @@ public sealed class PiMessagesProvider : IStreamProvider
                 if (string.IsNullOrWhiteSpace(sse.Data)) continue;
                 if (sse.Data.Trim().Equals("[DONE]", StringComparison.OrdinalIgnoreCase)) continue;
                 using var document = JsonDocument.Parse(sse.Data);
+                if (options.OnProviderStreamEvent is not null) await options.OnProviderStreamEvent(document.RootElement.Clone(), model).ConfigureAwait(false);
                 partial = ApplyEvent(document.RootElement, partial, output, ref terminalSeen);
                 if (terminalSeen) break;
             }
@@ -148,14 +163,12 @@ public sealed class PiMessagesProvider : IStreamProvider
         }
     }
 
-    private static Dictionary<string, object> BuildContext(LlmContext context)
-    {
-        var result = new Dictionary<string, object> { ["messages"] = context.Messages };
-        if (context.SystemPrompt is not null) result["systemPrompt"] = context.SystemPrompt;
-        if (context.Tools is not null) result["tools"] = context.Tools;
-        return result;
-    }
-
+    /// <summary>【PiMessages】【响应重放】应用流事件并把内容签名写回最终消息，供下一请求继续使用。</summary>
+    /// <param name="eventElement">服务端事件。</param>
+    /// <param name="partial">当前助手状态。</param>
+    /// <param name="output">事件输出流。</param>
+    /// <param name="terminalSeen">是否已接收终态。</param>
+    /// <returns>更新后的助手消息。</returns>
     private static AssistantMessage ApplyEvent(JsonElement eventElement, AssistantMessage partial, AssistantMessageStream output, ref bool terminalSeen)
     {
         var type = eventElement.TryGetProperty("type", out var typeElement) ? typeElement.GetString() : null;
@@ -173,7 +186,8 @@ public sealed class PiMessagesProvider : IStreamProvider
                 break;
             case "text_end":
                 var text = GetString(eventElement, "content");
-                partial = ReplaceContent(partial, index, block => block is TextContent ? new TextContent(text ?? ((TextContent)block).Text) : block);
+                partial = ReplaceContent(partial, index, block => block is TextContent textBlock
+                    ? textBlock with { Text = text ?? textBlock.Text, TextSignature = GetString(eventElement, "contentSignature") ?? textBlock.TextSignature } : block);
                 output.Push(new TextEndEvent(index, partial, text, GetString(eventElement, "contentSignature")));
                 break;
             case "thinking_start":
@@ -187,8 +201,11 @@ public sealed class PiMessagesProvider : IStreamProvider
                 break;
             case "thinking_end":
                 var thinkingText = GetString(eventElement, "content");
-                partial = ReplaceContent(partial, index, block => block is ThinkingContent thinkingBlock ? new ThinkingContent(thinkingText ?? thinkingBlock.Thinking) : block);
-                output.Push(new ThinkingEndEvent(index, partial, thinkingText, GetString(eventElement, "contentSignature"), eventElement.TryGetProperty("redacted", out var redacted) && redacted.ValueKind == JsonValueKind.True));
+                var isRedacted = eventElement.TryGetProperty("redacted", out var redacted) && redacted.ValueKind == JsonValueKind.True;
+                partial = ReplaceContent(partial, index, block => block is ThinkingContent thinkingBlock
+                    ? thinkingBlock with { Thinking = thinkingText ?? thinkingBlock.Thinking,
+                        ThinkingSignature = GetString(eventElement, "contentSignature") ?? thinkingBlock.ThinkingSignature, Redacted = isRedacted } : block);
+                output.Push(new ThinkingEndEvent(index, partial, thinkingText, GetString(eventElement, "contentSignature"), isRedacted));
                 break;
             case "toolcall_start":
                 var toolId = GetString(eventElement, "id") ?? string.Empty;
@@ -209,6 +226,7 @@ public sealed class PiMessagesProvider : IStreamProvider
                 if (eventElement.TryGetProperty("toolCall", out var call) && call.ValueKind == JsonValueKind.Object)
                 {
                     var toolCall = new ToolCallContent(call.TryGetProperty("id", out var callId) ? callId.GetString() ?? string.Empty : string.Empty, call.TryGetProperty("toolName", out var callName) ? callName.GetString() ?? string.Empty : call.TryGetProperty("name", out var name) ? name.GetString() ?? string.Empty : string.Empty, call.TryGetProperty("arguments", out var arguments) ? arguments.ValueKind == JsonValueKind.String ? arguments.GetString() ?? "{}" : arguments.GetRawText() : "{}");
+                    toolCall = toolCall with { ThoughtSignature = GetString(call, "thoughtSignature"), Namespace = GetString(call, "namespace") };
                     partial = AppendContent(partial, index, toolCall, merge: false);
                     output.Push(new ToolCallEndEvent(index, partial, toolCall));
                 }
@@ -217,12 +235,14 @@ public sealed class PiMessagesProvider : IStreamProvider
             }
             case "done":
                 terminalSeen = true;
+                partial = partial with { ProviderThinkingLevel = GetString(eventElement, "providerThinkingLevel") ?? partial.ProviderThinkingLevel };
                 partial = partial with { StopReason = ParseStopReason(eventElement), Usage = ParseUsage(eventElement), ResponseId = GetString(eventElement, "responseId"), Timestamp = DateTimeOffset.UtcNow };
                 partial = AppendRewriteDiagnostic(partial, eventElement);
                 output.Push(new DoneEvent(partial));
                 break;
             case "error":
                 terminalSeen = true;
+                partial = partial with { ProviderThinkingLevel = GetString(eventElement, "providerThinkingLevel") ?? partial.ProviderThinkingLevel };
                 var errorMessage = GetString(eventElement, "errorMessage") ?? "pi-messages error";
                 partial = partial with { StopReason = ParseStopReason(eventElement), ErrorMessage = errorMessage, Usage = ParseUsage(eventElement), ResponseId = GetString(eventElement, "responseId"), Timestamp = DateTimeOffset.UtcNow };
                 partial = AppendRewriteDiagnostic(partial, eventElement);
@@ -251,12 +271,16 @@ public sealed class PiMessagesProvider : IStreamProvider
     }
 
     private static StopReason ParseStopReason(JsonElement element) => (GetString(element, "reason") ?? "stop") switch { "length" => StopReason.MaxTokens, "toolUse" => StopReason.ToolUse, "error" => StopReason.Error, "aborted" => StopReason.Aborted, _ => StopReason.EndTurn };
+    /// <summary>【PiMessages】【用量恢复】读取服务端 token、缓存细分和计费数据。</summary>
+    /// <param name="element">终态事件。</param>
+    /// <returns>助手用量。</returns>
     private static Usage ParseUsage(JsonElement element)
     {
         if (!element.TryGetProperty("usage", out var usage) || usage.ValueKind != JsonValueKind.Object) return CreateEmptyUsage();
         var result = new Usage(ReadInt(usage, "input"), ReadInt(usage, "output"), ReadNullableInt(usage, "cacheRead"), ReadNullableInt(usage, "cacheWrite"))
         {
             ReasoningTokens = ReadNullableInt(usage, "reasoning"),
+            CacheWrite1hTokens = ReadNullableInt(usage, "cacheWrite1h"),
             TotalTokens = ReadNullableInt(usage, "totalTokens")
         };
         if (usage.TryGetProperty("cost", out var cost) && cost.ValueKind == JsonValueKind.Object)
@@ -291,11 +315,14 @@ public sealed class PiMessagesProvider : IStreamProvider
     private static int ReadInt(JsonElement element, string name) => element.TryGetProperty(name, out var value) && value.TryGetInt32(out var result) ? result : 0;
     private static int? ReadNullableInt(JsonElement element, string name) => element.TryGetProperty(name, out var value) && value.TryGetInt32(out var result) ? result : null;
     private static decimal ReadDecimal(JsonElement element, string name) => element.TryGetProperty(name, out var value) && value.TryGetDecimal(out var result) ? result : 0m;
+    /// <summary>【PiMessages】【缓存选项】显式 none 优先于环境配置，未指定时保留网关默认值。</summary>
+    /// <param name="options">请求选项。</param>
+    /// <returns>网关缓存策略或空。</returns>
     private static object? ResolveCacheRetention(StreamOptions options)
     {
-        if (options.CacheRetention is CacheRetention.Short or CacheRetention.Long)
+        if (options.HasExplicitCacheRetention)
         {
-            return options.CacheRetention == CacheRetention.Long ? "long" : "short";
+            return options.CacheRetention.ToString().ToLowerInvariant();
         }
 
         return string.Equals(

@@ -1,6 +1,5 @@
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
-using System.Threading.Channels;
 using Tau.Ai;
 using Tau.Ai.Observability;
 using Tau.Ai.Providers;
@@ -17,44 +16,120 @@ namespace Tau.AgentCore.Runtime;
 /// </summary>
 public sealed class AgentRuntime
 {
-    private readonly Channel<ChatMessage> _steeringQueue = Channel.CreateUnbounded<ChatMessage>();
-    private readonly Channel<ChatMessage> _followUpQueue = Channel.CreateUnbounded<ChatMessage>();
+    private readonly object _queueGate = new();
+    private readonly Queue<ChatMessage> _steeringQueue = new();
+    private readonly Queue<ChatMessage> _followUpQueue = new();
     private CancellationTokenSource? _runCts;
     private readonly object _idleGate = new();
     private TaskCompletionSource _idleTcs = CompletedIdleSource();
-    private int _pendingSteeringMessageCount;
-    private int _pendingFollowUpMessageCount;
 
     public AgentState State { get; } = new();
     public AgentQueueMode SteeringMode { get; set; } = AgentQueueMode.OneAtATime;
     public AgentQueueMode FollowUpMode { get; set; } = AgentQueueMode.OneAtATime;
-    public bool HasQueuedMessages => _steeringQueue.Reader.TryPeek(out _) || _followUpQueue.Reader.TryPeek(out _);
-    public int PendingMessageCount =>
-        Volatile.Read(ref _pendingSteeringMessageCount) + Volatile.Read(ref _pendingFollowUpMessageCount);
+    public bool HasQueuedMessages => PendingMessageCount > 0;
+    public int PendingMessageCount
+    {
+        get { lock (_queueGate) return _steeringQueue.Count + _followUpQueue.Count; }
+    }
 
     public void AddMessage(ChatMessage message) => State.AddMessage(message);
+
+    /// <summary>【AgentCore】【会话基线】为直接运行时入口补齐开场声明，已有系统开场时以历史为准。</summary>
+    /// <param name="systemPrompt">缺少开场声明时使用的系统提示。</param>
+    /// <param name="model">当前执行模型。</param>
+    /// <param name="tools">当前执行工具；声明保存为独立快照。</param>
+    public void InitializeTranscript(string? systemPrompt, Model model, IReadOnlyList<IAgentTool> tools)
+    {
+        State.Configure(null, model, tools);
+        if (State.Messages.FirstOrDefault() is SystemMessage) return;
+        var initial = Transcript.CreateInitialSystemMessage(systemPrompt, tools.Select(tool =>
+            new Tool(tool.Name, tool.Description, tool.ParameterSchema) { ConstrainedSampling = tool.ConstrainedSampling }).ToArray());
+        if (initial is not null) State.SetMessages([initial, .. State.Messages]);
+    }
+
+    /// <summary>【AgentCore】【结构化基线】为新会话保留命名段落，并声明当前可执行工具；已有开场声明时保留历史。</summary>
+    /// <param name="initial">包含系统文本或命名段落的开场消息。</param>
+    /// <param name="model">当前模型。</param>
+    /// <param name="tools">当前可执行工具。</param>
+    public void InitializeStructuredTranscript(SystemMessage initial, Model model, IReadOnlyList<IAgentTool> tools)
+    {
+        State.Configure(null, model, tools);
+        if (State.Messages.FirstOrDefault() is SystemMessage) return;
+        var declarations = tools.Select(tool => new Tool(tool.Name, tool.Description, tool.ParameterSchema)
+            { ConstrainedSampling = tool.ConstrainedSampling }).ToArray();
+        State.SetMessages([initial with { ToolsAdded = declarations.Length == 0 ? null : declarations }, .. State.Messages]);
+    }
+
+    /// <summary>【AgentCore】【提示替换】替换会话的完整系统提示，同时保留工具声明与待执行队列。</summary>
+    /// <param name="systemPrompt">完整提示；null 表示清空提示。</param>
+    public void ReplaceSystemPrompt(string? systemPrompt) => State.ReplaceSystemPrompt(systemPrompt);
+
+    /// <summary>【AgentCore】【队列调度】追加将在下一回合优先选取的引导消息</summary>
+    /// <param name="message">待发送的引导消息</param>
     public void Steer(ChatMessage message)
     {
-        if (_steeringQueue.Writer.TryWrite(message))
-        {
-            Interlocked.Increment(ref _pendingSteeringMessageCount);
-        }
+        lock (_queueGate) _steeringQueue.Enqueue(message);
     }
 
+    /// <summary>【AgentCore】【队列调度】追加在引导队列消费完后选取的后续消息</summary>
+    /// <param name="message">待发送的后续消息</param>
     public void FollowUp(ChatMessage message)
     {
-        if (_followUpQueue.Writer.TryWrite(message))
+        lock (_queueGate) _followUpQueue.Enqueue(message);
+    }
+
+    /// <summary>【AgentCore】【队列预览】按当前模式预览下一回合选中的消息，不消费队列；引导消息优先</summary>
+    /// <returns>独立的消息数组；消息对象与队列中的对象保持一致</returns>
+    public IReadOnlyList<ChatMessage> PeekQueuedMessages()
+    {
+        lock (_queueGate)
         {
-            Interlocked.Increment(ref _pendingFollowUpMessageCount);
+            var queue = _steeringQueue.Count > 0 ? _steeringQueue : _followUpQueue;
+            var mode = _steeringQueue.Count > 0 ? SteeringMode : FollowUpMode;
+            return mode == AgentQueueMode.All ? queue.ToArray() : queue.TryPeek(out var first) ? [first] : [];
         }
     }
 
-    public void ClearSteeringQueue() => DrainChannel(_steeringQueue, ref _pendingSteeringMessageCount);
-    public void ClearFollowUpQueue() => DrainChannel(_followUpQueue, ref _pendingFollowUpMessageCount);
+    /// <summary>【AgentCore】【队列调度】清空尚未选取的引导消息</summary>
+    public void ClearSteeringQueue() { lock (_queueGate) _steeringQueue.Clear(); }
+
+    /// <summary>【AgentCore】【队列调度】清空尚未选取的后续消息</summary>
+    public void ClearFollowUpQueue() { lock (_queueGate) _followUpQueue.Clear(); }
+
+    /// <summary>【AgentCore】【队列清空】在同一个同步边界清除全部等待消息，不受逐回合消费模式影响。</summary>
+    public void ClearAllQueues()
+    {
+        lock (_queueGate) { _steeringQueue.Clear(); _followUpQueue.Clear(); }
+    }
+
+    /// <summary>【AgentCore】【完整队列快照】读取全部等待消息，不消费条目，也不套用单回合选择模式。</summary>
+    /// <returns>引导与跟进队列的独立数组。</returns>
+    public (IReadOnlyList<ChatMessage> Steering, IReadOnlyList<ChatMessage> FollowUp) GetQueuedMessages()
+    {
+        lock (_queueGate) return (_steeringQueue.ToArray(), _followUpQueue.ToArray());
+    }
+
+    /// <summary>【AgentCore】【队列提取】原子提取并清除全部等待消息，用于用户取消后的输入恢复。</summary>
+    /// <returns>引导与跟进队列的独立数组；保留消息对象和各队列原始顺序。</returns>
+    public (IReadOnlyList<ChatMessage> Steering, IReadOnlyList<ChatMessage> FollowUp) DrainAllQueuedMessages()
+    {
+        lock (_queueGate)
+        {
+            var steering = _steeringQueue.ToArray(); var followUp = _followUpQueue.ToArray();
+            _steeringQueue.Clear(); _followUpQueue.Clear();
+            return (steering, followUp);
+        }
+    }
+
+    /// <summary>【AgentCore】【队列调度】按当前引导模式选取并移除消息</summary>
+    /// <returns>本次选中的引导消息</returns>
     public IReadOnlyList<ChatMessage> DrainSteeringMessages() =>
-        DrainQueuedMessagesToList(_steeringQueue, SteeringMode, ref _pendingSteeringMessageCount);
+        DrainQueuedMessagesToList(_steeringQueue, SteeringMode);
+
+    /// <summary>【AgentCore】【队列调度】按当前后续模式选取并移除消息</summary>
+    /// <returns>本次选中的后续消息</returns>
     public IReadOnlyList<ChatMessage> DrainFollowUpMessages() =>
-        DrainQueuedMessagesToList(_followUpQueue, FollowUpMode, ref _pendingFollowUpMessageCount);
+        DrainQueuedMessagesToList(_followUpQueue, FollowUpMode);
 
     public void Abort() => _runCts?.Cancel();
     public Task WaitForIdleAsync()
@@ -65,12 +140,16 @@ public sealed class AgentRuntime
         }
     }
 
+    /// <summary>【AgentCore】【运行重置】清除会话状态并一次性清空两类输入队列。</summary>
     public void Reset()
     {
         State.Reset();
-        ClearSteeringQueue();
-        ClearFollowUpQueue();
+        ClearAllQueues();
     }
+
+    /// <summary>【AgentCore】【上下文替换】替换已完成的会话消息，保留待处理的引导与后续输入。</summary>
+    /// <param name="messages">新的上下文消息；保存为独立列表。</param>
+    public void ReplaceMessages(IEnumerable<ChatMessage> messages) => State.SetMessages(messages.ToList());
 
     public EventStream<AgentEvent, ChatMessage[]> RunStream(
         AgentLoopConfig config,
@@ -107,6 +186,10 @@ public sealed class AgentRuntime
         return stream;
     }
 
+    /// <summary>【AgentCore】【运行循环】执行模型回合和工具批次，并维护完整消息生命周期</summary>
+    /// <param name="config">模型、工具、上下文转换及生命周期配置</param>
+    /// <param name="ct">运行取消信号</param>
+    /// <returns>模型、工具、回合及运行结束事件</returns>
     public async IAsyncEnumerable<AgentEvent> RunAsync(
         AgentLoopConfig config,
         [EnumeratorCancellation] CancellationToken ct = default)
@@ -114,7 +197,7 @@ public sealed class AgentRuntime
         BeginIdleWait();
         _runCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         var token = _runCts.Token;
-        var currentConfig = config;
+        var currentConfig = config with { StreamFunction = config.StreamFunction ?? AgentStreaming.GetDefaultStreamFunction() };
         State.Configure(currentConfig.SystemPrompt, currentConfig.Model, currentConfig.Tools);
 
         yield return new AgentStartEvent();
@@ -125,6 +208,8 @@ public sealed class AgentRuntime
             var skipInitialSteeringPoll = config.SkipInitialSteeringPoll;
             IReadOnlyList<ChatMessage> pendingQueuedMessages = [];
             AgentLoopTurnContext? lastCompletedTurn = null;
+            var newMessages = new List<ChatMessage>();
+            var explicitContinuation = false;
 
             // Outer loop: follow-up messages
             do
@@ -134,8 +219,9 @@ public sealed class AgentRuntime
                 do
                 {
                     hasMoreWork = false;
+                    IReadOnlyList<ChatMessage> preparedMessages = [];
 
-                    // 1. 只有确认上一轮之后仍会进入新的 assistant 回合时才执行准备钩子
+                    // 1. 【AgentCore】【回合准备】仅在已确定进入下一回合时执行准备钩子
                     if (lastCompletedTurn is not null)
                     {
                         if (currentConfig.PrepareNextTurnAsync is not null)
@@ -143,13 +229,8 @@ public sealed class AgentRuntime
                             var update = await currentConfig.PrepareNextTurnAsync(lastCompletedTurn, token).ConfigureAwait(false);
                             if (update is not null)
                             {
-                                currentConfig = ApplyTurnUpdate(currentConfig, update);
-                                if (update.Context is not null)
-                                {
-                                    State.SetMessages(update.Context.ToList());
-                                }
-
-                                State.Configure(currentConfig.SystemPrompt, currentConfig.Model, currentConfig.Tools);
+                                currentConfig = ApplyRequestUpdate(currentConfig, update);
+                                preparedMessages = update.Messages;
                             }
                         }
 
@@ -162,29 +243,65 @@ public sealed class AgentRuntime
                     }
                     else if (pendingQueuedMessages.Count > 0)
                     {
-                        // 1. follow-up 消息已经由外层循环取出,本轮直接消费
+                        // 2. 【AgentCore】【队列调度】已选中的队列消息直接消费，保持逐条模式
                     }
                     else
                     {
                         pendingQueuedMessages = DrainQueuedMessagesToList(
                             _steeringQueue,
-                            SteeringMode,
-                            ref _pendingSteeringMessageCount);
+                            SteeringMode);
                     }
 
                     yield return new TurnStartEvent(turnIndex);
 
-                    foreach (var message in pendingQueuedMessages)
+                    // 3. 【AgentCore】【工具声明】首次提示先发布，再处理已选队列消息
+                    if (turnIndex == 0 && config.InitialMessages.Count > 0)
+                    {
+                        foreach (var message in ToolDeclarations.Declare(State.Messages, config.InitialMessages, currentConfig.Tools))
+                        {
+                            yield return new MessageStartEvent(message);
+                            var finalized = await TransformMessageEndAsync(currentConfig, message, token).ConfigureAwait(false);
+                            State.AddMessage(finalized);
+                            newMessages.Add(finalized);
+                            yield return new MessageEndEvent(finalized);
+                        }
+                    }
+
+                    foreach (var message in ToolDeclarations.Declare(State.Messages, [.. preparedMessages, .. pendingQueuedMessages], currentConfig.Tools))
                     {
                         yield return new MessageStartEvent(message);
                         var finalizedMessage = await TransformMessageEndAsync(currentConfig, message, token).ConfigureAwait(false);
                         yield return new MessageEndEvent(finalizedMessage);
                         State.AddMessage(finalizedMessage);
+                        newMessages.Add(finalizedMessage);
                     }
 
                     pendingQueuedMessages = [];
 
-                    // Build context and stream LLM response
+                    // 3. 【AgentCore】【请求准备】当前输入发布后替换请求状态，此后不再轮询队列
+                    if (currentConfig.PrepareRequestAsync is not null)
+                    {
+                        var request = new AgentPrepareRequestContext(
+                            State.Messages.ToArray(), currentConfig.Model,
+                            currentConfig.StreamOptions?.Reasoning ?? ThinkingLevel.Off,
+                            State.SystemPrompt, currentConfig.Tools.ToArray());
+                        var update = await currentConfig.PrepareRequestAsync(request, token).ConfigureAwait(false);
+                        if (update is not null) currentConfig = ApplyRequestUpdate(currentConfig, update);
+
+                        // 4. 【AgentCore】【请求准备】保留 Tau 的 Tools 更新接口，替换上下文后重新声明实际工具
+                        if (update?.Tools is not null)
+                        {
+                            foreach (var message in ToolDeclarations.Declare(State.Messages, [], currentConfig.Tools))
+                            {
+                                yield return new MessageStartEvent(message);
+                                State.AddMessage(message);
+                                newMessages.Add(message);
+                                yield return new MessageEndEvent(message);
+                            }
+                        }
+                    }
+
+                    // 4. 【AgentCore】【模型请求】准备完成后再转换上下文和解析模型凭据
                     LlmContext context = default;
                     AssistantMessage? contextFailureMessage = null;
                     try
@@ -208,13 +325,19 @@ public sealed class AgentRuntime
                             contextFailureMessage,
                             token).ConfigureAwait(false);
                         State.AddMessage(contextFailureMessage);
+                        newMessages.Add(contextFailureMessage);
                         yield return new MessageEndEvent(contextFailureMessage);
+                        await FinishTurnAsync(currentConfig,
+                            CreateTurnContext(contextFailureMessage, [], currentConfig, newMessages), token).ConfigureAwait(false);
                         yield return new TurnEndEvent(turnIndex, contextFailureMessage, []);
-                        yield return new AgentEndEvent(contextFailureMessage.ErrorMessage, State.Messages.ToArray());
+                        yield return new AgentEndEvent(contextFailureMessage.ErrorMessage, newMessages.ToArray());
                         yield break;
                     }
 
                     var streamOptions = await ResolveStreamOptionsAsync(currentConfig, token).ConfigureAwait(false);
+                    // 1. 【AgentCore】【请求取消】运行取消必须到达提供方，同时保留调用方单独配置的取消信号
+                    using var providerCancellation = CancellationTokenSource.CreateLinkedTokenSource(token, streamOptions.Signal);
+                    streamOptions = streamOptions with { Signal = providerCancellation.Token };
                     var providerRunStartedAt = LogProviderRunStart(currentConfig, context, streamOptions);
                     var providerRunEnded = false;
                     void LogProviderEnd(
@@ -240,12 +363,11 @@ public sealed class AgentRuntime
                             exceptionType);
                     }
 
-                    var stream = StartProviderStream(
-                        currentConfig.ProviderRegistry,
-                        currentConfig.Model,
+                    var stream = await StartProviderStreamAsync(
+                        currentConfig,
                         context,
                         streamOptions,
-                        ex => LogProviderEnd(false, "exception", State.StreamingMessage, ex.GetType().Name));
+                        ex => LogProviderEnd(false, "exception", State.StreamingMessage, ex.GetType().Name)).ConfigureAwait(false);
 
                     AssistantMessage? assistantMessage = null;
                     var assistantStarted = false;
@@ -272,12 +394,15 @@ public sealed class AgentRuntime
                             }
                             assistantMessage = (AssistantMessage)await TransformMessageEndAsync(
                                 currentConfig,
-                                assistantMessage,
+                                RecordThinkingLevel(currentConfig, assistantMessage),
                                 token).ConfigureAwait(false);
                             State.AddMessage(assistantMessage);
+                            newMessages.Add(assistantMessage);
                             yield return new MessageEndEvent(assistantMessage);
+                            await FinishTurnAsync(currentConfig,
+                                CreateTurnContext(assistantMessage, turnToolResults, currentConfig, newMessages), token).ConfigureAwait(false);
                             yield return new TurnEndEvent(turnIndex, assistantMessage, turnToolResults);
-                            yield return new AgentEndEvent(error, State.Messages.ToArray());
+                            yield return new AgentEndEvent(error, newMessages.ToArray());
                             yield break;
                         }
 
@@ -305,9 +430,10 @@ public sealed class AgentRuntime
                             }
                             assistantMessage = (AssistantMessage)await TransformMessageEndAsync(
                                 currentConfig,
-                                assistantMessage,
+                                RecordThinkingLevel(currentConfig, assistantMessage),
                                 token).ConfigureAwait(false);
                             State.AddMessage(assistantMessage);
+                            newMessages.Add(assistantMessage);
                             yield return new MessageEndEvent(assistantMessage);
                         }
                         else if (evt is ErrorEvent error)
@@ -327,12 +453,15 @@ public sealed class AgentRuntime
                             }
                             assistantMessage = (AssistantMessage)await TransformMessageEndAsync(
                                 currentConfig,
-                                assistantMessage,
+                                RecordThinkingLevel(currentConfig, assistantMessage),
                                 token).ConfigureAwait(false);
                             State.AddMessage(assistantMessage);
+                            newMessages.Add(assistantMessage);
                             yield return new MessageEndEvent(assistantMessage);
+                            await FinishTurnAsync(currentConfig,
+                                CreateTurnContext(assistantMessage, turnToolResults, currentConfig, newMessages), token).ConfigureAwait(false);
                             yield return new TurnEndEvent(turnIndex, assistantMessage, turnToolResults);
-                            yield return new AgentEndEvent(error.Error, State.Messages.ToArray());
+                            yield return new AgentEndEvent(error.Error, newMessages.ToArray());
                             yield break;
                         }
                         else
@@ -353,16 +482,30 @@ public sealed class AgentRuntime
                         }
                         assistantMessage = (AssistantMessage)await TransformMessageEndAsync(
                             currentConfig,
-                            assistantMessage,
+                            RecordThinkingLevel(currentConfig, assistantMessage),
                             token).ConfigureAwait(false);
                         State.AddMessage(assistantMessage);
+                        newMessages.Add(assistantMessage);
                         yield return new MessageEndEvent(assistantMessage);
+                        await FinishTurnAsync(currentConfig,
+                            CreateTurnContext(assistantMessage, turnToolResults, currentConfig, newMessages), token).ConfigureAwait(false);
                         yield return new TurnEndEvent(turnIndex, assistantMessage, turnToolResults);
-                        yield return new AgentEndEvent(error, State.Messages.ToArray());
+                        yield return new AgentEndEvent(error, newMessages.ToArray());
                         yield break;
                     }
 
-                    // Extract tool calls
+                    // 5. 【AgentCore】【回合完成】错误和中止响应强制结束，钩子决策不能触发工具或下一请求
+                    if (assistantMessage.StopReason is StopReason.Error or StopReason.Aborted)
+                    {
+                        State.SetError(assistantMessage.ErrorMessage);
+                        await FinishTurnAsync(currentConfig,
+                            CreateTurnContext(assistantMessage, [], currentConfig, newMessages), token).ConfigureAwait(false);
+                        yield return new TurnEndEvent(turnIndex, assistantMessage, []);
+                        yield return new AgentEndEvent(assistantMessage.ErrorMessage, newMessages.ToArray());
+                        yield break;
+                    }
+
+                    // 6. 【AgentCore】【工具执行】执行正常响应的工具批次并收集最终工具消息
                     var toolCalls = assistantMessage.Content
                         .OfType<ToolCallContent>()
                         .ToList();
@@ -375,24 +518,32 @@ public sealed class AgentRuntime
                         {
                             await foreach (var toolEvt in ToolExecutor.ExecuteToolCallsAsync(
                                 toolCalls, currentConfig.Tools, currentConfig.Interceptors,
-                                State.Messages, currentConfig.DefaultExecutionMode, currentConfig.LogSink, currentConfig.LogContext, token))
+                                State.Messages, currentConfig.DefaultExecutionMode, currentConfig.LogSink, currentConfig.LogContext, token,
+                                responseTruncated: assistantMessage.StopReason == StopReason.MaxTokens))
                             {
                                 yield return toolEvt;
 
-                                // Add tool results to conversation
+                                // 1. 【AgentCore】【工具结果】将完整结果元数据写入事件、历史及下一轮上下文
                                 if (toolEvt is ToolExecutionEndEvent endEvt)
                                 {
                                     toolEndResults.Add(endEvt.Result);
                                     var toolResultMessage = new ToolResultMessage(
                                         endEvt.ToolCallId,
                                         endEvt.Result.Content,
-                                        endEvt.Result.IsError);
+                                        endEvt.IsError)
+                                    {
+                                        ToolName = endEvt.ToolName,
+                                        Details = endEvt.Result.Details,
+                                        Usage = endEvt.Result.Usage,
+                                        Timestamp = DateTimeOffset.UtcNow
+                                    };
                                     yield return new MessageStartEvent(toolResultMessage);
                                     toolResultMessage = (ToolResultMessage)await TransformMessageEndAsync(
                                         currentConfig,
                                         toolResultMessage,
                                         token).ConfigureAwait(false);
                                     State.AddMessage(toolResultMessage);
+                                    newMessages.Add(toolResultMessage);
                                     turnToolResults.Add(toolResultMessage);
                                     yield return new MessageEndEvent(toolResultMessage);
                                 }
@@ -408,23 +559,25 @@ public sealed class AgentRuntime
                         hasMoreWork = !terminatedByTools;
                     }
 
+                    // 7. 【AgentCore】【回合完成】钩子观察最终消息，在 turn_end 发布之后应用决策
+                    var turnContext = CreateTurnContext(assistantMessage, turnToolResults, currentConfig, newMessages);
+                    var decision = await FinishTurnAsync(currentConfig, turnContext, token).ConfigureAwait(false);
                     yield return new TurnEndEvent(turnIndex, assistantMessage, turnToolResults);
 
-                    // 1. 先让停止钩子和 steering 队列决定是否会开始下一轮
-                    var turnContext = CreateTurnContext(assistantMessage, turnToolResults);
-                    if (currentConfig.ShouldStopAfterTurnAsync is not null &&
-                        await currentConfig.ShouldStopAfterTurnAsync(turnContext, token).ConfigureAwait(false))
+                    if (decision == AgentTurnDecision.End ||
+                        (currentConfig.FinishTurnAsync is null && currentConfig.ShouldStopAfterTurnAsync is not null &&
+                         await currentConfig.ShouldStopAfterTurnAsync(turnContext, token).ConfigureAwait(false)))
                     {
-                        yield return new AgentEndEvent(messages: State.Messages.ToArray());
+                        yield return new AgentEndEvent(messages: newMessages.ToArray());
                         yield break;
                     }
 
-                    // Check for new steering messages after turn hooks have had a chance to stop.
-                    if (_steeringQueue.Reader.TryPeek(out _))
-                        hasMoreWork = true;
-
-                    // 2. 只记录已完成回合；下一次确实进入循环时在入口执行 prepare 钩子
-                    //    本轮结束时不会再次调用 prepare，避免 final/terminating turn 产生副作用
+                    // 8. 【AgentCore】【队列调度】先选定 steering，避免准备期间新增输入抢占已选消息
+                    pendingQueuedMessages = token.IsCancellationRequested
+                        ? []
+                        : DrainQueuedMessagesToList(_steeringQueue, SteeringMode);
+                    hasMoreWork |= pendingQueuedMessages.Count > 0;
+                    explicitContinuation = decision == AgentTurnDecision.Continue && !hasMoreWork;
                     lastCompletedTurn = turnContext;
 
                     turnIndex++;
@@ -433,11 +586,12 @@ public sealed class AgentRuntime
 
                 pendingQueuedMessages = token.IsCancellationRequested
                     ? []
-                    : DrainQueuedMessagesToList(_followUpQueue, FollowUpMode, ref _pendingFollowUpMessageCount);
+                    : DrainQueuedMessagesToList(_followUpQueue, FollowUpMode);
+                if (pendingQueuedMessages.Count > 0) explicitContinuation = false;
 
-            } while (!token.IsCancellationRequested && pendingQueuedMessages.Count > 0);
+            } while (!token.IsCancellationRequested && (pendingQueuedMessages.Count > 0 || explicitContinuation));
 
-            yield return new AgentEndEvent(messages: State.Messages.ToArray());
+            yield return new AgentEndEvent(messages: newMessages.ToArray());
         }
         finally
         {
@@ -493,6 +647,18 @@ public sealed class AgentRuntime
         return IsCompatibleMessageReplacement(message, replacement) ? replacement : message;
     }
 
+    /// <summary>【AgentCore】【请求记录】在完成钩子之前记录实际请求的推理等级，不修改输入的历史消息。</summary>
+    /// <param name="config">实际请求配置。</param><param name="message">提供方完成或失败的响应。</param><returns>包含请求等级的响应。</returns>
+    private static AssistantMessage RecordThinkingLevel(AgentLoopConfig config, AssistantMessage message) => message with
+    {
+        ThinkingLevel = config.StreamOptions?.Reasoning switch
+        {
+            null or ThinkingLevel.Off => "off",
+            ThinkingLevel.ExtraHigh => "xhigh",
+            var level => level.ToString()!.ToLowerInvariant()
+        }
+    };
+
     /// <summary>
     /// 判断 message_end 替换结果是否可以安全替代原消息。
     /// </summary>
@@ -504,16 +670,41 @@ public sealed class AgentRuntime
         replacement.Role.Equals(original.Role, StringComparison.Ordinal) &&
         replacement.GetType() == original.GetType();
 
+    /// <summary>【AgentCore】【回合完成】创建当前上下文及本次新增消息的独立快照</summary>
+    /// <param name="message">完成的助手消息</param>
+    /// <param name="toolResults">本回合工具结果</param>
+    /// <param name="config">当前运行配置</param>
+    /// <param name="newMessages">本次运行已发布的新增消息</param>
+    /// <returns>供完成和准备钩子读取的回合快照</returns>
     private AgentLoopTurnContext CreateTurnContext(
         AssistantMessage message,
-        IReadOnlyList<ToolResultMessage> toolResults) =>
+        IReadOnlyList<ToolResultMessage> toolResults,
+        AgentLoopConfig config,
+        IReadOnlyList<ChatMessage> newMessages) =>
         new(
             message,
             toolResults.ToArray(),
             State.Messages.ToArray(),
-            State.Messages.ToArray());
+            newMessages.ToArray())
+        {
+            SystemPrompt = State.SystemPrompt,
+            Tools = config.Tools.ToArray()
+        };
 
-    private static AgentLoopConfig ApplyTurnUpdate(AgentLoopConfig config, AgentLoopTurnUpdate update)
+    /// <summary>【AgentCore】【回合完成】调用完成钩子，缺省时保持循环原有调度</summary>
+    /// <param name="config">当前配置</param>
+    /// <param name="turn">已完成的回合快照</param>
+    /// <param name="token">当前运行取消信号，即使已取消也传给钩子</param>
+    /// <returns>可选的继续或结束决策</returns>
+    private static async ValueTask<AgentTurnDecision?> FinishTurnAsync(
+        AgentLoopConfig config, AgentLoopTurnContext turn, CancellationToken token) =>
+        config.FinishTurnAsync is null ? null : await config.FinishTurnAsync(turn, token).ConfigureAwait(false);
+
+    /// <summary>【AgentCore】【请求准备】统一应用回合准备和请求准备返回的状态替换</summary>
+    /// <param name="config">当前配置</param>
+    /// <param name="update">待应用的状态更新</param>
+    /// <returns>应用更新后的配置</returns>
+    private AgentLoopConfig ApplyRequestUpdate(AgentLoopConfig config, AgentRequestUpdate update)
     {
         var streamOptions = update.StreamOptions ?? config.StreamOptions;
         if (update.ClearReasoning && streamOptions is not null)
@@ -523,16 +714,23 @@ public sealed class AgentRuntime
 
         if (update.Reasoning is { } reasoning)
         {
-            streamOptions = (streamOptions ?? new SimpleStreamOptions()) with { Reasoning = reasoning };
+            streamOptions = (streamOptions ?? new SimpleStreamOptions()) with
+            {
+                Reasoning = reasoning == ThinkingLevel.Off ? null : reasoning
+            };
         }
 
-        return config with
+        var updated = config with
         {
             Model = update.Model ?? config.Model,
-            SystemPrompt = update.SystemPrompt ?? config.SystemPrompt,
+            SystemPrompt = config.SystemPromptFromTranscript ? null : update.SystemPrompt ?? config.SystemPrompt,
             Tools = update.Tools ?? config.Tools,
             StreamOptions = streamOptions
         };
+        if (update.Context is not null) State.SetMessages(update.Context.ToList());
+        if (config.SystemPromptFromTranscript && update.SystemPrompt is not null) State.ReplaceSystemPrompt(update.SystemPrompt);
+        State.Configure(updated.SystemPrompt, update.PreserveModelSelection ? State.Model ?? updated.Model : updated.Model, updated.Tools);
+        return updated;
     }
 
     private static async Task<SimpleStreamOptions> ResolveStreamOptionsAsync(
@@ -589,16 +787,24 @@ public sealed class AgentRuntime
         return startedAt;
     }
 
-    private static AssistantMessageStream StartProviderStream(
-        ProviderRegistry providerRegistry,
-        Model model,
+    /// <summary>【AgentCore】【模型请求】使用会话绑定的配置和认证启动流式请求。</summary>
+    /// <param name="config">当前回合配置。</param>
+    /// <param name="context">发送给模型的上下文。</param>
+    /// <param name="streamOptions">已解析的请求选项。</param>
+    /// <param name="onException">请求启动失败的记录回调。</param>
+    /// <returns>模型响应事件流。</returns>
+    private static async ValueTask<AssistantMessageStream> StartProviderStreamAsync(
+        AgentLoopConfig config,
         LlmContext context,
         SimpleStreamOptions streamOptions,
         Action<Exception> onException)
     {
         try
         {
-            return StreamFunctions.StreamSimple(providerRegistry, model, context, streamOptions);
+            var streamFunction = config.StreamFunction;
+            if (streamFunction is not null) return await streamFunction(config.Model, context, streamOptions).ConfigureAwait(false);
+            return StreamFunctions.StreamSimple(config.ProviderRegistry, config.Model, context, streamOptions,
+                config.ConfigurationStore, config.AuthResolver);
         }
         catch (Exception ex)
         {
@@ -643,6 +849,11 @@ public sealed class AgentRuntime
         config.LogSink.Log(new TauLogEvent("provider", "run.end", DateTimeOffset.UtcNow, fields));
     }
 
+    /// <summary>【AgentCore】【请求观测】生成不含正文的日志字段，消息数沿用排除系统声明的口径。</summary>
+    /// <param name="config">本次代理配置。</param>
+    /// <param name="context">保留系统声明的上下文。</param>
+    /// <param name="streamOptions">实际请求选项。</param>
+    /// <returns>消息统计、当前有效工具数和传输配置。</returns>
     private static Dictionary<string, string?> CreateProviderRunFields(
         AgentLoopConfig config,
         LlmContext context,
@@ -653,8 +864,8 @@ public sealed class AgentRuntime
             ["provider"] = config.Model.Provider,
             ["model"] = config.Model.Id,
             ["api"] = config.Model.Api,
-            ["messageCount"] = context.Messages.Count.ToString(System.Globalization.CultureInfo.InvariantCulture),
-            ["toolCount"] = (context.Tools?.Count ?? 0).ToString(System.Globalization.CultureInfo.InvariantCulture),
+            ["messageCount"] = context.Messages.Count(message => message is not SystemMessage).ToString(System.Globalization.CultureInfo.InvariantCulture),
+            ["toolCount"] = Transcript.GetCurrentTools(Transcript.NormalizeContext(context).Messages).Count.ToString(System.Globalization.CultureInfo.InvariantCulture),
             ["transport"] = FormatEnum(streamOptions.Transport),
             ["cacheRetention"] = FormatEnum(streamOptions.CacheRetention)
         };
@@ -778,37 +989,21 @@ public sealed class AgentRuntime
         return EnrichAssistantMessage(message, model);
     }
 
-    private static IReadOnlyList<ChatMessage> DrainQueuedMessagesToList(
-        Channel<ChatMessage> channel,
-        AgentQueueMode mode,
-        ref int pendingCount)
+    /// <summary>【AgentCore】【队列调度】在同一锁内选取并移除消息，使预览、计数与消费使用相同状态</summary>
+    /// <param name="queue">目标消息队列</param>
+    /// <param name="mode">逐条或全部消费模式</param>
+    /// <returns>本次选取的独立消息数组</returns>
+    private IReadOnlyList<ChatMessage> DrainQueuedMessagesToList(Queue<ChatMessage> queue, AgentQueueMode mode)
     {
-        var messages = new List<ChatMessage>();
-        if (mode == AgentQueueMode.All)
+        lock (_queueGate)
         {
-            while (channel.Reader.TryRead(out var message))
+            if (mode == AgentQueueMode.All)
             {
-                messages.Add(message);
-                Interlocked.Decrement(ref pendingCount);
+                var messages = queue.ToArray();
+                queue.Clear();
+                return messages;
             }
-
-            return messages;
-        }
-
-        if (channel.Reader.TryRead(out var next))
-        {
-            messages.Add(next);
-            Interlocked.Decrement(ref pendingCount);
-        }
-
-        return messages;
-    }
-
-    private static void DrainChannel(Channel<ChatMessage> channel, ref int pendingCount)
-    {
-        while (channel.Reader.TryRead(out _))
-        {
-            Interlocked.Decrement(ref pendingCount);
+            return queue.TryDequeue(out var next) ? [next] : [];
         }
     }
 

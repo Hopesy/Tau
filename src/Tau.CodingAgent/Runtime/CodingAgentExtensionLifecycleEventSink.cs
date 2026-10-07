@@ -22,12 +22,32 @@ public sealed record CodingAgentExtensionLifecycleMessageEndResult(
     IReadOnlyList<CodingAgentExtensionLifecycleEventError> Errors,
     ChatMessage Message);
 
-public sealed class CodingAgentExtensionLifecycleEventSink
+public sealed partial class CodingAgentExtensionLifecycleEventSink
 {
     private static readonly HashSet<string> SupportedEventTypes = new(StringComparer.Ordinal)
     {
+        "input",
+        "project_trust",
+        "resources_discover",
+        "model_select",
+        "thinking_level_select",
+        "session_info_changed",
+        "mcp_servers_change",
+        "before_agent_start",
+        "session_before_compact",
+        "session_compact",
+        "session_compact_failed",
+        "context",
+        "context_with_system",
+        "before_provider_request",
+        "before_provider_headers",
+        "after_provider_response",
+        "provider_stream_event",
         "agent_start",
         "agent_end",
+        "agent_before_settle",
+        "agent_settled",
+        "cache_warming_decision",
         "turn_start",
         "turn_end",
         "message_start",
@@ -73,7 +93,7 @@ public sealed class CodingAgentExtensionLifecycleEventSink
                 continue;
             }
 
-            var result = _runtime.EmitEvent(module.FilePath, payload.RootElement);
+            var result = _runtime.EmitEvent(module.FilePath, payload.RootElement, cancellationToken);
             if (!result.Success)
             {
                 errors.Add(new CodingAgentExtensionLifecycleEventError(
@@ -130,7 +150,7 @@ public sealed class CodingAgentExtensionLifecycleEventSink
                 continue;
             }
 
-            var result = _runtime.EmitEvent(module.FilePath, payload.RootElement);
+            var result = _runtime.EmitEvent(module.FilePath, payload.RootElement, cancellationToken);
             if (!result.Success)
             {
                 errors.Add(new CodingAgentExtensionLifecycleEventError(
@@ -178,7 +198,7 @@ public sealed class CodingAgentExtensionLifecycleEventSink
             }
 
             using var payload = CodingAgentExtensionLifecycleEventJson.CreateDocument(new MessageEndEvent(currentMessage));
-            var result = _runtime.EmitEvent(module.FilePath, payload.RootElement);
+            var result = _runtime.EmitEvent(module.FilePath, payload.RootElement, cancellationToken);
             if (!result.Success)
             {
                 errors.Add(new CodingAgentExtensionLifecycleEventError(
@@ -297,12 +317,14 @@ file static class CodingAgentExtensionLifecycleEventJson
                     WriteMessageProperty(writer, "message", messageEnd.Message);
                     break;
                 case ToolExecutionStartEvent toolStart:
+                    if (toolStart.ParentToolCallId is not null) writer.WriteString("parentToolCallId", toolStart.ParentToolCallId);
                     writer.WriteString("toolCallId", toolStart.ToolCallId);
                     writer.WriteString("toolName", toolStart.ToolName);
                     writer.WritePropertyName("args");
                     WriteJsonOrStringValue(writer, toolStart.Args);
                     break;
                 case ToolExecutionUpdateEvent toolUpdate:
+                    if (toolUpdate.ParentToolCallId is not null) writer.WriteString("parentToolCallId", toolUpdate.ParentToolCallId);
                     writer.WriteString("toolCallId", toolUpdate.ToolCallId);
                     writer.WriteString("toolName", toolUpdate.ToolName ?? string.Empty);
                     writer.WritePropertyName("args");
@@ -318,6 +340,7 @@ file static class CodingAgentExtensionLifecycleEventJson
                     }
                     break;
                 case ToolExecutionEndEvent toolEnd:
+                    if (toolEnd.ParentToolCallId is not null) writer.WriteString("parentToolCallId", toolEnd.ParentToolCallId);
                     writer.WriteString("toolCallId", toolEnd.ToolCallId);
                     writer.WriteString("toolName", toolEnd.ToolName ?? string.Empty);
                     writer.WritePropertyName("result");
@@ -356,52 +379,13 @@ file static class CodingAgentExtensionLifecycleEventJson
         WriteMessage(writer, message);
     }
 
+    /// <summary>【CodingAgent】【扩展事件】写入扩展可识别的消息，保留系统增量字段。</summary>
+    /// <param name="writer">事件写入器。</param>
+    /// <param name="message">事件消息。</param>
     private static void WriteMessage(Utf8JsonWriter writer, ChatMessage message)
     {
-        writer.WriteStartObject();
-        writer.WriteString("role", message.Role);
-        switch (message)
-        {
-            case UserMessage user:
-                writer.WritePropertyName("content");
-                WriteContentBlocks(writer, user.Content);
-                break;
-            case AssistantMessage assistant:
-                writer.WritePropertyName("content");
-                WriteContentBlocks(writer, assistant.Content);
-                if (assistant.StopReason is not null)
-                {
-                    writer.WriteString("stopReason", MapStopReason(assistant.StopReason));
-                }
-                if (!string.IsNullOrWhiteSpace(assistant.ErrorMessage))
-                {
-                    writer.WriteString("errorMessage", assistant.ErrorMessage);
-                }
-                break;
-            case ToolResultMessage toolResult:
-                writer.WriteString("toolCallId", toolResult.ToolCallId);
-                writer.WritePropertyName("content");
-                WriteContentBlocks(writer, toolResult.Content);
-                writer.WriteBoolean("isError", toolResult.IsError);
-                break;
-            case AgentCustomMessage custom:
-                writer.WriteString("customType", custom.CustomType);
-                writer.WritePropertyName("content");
-                WriteContentBlocks(writer, custom.Content);
-                writer.WriteBoolean("display", custom.Display);
-                if (custom.Details is not null)
-                {
-                    writer.WritePropertyName("details");
-                    WriteObjectValue(writer, custom.Details);
-                }
-                if (custom.Timestamp is not null)
-                {
-                    writer.WriteNumber("timestamp", custom.Timestamp.Value.ToUnixTimeMilliseconds());
-                }
-                break;
-        }
-
-        writer.WriteEndObject();
+        var stored = CodingAgentSessionStore.FromMessage(message);
+        JsonSerializer.Serialize(writer, stored, CodingAgentTreeSessionJsonContext.Default.CodingAgentSessionMessage);
     }
 
     private static void WriteContentBlocks(Utf8JsonWriter writer, IReadOnlyList<ContentBlock> content)
@@ -443,6 +427,7 @@ file static class CodingAgentExtensionLifecycleEventJson
                     {
                         writer.WriteString("thoughtSignature", toolCall.ThoughtSignature);
                     }
+                    if (toolCall.Namespace is not null) writer.WriteString("namespace", toolCall.Namespace);
                     break;
                 default:
                     writer.WriteString("type", block.Type);
@@ -552,6 +537,7 @@ file static class CodingAgentExtensionLifecycleEventJson
         {
             writer.WriteString("thoughtSignature", toolCall.ThoughtSignature);
         }
+        if (toolCall.Namespace is not null) writer.WriteString("namespace", toolCall.Namespace);
         writer.WriteEndObject();
     }
 
@@ -571,19 +557,11 @@ file static class CodingAgentExtensionLifecycleEventJson
             : string.Empty;
     }
 
-    private static void WriteToolResult(Utf8JsonWriter writer, ToolResult result)
-    {
-        writer.WriteStartObject();
-        writer.WritePropertyName("content");
-        WriteContentBlocks(writer, result.Content);
-        writer.WriteBoolean("isError", result.IsError);
-        if (result.Details is not null)
-        {
-            writer.WritePropertyName("details");
-            WriteObjectValue(writer, result.Details);
-        }
-        writer.WriteEndObject();
-    }
+    /// <summary>【CodingAgent】【工具事件】复用标准序列化，保留结构化输出和工具用量。</summary>
+    /// <param name="writer">JSON 写入器。</param>
+    /// <param name="result">工具结果。</param>
+    private static void WriteToolResult(Utf8JsonWriter writer, ToolResult result) =>
+        CodingAgentJavaScriptExtensionRuntime.WriteToolResult(writer, result);
 
     private static void WriteToolUpdate(Utf8JsonWriter writer, ToolUpdate update)
     {

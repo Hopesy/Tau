@@ -52,7 +52,7 @@ public sealed class CodingAgentTreeSessionRedactionTests
             using var sessionInfo = JsonDocument.Parse(FindLine(lines, "\"type\":\"session_info\""));
             Assert.Equal($"session {TauSecretRedactor.Placeholder}", sessionInfo.RootElement.GetProperty("name").GetString());
             Assert.Equal($"provider {TauSecretRedactor.Placeholder}", sessionInfo.RootElement.GetProperty("provider").GetString());
-            Assert.Equal($"model {TauSecretRedactor.Placeholder}", sessionInfo.RootElement.GetProperty("model").GetString());
+            Assert.Equal($"model {TauSecretRedactor.Placeholder}", sessionInfo.RootElement.GetProperty("modelId").GetString());
 
             using var userMessage = JsonDocument.Parse(FindLine(lines, "\"role\":\"user\""));
             Assert.Equal(
@@ -62,7 +62,7 @@ public sealed class CodingAgentTreeSessionRedactionTests
             using var toolMessage = JsonDocument.Parse(FindLine(lines, "\"arguments\""));
             Assert.Contains(
                 TauSecretRedactor.Placeholder,
-                toolMessage.RootElement.GetProperty("message").GetProperty("content")[0].GetProperty("arguments").GetString(),
+                toolMessage.RootElement.GetProperty("message").GetProperty("content")[0].GetProperty("arguments").GetRawText(),
                 StringComparison.Ordinal);
 
             using var compaction = JsonDocument.Parse(FindLine(lines, "\"type\":\"compaction\""));
@@ -172,12 +172,12 @@ public sealed class CodingAgentTreeSessionRedactionTests
             Assert.Equal("openai", message.GetProperty("provider").GetString());
             Assert.Equal("gpt-5.4", message.GetProperty("model").GetString());
             Assert.Equal("openai-responses", message.GetProperty("api").GetString());
-            Assert.Equal(timestamp, message.GetProperty("timestamp").GetDateTimeOffset());
+            Assert.Equal(timestamp.ToUnixTimeMilliseconds(), message.GetProperty("timestamp").GetInt64());
             var usage = message.GetProperty("usage");
-            Assert.Equal(1_000_000, usage.GetProperty("inputTokens").GetInt32());
-            Assert.Equal(2_000_000, usage.GetProperty("outputTokens").GetInt32());
-            Assert.Equal(300_000, usage.GetProperty("cacheReadTokens").GetInt32());
-            Assert.Equal(400_000, usage.GetProperty("cacheWriteTokens").GetInt32());
+            Assert.Equal(1_000_000, usage.GetProperty("input").GetInt32());
+            Assert.Equal(2_000_000, usage.GetProperty("output").GetInt32());
+            Assert.Equal(300_000, usage.GetProperty("cacheRead").GetInt32());
+            Assert.Equal(400_000, usage.GetProperty("cacheWrite").GetInt32());
             Assert.Equal("priority", usage.GetProperty("serviceTier").GetString());
             Assert.Equal(37.1m, usage.GetProperty("cost").GetProperty("total").GetDecimal());
 

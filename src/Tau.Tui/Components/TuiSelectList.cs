@@ -3,7 +3,11 @@ using Tau.Tui.Rendering;
 
 namespace Tau.Tui.Components;
 
-public sealed record TuiSelectItem(string Value, string Label, string? Description = null);
+public sealed record TuiSelectItem(string Value, string Label, string? Description = null)
+{
+    /// <summary>可选搜索文本，用于包含无需显示在列表中的名称和类型。</summary>
+    public string? SearchText { get; init; }
+}
 
 public sealed record TuiSelectListLayout(
     int MinPrimaryColumnWidth = 32,
@@ -268,8 +272,10 @@ public sealed class TuiSelectList : ITuiInputComponent
     private static string DisplayValue(TuiSelectItem item) =>
         string.IsNullOrEmpty(item.Label) ? item.Value : item.Label;
 
+    /// <summary>【TUI】【列表搜索】使用指定索引文本，缺省时搜索可见内容及选择值。</summary>
+    /// <param name="item">列表项。</param><returns>参与模糊匹配的文本。</returns>
     private static string SearchText(TuiSelectItem item) =>
-        string.Join(' ', item.Value, item.Label, item.Description ?? string.Empty);
+        item.SearchText ?? string.Join(' ', item.Value, item.Label, item.Description ?? string.Empty);
 
     private static bool IsMoveUp(ConsoleKeyInfo key) =>
         key.Key == ConsoleKey.UpArrow || key.KeyChar is 'k' or 'K';

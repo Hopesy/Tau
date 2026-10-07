@@ -365,7 +365,8 @@ public static class CodingAgentHtmlSessionExporter
                     toolCall.Name,
                     redactor.Redact(toolCall.Arguments))
                 {
-                    ThoughtSignature = toolCall.ThoughtSignature
+                    ThoughtSignature = toolCall.ThoughtSignature,
+                    Namespace = toolCall.Namespace
                 },
                 _ => content[i]
             };

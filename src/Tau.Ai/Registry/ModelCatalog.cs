@@ -7,7 +7,7 @@ public readonly record struct ResolvedModelSelection(string Provider, string Mod
     public string CanonicalReference => $"{Provider}/{ModelId}";
 }
 
-public sealed class ModelCatalog
+public sealed partial class ModelCatalog
 {
     private const string DefaultProviderId = "openai";
     private static readonly IReadOnlySet<string> RetiredXaiModelIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
@@ -64,12 +64,22 @@ public sealed class ModelCatalog
         , ["radius"] = "default"
     };
 
-    private readonly Dictionary<string, Dictionary<string, Model>> _models = new(StringComparer.OrdinalIgnoreCase);
+    private volatile Dictionary<string, Dictionary<string, Model>> _models = new(StringComparer.OrdinalIgnoreCase);
     private readonly ProviderAuthResolver _authResolver;
 
+    /// <summary>【AI】【模型配置】构建目录时使用的配置，请求必须复用同一来源。</summary>
+    public ModelConfigurationStore ConfigurationStore { get; }
+
+    /// <summary>【AI】【模型认证】与目录绑定的认证解析器，供会话和请求复用。</summary>
+    public ProviderAuthResolver AuthResolver => _authResolver;
+
+    /// <summary>【AI】【模型目录】使用同一配置和认证上下文构建模型目录。</summary>
+    /// <param name="authResolver">可选认证解析器。</param>
+    /// <param name="configurationStore">可选模型配置来源。</param>
     public ModelCatalog(ProviderAuthResolver? authResolver = null, ModelConfigurationStore? configurationStore = null)
     {
-        _authResolver = authResolver ?? new ProviderAuthResolver();
+        ConfigurationStore = configurationStore ?? new ModelConfigurationStore();
+        _authResolver = authResolver ?? new ProviderAuthResolver(configurationStore: ConfigurationStore);
 
         foreach (var catalog in new[] { BuiltInModels.Catalog, GeneratedBuiltInModels.Catalog })
         {
@@ -88,20 +98,18 @@ public sealed class ModelCatalog
             }
         }
 
-        (configurationStore ?? new ModelConfigurationStore()).ApplyTo(_models);
+        ConfigurationStore.ApplyTo(_models);
+        _capabilityModels = CreateCapabilityModels();
     }
 
-    public IReadOnlyList<string> GetProviders() => [.. _models.Keys.Order(StringComparer.OrdinalIgnoreCase)];
+    public IReadOnlyList<string> GetProviders() => [.. _models.Keys.Concat(_virtualModels.Select(model => model.Provider)).Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.OrdinalIgnoreCase)];
 
-    public IReadOnlyList<Model> GetModels(string provider) =>
-        _models.TryGetValue(provider, out var models)
-            ? [.. models.Values
-                .Where(model => !IsRetiredModel(model))
-                .Select(_authResolver.ResolveModel)]
-            : [];
+    public IReadOnlyList<Model> GetModels(string provider) => GetModelsOfType(ModelTypes.Chat, provider);
 
     public Model GetModel(string provider, string modelId)
     {
+        var routed = _virtualModels.FirstOrDefault(model => model.Provider.Equals(provider, StringComparison.OrdinalIgnoreCase) && model.Id.Equals(modelId, StringComparison.OrdinalIgnoreCase));
+        if (routed is not null) return routed;
         if (!_models.TryGetValue(provider, out var models) || !models.TryGetValue(modelId, out var model))
         {
             throw new KeyNotFoundException($"Model '{provider}/{modelId}' is not registered.");
@@ -112,6 +120,8 @@ public sealed class ModelCatalog
 
     public Model? TryGetModel(string provider, string modelId)
     {
+        var routed = _virtualModels.FirstOrDefault(model => model.Provider.Equals(provider, StringComparison.OrdinalIgnoreCase) && model.Id.Equals(modelId, StringComparison.OrdinalIgnoreCase));
+        if (routed is not null) return routed;
         if (!_models.TryGetValue(provider, out var models) || !models.TryGetValue(modelId, out var model))
         {
             return null;
@@ -154,7 +164,10 @@ public sealed class ModelCatalog
         var resolvedProvider = ResolveProvider(normalizedProviderHint, defaultProvider);
         if (string.IsNullOrWhiteSpace(normalizedModelHint))
         {
-            return new ResolvedModelSelection(resolvedProvider, GetDefaultModelId(resolvedProvider));
+            var preferred = GetDefaultModelId(resolvedProvider);
+            var available = GetModels(resolvedProvider);
+            return new ResolvedModelSelection(resolvedProvider, available.FirstOrDefault(model => model.Id == preferred)?.Id
+                ?? available.FirstOrDefault()?.Id ?? throw new KeyNotFoundException($"Provider '{resolvedProvider}' has no chat models."));
         }
 
         if (TryGetModel(resolvedProvider, normalizedModelHint) is not null)
@@ -164,9 +177,8 @@ public sealed class ModelCatalog
 
         if (string.IsNullOrWhiteSpace(normalizedProviderHint))
         {
-            var exactMatches = _models
-                .Where(entry => entry.Value.ContainsKey(normalizedModelHint))
-                .Select(entry => entry.Key)
+            var exactMatches = GetProviders()
+                .Where(provider => TryGetModel(provider, normalizedModelHint) is not null)
                 .Order(StringComparer.OrdinalIgnoreCase)
                 .ToArray();
 
@@ -185,16 +197,44 @@ public sealed class ModelCatalog
         throw new KeyNotFoundException($"Model '{resolvedProvider}/{normalizedModelHint}' is not registered.");
     }
 
+    /// <summary>【AI】【模型注册】登记 SDK 模型，按类型隔离并重新应用当前扩展覆盖。</summary>
+    /// <param name="model">聊天、图像或分类模型。</param>
     public void RegisterModel(Model model)
     {
-        if (!_models.TryGetValue(model.Provider, out var models))
+        lock (_catalogGate)
         {
-            models = new Dictionary<string, Model>(StringComparer.OrdinalIgnoreCase);
-            _models[model.Provider] = models;
+            if (ModelTypes.GetModelType(model) != ModelTypes.Chat)
+            {
+                if (!ModelTypes.IsKnown(model)) throw new ArgumentException($"Unknown model type: {model.Type}", nameof(model));
+                _customCapabilityModels = ReplaceCapabilityModel(_customCapabilityModels, model);
+                if (_runtimeCapabilityBaseline is not null)
+                {
+                    _runtimeCapabilityBaseline = ReplaceCapabilityModel(_runtimeCapabilityBaseline, model);
+                    SetRuntimeProviders(_runtimeDefinitions);
+                }
+                else _capabilityModels = ReplaceCapabilityModel(_capabilityModels, model);
+                return;
+            }
+            var next = CopyModels(_models);
+            if (!next.TryGetValue(model.Provider, out var models)) next[model.Provider] = models = new(StringComparer.OrdinalIgnoreCase);
+            models[model.Id] = model;
+            if (!_customModels.TryGetValue(model.Provider, out var custom)) _customModels[model.Provider] = custom = new(StringComparer.OrdinalIgnoreCase);
+            custom[model.Id] = model;
+            _models = next;
+            if (_runtimeBaseline is not null)
+            {
+                if (!_runtimeBaseline.TryGetValue(model.Provider, out var baseline)) _runtimeBaseline[model.Provider] = baseline = new(StringComparer.OrdinalIgnoreCase);
+                baseline[model.Id] = model;
+                SetRuntimeProviders(_runtimeDefinitions);
+            }
         }
-
-        models[model.Id] = model;
     }
+
+    /// <summary>【AI】【模型注册】替换同类型、同提供方和同标识的单个模型。</summary>
+    /// <param name="models">原始目录。</param><param name="model">新模型。</param><returns>独立目录。</returns>
+    private static IReadOnlyList<Model> ReplaceCapabilityModel(IReadOnlyList<Model> models, Model model) =>
+        [.. models.Where(item => ModelTypes.GetModelType(item) != ModelTypes.GetModelType(model) ||
+            !item.Provider.Equals(model.Provider, StringComparison.OrdinalIgnoreCase) || !item.Id.Equals(model.Id, StringComparison.OrdinalIgnoreCase)), model];
 
     public static string GetDefaultProviderId() => DefaultProviderId;
 
@@ -256,7 +296,7 @@ public sealed class ModelCatalog
         var outputRate = baseCost.OutputPerMillion;
         var cacheReadRate = baseCost.CacheReadPerMillion.GetValueOrDefault();
         var cacheWriteRate = baseCost.CacheWritePerMillion.GetValueOrDefault();
-        var matchedThreshold = -1L;
+        var matchedThreshold = -1d;
         foreach (var tier in baseCost.Tiers ?? [])
         {
             if (inputTotal > tier.InputTokensAbove && tier.InputTokensAbove > matchedThreshold)
@@ -384,6 +424,7 @@ public sealed class ModelCatalog
 
     public static bool SupportsXhigh(Model model)
     {
+        if (model.ThinkingLevelMap?.TryGetValue("xhigh", out var mapped) == true) return mapped is not null;
         return model.Id.Contains("gpt-5.2", StringComparison.OrdinalIgnoreCase) ||
                model.Id.Contains("gpt-5.3", StringComparison.OrdinalIgnoreCase) ||
                model.Id.Contains("gpt-5.4", StringComparison.OrdinalIgnoreCase) ||
@@ -393,12 +434,17 @@ public sealed class ModelCatalog
                model.Id.Contains("opus-4.7", StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <summary>【AI】【模型类型】比较模型的提供方、标识和能力类型。</summary>
+    /// <param name="left">第一个模型。</param>
+    /// <param name="right">第二个模型。</param>
+    /// <returns>两者均存在且标识与类型一致时返回 true。</returns>
     public static bool ModelsAreEqual(Model? left, Model? right)
     {
         return left is not null &&
                right is not null &&
                left.Id.Equals(right.Id, StringComparison.OrdinalIgnoreCase) &&
-               left.Provider.Equals(right.Provider, StringComparison.OrdinalIgnoreCase);
+               left.Provider.Equals(right.Provider, StringComparison.OrdinalIgnoreCase) &&
+               ModelTypes.GetModelType(left) == ModelTypes.GetModelType(right);
     }
 
     private bool TryResolveCanonicalReference(
@@ -478,7 +524,7 @@ public sealed class ModelCatalog
 
     private bool TryGetCanonicalProvider(string providerHint, out string canonicalProvider)
     {
-        foreach (var provider in _models.Keys)
+        foreach (var provider in GetProviders())
         {
             if (provider.Equals(providerHint, StringComparison.OrdinalIgnoreCase))
             {

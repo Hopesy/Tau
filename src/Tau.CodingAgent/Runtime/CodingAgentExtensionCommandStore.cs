@@ -15,7 +15,10 @@ public sealed record CodingAgentExtensionCommand(
     bool SendToRunner,
     string FilePath,
     string Scope,
-    string Runtime = "json");
+    string Runtime = "json")
+{
+    public CodingAgentSourceInfo SourceInfo { get; init; } = CodingAgentSourceInfo.ForResource(FilePath, Scope, Path.GetDirectoryName(FilePath));
+}
 
 public sealed record CodingAgentExtensionCustomMessageDelivery(
     AgentCustomMessage Message,
@@ -32,6 +35,8 @@ public sealed record CodingAgentExtensionCommandInvocation(
     IReadOnlyList<AgentCustomMessage>? CustomMessages = null,
     IReadOnlyList<CodingAgentExtensionCustomMessageDelivery>? CustomMessageDeliveries = null)
 {
+    internal IReadOnlyList<CodingAgentExtensionMessageDelivery>? MessageActions { get; init; }
+
     public static CodingAgentExtensionCommandInvocation Status(
         CodingAgentExtensionCommand command,
         string message,
@@ -61,7 +66,19 @@ public sealed record CodingAgentExtensionTool(
     string Scope,
     string Runtime,
     bool HasPrepareArguments,
-    string? ExecutionMode);
+    string? ExecutionMode)
+{
+    public CodingAgentSourceInfo? SourceInfo { get; init; }
+    public bool HasPrepareLoadout { get; init; }
+    public string? PromptSnippet { get; init; }
+    public IReadOnlyList<string> PromptGuidelines { get; init; } = [];
+    public string Exposure { get; init; } = "direct";
+    public bool? DefaultActive { get; init; }
+    public JsonElement? OutputSchema { get; init; }
+    public JsonElement? Namespace { get; init; }
+    public JsonElement? Annotations { get; init; }
+    public Tau.Ai.ConstrainedSamplingConfig? ConstrainedSampling { get; init; }
+}
 
 public sealed record CodingAgentExtensionFlag(
     string Name,
@@ -94,6 +111,7 @@ public sealed record CodingAgentExtensionShortcutInvocation(
     IReadOnlyList<AgentCustomMessage>? CustomMessages = null,
     IReadOnlyList<CodingAgentExtensionCustomMessageDelivery>? CustomMessageDeliveries = null)
 {
+    internal IReadOnlyList<CodingAgentExtensionMessageDelivery>? MessageActions { get; init; }
     public static CodingAgentExtensionShortcutInvocation Status(
         CodingAgentExtensionShortcut shortcut,
         string message,
@@ -119,6 +137,7 @@ public sealed record CodingAgentExtensionResources(
     IReadOnlyList<string> PromptPaths,
     IReadOnlyList<string> ThemePaths)
 {
+    public IReadOnlyDictionary<string, CodingAgentSourceInfo> SourceInfos { get; init; } = new Dictionary<string, CodingAgentSourceInfo>();
     public CodingAgentExtensionResources(
         IReadOnlyList<string> skillPaths,
         IReadOnlyList<string> promptPaths)
@@ -139,7 +158,10 @@ public sealed record CodingAgentExtensionModule(
     string FilePath,
     string Scope,
     string Runtime,
-    string Status);
+    string Status)
+{
+    public bool HasMarkdownTransformer { get; init; }
+}
 
 public sealed record CodingAgentExtensionEventHandler(
     string FilePath,
@@ -152,6 +174,9 @@ public sealed record CodingAgentExtensionMessageRenderer(
     string FilePath,
     string Scope,
     string Runtime);
+
+/// <summary>【CodingAgent】【条目渲染器】保存类型与所属模块，跨模块冲突采用第一个有效注册。</summary>
+public sealed record CodingAgentExtensionEntryRenderer(string CustomType, string FilePath, string Scope, string Runtime);
 
 public sealed record CodingAgentExtensionDiagnostic(
     string Severity,
@@ -171,11 +196,12 @@ public sealed record CodingAgentExtensionStatus(
     IReadOnlyList<CodingAgentExtensionMessageRenderer> MessageRenderers,
     IReadOnlyList<CodingAgentExtensionDiagnostic> Diagnostics)
 {
+    public IReadOnlyList<CodingAgentExtensionEntryRenderer> EntryRenderers { get; init; } = [];
     public IReadOnlyList<CodingAgentResourceDiagnostic> ResourceDiagnostics =>
         CodingAgentResourceDiagnostics.FromExtensions(Diagnostics);
 }
 
-public sealed class CodingAgentExtensionCommandStore
+public sealed partial class CodingAgentExtensionCommandStore : IDisposable
 {
     public const string ExtensionPathsEnvironmentVariable = "TAU_CODING_AGENT_EXTENSION_PATHS";
 
@@ -183,8 +209,17 @@ public sealed class CodingAgentExtensionCommandStore
     private readonly string _userExtensionsDirectory;
     private readonly IReadOnlyList<string> _explicitPaths;
     private readonly Func<IReadOnlyList<string>>? _additionalPathsProvider;
+    private readonly Func<IReadOnlyDictionary<string, CodingAgentSourceInfo>>? _sourceInfosProvider;
     private readonly bool _includeDefaults;
+    public bool IsProjectTrusted { get; set; } = true;
     private readonly CodingAgentJavaScriptExtensionRuntime _javaScriptRuntime;
+    private CodingAgentRpcExtensionUiBridge? _extensionUiBridge;
+    private string _extensionMode = "tui";
+    private long _uiBridgeVersion;
+    private readonly object _lifecycleGate = new();
+    private Task<IReadOnlyList<CodingAgentExtensionLifecycleEventError>>? _startupTask;
+    private bool _sessionStarted;
+    private int _disposed;
 
     public CodingAgentExtensionCommandStore(
         string? cwd = null,
@@ -192,7 +227,8 @@ public sealed class CodingAgentExtensionCommandStore
         IReadOnlyList<string>? explicitPaths = null,
         Func<IReadOnlyList<string>>? additionalPathsProvider = null,
         bool includeDefaults = true,
-        CodingAgentJavaScriptExtensionRuntime? javaScriptRuntime = null)
+        CodingAgentJavaScriptExtensionRuntime? javaScriptRuntime = null,
+        Func<IReadOnlyDictionary<string, CodingAgentSourceInfo>>? sourceInfosProvider = null)
     {
         _cwd = string.IsNullOrWhiteSpace(cwd) ? Environment.CurrentDirectory : Path.GetFullPath(cwd);
         _userExtensionsDirectory = string.IsNullOrWhiteSpace(userExtensionsDirectory)
@@ -200,6 +236,7 @@ public sealed class CodingAgentExtensionCommandStore
             : Path.GetFullPath(userExtensionsDirectory);
         _explicitPaths = explicitPaths ?? GetConfiguredExtensionPaths();
         _additionalPathsProvider = additionalPathsProvider;
+        _sourceInfosProvider = sourceInfosProvider;
         _includeDefaults = includeDefaults;
         _javaScriptRuntime = javaScriptRuntime ?? new CodingAgentJavaScriptExtensionRuntime(_cwd);
     }
@@ -209,10 +246,93 @@ public sealed class CodingAgentExtensionCommandStore
         return LoadStatus().Commands;
     }
 
+    /// <summary>【CodingAgent】【扩展绑定】使本存储内的命令、工具和事件共享真实会话。</summary>
+    /// <param name="runner">当前运行器。</param>
+    /// <param name="tree">可选 JSONL 控制器。</param>
+    /// <param name="flat">可选平面会话存储。</param>
+    public void BindSession(ICodingAgentRunner runner, CodingAgentTreeSessionController? tree = null, CodingAgentSessionStore? flat = null)
+    {
+        _javaScriptRuntime.BindSession(runner, tree, flat);
+        _javaScriptRuntime.SessionCommands = this;
+        if (runner is RuntimeCodingAgentRunner runtime) runtime.ConfigureExtensionCommands(this);
+    }
+
+    /// <summary>【CodingAgent】【扩展交互】替换桥接器并解除旧桥接器的事件订阅</summary>
+    /// <param name="extensionUiBridge">新的桥接器；为空时停用交互</param>
+    /// <param name="mode">宿主运行模式</param>
     public void SetExtensionUiBridge(CodingAgentRpcExtensionUiBridge? extensionUiBridge, string mode = "tui")
     {
-        extensionUiBridge?.SetUiPromptEventPublisher(PublishUiPromptEventAsync);
+        _extensionUiBridge?.SetUiPromptEventPublisher(null);
+        _extensionUiBridge = extensionUiBridge;
+        _extensionMode = mode;
+        var version = Interlocked.Increment(ref _uiBridgeVersion);
+        extensionUiBridge?.SetUiPromptEventPublisher((eventType, kind, title, token) =>
+            version == Volatile.Read(ref _uiBridgeVersion)
+                ? PublishUiPromptEventAsync(eventType, kind, title, token)
+                : Task.CompletedTask);
         _javaScriptRuntime.SetExtensionUiBridge(extensionUiBridge, mode);
+    }
+
+    /// <summary>【CodingAgent】【扩展重载】重建扩展进程并重新发现注册信息</summary>
+    /// <returns>重新初始化后的扩展状态</returns>
+    public CodingAgentExtensionStatus Reload()
+    {
+        PublishSessionShutdownAsync(reason: "reload").GetAwaiter().GetResult();
+        ResetRuntime();
+        return LoadStatus();
+    }
+
+    /// <summary>【CodingAgent】【扩展生命周期】停止当前扩展进程，保留存储对象以供下次加载</summary>
+    public void ResetRuntime()
+    {
+        RefreshResourcePaths?.Invoke();
+        // 1. 【CodingAgent】【扩展重载】使旧交互回调失效，避免取消回调意外启动新进程
+        SetExtensionUiBridge(_extensionUiBridge, _extensionMode);
+        _javaScriptRuntime.Reset();
+        ResetDiscoveredResources();
+        lock (_lifecycleGate) { _startupTask = null; _sessionStarted = false; }
+    }
+
+    /// <summary>【CodingAgent】【扩展生命周期】释放存储拥有的运行时，包括构造时传入的运行时</summary>
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+        SetExtensionUiBridge(null, _extensionMode);
+        try
+        {
+            if (_sessionStarted) PublishSessionShutdownAsync().GetAwaiter().GetResult();
+        }
+        finally { _javaScriptRuntime.Dispose(); }
+    }
+
+    /// <summary>【CodingAgent】【会话启动】每次扩展进程生命周期只自动发布一次启动事件。</summary>
+    /// <param name="cancellationToken">取消等待信号。</param>
+    /// <returns>启动处理器错误列表。</returns>
+    public Task<IReadOnlyList<CodingAgentExtensionLifecycleEventError>> EnsureSessionStartedAsync(CancellationToken cancellationToken = default)
+    {
+        lock (_lifecycleGate)
+        {
+            _startupTask ??= _sessionStarted
+                ? Task.FromResult<IReadOnlyList<CodingAgentExtensionLifecycleEventError>>([])
+                : Task.Run(() => PublishSessionStartAsync("startup", cancellationToken), cancellationToken);
+            return _startupTask;
+        }
+    }
+
+    /// <summary>【CodingAgent】【会话关闭】在进程终止前发布关闭事件，允许扩展保存最后状态。</summary>
+    /// <param name="cancellationToken">取消信号。</param>
+    /// <param name="reason">quit、reload 或会话替换等生命周期原因。</param>
+    /// <param name="targetSessionFile">即将切入的会话文件，退出或重载时为空。</param>
+    /// <returns>处理器错误列表。</returns>
+    public Task<IReadOnlyList<CodingAgentExtensionLifecycleEventError>> PublishSessionShutdownAsync(CancellationToken cancellationToken = default, string reason = "quit", string? targetSessionFile = null)
+    {
+        lock (_lifecycleGate)
+        {
+            if (!_sessionStarted) return Task.FromResult<IReadOnlyList<CodingAgentExtensionLifecycleEventError>>([]);
+            _sessionStarted = false;
+        }
+        var payload = JsonSerializer.SerializeToElement(new { type = "session_shutdown", reason, targetSessionFile });
+        return PublishSessionEventAsync("session_shutdown", payload, cancellationToken);
     }
 
     /// <summary>
@@ -358,35 +478,54 @@ public sealed class CodingAgentExtensionCommandStore
             : new CodingAgentExtensionLifecycleEventSink(modules, _javaScriptRuntime);
     }
 
-    public Task<IReadOnlyList<CodingAgentExtensionLifecycleEventError>> PublishSessionStartAsync(
+    /// <summary>【CodingAgent】【会话启动】发布启动或重载事件。</summary>
+    /// <param name="reason">startup、reload、new、resume 或 fork。</param>
+    /// <param name="cancellationToken">取消信号。</param>
+    /// <param name="previousSessionFile">替换前的会话文件；首次启动及重载时为空。</param>
+    /// <returns>处理器错误列表。</returns>
+    public async Task<IReadOnlyList<CodingAgentExtensionLifecycleEventError>> PublishSessionStartAsync(
         string reason = "startup",
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default, string? previousSessionFile = null)
+    {
+        lock (_lifecycleGate) _sessionStarted = true;
+        using var document = CreateSessionStartEventDocument(reason, previousSessionFile);
+        var errors = await PublishSessionEventAsync("session_start", document.RootElement, cancellationToken).ConfigureAwait(false);
+        var discoveryErrors = await DiscoverResourcesAsync(reason == "reload" ? "reload" : "startup", cancellationToken).ConfigureAwait(false);
+        return errors.Concat(discoveryErrors).ToArray();
+    }
+
+    /// <summary>【CodingAgent】【会话事件】向所有注册模块按顺序分发事件。</summary>
+    /// <param name="eventType">事件类型。</param>
+    /// <param name="extensionEvent">完整事件对象。</param>
+    /// <param name="cancellationToken">取消信号。</param>
+    /// <returns>模块或处理器错误列表。</returns>
+    private async Task<IReadOnlyList<CodingAgentExtensionLifecycleEventError>> PublishSessionEventAsync(
+        string eventType, JsonElement extensionEvent, CancellationToken cancellationToken)
     {
         var modules = LoadStatus()
             .EventHandlers
-            .Where(static handler => handler.EventType.Equals("session_start", StringComparison.Ordinal))
+            .Where(handler => handler.EventType.Equals(eventType, StringComparison.Ordinal))
             .GroupBy(static handler => Path.GetFullPath(handler.FilePath), StringComparer.OrdinalIgnoreCase)
             .Select(static group => group.First())
             .ToArray();
         if (modules.Length == 0)
         {
-            return Task.FromResult<IReadOnlyList<CodingAgentExtensionLifecycleEventError>>([]);
+            return [];
         }
 
         var errors = new List<CodingAgentExtensionLifecycleEventError>();
-        using var document = CreateSessionStartEventDocument(reason);
         foreach (var module in modules)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var result = _javaScriptRuntime.EmitEvent(module.FilePath, document.RootElement);
+            var result = await _javaScriptRuntime.EmitEventAsync(module.FilePath, extensionEvent, cancellationToken).ConfigureAwait(false);
             if (!result.Success)
             {
                 errors.Add(new CodingAgentExtensionLifecycleEventError(
                     module.FilePath,
                     module.Scope,
                     module.Runtime,
-                    "session_start",
-                    result.Error ?? "javascript extension session_start handler failed"));
+                    eventType,
+                    result.Error ?? "javascript extension session handler failed"));
                 continue;
             }
 
@@ -396,12 +535,12 @@ public sealed class CodingAgentExtensionCommandStore
                     module.FilePath,
                     module.Scope,
                     module.Runtime,
-                    "session_start",
+                    eventType,
                     handlerError));
             }
         }
 
-        return Task.FromResult<IReadOnlyList<CodingAgentExtensionLifecycleEventError>>(errors);
+        return errors;
     }
 
     public CodingAgentExtensionResources LoadResources()
@@ -422,11 +561,13 @@ public sealed class CodingAgentExtensionCommandStore
         var modules = new List<CodingAgentExtensionModule>();
         var eventHandlers = new List<CodingAgentExtensionEventHandler>();
         var messageRenderers = new List<CodingAgentExtensionMessageRenderer>();
+        var entryRenderers = new List<CodingAgentExtensionEntryRenderer>();
         var diagnostics = new List<CodingAgentExtensionDiagnostic>();
+        var autoFilter = AutoResourceFilterProvider?.Invoke();
         if (_includeDefaults)
         {
-            LoadSourceDirectory(_userExtensionsDirectory, "user", definitions, tools, flags, shortcuts, skillPaths, promptPaths, themePaths, files, modules, eventHandlers, messageRenderers, diagnostics, _javaScriptRuntime);
-            LoadSourceDirectory(Path.Combine(_cwd, ".tau", "extensions"), "project", definitions, tools, flags, shortcuts, skillPaths, promptPaths, themePaths, files, modules, eventHandlers, messageRenderers, diagnostics, _javaScriptRuntime);
+            LoadSourceDirectory(_userExtensionsDirectory, "user", definitions, tools, flags, shortcuts, skillPaths, promptPaths, themePaths, files, modules, eventHandlers, messageRenderers, entryRenderers, diagnostics, _javaScriptRuntime, resourceFilter: autoFilter);
+            if (IsProjectTrusted) LoadSourceDirectory(Path.Combine(_cwd, ".tau", "extensions"), "project", definitions, tools, flags, shortcuts, skillPaths, promptPaths, themePaths, files, modules, eventHandlers, messageRenderers, entryRenderers, diagnostics, _javaScriptRuntime, resourceFilter: autoFilter);
         }
 
         foreach (var path in GetExplicitPaths())
@@ -434,7 +575,7 @@ public sealed class CodingAgentExtensionCommandStore
             var resolved = ResolvePath(path, _cwd);
             if (Directory.Exists(resolved))
             {
-                LoadSourceDirectory(resolved, "path", definitions, tools, flags, shortcuts, skillPaths, promptPaths, themePaths, files, modules, eventHandlers, messageRenderers, diagnostics, _javaScriptRuntime, reportMissing: true);
+                LoadSourceDirectory(resolved, "path", definitions, tools, flags, shortcuts, skillPaths, promptPaths, themePaths, files, modules, eventHandlers, messageRenderers, entryRenderers, diagnostics, _javaScriptRuntime, reportMissing: true);
             }
             else if (File.Exists(resolved) && Path.GetExtension(resolved).Equals(".json", StringComparison.OrdinalIgnoreCase))
             {
@@ -442,7 +583,7 @@ public sealed class CodingAgentExtensionCommandStore
             }
             else if (File.Exists(resolved) && IsModuleFile(resolved))
             {
-                AddModule(resolved, "path", modules, eventHandlers, messageRenderers, definitions, tools, flags, shortcuts, diagnostics, _javaScriptRuntime);
+                AddModule(resolved, "path", modules, eventHandlers, messageRenderers, entryRenderers, definitions, tools, flags, shortcuts, diagnostics, _javaScriptRuntime);
             }
             else if (File.Exists(resolved))
             {
@@ -463,9 +604,9 @@ public sealed class CodingAgentExtensionCommandStore
         }
 
         var resources = new CodingAgentExtensionResources(
-            skillPaths.Distinct(StringComparer.OrdinalIgnoreCase).ToArray(),
-            promptPaths.Distinct(StringComparer.OrdinalIgnoreCase).ToArray(),
-            themePaths.Distinct(StringComparer.OrdinalIgnoreCase).ToArray());
+            skillPaths.Concat(_discoveredResources.SkillPaths).Distinct(StringComparer.OrdinalIgnoreCase).ToArray(),
+            promptPaths.Concat(_discoveredResources.PromptPaths).Distinct(StringComparer.OrdinalIgnoreCase).ToArray(),
+            themePaths.Concat(_discoveredResources.ThemePaths).Distinct(StringComparer.OrdinalIgnoreCase).ToArray()) { SourceInfos = _discoveredResources.SourceInfos };
 
         var resolvedShortcuts = keyBindings is null
             ? shortcuts.ToArray()
@@ -473,9 +614,15 @@ public sealed class CodingAgentExtensionCommandStore
                 .Select(static resolved => resolved.Shortcut)
                 .ToArray();
 
+        var sourceInfos = modules.DistinctBy(module => Path.GetFullPath(module.FilePath), StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(module => Path.GetFullPath(module.FilePath), module => ResolveExtensionSource(module.FilePath, module.Scope), StringComparer.OrdinalIgnoreCase);
+        _javaScriptRuntime.SetExtensionSources(sourceInfos);
+        CurrentCommandCatalog = ResolveInvocationNames(definitions).Select(command => command with
+        { SourceInfo = sourceInfos.GetValueOrDefault(Path.GetFullPath(command.FilePath)) ?? ResolveExtensionSource(command.FilePath, command.Scope) }).ToArray();
+        diagnostics.AddRange(_javaScriptRuntime.ProviderRefreshDiagnostics);
         return new CodingAgentExtensionStatus(
-            ResolveInvocationNames(definitions),
-            tools.ToArray(),
+            CurrentCommandCatalog,
+            tools.Select(tool => tool with { SourceInfo = sourceInfos.GetValueOrDefault(Path.GetFullPath(tool.FilePath)) }).ToArray(),
             flags.ToArray(),
             resolvedShortcuts,
             resources,
@@ -485,7 +632,7 @@ public sealed class CodingAgentExtensionCommandStore
                 .ToArray(),
             eventHandlers,
             messageRenderers,
-            diagnostics);
+            diagnostics) { EntryRenderers = entryRenderers };
     }
 
     public IReadOnlyList<CodingAgentResolvedExtensionShortcut> LoadResolvedShortcuts(IKeyBindingMap? keyBindings = null)
@@ -512,7 +659,14 @@ public sealed class CodingAgentExtensionCommandStore
         }
     }
 
-    public bool TryInvoke(string input, out CodingAgentExtensionCommandInvocation? invocation)
+    /// <summary>【CodingAgent】【扩展命令】匹配并执行斜杠命令，允许宿主取消运行中的扩展。</summary>
+    /// <param name="input">完整命令输入。</param>
+    /// <param name="invocation">命令执行结果；未匹配时为空。</param>
+    /// <param name="cancellationToken">宿主取消信号。</param>
+    /// <returns>是否匹配已注册命令。</returns>
+    /// <param name="preserveMessageActions">保留原始消息动作供真实运行器按统一规则投递。</param>
+    public bool TryInvoke(string input, out CodingAgentExtensionCommandInvocation? invocation, CancellationToken cancellationToken = default,
+        bool preserveMessageActions = false)
     {
         invocation = null;
         if (!input.StartsWith("/", StringComparison.Ordinal))
@@ -537,15 +691,22 @@ public sealed class CodingAgentExtensionCommandStore
         var argsText = spaceIndex < 0 ? string.Empty : input[(spaceIndex + 1)..];
         if (IsNodeModuleRuntime(command.Runtime))
         {
-            var result = _javaScriptRuntime.Invoke(command.FilePath, command.Name, argsText);
+            var result = _javaScriptRuntime.Invoke(command.FilePath, command.Name, argsText, cancellationToken, preserveMessageActions);
             if (!result.Success)
             {
                 invocation = CodingAgentExtensionCommandInvocation.Error(
                     command,
-                    $"extension command '/{command.InvocationName}' failed: {result.Error ?? $"unknown {command.Runtime} extension error"}");
+                    $"extension command '/{command.InvocationName}' failed: {result.Error ?? $"unknown {command.Runtime} extension error"}")
+                    with { MessageActions = preserveMessageActions ? result.MessageActions : null };
                 return true;
             }
 
+            if (preserveMessageActions)
+            {
+                invocation = CodingAgentExtensionCommandInvocation.Status(command, result.StatusMessage ?? "")
+                    with { MessageActions = result.MessageActions };
+                return true;
+            }
             var customMessages = result.CustomMessages.Select(static message => message.Message).ToArray();
             var customMessageDeliveries = CreateCustomMessageDeliveries(result.CustomMessages);
             var displayMessages = RenderCustomMessages(result.CustomMessages);
@@ -599,9 +760,15 @@ public sealed class CodingAgentExtensionCommandStore
         return true;
     }
 
+    /// <summary>【CodingAgent】【扩展快捷键】执行已解析的扩展快捷键并传递宿主取消信号。</summary>
+    /// <param name="shortcut">快捷键定义。</param>
+    /// <param name="invocation">调用结果。</param>
+    /// <param name="cancellationToken">宿主取消信号。</param>
+    /// <param name="preserveMessageActions">是否使用完整有序动作，保留图片与未指定的触发状态。</param>
+    /// <returns>是否处理该快捷键。</returns>
     public bool TryInvokeShortcut(
         CodingAgentExtensionShortcut shortcut,
-        out CodingAgentExtensionShortcutInvocation? invocation)
+        out CodingAgentExtensionShortcutInvocation? invocation, CancellationToken cancellationToken = default, bool preserveMessageActions = false)
     {
         invocation = null;
         if (!shortcut.HasHandler)
@@ -620,15 +787,22 @@ public sealed class CodingAgentExtensionCommandStore
             return true;
         }
 
-        var result = _javaScriptRuntime.InvokeShortcut(shortcut.FilePath, shortcut.Shortcut);
+        var result = _javaScriptRuntime.InvokeShortcut(shortcut.FilePath, shortcut.Shortcut, cancellationToken, preserveMessageActions);
         if (!result.Success)
         {
             invocation = CodingAgentExtensionShortcutInvocation.Error(
                 shortcut,
-                $"extension shortcut '{shortcut.Shortcut}' failed: {result.Error ?? $"unknown {shortcut.Runtime} extension error"}");
+                $"extension shortcut '{shortcut.Shortcut}' failed: {result.Error ?? $"unknown {shortcut.Runtime} extension error"}")
+                with { MessageActions = preserveMessageActions ? result.MessageActions : null };
             return true;
         }
 
+        if (preserveMessageActions)
+        {
+            invocation = CodingAgentExtensionShortcutInvocation.Status(shortcut, result.StatusMessage ?? "")
+                with { MessageActions = result.MessageActions };
+            return true;
+        }
         var customMessages = result.CustomMessages.Select(static message => message.Message).ToArray();
         var customMessageDeliveries = CreateCustomMessageDeliveries(result.CustomMessages);
         var displayMessages = RenderCustomMessages(result.CustomMessages);
@@ -933,9 +1107,11 @@ public sealed class CodingAgentExtensionCommandStore
         ICollection<CodingAgentExtensionModule> modules,
         ICollection<CodingAgentExtensionEventHandler> eventHandlers,
         ICollection<CodingAgentExtensionMessageRenderer> messageRenderers,
+        ICollection<CodingAgentExtensionEntryRenderer> entryRenderers,
         ICollection<CodingAgentExtensionDiagnostic> diagnostics,
         CodingAgentJavaScriptExtensionRuntime javaScriptRuntime,
-        bool reportMissing = false)
+        bool reportMissing = false,
+        Func<string, string, bool>? resourceFilter = null)
     {
         if (!Directory.Exists(directory))
         {
@@ -971,12 +1147,14 @@ public sealed class CodingAgentExtensionCommandStore
 
         foreach (var file in jsonFiles)
         {
+            if (resourceFilter?.Invoke(file, scope) == false) continue;
             LoadSourceFile(file, scope, definitions, skillPaths, promptPaths, themePaths, fileStatuses, diagnostics);
         }
 
         foreach (var module in DiscoverModuleFiles(directory))
         {
-            AddModule(module, scope, modules, eventHandlers, messageRenderers, definitions, tools, flags, shortcuts, diagnostics, javaScriptRuntime);
+            if (resourceFilter?.Invoke(module, scope) == false) continue;
+            AddModule(module, scope, modules, eventHandlers, messageRenderers, entryRenderers, definitions, tools, flags, shortcuts, diagnostics, javaScriptRuntime);
         }
     }
 
@@ -1231,7 +1409,7 @@ public sealed class CodingAgentExtensionCommandStore
         return property.ValueKind == JsonValueKind.String ? property.GetString() : null;
     }
 
-    private static JsonDocument CreateSessionStartEventDocument(string reason)
+    private static JsonDocument CreateSessionStartEventDocument(string reason, string? previousSessionFile = null)
     {
         using var stream = new MemoryStream();
         using (var writer = new Utf8JsonWriter(stream))
@@ -1239,6 +1417,7 @@ public sealed class CodingAgentExtensionCommandStore
             writer.WriteStartObject();
             writer.WriteString("type", "session_start");
             writer.WriteString("reason", string.IsNullOrWhiteSpace(reason) ? "startup" : reason);
+            if (previousSessionFile is not null) writer.WriteString("previousSessionFile", previousSessionFile);
             writer.WriteEndObject();
         }
 
@@ -1490,6 +1669,7 @@ public sealed class CodingAgentExtensionCommandStore
         ICollection<CodingAgentExtensionModule> modules,
         ICollection<CodingAgentExtensionEventHandler> eventHandlers,
         ICollection<CodingAgentExtensionMessageRenderer> messageRenderers,
+        ICollection<CodingAgentExtensionEntryRenderer> entryRenderers,
         ICollection<CommandDefinition> definitions,
         ICollection<CodingAgentExtensionTool> tools,
         ICollection<CodingAgentExtensionFlag> flags,
@@ -1498,6 +1678,9 @@ public sealed class CodingAgentExtensionCommandStore
         CodingAgentJavaScriptExtensionRuntime javaScriptRuntime)
     {
         var fullPath = Path.GetFullPath(filePath);
+        // 1. 【CodingAgent】【扩展去重】用户目录、项目目录及显式路径重叠时，同一模块只注册一次
+        if (modules.Any(module => Path.GetFullPath(module.FilePath).Equals(fullPath,
+            OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))) return;
         var runtime = Path.GetExtension(filePath).Equals(".ts", StringComparison.OrdinalIgnoreCase)
             ? "typescript"
             : "javascript";
@@ -1590,7 +1773,13 @@ public sealed class CodingAgentExtensionCommandStore
                 scope,
                 runtime,
                 tool.HasPrepareArguments,
-                tool.ExecutionMode));
+                tool.ExecutionMode)
+                {
+                    HasPrepareLoadout = tool.HasPrepareLoadout,
+                    PromptSnippet = tool.PromptSnippet, PromptGuidelines = tool.PromptGuidelines,
+                    Exposure = tool.Exposure, DefaultActive = tool.DefaultActive, OutputSchema = tool.OutputSchema,
+                    Namespace = tool.Namespace, Annotations = tool.Annotations, ConstrainedSampling = tool.ConstrainedSampling
+                });
         }
 
         foreach (var eventType in result.EventHandlerTypes)
@@ -1635,6 +1824,19 @@ public sealed class CodingAgentExtensionCommandStore
                 fullPath,
                 scope,
                 runtime));
+        }
+
+        // 2. 【CodingAgent】【条目渲染注册】无效注册保留诊断，不遮盖其他模块的有效渲染器
+        foreach (var renderer in result.EntryRenderers)
+        {
+            var customType = renderer.CustomType.Trim();
+            if (string.IsNullOrWhiteSpace(customType) || !renderer.HasRenderer)
+            {
+                diagnostics.Add(new("error", $"{runtime} extension entry renderer requires a non-empty custom type and a renderer function", fullPath, scope));
+                continue;
+            }
+            if (entryRenderers.All(existing => existing.CustomType != customType))
+                entryRenderers.Add(new(customType, fullPath, scope, runtime));
         }
 
         foreach (var flag in result.Flags)
@@ -1717,12 +1919,13 @@ public sealed class CodingAgentExtensionCommandStore
             fullPath,
             scope,
             runtime,
-            FormatNodeModuleStatus(result)));
+            FormatNodeModuleStatus(result)) { HasMarkdownTransformer = result.HasMarkdownTransformer });
     }
 
     private static string FormatNodeModuleStatus(CodingAgentJavaScriptExtensionLoadResult result)
     {
         var status = $"loaded; commands {result.Commands.Count(static command => command.HasHandler)}; tools {result.Tools.Count(static tool => tool.HasHandler)}";
+        if (result.HasMarkdownTransformer) status += "; markdown transformer";
         if (result.Flags.Count > 0)
         {
             status = $"{status}; flags {result.Flags.Count}";
@@ -1744,6 +1947,8 @@ public sealed class CodingAgentExtensionCommandStore
         {
             status = $"{status}; message renderers {messageRendererCount}";
         }
+        var entryRendererCount = result.EntryRenderers.Count(static renderer => renderer.HasRenderer);
+        if (entryRendererCount > 0) status = $"{status}; entry renderers {entryRendererCount}";
 
         status = $"{status}; limited runtime";
         var unsupported = new List<string>();

@@ -8,9 +8,12 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="Tau.CodingAgent.Tests" />
+    <EmbeddedResource Include="Runtime\JavaScript\extension-runtime.cjs" />
+    <EmbeddedResource Include="Runtime\JavaScript\codemode-prelude.js" />
   </ItemGroup>
 
   <ItemGroup>
+    <PackageReference Include="Jint" Version="4.16.4" />
     <PackageReference Include="SixLabors.ImageSharp" Version="3.1.11" />
   </ItemGroup>
 

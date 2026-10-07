@@ -293,8 +293,12 @@ public sealed class TuiInputSequenceBuffer : IDisposable
             }
             else
             {
-                sequences.Add(remaining[0].ToString());
-                position++;
+                // 1. 【Tui】【Unicode 分帧】等待完整代理对，避免把非 BMP 字符拆成两个损坏事件
+                if (char.IsHighSurrogate(remaining[0]) && remaining.Length == 1)
+                    return new SequenceExtractionResult(sequences, remaining);
+                var length = remaining.Length > 1 && char.IsSurrogatePair(remaining[0], remaining[1]) ? 2 : 1;
+                sequences.Add(remaining[..length]);
+                position += length;
             }
         }
 

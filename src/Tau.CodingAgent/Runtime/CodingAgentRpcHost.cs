@@ -9,7 +9,7 @@ using Tau.Ai.Observability;
 
 namespace Tau.CodingAgent.Runtime;
 
-public sealed class CodingAgentRpcHost
+public sealed partial class CodingAgentRpcHost
 {
     private const int BashOutputQueueCapacity = 1024;
 
@@ -23,7 +23,8 @@ public sealed class CodingAgentRpcHost
     private readonly TextWriter _output;
     private readonly CodingAgentSessionStore? _sessionStore;
     private readonly CodingAgentSettingsStore? _settingsStore;
-    private readonly CodingAgentTreeSessionController? _treeSessionController;
+    private readonly CodingAgentTreeSessionController? _initialTreeSessionController;
+    private CodingAgentTreeSessionController? _treeSessionController => _extensionCommandStore?.CurrentTreeSessionController ?? (_runner as RuntimeCodingAgentRunner)?.CurrentTreeSessionController ?? _initialTreeSessionController;
     private readonly CodingAgentPromptTemplateStore? _promptTemplateStore;
     private readonly CodingAgentSkillStore? _skillStore;
     private readonly CodingAgentExtensionCommandStore? _extensionCommandStore;
@@ -35,6 +36,8 @@ public sealed class CodingAgentRpcHost
     private bool? _autoCompactionEnabled;
     private readonly SemaphoreSlim _writeLock = new(1, 1);
     private readonly object _gate = new();
+    private readonly Dictionary<long, Task> _extensionCommandTasks = [];
+    private long _extensionCommandSequence;
     private Task? _activePromptTask;
     private CancellationTokenSource? _activePromptCts;
     private CancellationTokenSource? _activeRetryDelayCts;
@@ -72,14 +75,17 @@ public sealed class CodingAgentRpcHost
         _output = output;
         _sessionStore = sessionStore;
         _settingsStore = settingsStore;
-        _treeSessionController = treeSessionController;
+        _initialTreeSessionController = treeSessionController;
         _promptTemplateStore = promptTemplateStore;
         _skillStore = skillStore;
+        if (runner is RuntimeCodingAgentRunner runtimeRunner) runtimeRunner.ConfigureInputResources(skillStore, promptTemplateStore, "rpc");
         _extensionCommandStore = extensionCommandStore;
+        _extensionCommandStore?.BindSession(runner, treeSessionController, sessionStore);
         ExtensionUi = extensionUi ?? new CodingAgentRpcExtensionUiBridge();
         ExtensionUi.Attach(WriteJsonLineAsync);
         _extensionCommandStore?.SetExtensionUiBridge(ExtensionUi, "rpc");
-        _shellRunner = shellRunner ?? new SystemCodingAgentShellRunner();
+        _shellRunner = shellRunner ?? (runner as RuntimeCodingAgentRunner)?.CreateShellRunner() ?? new SystemCodingAgentShellRunner();
+        _useSessionBash = runner is RuntimeCodingAgentRunner && shellRunner is null;
         _autoCompaction = autoCompaction ?? CodingAgentAutoCompactionOptions.Disabled;
         _sessionSwitchCoordinator = new CodingAgentSessionSwitchCoordinator(
             runner,
@@ -87,52 +93,181 @@ public sealed class CodingAgentRpcHost
             sessionSwitchPrompt: null,
             sessionSwitchHook: sessionSwitchHook);
         _scopedModelsOverride = scopedModelsOverride is { Count: > 0 } ? scopedModelsOverride.ToArray() : null;
-        _retryOptions = retryOptions ?? CodingAgentRetryOptions.Disabled;
+        if (_runner is RuntimeCodingAgentRunner sessionRunner)
+        {
+            sessionRunner.EnsureSessionContext(treeSessionController, sessionStore);
+            sessionRunner.ConfigureScopedModelPatterns(scopedModelsOverride);
+            if (settingsStore is not null) sessionRunner.ConfigureSessionSettings(settingsStore);
+        }
+        _retryOptions = retryOptions ?? (_runner as RuntimeCodingAgentRunner)?.RetryOptions ?? CodingAgentRetryOptions.Disabled;
+        if (_runner is RuntimeCodingAgentRunner summaryRunner) summaryRunner.SummaryRetryOptions = _retryOptions;
         _autoCompactionEnabled = settingsStore?.Load().AutoCompactionEnabled;
     }
 
+    /// <summary>【CodingAgent】【RPC宿主】处理输入请求并在退出时释放扩展进程</summary>
+    /// <param name="cancellationToken">宿主取消信号</param>
+    /// <returns>正常结束时返回零</returns>
     public async Task<int> RunAsync(CancellationToken cancellationToken = default)
     {
-        while (!cancellationToken.IsCancellationRequested)
+        var background = _runner as RuntimeCodingAgentRunner;
+        if (background is not null) background.BackgroundEvent += HandleBackgroundEventAsync;
+        using var mcpNotificationsCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var mcpNotifications = Task.CompletedTask;
+        using var inputCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var commands = Channel.CreateUnbounded<string>(new UnboundedChannelOptions { SingleReader = true, SingleWriter = true });
+        var inputTask = ReadInputAsync(commands.Writer, inputCancellation.Token);
+        var shutdownWatch = WatchShutdownAsync(background, commands.Writer, inputCancellation.Token);
+        using var extensionCancellation = cancellationToken.Register(() =>
         {
-            var line = await _input.ReadLineAsync(cancellationToken).ConfigureAwait(false);
-            if (line is null)
+            _extensionCommandStore?.SetExtensionUiBridge(null, "rpc");
+            _extensionCommandStore?.ResetRuntime();
+        });
+        try
+        {
+            // 1. 【CodingAgent】【RPC启动】输入泵已能接收 UI 响应，启动扩展可安全等待交互
+            if (_extensionCommandStore is not null)
             {
-                break;
+                foreach (var error in await _extensionCommandStore.EnsureSessionStartedAsync(cancellationToken).ConfigureAwait(false))
+                    await WriteErrorAsync(null, "session_start", error.Error, cancellationToken).ConfigureAwait(false);
+            }
+            background?.StartBackgroundDelivery();
+            if (background?.McpService is { } mcp)
+                mcpNotifications = mcp.PresentNotificationsAsync(
+                    (notice, token) => ExtensionUi.NotifyAsync(notice.Message, notice.Level, token), mcpNotificationsCancellation.Token);
+            await foreach (var line in commands.Reader.ReadAllAsync(cancellationToken).ConfigureAwait(false))
+            {
+                if (background?.IsShutdownRequested == true) break;
+                await HandleLineAsync(line, cancellationToken).ConfigureAwait(false);
             }
 
-            if (line.EndsWith('\r'))
+            // 1. 【CodingAgent】【RPC退出】输入断开后不再可能收到编辑器响应，先解除扩展等待
+            if (background?.IsShutdownRequested != true)
             {
-                line = line[..^1];
+                ExtensionUi.Close();
+                await WaitForSessionBashAsync().ConfigureAwait(false);
+                _extensionCommandStore?.SetExtensionUiBridge(null, "rpc");
+                if (_extensionCommandStore is not null)
+                    await _extensionCommandStore.PublishSessionShutdownAsync(CancellationToken.None).ConfigureAwait(false);
+                _extensionCommandStore?.ResetRuntime();
+            }
+            Task[] extensionTasks;
+            lock (_gate) extensionTasks = _extensionCommandTasks.Values.ToArray();
+            await Task.WhenAll(extensionTasks).ConfigureAwait(false);
+            var active = GetActivePromptTask();
+            if (active is not null)
+            {
+                await active.ConfigureAwait(false);
             }
 
-            if (string.IsNullOrWhiteSpace(line))
+            var activeBash = GetActiveBashTask();
+            if (activeBash is not null)
             {
-                continue;
+                await activeBash.ConfigureAwait(false);
             }
 
-            await HandleLineAsync(line, cancellationToken).ConfigureAwait(false);
-        }
+            var activeCompaction = GetActiveCompactionTask();
+            if (activeCompaction is not null)
+            {
+                await activeCompaction.ConfigureAwait(false);
+            }
 
-        var active = GetActivePromptTask();
-        if (active is not null)
+            // 2. 【CodingAgent】【扩展退出】主动退出等待当前操作提交，再发布一次关闭事件和最后的会话保存
+            if (background?.IsShutdownRequested == true)
+            {
+                AbortSessionBash();
+                await WaitForSessionBashAsync().ConfigureAwait(false);
+                await background.WaitForIdleAsync(cancellationToken).ConfigureAwait(false);
+                _extensionCommandStore?.SetExtensionUiBridge(null, "rpc");
+                if (_extensionCommandStore is not null)
+                    await _extensionCommandStore.PublishSessionShutdownAsync(CancellationToken.None).ConfigureAwait(false);
+                PersistSession();
+                _extensionCommandStore?.ResetRuntime();
+            }
+
+            return 0;
+        }
+        finally
         {
-            await active.ConfigureAwait(false);
+            AbortSessionBash();
+            await WaitForSessionBashAsync().ConfigureAwait(false);
+            await mcpNotificationsCancellation.CancelAsync().ConfigureAwait(false);
+            await mcpNotifications.ConfigureAwait(false);
+            if (background is not null)
+            {
+                await background.StopBackgroundDeliveryAsync().ConfigureAwait(false);
+                background.BackgroundEvent -= HandleBackgroundEventAsync;
+            }
+            await inputCancellation.CancelAsync().ConfigureAwait(false);
+            await shutdownWatch.ConfigureAwait(false);
+            ExtensionUi.Close();
+            await inputTask.ConfigureAwait(false);
+            _extensionCommandStore?.SetExtensionUiBridge(null, "rpc");
+            _extensionCommandStore?.ResetRuntime();
+            Task[] remainingCommands;
+            lock (_gate) remainingCommands = _extensionCommandTasks.Values.ToArray();
+            await Task.WhenAll(remainingCommands).ConfigureAwait(false);
         }
+    }
 
-        var activeBash = GetActiveBashTask();
-        if (activeBash is not null)
+    /// <summary>【CodingAgent】【RPC后台】输出扩展自动运行事件，并保存已提交的会话状态。</summary>
+    /// <param name="evt">后台模型或消息事件。</param>
+    /// <param name="token">后台运行取消信号。</param>
+    /// <returns>协议输出完成的任务。</returns>
+    private async Task HandleBackgroundEventAsync(AgentEvent evt, CancellationToken token)
+    {
+        await WriteJsonLineAsync(ToRpcEvent(evt), token).ConfigureAwait(false);
+        if (evt is MessageEndEvent or AgentEndEvent) PersistSession();
+    }
+
+    /// <summary>【CodingAgent】【退出唤醒】扩展请求退出时停止接收普通命令，使空闲 RPC 无需等到 stdin 关闭。</summary>
+    /// <param name="runner">真实会话运行器。</param>
+    /// <param name="commands">普通命令队列。</param>
+    /// <param name="token">宿主退出时取消监听的信号。</param>
+    /// <returns>退出请求或宿主结束后完成。</returns>
+    private static async Task WatchShutdownAsync(RuntimeCodingAgentRunner? runner, ChannelWriter<string> commands, CancellationToken token)
+    {
+        if (runner is null) return;
+        try
         {
-            await activeBash.ConfigureAwait(false);
+            await runner.ShutdownRequested.WaitAsync(token).ConfigureAwait(false);
+            commands.TryComplete();
         }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+    }
 
-        var activeCompaction = GetActiveCompactionTask();
-        if (activeCompaction is not null)
+    /// <summary>【CodingAgent】【RPC输入】独立接收 UI 响应，其余命令保持输入顺序交给主循环。</summary>
+    /// <param name="commands">命令队列写入端。</param>
+    /// <param name="cancellationToken">停止输入泵的信号。</param>
+    /// <returns>输入结束时完成的任务。</returns>
+    private async Task ReadInputAsync(ChannelWriter<string> commands, CancellationToken cancellationToken)
+    {
+        try
         {
-            await activeCompaction.ConfigureAwait(false);
+            while (await _input.ReadLineAsync(cancellationToken).ConfigureAwait(false) is { } line)
+            {
+                line = line.TrimEnd('\r');
+                if (string.IsNullOrWhiteSpace(line)) continue;
+                try
+                {
+                    using var document = JsonDocument.Parse(line);
+                    if (document.RootElement.ValueKind == JsonValueKind.Object &&
+                        GetOptionalString(document.RootElement, "type") == "extension_ui_response")
+                    {
+                        ExtensionUi.TryHandleResponse(document.RootElement);
+                        continue;
+                    }
+                }
+                catch (JsonException) { }
+                await commands.WriteAsync(line, cancellationToken).ConfigureAwait(false);
+            }
         }
-
-        return 0;
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+        catch (Exception ex) { commands.TryComplete(ex); }
+        finally
+        {
+            ExtensionUi.Close();
+            commands.TryComplete();
+        }
     }
 
     private async Task HandleLineAsync(string line, CancellationToken cancellationToken)
@@ -237,6 +372,10 @@ public sealed class CodingAgentRpcHost
                 case "cycle_thinking_level":
                     await HandleCycleThinkingLevelAsync(id, cancellationToken).ConfigureAwait(false);
                     break;
+                case "get_available_thinking_levels":
+                    await WriteSuccessAsync(id, "get_available_thinking_levels",
+                        new { levels = CodingAgentThinkingLevels.AvailableForModel(_runner.Model) }, cancellationToken).ConfigureAwait(false);
+                    break;
                 case "set_auto_retry":
                     await HandleSetAutoRetryAsync(id, command, cancellationToken).ConfigureAwait(false);
                     break;
@@ -325,8 +464,24 @@ public sealed class CodingAgentRpcHost
         var message = GetRequiredString(command, "message");
         var streamingBehavior = GetOptionalString(command, "streamingBehavior");
         var content = TryReadPromptContent(command, message);
+        if (_runner is RuntimeCodingAgentRunner runtime && runtime.IsExtensionCommand(message))
+        {
+            lock (_gate)
+            {
+                var sequence = ++_extensionCommandSequence;
+                _extensionCommandTasks[sequence] = Task.Run(() => RunExtensionCommandAsync(sequence, id, message, cancellationToken));
+            }
+            return;
+        }
         if (IsPromptActive)
         {
+            if (_runner is RuntimeCodingAgentRunner native)
+            {
+                var disposition = native.QueuePromptInput(new UserMessage(content ?? [new TextContent(message)]), streamingBehavior, cancellationToken);
+                await native.WaitForQueueNotificationsAsync().ConfigureAwait(false);
+                await WriteSuccessAsync(id, "prompt", new { disposition = disposition.ToString().ToLowerInvariant() }, cancellationToken).ConfigureAwait(false);
+                return;
+            }
             if (streamingBehavior is not null &&
                 streamingBehavior.Equals("steer", StringComparison.OrdinalIgnoreCase))
             {
@@ -339,7 +494,7 @@ public sealed class CodingAgentRpcHost
                     _runner.Steer(content);
                 }
 
-                await WriteSuccessAsync(id, "prompt", cancellationToken: cancellationToken).ConfigureAwait(false);
+                await WriteSuccessAsync(id, "prompt", new { disposition = "queued" }, cancellationToken).ConfigureAwait(false);
                 return;
             }
 
@@ -356,7 +511,7 @@ public sealed class CodingAgentRpcHost
                     _runner.FollowUp(content);
                 }
 
-                await WriteSuccessAsync(id, "prompt", cancellationToken: cancellationToken).ConfigureAwait(false);
+                await WriteSuccessAsync(id, "prompt", new { disposition = "queued" }, cancellationToken).ConfigureAwait(false);
                 return;
             }
 
@@ -379,8 +534,48 @@ public sealed class CodingAgentRpcHost
         }
     }
 
+    /// <summary>【CodingAgent】【RPC命令】独立执行扩展命令，等待空闲和 UI 时继续接收取消及其他协议请求。</summary>
+    /// <param name="sequence">当前命令任务标识。</param>
+    /// <param name="id">协议请求标识。</param>
+    /// <param name="message">完整命令文本。</param>
+    /// <param name="token">宿主取消信号。</param>
+    /// <returns>命令及其直接投递完成后的任务。</returns>
+    private async Task RunExtensionCommandAsync(long sequence, string? id, string message, CancellationToken token)
+    {
+        var response = new RpcPromptResponseState(this, id);
+        try
+        {
+            var events = _runner is RuntimeCodingAgentRunner native
+                ? native.RunWithDispositionAsync([new TextContent(message)], disposition => response.AcceptAsync(CancellationToken.None, disposition), CreatePromptLogContext(id), token)
+                : _runner.RunAsync(message, CreatePromptLogContext(id), token);
+            await foreach (var evt in events.ConfigureAwait(false))
+            {
+                await WriteJsonLineAsync(ToRpcEvent(evt), _runner is RuntimeCodingAgentRunner ? CancellationToken.None : token).ConfigureAwait(false);
+                if (evt is MessageEndEvent or AgentEndEvent) PersistSession();
+            }
+            await response.AcceptAsync(CancellationToken.None, CodingAgentPromptDisposition.Handled).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+        catch (Exception ex)
+        {
+            await response.FailAsync(ex.Message, CancellationToken.None).ConfigureAwait(false);
+        }
+        finally
+        {
+            lock (_gate) _extensionCommandTasks.Remove(sequence);
+        }
+    }
+
     private async Task HandleSteerAsync(string? id, JsonElement command, CancellationToken cancellationToken)
     {
+        if (_runner is RuntimeCodingAgentRunner native)
+        {
+            var text = GetRequiredString(command, "message");
+            var disposition = native.SteerWithDisposition(new UserMessage(TryReadPromptContent(command, text) ?? [new TextContent(text)]), cancellationToken);
+            await native.WaitForQueueNotificationsAsync().ConfigureAwait(false);
+            await WriteSuccessAsync(id, "steer", new { disposition = disposition.ToString().ToLowerInvariant() }, cancellationToken).ConfigureAwait(false);
+            return;
+        }
         if (!IsPromptActive)
         {
             await WriteErrorAsync(id, "steer", "Agent is not running.", cancellationToken).ConfigureAwait(false);
@@ -398,11 +593,19 @@ public sealed class CodingAgentRpcHost
             _runner.Steer(content);
         }
 
-        await WriteSuccessAsync(id, "steer", cancellationToken: cancellationToken).ConfigureAwait(false);
+        await WriteSuccessAsync(id, "steer", new { disposition = "queued" }, cancellationToken).ConfigureAwait(false);
     }
 
     private async Task HandleFollowUpAsync(string? id, JsonElement command, CancellationToken cancellationToken)
     {
+        if (_runner is RuntimeCodingAgentRunner native)
+        {
+            var text = GetRequiredString(command, "message");
+            var disposition = native.FollowUpWithDisposition(new UserMessage(TryReadPromptContent(command, text) ?? [new TextContent(text)]), cancellationToken);
+            await native.WaitForQueueNotificationsAsync().ConfigureAwait(false);
+            await WriteSuccessAsync(id, "follow_up", new { disposition = disposition.ToString().ToLowerInvariant() }, cancellationToken).ConfigureAwait(false);
+            return;
+        }
         if (!IsPromptActive)
         {
             await WriteErrorAsync(id, "follow_up", "Agent is not running.", cancellationToken).ConfigureAwait(false);
@@ -420,7 +623,7 @@ public sealed class CodingAgentRpcHost
             _runner.FollowUp(content);
         }
 
-        await WriteSuccessAsync(id, "follow_up", cancellationToken: cancellationToken).ConfigureAwait(false);
+        await WriteSuccessAsync(id, "follow_up", new { disposition = "queued" }, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -431,6 +634,7 @@ public sealed class CodingAgentRpcHost
     private async Task HandleClearQueueAsync(string? id, CancellationToken cancellationToken)
     {
         var queued = _runner.DrainQueuedMessages();
+        if (_runner is RuntimeCodingAgentRunner native) await native.WaitForQueueNotificationsAsync().ConfigureAwait(false);
         await WriteSuccessAsync(
                 id,
                 "clear_queue",
@@ -441,6 +645,13 @@ public sealed class CodingAgentRpcHost
 
     private async Task HandleNewSessionAsync(string? id, JsonElement command, CancellationToken cancellationToken)
     {
+        if (_runner is RuntimeCodingAgentRunner nativeRunner)
+        {
+            var result = await nativeRunner.NewSessionAsync(GetOptionalString(command, "parentSession"), cancellationToken).ConfigureAwait(false);
+            if (!result.Cancelled) PersistSession();
+            await WriteSuccessAsync(id, "new_session", new { cancelled = result.Cancelled, sessionFile = _treeSessionController?.Path }, cancellationToken).ConfigureAwait(false);
+            return;
+        }
         if (IsPromptActive)
         {
             await WriteErrorAsync(id, "new_session", "Cannot start a new session while the agent is running.", cancellationToken)
@@ -478,17 +689,10 @@ public sealed class CodingAgentRpcHost
 
     private async Task HandleSetModelAsync(string? id, JsonElement command, CancellationToken cancellationToken)
     {
-        if (IsPromptActive)
-        {
-            await WriteErrorAsync(id, "set_model", "Cannot change model while the agent is running.", cancellationToken)
-                .ConfigureAwait(false);
-            return;
-        }
-
         var provider = GetRequiredString(command, "provider");
         var modelId = GetRequiredString(command, "modelId");
         var model = SelectConfiguredModel(provider, modelId);
-        _settingsStore?.SaveDefaultModel(model);
+        // 1. 【CodingAgent】【会话模型】RPC 选择只影响当前会话，用户默认配置由显式设置操作修改
         ClampCurrentThinkingLevel();
         _treeSessionController?.SyncFromRunner(_runner);
         PersistSession();
@@ -547,7 +751,7 @@ public sealed class CodingAgentRpcHost
         var effectiveThinking = CodingAgentThinkingLevels.ClampForModel(
             _runner.Model,
             ParseThinkingLevelOrNull(updated.DefaultThinkingLevel));
-        updated = updated with { DefaultThinkingLevel = FormatThinkingLevelRaw(effectiveThinking) };
+        updated = updated with { DefaultThinkingLevel = CodingAgentThinkingLevels.Format(effectiveThinking) };
         _settingsStore.Save(updated);
 
         _runner.ThinkingLevel = effectiveThinking;
@@ -555,12 +759,9 @@ public sealed class CodingAgentRpcHost
         _runner.FollowUpMode = CodingAgentQueueModes.ToAgentQueueMode(updated.FollowUpMode);
         SetRetryOptions(CodingAgentRetryOptions.FromSettingsOrEnvironment(updated));
         _autoCompactionEnabled = updated.AutoCompactionEnabled;
+        if (_runner is RuntimeCodingAgentRunner runtime) runtime.SetAutoCompactionEnabled(null);
 
-        if (selectedModel is not null)
-        {
-            _treeSessionController?.SyncFromRunner(_runner);
-            PersistSession();
-        }
+        PersistSession();
 
         await WriteSuccessAsync(id, "update_settings", CreateSettingsData(updated), cancellationToken)
             .ConfigureAwait(false);
@@ -568,36 +769,19 @@ public sealed class CodingAgentRpcHost
 
     private async Task HandleCycleModelAsync(string? id, CancellationToken cancellationToken)
     {
-        if (IsPromptActive)
-        {
-            await WriteErrorAsync(id, "cycle_model", "Cannot change model while the agent is running.", cancellationToken)
-                .ConfigureAwait(false);
-            return;
-        }
-
         var candidates = GetModelCycleCandidates(out var isScoped);
-        if (candidates.Count == 0)
-        {
-            await WriteErrorAsync(
-                    id,
-                    "cycle_model",
-                    "No models with configured auth are available. Use login or configure provider credentials.",
-                    cancellationToken)
-                .ConfigureAwait(false);
-            return;
-        }
-
-        if (candidates.Count == 1)
+        if (candidates.Count <= 1)
         {
             await WriteExplicitDataSuccessAsync(id, "cycle_model", null, cancellationToken).ConfigureAwait(false);
             return;
         }
 
         var currentIndex = candidates.FindIndex(candidate => SameModel(candidate.Model, _runner.Model));
-        var nextIndex = currentIndex < 0 ? 0 : (currentIndex + 1) % candidates.Count;
+        var nextIndex = (Math.Max(0, currentIndex) + 1) % candidates.Count;
         var next = candidates[nextIndex];
-        var selected = _runner.SelectModel(next.Model.Provider, next.Model.Id);
-        _settingsStore?.SaveDefaultModel(selected);
+        var selected = _runner is RuntimeCodingAgentRunner runtime
+            ? await runtime.SelectModelWithSourceAsync(next.Model.Provider, next.Model.Id, "cycle", cancellationToken, next.ThinkingLevel).ConfigureAwait(false)
+            : _runner.SelectModel(next.Model.Provider, next.Model.Id);
         ApplyScopedThinkingOverride(next.ThinkingLevel);
         _treeSessionController?.SyncFromRunner(_runner);
         PersistSession();
@@ -615,39 +799,31 @@ public sealed class CodingAgentRpcHost
 
     private async Task HandleSetThinkingLevelAsync(string? id, JsonElement command, CancellationToken cancellationToken)
     {
-        if (IsPromptActive)
-        {
-            await WriteErrorAsync(id, "set_thinking_level", "Cannot change thinking level while the agent is running.", cancellationToken)
-                .ConfigureAwait(false);
-            return;
-        }
-
         var rawLevel = GetRequiredString(command, "level").Trim();
         if (!CodingAgentThinkingLevels.TryParse(rawLevel, out var level))
         {
-            throw new ArgumentException($"Unsupported thinking level '{rawLevel}'. Expected off, minimal, low, medium, high, or xhigh.");
+            throw new ArgumentException($"Unsupported thinking level '{rawLevel}'. Expected off, minimal, low, medium, high, xhigh, or max.");
         }
 
-        SetAndSaveThinkingLevel(level);
+        SetSessionThinkingLevel(level);
         await WriteSuccessAsync(id, "set_thinking_level", cancellationToken: cancellationToken).ConfigureAwait(false);
     }
 
     private async Task HandleCycleThinkingLevelAsync(string? id, CancellationToken cancellationToken)
     {
-        if (IsPromptActive)
+        if (!_runner.Model.Reasoning)
         {
-            await WriteErrorAsync(id, "cycle_thinking_level", "Cannot change thinking level while the agent is running.", cancellationToken)
-                .ConfigureAwait(false);
+            await WriteExplicitDataSuccessAsync(id, "cycle_thinking_level", null, cancellationToken).ConfigureAwait(false);
             return;
         }
 
         _runner.ThinkingLevel = CodingAgentThinkingLevels.CycleForModel(_runner.Model, _runner.ThinkingLevel);
-        SaveThinkingLevel(_runner.ThinkingLevel);
-        var level = FormatThinkingLevelRaw(_runner.ThinkingLevel);
+        PersistSession();
+        var level = CodingAgentThinkingLevels.Format(_runner.ThinkingLevel);
         await WriteExplicitDataSuccessAsync(
             id,
             "cycle_thinking_level",
-            level is null ? null : new { level },
+            new { level },
             cancellationToken).ConfigureAwait(false);
     }
 
@@ -702,12 +878,19 @@ public sealed class CodingAgentRpcHost
 
         var enabled = GetRequiredBoolean(command, "enabled");
         _autoCompactionEnabled = enabled;
+        if (_runner is RuntimeCodingAgentRunner runtime) runtime.SetAutoCompactionEnabled(enabled);
         SaveAutoCompactionEnabled(enabled);
         await WriteSuccessAsync(id, "set_auto_compaction", cancellationToken: cancellationToken).ConfigureAwait(false);
     }
 
     private async Task HandleBashAsync(string? id, JsonElement command, CancellationToken cancellationToken)
     {
+        if (_useSessionBash)
+        {
+            StartSessionBash(id, GetRequiredString(command, "command"),
+                command.TryGetProperty("excludeFromContext", out var excluded) && excluded.GetBoolean(), cancellationToken);
+            return;
+        }
         if (IsBashActive)
         {
             await WriteErrorAsync(id, "bash", "A bash command is already running.", cancellationToken)
@@ -760,6 +943,13 @@ public sealed class CodingAgentRpcHost
 
     private async Task HandleSwitchSessionAsync(string? id, JsonElement command, CancellationToken cancellationToken)
     {
+        if (_runner is RuntimeCodingAgentRunner nativeRunner)
+        {
+            var result = await nativeRunner.SwitchSessionAsync(GetRequiredString(command, "sessionPath"), cancellationToken).ConfigureAwait(false);
+            if (!result.Cancelled) PersistSession();
+            await WriteSuccessAsync(id, "switch_session", new { cancelled = result.Cancelled, sessionFile = _treeSessionController?.Path }, cancellationToken).ConfigureAwait(false);
+            return;
+        }
         if (IsPromptActive)
         {
             await WriteErrorAsync(id, "switch_session", "Cannot switch session while the agent is running.", cancellationToken)
@@ -846,7 +1036,9 @@ public sealed class CodingAgentRpcHost
             return;
         }
 
-        _runner.SessionName = GetRequiredString(command, "name").Trim();
+        var name = GetRequiredString(command, "name").Trim();
+        if (_runner is RuntimeCodingAgentRunner runtime) runtime.SetSessionName(name);
+        else _runner.SessionName = name;
         PersistSession();
         await WriteSuccessAsync(id, "set_session_name", cancellationToken: cancellationToken).ConfigureAwait(false);
     }
@@ -861,7 +1053,7 @@ public sealed class CodingAgentRpcHost
         _treeSessionController.SyncFromRunner(_runner);
         return _runner
             .GetSessionStats(_sessionStore?.Path)
-            .WithUsage(_treeSessionController.GetCurrentBranchUsageSummary());
+            .WithUsage(_treeSessionController.GetSessionUsageSummary());
     }
 
     private async Task HandleCompactAsync(string? id, JsonElement command, CancellationToken cancellationToken)
@@ -910,7 +1102,7 @@ public sealed class CodingAgentRpcHost
                 .ConfigureAwait(false);
             _treeSessionController?.RecordCompaction(_runner, result);
             PersistSession();
-            await WriteSuccessAsync(id, "compact", result, CancellationToken.None).ConfigureAwait(false);
+            await WriteSuccessAsync(id, "compact", ToCompactionResult(result), CancellationToken.None).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
@@ -938,6 +1130,13 @@ public sealed class CodingAgentRpcHost
 
     private async Task HandleForkAsync(string? id, JsonElement command, CancellationToken cancellationToken)
     {
+        if (_runner is RuntimeCodingAgentRunner nativeRunner)
+        {
+            var result = await nativeRunner.ForkSessionAsync(GetRequiredString(command, "entryId"), GetOptionalString(command, "position") ?? "before", cancellationToken).ConfigureAwait(false);
+            if (!result.Cancelled) PersistSession();
+            await WriteSuccessAsync(id, "fork", new { cancelled = result.Cancelled, text = result.SelectedText, sessionFile = _treeSessionController?.Path }, cancellationToken).ConfigureAwait(false);
+            return;
+        }
         if (IsPromptActive)
         {
             await WriteErrorAsync(id, "fork", "Cannot fork while the agent is running.", cancellationToken)
@@ -972,6 +1171,15 @@ public sealed class CodingAgentRpcHost
 
     private async Task HandleCloneAsync(string? id, CancellationToken cancellationToken)
     {
+        if (_runner is RuntimeCodingAgentRunner nativeRunner && _treeSessionController is not null)
+        {
+            _treeSessionController.SyncFromRunner(_runner);
+            var leaf = _treeSessionController.GetSummary().LeafId ?? throw new InvalidOperationException("Nothing to clone yet.");
+            var result = await nativeRunner.ForkSessionAsync(leaf, "at", cancellationToken).ConfigureAwait(false);
+            if (!result.Cancelled) PersistSession();
+            await WriteSuccessAsync(id, "clone", new { cancelled = result.Cancelled, sessionFile = _treeSessionController?.Path }, cancellationToken).ConfigureAwait(false);
+            return;
+        }
         if (IsPromptActive)
         {
             await WriteErrorAsync(id, "clone", "Cannot clone while the agent is running.", cancellationToken)
@@ -1021,6 +1229,12 @@ public sealed class CodingAgentRpcHost
 
         try
         {
+            // 1. 【CodingAgent】【统一恢复】运行器管理原生恢复，宿主不回滚失败原始记录或重复发送用户输入
+            if (_runner is RuntimeCodingAgentRunner)
+            {
+                await RunSinglePromptAttemptAsync(message, content, logContext, response, cts.Token).ConfigureAwait(false);
+                return;
+            }
             while (true)
             {
                 var result = await RunSinglePromptAttemptAsync(message, content, logContext, response, cts.Token).ConfigureAwait(false);
@@ -1247,29 +1461,40 @@ public sealed class CodingAgentRpcHost
         RpcPromptResponseState response,
         CancellationToken cancellationToken)
     {
+        string? finalError = null;
+        var settled = false;
         try
         {
-            var events = content is null
+            var events = _runner is RuntimeCodingAgentRunner native
+                ? native.RunWithDispositionAsync(content ?? [new TextContent(message)], disposition => response.AcceptAsync(CancellationToken.None, disposition), logContext, cancellationToken)
+                : content is null
                 ? _runner.RunAsync(message, logContext, cancellationToken)
                 : _runner.RunAsync(content, logContext, cancellationToken);
 
             await foreach (var evt in events.ConfigureAwait(false))
             {
-                await response.AcceptAsync(CancellationToken.None).ConfigureAwait(false);
-                await WriteJsonLineAsync(ToRpcEvent(evt), cancellationToken).ConfigureAwait(false);
-                if (evt is AgentEndEvent { ErrorMessage: not null } end)
+                if (_runner is not RuntimeCodingAgentRunner) await response.AcceptAsync(CancellationToken.None).ConfigureAwait(false);
+                await WriteJsonLineAsync(ToRpcEvent(evt), _runner is RuntimeCodingAgentRunner ? CancellationToken.None : cancellationToken).ConfigureAwait(false);
+                if (evt is CodingAgentSettledEvent) settled = true;
+                if (evt is AgentEndEvent end)
                 {
-                    return RpcPromptAttemptResult.Failed(end.ErrorMessage);
+                    finalError = end.ErrorMessage;
+                    if (finalError is not null && _runner is not RuntimeCodingAgentRunner)
+                        return RpcPromptAttemptResult.Failed(finalError);
                 }
             }
 
-            await response.AcceptAsync(CancellationToken.None).ConfigureAwait(false);
-            return RpcPromptAttemptResult.Success();
+            await response.AcceptAsync(CancellationToken.None, CodingAgentPromptDisposition.Handled).ConfigureAwait(false);
+            return finalError is null ? RpcPromptAttemptResult.Success() : RpcPromptAttemptResult.Failed(finalError);
         }
         catch (Exception ex) when (!response.IsAccepted && ex is not OperationCanceledException)
         {
             await response.FailAsync(ex.Message, CancellationToken.None).ConfigureAwait(false);
             return RpcPromptAttemptResult.PreflightFailed(ex.Message);
+        }
+        catch (OperationCanceledException) when (settled)
+        {
+            return RpcPromptAttemptResult.Failed(finalError ?? "Cancelled");
         }
         catch (OperationCanceledException)
         {
@@ -1277,6 +1502,7 @@ public sealed class CodingAgentRpcHost
         }
         catch (Exception ex)
         {
+            if (settled) return RpcPromptAttemptResult.Failed(finalError ?? ex.Message);
             await WriteJsonLineAsync(new { type = "agent_end", errorMessage = ex.Message }, CancellationToken.None)
                 .ConfigureAwait(false);
             return RpcPromptAttemptResult.Failed(ex.Message);
@@ -1331,7 +1557,7 @@ public sealed class CodingAgentRpcHost
             steeringMode = CodingAgentQueueModes.FromAgentQueueMode(_runner.SteeringMode),
             followUpMode = CodingAgentQueueModes.FromAgentQueueMode(_runner.FollowUpMode),
             sessionFile = treeSummary?.FilePath ?? _sessionStore?.Path,
-            sessionId = treeSummary?.SessionId,
+            sessionId = treeSummary?.SessionId ?? (_runner as RuntimeCodingAgentRunner)?.SessionId,
             sessionName = _runner.SessionName,
             autoCompactionEnabled = GetAutoCompactionEnabled(),
             autoRetryEnabled = GetRetryOptions().IsEnabled,
@@ -1381,13 +1607,21 @@ public sealed class CodingAgentRpcHost
             {
                 enabled = retryOptions.IsEnabled,
                 maxAttempts = retryOptions.MaxAttempts,
-                baseDelayMilliseconds = retryOptions.BaseDelayMilliseconds
+                baseDelayMilliseconds = retryOptions.BaseDelayMilliseconds,
+                maxRetries = retryOptions.MaxAttempts,
+                baseDelayMs = retryOptions.BaseDelayMilliseconds,
+                maxAgentDelayMs = retryOptions.MaxAgentDelayMilliseconds,
+                provider = settings.Retry is { ValueKind: JsonValueKind.Object } retry && retry.TryGetProperty("provider", out var provider) ? provider : (JsonElement?)null
             },
+            compaction = new { enabled = settings.GetCompactionSettings(_runner.Model).Enabled,
+                reserveTokens = settings.GetCompactionSettings(_runner.Model).ReserveTokens,
+                keepRecentTokens = settings.GetCompactionSettings(_runner.Model).KeepRecentTokens },
+            branchSummary = new { reserveTokens = settings.GetBranchSummaryReserveTokens(), skipPrompt = settings.GetBranchSummarySkipPrompt() },
             defaultThinkingLevel = NormalizeThinkingLevelOrNull(settings.DefaultThinkingLevel) ?? "off",
             enabledModels = settings.EnabledModels?.ToArray(),
             steeringMode = CodingAgentQueueModes.NormalizeOrDefault(settings.SteeringMode),
             followUpMode = CodingAgentQueueModes.NormalizeOrDefault(settings.FollowUpMode),
-            autoCompactionEnabled = settings.AutoCompactionEnabled ?? _autoCompaction.IsEnabled,
+            autoCompactionEnabled = (_runner as RuntimeCodingAgentRunner)?.AutoCompactionEnabled ?? settings.AutoCompactionEnabled ?? _autoCompaction.IsEnabled,
             theme = string.IsNullOrWhiteSpace(settings.Theme)
                 ? CodingAgentThemeStore.DefaultThemeName
                 : settings.Theme,
@@ -1424,6 +1658,18 @@ public sealed class CodingAgentRpcHost
         JsonElement settingsElement)
     {
         var updated = current;
+        if (settingsElement.TryGetProperty("compaction", out var compaction))
+        {
+            var merged = compaction.ValueKind == JsonValueKind.Null ? (JsonElement?)null : CodingAgentNativeSettings.MergeObject(current.Compaction, compaction);
+            updated = updated with { Compaction = merged, AutoCompactionEnabled = CodingAgentNativeSettings.ReadBoolean(merged, "enabled", "compaction") };
+            _ = updated.GetCompactionSettings(_runner.Model);
+        }
+        if (settingsElement.TryGetProperty("branchSummary", out var branchSummary))
+        {
+            updated = updated with { BranchSummary = branchSummary.ValueKind == JsonValueKind.Null ? null : CodingAgentNativeSettings.MergeObject(current.BranchSummary, branchSummary) };
+            _ = updated.GetBranchSummaryReserveTokens();
+            _ = updated.GetBranchSummarySkipPrompt();
+        }
         if (settingsElement.TryGetProperty("defaultProvider", out var defaultProvider))
         {
             updated = updated with { DefaultProvider = ReadNullableString(defaultProvider) };
@@ -1681,7 +1927,8 @@ public sealed class CodingAgentRpcHost
             return current with
             {
                 RetryMaxAttempts = null,
-                RetryBaseDelayMilliseconds = null
+                RetryBaseDelayMilliseconds = null,
+                Retry = null
             };
         }
 
@@ -1724,10 +1971,23 @@ public sealed class CodingAgentRpcHost
             retryBaseDelayMilliseconds = ReadNullableNonNegativeInt(baseDelayMs, "settings.retry.baseDelayMs");
         }
 
+        var native = CodingAgentNativeSettings.MergeObject(current.Retry, retryElement);
+        if (retryElement.TryGetProperty("maxRetries", out var maxRetries))
+            retryMaxAttempts = ReadNullableNonNegativeInt(maxRetries, "settings.retry.maxRetries");
+        if (retryElement.TryGetProperty("enabled", out var explicitEnabled) && explicitEnabled.ValueKind == JsonValueKind.False) retryMaxAttempts = 0;
+        _ = CodingAgentNativeSettings.ReadInteger(native, "maxAgentDelayMs", "retry");
+        if (native.TryGetProperty("provider", out var provider))
+        {
+            _ = CodingAgentNativeSettings.ReadInteger(provider, "timeoutMs", "retry.provider");
+            _ = CodingAgentNativeSettings.ReadInteger(provider, "maxRetries", "retry.provider");
+            _ = CodingAgentNativeSettings.ReadInteger(provider, "maxRetryDelayMs", "retry.provider");
+        }
+
         return current with
         {
             RetryMaxAttempts = retryMaxAttempts,
-            RetryBaseDelayMilliseconds = retryBaseDelayMilliseconds
+            RetryBaseDelayMilliseconds = retryBaseDelayMilliseconds,
+            Retry = native
         };
     }
 
@@ -1819,6 +2079,7 @@ public sealed class CodingAgentRpcHost
         {
             _activePromptCts?.Cancel();
         }
+        if (_runner is RuntimeCodingAgentRunner runtime) runtime.Abort();
     }
 
     private void AbortActiveRetry()
@@ -1827,10 +2088,12 @@ public sealed class CodingAgentRpcHost
         {
             _activeRetryDelayCts?.Cancel();
         }
+        if (_runner is RuntimeCodingAgentRunner runtime) runtime.AbortRetry();
     }
 
     private void AbortActiveBash()
     {
+        AbortSessionBash();
         lock (_gate)
         {
             _activeBashCts?.Cancel();
@@ -1893,7 +2156,7 @@ public sealed class CodingAgentRpcHost
         {
             lock (_gate)
             {
-                return _activePromptCts is not null;
+                return _activePromptCts is not null || _runner.IsStreaming;
             }
         }
     }
@@ -1904,7 +2167,7 @@ public sealed class CodingAgentRpcHost
         {
             lock (_gate)
             {
-                return _activeBashCts is not null;
+                return _useSessionBash ? ((RuntimeCodingAgentRunner)_runner).IsBashRunning : _activeBashCts is not null;
             }
         }
     }
@@ -1930,7 +2193,7 @@ public sealed class CodingAgentRpcHost
 
     private void PersistSession()
     {
-        _sessionStore?.Save(_runner.Messages, _runner.Model, _runner.SessionName);
+        _sessionStore?.Save(_runner.Messages, _runner.Model, _runner.SessionName, CodingAgentThinkingLevels.Format(_runner.ThinkingLevel));
         _treeSessionController?.SyncFromRunner(_runner);
     }
 
@@ -1981,6 +2244,7 @@ public sealed class CodingAgentRpcHost
         lock (_gate)
         {
             _retryOptions = options;
+            if (_runner is RuntimeCodingAgentRunner runtime) runtime.SummaryRetryOptions = options;
         }
     }
 
@@ -2039,6 +2303,7 @@ public sealed class CodingAgentRpcHost
 
     private bool GetAutoCompactionEnabled()
     {
+        if (_runner is RuntimeCodingAgentRunner runtime) return runtime.AutoCompactionEnabled;
         if (_autoCompactionEnabled is not null)
         {
             return _autoCompactionEnabled.Value;
@@ -2156,12 +2421,16 @@ public sealed class CodingAgentRpcHost
         return new string(chars);
     }
 
+    /// <summary>【CodingAgent】【RPC 确认】先送达操作产生的队列快照，再确认命令完成。</summary>
+    /// <param name="id">请求标识。</param><param name="command">命令名。</param>
+    /// <param name="data">可选返回数据。</param><param name="cancellationToken">取消信号。</param><returns>确认完成任务。</returns>
     private async Task WriteSuccessAsync(
         string? id,
         string command,
         object? data = null,
         CancellationToken cancellationToken = default)
     {
+        if (_runner is RuntimeCodingAgentRunner native) await native.WaitForQueueNotificationsAsync().ConfigureAwait(false);
         await WriteJsonLineAsync(new RpcResponse(id, "response", command, true, data), cancellationToken)
             .ConfigureAwait(false);
     }
@@ -2363,13 +2632,36 @@ public sealed class CodingAgentRpcHost
         return JsonSerializer.Serialize(payload, JsonOptions);
     }
 
+    /// <summary>【CodingAgent】【压缩协议】输出上游摘要字段，不暴露内部存储标识与恢复控制字段。</summary>
+    /// <param name="result">摘要结果，失败时为空。</param>
+    /// <returns>标准摘要对象。</returns>
+    private static object? ToCompactionResult(CodingAgentCompactionResult? result) => result is null ? null : new
+    {
+        summary = result.Summary, firstKeptEntryId = result.FirstKeptEntryId, tokensBefore = result.TokensBefore,
+        estimatedTokensAfter = result.EstimatedTokensAfter, details = result.Details, usage = result.Usage
+    };
+
     private static object ToRpcEvent(AgentEvent evt) => evt switch
     {
+        CodingAgentAutoRetryStartEvent retry => new { type = retry.Type, attempt = retry.Attempt, maxAttempts = retry.MaxAttempts, delayMs = retry.DelayMs, errorMessage = retry.ErrorMessage },
+        CodingAgentAutoRetryEndEvent retry => new { type = retry.Type, success = retry.Success, attempt = retry.Attempt, finalError = retry.FinalError },
+        CodingAgentEntryAppendedEvent entry => new { type = entry.Type, entry = entry.Entry },
+        CodingAgentQueueUpdateEvent queue => new { type = queue.Type, steering = queue.Steering, followUp = queue.FollowUp },
+        CodingAgentSummaryRetryScheduledEvent retry => new { type = retry.Type, attempt = retry.Attempt, maxAttempts = retry.MaxAttempts, delayMs = retry.DelayMs, errorMessage = retry.ErrorMessage },
+        CodingAgentSummaryRetryAttemptEvent retry => new { type = retry.Type, source = retry.Source, reason = retry.Reason },
+        CodingAgentSummaryRetryFinishedEvent retry => new { type = retry.Type },
+        CodingAgentCompactionStartEvent start => new { type = start.Type, reason = start.Reason },
+        CodingAgentBashExecutionUpdateEvent bash => new { type = bash.Type, id = bash.Id, delta = bash.Delta },
+        CodingAgentCompactionEndEvent end => new { type = end.Type, reason = end.Reason, result = ToCompactionResult(end.Result), aborted = end.Aborted, willRetry = end.WillRetry, errorMessage = end.ErrorMessage },
+        CodingAgentExtensionErrorEvent error => new { type = error.Type, extensionPath = error.ExtensionPath, @event = error.Event, error = error.Error },
+        CodingAgentSessionInfoChangedEvent info => new { type = info.Type, name = info.Name },
+        CodingAgentThinkingLevelChangedEvent thinking => new { type = thinking.Type, level = thinking.Level },
         AgentStartEvent => new { type = evt.Type },
         AgentEndEvent end => new
         {
             type = evt.Type,
             errorMessage = end.ErrorMessage,
+            willRetry = end.WillRetry,
             messages = end.Messages.Select(ToRpcMessage).ToArray()
         },
         TurnStartEvent turn => new { type = evt.Type, turnIndex = turn.TurnIndex },
@@ -2388,7 +2680,7 @@ public sealed class CodingAgentRpcHost
             message = update.Message is null ? null : ToRpcMessage(update.Message)
         },
         MessageEndEvent message => new { type = evt.Type, message = ToRpcMessage(message.Message) },
-        ToolExecutionStartEvent tool => new { type = evt.Type, toolCallId = tool.ToolCallId, toolName = tool.ToolName, args = tool.Args },
+        ToolExecutionStartEvent tool => new { type = evt.Type, toolCallId = tool.ToolCallId, toolName = tool.ToolName, args = tool.Args, parentToolCallId = tool.ParentToolCallId },
         ToolExecutionUpdateEvent tool => new
         {
             type = evt.Type,
@@ -2396,6 +2688,7 @@ public sealed class CodingAgentRpcHost
             toolName = tool.ToolName,
             args = tool.Args,
             update = new { text = tool.Update.Text },
+            parentToolCallId = tool.ParentToolCallId,
             partialResult = tool.PartialResult is null ? null : ToRpcToolResult(tool.PartialResult)
         },
         ToolExecutionEndEvent tool => new
@@ -2404,16 +2697,16 @@ public sealed class CodingAgentRpcHost
             toolCallId = tool.ToolCallId,
             toolName = tool.ToolName,
             isError = tool.IsError,
+            parentToolCallId = tool.ParentToolCallId,
             result = ToRpcToolResult(tool.Result)
         },
         _ => new { type = evt.Type }
     };
 
-    private static object ToRpcToolResult(ToolResult result) => new
-    {
-        isError = result.IsError,
-        content = result.Content.Select(ToRpcContent).ToArray()
-    };
+    /// <summary>【CodingAgent】【RPC工具】输出与扩展一致的完整工具结果。</summary>
+    /// <param name="result">工具结果。</param>
+    /// <returns>包含内容、详情、结构化输出和用量的 JSON 对象。</returns>
+    private static object ToRpcToolResult(ToolResult result) => CodingAgentJavaScriptExtensionRuntime.SerializeToolResult(result);
 
     private static object ToRpcAssistantMessageEvent(StreamEvent evt) => evt switch
     {
@@ -2519,21 +2812,13 @@ public sealed class CodingAgentRpcHost
         return stopReason == StopReason.Aborted ? "aborted" : "error";
     }
 
+    /// <summary>【CodingAgent】【RPC 消息】复用 pi 会话序列化，保留自定义消息、用量、停止原因和协议元数据。</summary>
+    /// <param name="message">会话消息。</param>
+    /// <returns>可由 RPC JSON 序列化器输出的对象。</returns>
     private static object ToRpcMessage(ChatMessage message)
     {
-        var converted = CodingAgentSessionStore.FromMessage(message);
-        return new
-        {
-            role = converted.Role,
-            toolCallId = converted.ToolCallId,
-            isError = converted.Role.Equals("toolResult", StringComparison.Ordinal) ? converted.IsError : (bool?)null,
-            usage = converted.Usage,
-            api = converted.Api,
-            provider = converted.Provider,
-            model = converted.Model,
-            timestamp = converted.Timestamp,
-            content = GetContent(message).Select(ToRpcContent).ToArray()
-        };
+        return JsonSerializer.SerializeToElement(CodingAgentSessionStore.FromMessage(message),
+            CodingAgentTreeSessionJsonContext.Default.CodingAgentSessionMessage);
     }
 
     private static object ToRpcContent(ContentBlock block) => block switch
@@ -2547,17 +2832,10 @@ public sealed class CodingAgentRpcHost
             id = tool.Id,
             name = tool.Name,
             arguments = ToRpcToolCallArguments(tool.Arguments),
-            thoughtSignature = tool.ThoughtSignature
+            thoughtSignature = tool.ThoughtSignature,
+            @namespace = tool.Namespace
         },
         _ => new { type = block.Type }
-    };
-
-    private static IReadOnlyList<ContentBlock> GetContent(ChatMessage message) => message switch
-    {
-        UserMessage user => user.Content,
-        AssistantMessage assistant => assistant.Content,
-        ToolResultMessage toolResult => toolResult.Content,
-        _ => []
     };
 
     private static object ToRpcToolCallArguments(string arguments)
@@ -2798,7 +3076,7 @@ public sealed class CodingAgentRpcHost
     {
         if (!CodingAgentThinkingLevels.TryParse(value, out var level))
         {
-            throw new ArgumentException($"Unsupported thinking level '{value}'. Expected off, minimal, low, medium, high, or xhigh.");
+            throw new ArgumentException($"Unsupported thinking level '{value}'. Expected off, minimal, low, medium, high, xhigh, or max.");
         }
 
         return FormatThinkingLevelRaw(level);
@@ -2839,28 +3117,19 @@ public sealed class CodingAgentRpcHost
     private static ThinkingLevel? ParseThinkingLevelOrNull(string? value) =>
         CodingAgentThinkingLevels.ParseOrNull(value);
 
-    private ThinkingLevel? SetAndSaveThinkingLevel(ThinkingLevel? requested)
+    /// <summary>【CodingAgent】【RPC 思考等级】更新当前会话的有效等级，保存历史而不改写全局默认设置。</summary>
+    /// <param name="requested">请求的等级，空值表示 off。</param><returns>模型允许的实际等级。</returns>
+    private ThinkingLevel? SetSessionThinkingLevel(ThinkingLevel? requested)
     {
         var effective = CodingAgentThinkingLevels.ClampForModel(_runner.Model, requested);
         _runner.ThinkingLevel = effective;
-        SaveThinkingLevel(effective);
+        PersistSession();
         return effective;
     }
 
     private void ClampCurrentThinkingLevel()
     {
-        SetAndSaveThinkingLevel(_runner.ThinkingLevel);
-    }
-
-    private void SaveThinkingLevel(ThinkingLevel? level)
-    {
-        if (_settingsStore is null)
-        {
-            return;
-        }
-
-        var settings = _settingsStore.Load();
-        _settingsStore.Save(settings with { DefaultThinkingLevel = FormatThinkingLevelRaw(level) });
+        SetSessionThinkingLevel(_runner.ThinkingLevel);
     }
 
     private void ApplyScopedThinkingOverride(string? thinkingLevel)
@@ -2872,7 +3141,7 @@ public sealed class CodingAgentRpcHost
         }
 
         var level = CodingAgentScopedModelPatterns.ParseThinkingLevelOrNull(thinkingLevel);
-        SetAndSaveThinkingLevel(level);
+        SetSessionThinkingLevel(level);
     }
 
     private RpcCommandInfo[] CreateRpcCommandInfos()
@@ -2958,14 +3227,16 @@ public sealed class CodingAgentRpcHost
 
         public bool IsAccepted => Volatile.Read(ref _completed) == 1;
 
-        public async Task AcceptAsync(CancellationToken cancellationToken)
+        /// <summary>【CodingAgent】【RPC 接收结果】只发送一次成功响应，并返回提示实际处理方式。</summary>
+        /// <param name="cancellationToken">响应写入取消信号。</param><param name="disposition">处理方式。</param><returns>响应写入任务。</returns>
+        public async Task AcceptAsync(CancellationToken cancellationToken, CodingAgentPromptDisposition disposition = CodingAgentPromptDisposition.Started)
         {
             if (Interlocked.CompareExchange(ref _completed, 1, 0) != 0)
             {
                 return;
             }
 
-            await host.WriteSuccessAsync(id, "prompt", cancellationToken: cancellationToken).ConfigureAwait(false);
+            await host.WriteSuccessAsync(id, "prompt", new { disposition = disposition.ToString().ToLowerInvariant() }, cancellationToken).ConfigureAwait(false);
         }
 
         public async Task FailAsync(string error, CancellationToken cancellationToken)

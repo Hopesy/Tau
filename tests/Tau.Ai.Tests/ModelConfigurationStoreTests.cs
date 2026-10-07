@@ -14,6 +14,7 @@ using Tau.Ai.Streaming;
 
 namespace Tau.Ai.Tests;
 
+[Collection("ProcessEnvironment")]
 public sealed class ModelConfigurationStoreTests
 {
     [Fact]
@@ -1426,7 +1427,7 @@ public sealed class ModelConfigurationStoreTests
     }
 
     [Fact]
-    public async Task StreamFunctions_OpenAiProviderSpecificOptionsDoNotInjectModelDefaultMaxTokens()
+    public async Task StreamFunctions_OpenAiSimpleProviderOptionsUseModelDefaultMaxTokens()
     {
         using var scope = EnvironmentVariableScope.Acquire();
         var tempDir = Path.Combine(Path.GetTempPath(), $"tau-models-openai-no-default-max-{Guid.NewGuid():N}");
@@ -1483,7 +1484,7 @@ public sealed class ModelConfigurationStoreTests
 
             var options = provider.CapturedOptions!;
             Assert.Equal("openai-key", options.ApiKey);
-            Assert.Null(options.MaxTokens);
+            Assert.Equal(1024, options.MaxTokens);
             Assert.Equal("low", options.ReasoningEffort);
         }
         finally
@@ -1830,6 +1831,8 @@ public sealed class ModelConfigurationStoreTests
         }
     }
 
+    /// <summary>【AI】【Anthropic 配置回归】合并供应商选项并追加思考预算，保留回答空间。</summary>
+    /// <returns>配置与分发测试任务。</returns>
     [Fact]
     public async Task StreamFunctions_AppliesAnthropicProviderSpecificOptionsFromModelsJson()
     {
@@ -1895,9 +1898,10 @@ public sealed class ModelConfigurationStoreTests
 
             var options = provider.CapturedOptions!;
             Assert.Equal("anthropic-key", options.ApiKey);
-            Assert.Equal(777, options.MaxTokens);
+            // 1. 【AI】【Anthropic 预算回归】简化入口追加思考空间，并为最终回答保留 1024 token
+            Assert.Equal(3_122, options.MaxTokens);
             Assert.True(options.ThinkingEnabled);
-            Assert.Equal(2345, options.ThinkingBudgetTokens);
+            Assert.Equal(2_098, options.ThinkingBudgetTokens);
             Assert.Equal("high", options.Effort);
             Assert.Equal("omitted", options.ThinkingDisplay);
             Assert.True(options.InterleavedThinking);
@@ -1911,6 +1915,8 @@ public sealed class ModelConfigurationStoreTests
         }
     }
 
+    /// <summary>显式自适应能力与模型等级映射在合并配置后仍优先采用调用方思考等级。</summary>
+    /// <returns>测试任务。</returns>
     [Fact]
     public async Task StreamFunctions_PreservesExplicitSimpleReasoningWhenApplyingAnthropicProviderSpecificOptions()
     {
@@ -1960,7 +1966,9 @@ public sealed class ModelConfigurationStoreTests
                     Api = "anthropic-messages",
                     Provider = "anthropic",
                     Reasoning = true,
-                    MaxOutputTokens = 4096
+                    MaxOutputTokens = 4096,
+                    Compat = new ModelCompatibility { ForceAdaptiveThinking = true },
+                    ThinkingLevelMap = new Dictionary<string, string?> { ["xhigh"] = "xhigh" }
                 },
                 new LlmContext { Messages = [new UserMessage("hi")] },
                 new SimpleStreamOptions { Reasoning = ThinkingLevel.ExtraHigh },
@@ -2649,7 +2657,8 @@ public sealed class ModelConfigurationStoreTests
             Assert.Equal("assistant", messages[2].GetProperty("role").GetString());
             Assert.Equal("I have processed the tool results.", messages[2].GetProperty("content").GetString());
             Assert.Equal("user", messages[3].GetProperty("role").GetString());
-            Assert.Equal("follow up", messages[3].GetProperty("content").GetString());
+            Assert.Equal("follow up", messages[3].GetProperty("content")[0].GetProperty("text").GetString());
+            Assert.Equal("ephemeral", messages[3].GetProperty("content")[0].GetProperty("cache_control").GetProperty("type").GetString());
         }
         finally
         {

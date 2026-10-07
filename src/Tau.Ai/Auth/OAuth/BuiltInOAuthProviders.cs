@@ -11,6 +11,11 @@ public static class BuiltInOAuthProviders
         new GeminiCliOAuthProvider(),
         new AntigravityOAuthProvider(),
         new OpenAICodexOAuthProvider(),
-        new XaiOAuthProvider()
+        new XaiOAuthProvider(),
+        new OpenRouterOAuthProvider(),
+        new MetaOAuthProvider(),
+        new KimiCodingOAuthProvider(),
+        new RadiusOAuthProvider(),
+        new OpenAIChatGPTOAuthProvider()
     ];
 }

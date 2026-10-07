@@ -7,57 +7,93 @@ internal sealed record CodingAgentSessionTarget(
     CodingAgentTreeSessionController? TreeSessionController,
     bool PreferTreeSession)
 {
+    /// <summary>【CodingAgent】【会话选择】按显式路径、目录和继续标志选择会话，普通启动创建独立 JSONL。</summary>
+    /// <param name="explicitSessionPath">显式文件路径或会话 ID 前缀。</param>
+    /// <param name="continueRecent">是否继续当前工作目录最近会话。</param>
+    /// <param name="sessionDirectory">可选会话目录。</param>
+    /// <param name="forkSessionPath">可选分叉来源。</param>
+    /// <param name="noSession">是否禁用持久化。</param>
+    /// <param name="workingDirectory">会话工作目录，默认进程目录。</param>
+    /// <param name="agentDirectory">默认会话目录所属的 Agent 目录。</param>
+    /// <returns>选定的会话存储。</returns>
     public static CodingAgentSessionTarget Resolve(
         string? explicitSessionPath,
         bool continueRecent = false,
         string? sessionDirectory = null,
         string? forkSessionPath = null,
-        bool noSession = false)
+        bool noSession = false,
+        string? workingDirectory = null,
+        string? agentDirectory = null)
     {
         if (noSession)
         {
             return new CodingAgentSessionTarget(null, null, false);
         }
+        var cwd = Path.GetFullPath(workingDirectory ?? Environment.CurrentDirectory);
 
         if (!string.IsNullOrWhiteSpace(forkSessionPath))
         {
             var sourcePath = ResolveForkSessionPath(forkSessionPath, sessionDirectory);
-            var path = ForkSession(sourcePath, sessionDirectory);
-            return new CodingAgentSessionTarget(null, CodingAgentTreeSessionController.OpenOrCreate(path), true);
+            var path = ForkSession(sourcePath, sessionDirectory ?? GetDefaultSessionDirectory(cwd, agentDirectory));
+            return OpenTree(path, cwd);
         }
 
         if (!string.IsNullOrWhiteSpace(explicitSessionPath))
         {
-            var path = ResolveExplicitSessionPath(explicitSessionPath, sessionDirectory);
+            var path = LooksLikeSessionPath(explicitSessionPath)
+                ? Path.GetFullPath(explicitSessionPath.Trim(), cwd)
+                : ResolveExplicitSessionPath(explicitSessionPath, sessionDirectory);
             return CodingAgentTreeSessionStore.IsJsonlPath(path)
-                ? new CodingAgentSessionTarget(null, CodingAgentTreeSessionController.OpenOrCreate(path), true)
+                ? OpenTree(path, cwd)
                 : new CodingAgentSessionTarget(new CodingAgentSessionStore(path), null, false);
         }
 
         if (!string.IsNullOrWhiteSpace(sessionDirectory))
         {
             var path = continueRecent
-                ? FindMostRecentSession(sessionDirectory) ?? CreateSessionPath(sessionDirectory)
+                ? FindMostRecentSession(sessionDirectory, cwd) ?? CreateSessionPath(sessionDirectory)
                 : CreateSessionPath(sessionDirectory);
-            return new CodingAgentSessionTarget(null, CodingAgentTreeSessionController.OpenOrCreate(path), true);
+            return OpenTree(path, cwd);
         }
 
-        if (continueRecent)
+        // 1. 【CodingAgent】【会话选择】环境指定文件仍视为显式恢复；不再自动续接旧的固定默认文件
+        var configuredPath = Environment.GetEnvironmentVariable("TAU_CODING_AGENT_TREE_SESSION_FILE");
+        if (string.IsNullOrWhiteSpace(configuredPath))
+            configuredPath = Environment.GetEnvironmentVariable("TAU_CODING_AGENT_SESSION_FILE");
+        if (!string.IsNullOrWhiteSpace(configuredPath))
         {
-            var path = CodingAgentTreeSessionStore.FindMostRecentSession() ?? CodingAgentTreeSessionStore.GetDefaultPath();
-            return new CodingAgentSessionTarget(null, CodingAgentTreeSessionController.OpenOrCreate(path), true);
+            var path = Path.GetFullPath(configuredPath, cwd);
+            return CodingAgentTreeSessionStore.IsJsonlPath(path)
+                ? OpenTree(path, cwd)
+                : new CodingAgentSessionTarget(new CodingAgentSessionStore(path), null, false);
         }
 
-        var sessionFile = Environment.GetEnvironmentVariable("TAU_CODING_AGENT_SESSION_FILE");
-        var sessionStore = CodingAgentTreeSessionStore.IsJsonlPath(sessionFile)
-            ? null
-            : new CodingAgentSessionStore();
-
-        return new CodingAgentSessionTarget(
-            sessionStore,
-            CodingAgentTreeSessionController.OpenOrCreate(),
-            CodingAgentTreeSessionStore.HasExplicitTreeSessionPath);
+        // 2. 【CodingAgent】【会话选择】默认目录按 cwd 隔离，只有显式 continue 才选择已有文件
+        var directory = GetDefaultSessionDirectory(cwd, agentDirectory);
+        var selectedPath = continueRecent ? FindMostRecentSession(directory, cwd) : null;
+        return OpenTree(selectedPath ?? CreateSessionPath(directory), cwd);
     }
+
+    /// <summary>【CodingAgent】【会话目录】按上游 cwd 编码规则计算 Agent 目录下的会话目录，不创建文件。</summary>
+    /// <param name="workingDirectory">工作目录，默认进程目录。</param>
+    /// <param name="agentDirectory">Agent 根目录，默认用户的 .tau。</param>
+    /// <returns>当前项目专属会话目录。</returns>
+    internal static string GetDefaultSessionDirectory(string? workingDirectory = null, string? agentDirectory = null)
+    {
+        var cwd = Path.TrimEndingDirectorySeparator(Path.GetFullPath(workingDirectory ?? Environment.CurrentDirectory));
+        var agent = Path.GetFullPath(agentDirectory ?? Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".tau"));
+        var safePath = cwd.StartsWith('/') || cwd.StartsWith('\\') ? cwd[1..] : cwd;
+        safePath = safePath.Replace('/', '-').Replace('\\', '-').Replace(':', '-');
+        return Path.Combine(agent, "sessions", $"--{safePath}--");
+    }
+
+    /// <summary>【CodingAgent】【会话选择】打开带正确工作目录的树会话。</summary>
+    /// <param name="path">会话文件。</param>
+    /// <param name="cwd">会话工作目录。</param>
+    /// <returns>只使用 JSONL 的会话目标。</returns>
+    private static CodingAgentSessionTarget OpenTree(string path, string cwd) =>
+        new(null, new CodingAgentTreeSessionController(new CodingAgentTreeSessionStore(path, cwd)), true);
 
     public CodingAgentSessionSnapshot LoadInitialSnapshot()
     {
@@ -186,10 +222,19 @@ internal sealed record CodingAgentSessionTarget(
         }
     }
 
-    private static string? FindMostRecentSession(string sessionDirectory)
+    /// <summary>【CodingAgent】【继续会话】过滤共享目录内其他工作目录的会话。</summary>
+    /// <param name="sessionDirectory">待扫描目录。</param>
+    /// <param name="cwd">当前工作目录。</param>
+    /// <returns>最近的匹配会话路径，没有则为空。</returns>
+    private static string? FindMostRecentSession(string sessionDirectory, string cwd)
     {
         return ListSessionsInDirectory(sessionDirectory)
-            .FirstOrDefault()
+            // 1. 【CodingAgent】【继续会话】新建但尚未运行的空文件不能遮蔽最近的有效对话
+            .Where(static session => session.MessageCount > 0)
+            .FirstOrDefault(session => string.Equals(
+                Path.TrimEndingDirectorySeparator(Path.GetFullPath(session.Cwd)),
+                Path.TrimEndingDirectorySeparator(cwd),
+                OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
             ?.FilePath;
     }
 
@@ -225,12 +270,10 @@ internal sealed record CodingAgentSessionTarget(
         return targetPath;
     }
 
+    /// <summary>【CodingAgent】【会话分叉】取得当前项目的默认会话目录。</summary>
+    /// <returns>分叉会话的目标目录。</returns>
     private static string GetDefaultForkSessionDirectory()
     {
-        var defaultPath = CodingAgentTreeSessionStore.GetDefaultPath();
-        var defaultDirectory = Path.GetDirectoryName(defaultPath);
-        return Path.Combine(
-            string.IsNullOrWhiteSpace(defaultDirectory) ? Environment.CurrentDirectory : defaultDirectory,
-            "coding-agent-sessions");
+        return GetDefaultSessionDirectory();
     }
 }

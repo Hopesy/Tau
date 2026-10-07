@@ -147,6 +147,7 @@ public static class AgentHarnessMessages
                 case AgentCompactionSummaryMessage summary:
                     converted.Add(new UserMessage(CompactionSummaryPrefix + summary.Summary + CompactionSummarySuffix));
                     break;
+                case SystemMessage:
                 case UserMessage:
                 case AssistantMessage:
                 case ToolResultMessage:

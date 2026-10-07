@@ -7,6 +7,47 @@ namespace Tau.AgentCore.Tests;
 
 public sealed class JsonlSessionStorageTests
 {
+    /// <summary>【AgentCore】【工具命名空间】JSONL 重开保留可选及空字符串空间，旧消息缺省值仍为空。</summary>
+    /// <param name="toolNamespace">待持久化空间。</param><returns>异步测试任务。</returns>
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("mcp_files")]
+    public async Task ToolNamespaceSurvivesJsonlReopen(string? toolNamespace)
+    {
+        using var temp = TempDirectory.Create();
+        var path = Path.Combine(temp.Path, "namespace.jsonl");
+        var session = new AgentHarnessSession<JsonlSessionMetadata>(await JsonlSessionStorage.CreateAsync(path, temp.Path, "namespace"));
+        await session.AppendMessageAsync(new AssistantMessage([new ToolCallContent("call", "read", "{}")
+        { Namespace = toolNamespace, ThoughtSignature = "signature" }]));
+        var reopened = new AgentHarnessSession<JsonlSessionMetadata>(await JsonlSessionStorage.OpenAsync(path));
+        var assistant = Assert.Single((await reopened.BuildContextAsync()).Messages.OfType<AssistantMessage>());
+        var call = Assert.IsType<ToolCallContent>(Assert.Single(assistant.Content));
+        Assert.Equal(toolNamespace, call.Namespace);
+        Assert.Equal("signature", call.ThoughtSignature);
+        Assert.Equal("{}", call.Arguments);
+        if (toolNamespace is not null) Assert.Contains("\"namespace\":", File.ReadAllText(path));
+    }
+
+    /// <summary>【AgentCore】【思考等级持久化】JSONL 重开后保留原生等级和签名，旧消息缺省仍为空。</summary>
+    /// <returns>测试任务。</returns>
+    [Fact]
+    public async Task OpenAsync_PreservesProviderThinkingLevel()
+    {
+        using var temp = TempDirectory.Create();
+        var path = Path.Combine(temp.Path, "effort.jsonl");
+        var session = new AgentHarnessSession<JsonlSessionMetadata>(await JsonlSessionStorage.CreateAsync(path, temp.Path, "effort"));
+        await session.AppendMessageAsync(new AssistantMessage([new ThinkingContent("reasoning") { ThinkingSignature = "opaque" }, new TextContent("answer")])
+        { Api = "anthropic-messages", Provider = "test", Model = "model", ProviderThinkingLevel = "xhigh" });
+        await session.AppendMessageAsync(new AssistantMessage([new TextContent("legacy")]));
+        var reopened = new AgentHarnessSession<JsonlSessionMetadata>(await JsonlSessionStorage.OpenAsync(path));
+        var assistants = (await reopened.BuildContextAsync()).Messages.OfType<AssistantMessage>().ToArray();
+        Assert.Equal("xhigh", assistants[0].ProviderThinkingLevel);
+        Assert.Equal("opaque", Assert.IsType<ThinkingContent>(assistants[0].Content[0]).ThinkingSignature);
+        Assert.Null(assistants[1].ProviderThinkingLevel);
+        Assert.Contains("\"providerThinkingLevel\":\"xhigh\"", File.ReadAllText(path));
+    }
+
     [Fact]
     public async Task ForkAsync_WritesV4ParentSessionIdByDefault()
     {

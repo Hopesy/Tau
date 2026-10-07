@@ -1,9 +1,9 @@
-using System.Text.RegularExpressions;
 using Tau.Ai;
+using Tau.Ai.Utilities;
 
 namespace Tau.CodingAgent.Runtime;
 
-public sealed record CodingAgentRetryOptions(int MaxAttempts, int BaseDelayMilliseconds)
+public sealed record CodingAgentRetryOptions(int MaxAttempts, int BaseDelayMilliseconds, int MaxAgentDelayMilliseconds = 60_000)
 {
     private const string RetryAttemptsEnvironmentVariable = "TAU_CODING_AGENT_AUTO_RETRY_ATTEMPTS";
     private const string RetryBaseDelayEnvironmentVariable = "TAU_CODING_AGENT_AUTO_RETRY_BASE_DELAY_MS";
@@ -20,10 +20,12 @@ public sealed record CodingAgentRetryOptions(int MaxAttempts, int BaseDelayMilli
             return TimeSpan.Zero;
         }
 
-        var multiplier = Math.Pow(2, Math.Max(0, attempt - 1));
-        var delay = Math.Min(BaseDelayMilliseconds * multiplier, int.MaxValue);
-        return TimeSpan.FromMilliseconds(delay);
+        return TimeSpan.FromMilliseconds(AssistantRetry.RetryDelayMilliseconds(ToPolicy(), attempt));
     }
+
+    /// <summary>【CodingAgent】【重试策略】将会话配置转换为普通请求和摘要共用的策略。</summary>
+    /// <returns>共享助手重试策略。</returns>
+    public AssistantRetryPolicy ToPolicy() => new(IsEnabled, MaxAttempts, BaseDelayMilliseconds, MaxAgentDelayMilliseconds);
 
     public static CodingAgentRetryOptions FromEnvironment()
     {
@@ -44,18 +46,11 @@ public sealed record CodingAgentRetryOptions(int MaxAttempts, int BaseDelayMilli
 
     public static CodingAgentRetryOptions FromSettingsOrEnvironment(CodingAgentSettingsSnapshot? settings)
     {
-        if (settings?.RetryMaxAttempts is { } configuredMaxAttempts)
-        {
-            if (configuredMaxAttempts <= 0)
-            {
-                return Disabled;
-            }
-
-            var baseDelay = settings.RetryBaseDelayMilliseconds ?? Default.BaseDelayMilliseconds;
-            return new CodingAgentRetryOptions(configuredMaxAttempts, Math.Max(0, baseDelay));
-        }
-
-        return FromEnvironment();
+        var fallback = FromEnvironment();
+        var count = settings?.RetryMaxAttempts ?? fallback.MaxAttempts;
+        var delay = settings?.RetryBaseDelayMilliseconds ?? (settings?.RetryMaxAttempts is null ? fallback.BaseDelayMilliseconds : Default.BaseDelayMilliseconds);
+        var maximum = CodingAgentNativeSettings.ReadInteger(settings?.Retry, "maxAgentDelayMs", "retry") ?? 60000;
+        return new(Math.Max(0, count), Math.Max(0, delay), maximum);
     }
 
     private static int ReadNonNegativeEnvironmentInt(string name, int defaultValue)
@@ -85,14 +80,10 @@ internal static partial class CodingAgentRetryClassifier
             return false;
         }
 
-        return RetryableErrorPattern().IsMatch(errorMessage);
+        return AssistantRetry.IsRetryableError(errorMessage);
     }
 
     public static bool IsContextOverflow(string? errorMessage) =>
         ContextOverflowDetector.IsContextOverflowError(errorMessage);
 
-    [GeneratedRegex(
-        "overloaded|provider.?returned.?error|rate.?limit|too many requests|429|500|502|503|504|service.?unavailable|server.?error|internal.?error|network.?error|connection.?error|connection.?refused|connection.?lost|other side closed|fetch failed|upstream.?connect|reset before headers|socket hang up|ended without|timed? out|timeout|terminated|retry delay",
-        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
-    private static partial Regex RetryableErrorPattern();
 }

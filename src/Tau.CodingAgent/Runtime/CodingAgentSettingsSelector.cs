@@ -12,11 +12,14 @@ public sealed record CodingAgentSettingsSelectorState(
     Model CurrentModel,
     ThinkingLevel? CurrentThinkingLevel,
     bool AutoCompactionEnabled,
-    string CurrentTheme);
+    string CurrentTheme,
+    CodingAgentCacheWarmingMode CacheWarmingMode = CodingAgentCacheWarmingMode.Streaming);
 
 public static class CodingAgentSettingsSelector
 {
     public const string AutoCompactionAction = "auto-compaction";
+    public const string CacheWarmingAction = "cache-warming";
+    public const string CacheMissNoticesAction = "cache-miss-notices";
     public const string SteeringModeAction = "steering-mode";
     public const string FollowUpModeAction = "follow-up-mode";
     public const string TerminalShowImagesAction = "show-images";
@@ -207,7 +210,11 @@ public static class CodingAgentSettingsSelector
                 "Theme",
                 state.CurrentTheme,
                 "Open the theme selector.",
-                [state.CurrentTheme])
+                [state.CurrentTheme]),
+            new TuiSettingItem(CacheWarmingAction, "Cache warming", state.CacheWarmingMode.ToString().ToLowerInvariant(),
+                "Keep prompt caches warm when expected savings cover the cost. Global setting.", ["off", "streaming", "idle"]),
+            new TuiSettingItem(CacheMissNoticesAction, "Cache miss notices", settings.ShowCacheMissNotices == true ? "true" : "false",
+                "Show cache cost and provider recovery notices.", ["false", "true"])
         };
 
         return new TuiSettingsList(
@@ -250,7 +257,9 @@ public static class CodingAgentSettingsSelector
             new TuiSelectItem(
                 ThemeAction,
                 "Theme",
-                state.CurrentTheme)
+                state.CurrentTheme),
+            new TuiSelectItem(CacheWarmingAction, "Cache warming", state.CacheWarmingMode.ToString().ToLowerInvariant()),
+            new TuiSelectItem(CacheMissNoticesAction, "Cache miss notices", settings.ShowCacheMissNotices == true ? "true" : "false")
         };
 
         return new TuiSelectList(
@@ -311,6 +320,8 @@ public static class CodingAgentSettingsSelector
     private static string FormatThinkingSetting(string? defaultThinkingLevel) =>
         string.IsNullOrWhiteSpace(defaultThinkingLevel) ? "off" : defaultThinkingLevel;
 
+    /// <summary>【CodingAgent】【设置选择】格式化当前推理等级。</summary>
+    /// <param name="level">当前等级。</param><returns>规范文本。</returns>
     private static string FormatThinkingLevel(ThinkingLevel? level) => level switch
     {
         null => "off",
@@ -319,6 +330,7 @@ public static class CodingAgentSettingsSelector
         ThinkingLevel.Medium => "medium",
         ThinkingLevel.High => "high",
         ThinkingLevel.ExtraHigh => "xhigh",
+        ThinkingLevel.Max => "max",
         _ => "off"
     };
 

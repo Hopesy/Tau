@@ -4,6 +4,9 @@ namespace Tau.Ai;
 
 public record ImagesModel : Model
 {
+    /// <summary>【AI】【图像模型】创建具有图像类型标记的模型。</summary>
+    public ImagesModel() => Type = ModelTypes.Image;
+
     public IReadOnlyList<string> OutputModalities { get; init; } = ["image"];
 }
 
@@ -11,6 +14,9 @@ public record struct ImagesContext(IReadOnlyList<ContentBlock> Input);
 
 public record ImagesOptions
 {
+    /// <summary>【AI】【图像选项】保留原生扩展提供方的额外请求字段。</summary>
+    [JsonExtensionData]
+    public IDictionary<string, System.Text.Json.JsonElement>? AdditionalOptions { get; init; }
     public string? ApiKey { get; init; }
     [JsonIgnore]
     public CancellationToken Signal { get; init; }

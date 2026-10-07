@@ -45,6 +45,7 @@ internal sealed record JsonlSessionEntryDto
     public string? ParentId { get; init; }
     public DateTimeOffset Timestamp { get; init; }
     public SessionMessageDto? Message { get; init; }
+    public SessionMessageDto? SystemMessage { get; init; }
     public bool? Terminate { get; init; }
     public string? ThinkingLevel { get; init; }
     public string? Provider { get; init; }
@@ -84,7 +85,11 @@ internal sealed record JsonlV4OperationIntentDto
 
 internal sealed record SessionMessageDto
 {
+    public NestedToolCalls? NestedCalls { get; init; }
     public string? Role { get; init; }
+    public IReadOnlyDictionary<string, string?>? Sections { get; init; }
+    public IReadOnlyList<SessionToolDeclarationDto>? ToolsAdded { get; init; }
+    public IReadOnlyList<ToolReference>? ToolsRemoved { get; init; }
     /// <summary>消息内容；标准消息使用内容块数组，custom 消息也允许使用纯文本字符串。</summary>
     public JsonElement? Content { get; init; }
     public SessionUsageDto? Usage { get; init; }
@@ -92,6 +97,11 @@ internal sealed record SessionMessageDto
     public string? Provider { get; init; }
     public string? Model { get; init; }
     public string? ResponseModel { get; init; }
+    /// <summary>用于恢复供应商原生 effort 的助手等级。</summary>
+    public string? ProviderThinkingLevel { get; init; }
+
+    /// <summary>【AgentCore】【请求记录】此响应实际请求的推理等级，旧会话可以缺省。</summary>
+    public string? ThinkingLevel { get; init; }
     public string? ResponseId { get; init; }
     public string? StopReason { get; init; }
     public string? ErrorMessage { get; init; }
@@ -118,6 +128,9 @@ internal sealed record SessionMessageDto
     public string? FromId { get; init; }
     public int? TokensBefore { get; init; }
 }
+
+/// <summary>【AgentCore】【会话持久化】使用上游 parameters 字段保存纯工具声明。</summary>
+internal sealed record SessionToolDeclarationDto(string Name, string Description, JsonElement Parameters, ConstrainedSamplingConfig? ConstrainedSampling);
 
 internal sealed record SessionDeferredHandleDto
 {
@@ -184,6 +197,8 @@ internal sealed record SessionContentDto
     /// <summary>toolCall 参数；v4 使用 JSON 对象，读取旧 v3 时也允许字符串。</summary>
     public JsonElement? Arguments { get; init; }
     public string? ThoughtSignature { get; init; }
+    /// <summary>【AgentCore】【工具命名空间】原样保留供应商空间，包括合法空字符串。</summary>
+    public string? Namespace { get; init; }
 }
 
 internal static class JsonlSessionSerialization
@@ -1113,6 +1128,11 @@ internal static class JsonlSessionSerialization
         var roleName = role.GetString();
         switch (roleName)
         {
+            case "system":
+                ValidateMessageContent(value, name, filePath, lineNumber, allowText: true, "text");
+                ValidateOptionalMessageTimestamp(value, name, filePath, lineNumber);
+                ValidateSystemDeltas(value, name, filePath, lineNumber);
+                break;
             case "user":
                 ValidateMessageContent(value, name, filePath, lineNumber, allowText: true, "text", "image");
                 ValidateOptionalMessageTimestamp(value, name, filePath, lineNumber);
@@ -1123,6 +1143,8 @@ internal static class JsonlSessionSerialization
                 ValidateOptionalMessageString(value, "provider", name, filePath, lineNumber);
                 ValidateOptionalMessageString(value, "model", name, filePath, lineNumber);
                 ValidateOptionalMessageString(value, "responseModel", name, filePath, lineNumber);
+                ValidateOptionalMessageString(value, "providerThinkingLevel", name, filePath, lineNumber);
+                ValidateOptionalMessageString(value, "thinkingLevel", name, filePath, lineNumber);
                 ValidateOptionalMessageString(value, "responseId", name, filePath, lineNumber);
                 ValidateOptionalMessageString(value, "rawStopReason", name, filePath, lineNumber);
                 ValidateOptionalMessageString(value, "errorMessage", name, filePath, lineNumber);
@@ -1182,6 +1204,32 @@ internal static class JsonlSessionSerialization
         }
     }
 
+    /// <summary>【AgentCore】【会话校验】拒绝损坏的段落、工具定义和移除引用。</summary>
+    /// <param name="value">系统消息 JSON。</param>
+    /// <param name="name">诊断字段前缀。</param>
+    /// <param name="filePath">会话文件路径。</param>
+    /// <param name="lineNumber">文件行号。</param>
+    private static void ValidateSystemDeltas(JsonElement value, string name, string filePath, int lineNumber)
+    {
+        if (value.TryGetProperty("sections", out var sections) && sections.ValueKind != JsonValueKind.Null &&
+            (sections.ValueKind != JsonValueKind.Object || sections.EnumerateObject().Any(section => section.Value.ValueKind is not (JsonValueKind.String or JsonValueKind.Null))))
+            throw InvalidEntry(filePath, lineNumber, $"has invalid {name}.sections");
+        foreach (var field in new[] { "toolsAdded", "toolsRemoved" })
+        {
+            if (!value.TryGetProperty(field, out var tools) || tools.ValueKind == JsonValueKind.Null) continue;
+            if (tools.ValueKind != JsonValueKind.Array) throw InvalidEntry(filePath, lineNumber, $"has invalid {name}.{field}");
+            foreach (var tool in tools.EnumerateArray())
+            {
+                if (tool.ValueKind != JsonValueKind.Object || !tool.TryGetProperty("name", out var toolName) || toolName.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(toolName.GetString()))
+                    throw InvalidEntry(filePath, lineNumber, $"has invalid {name}.{field}.name");
+                if (field == "toolsRemoved") continue;
+                if (!tool.TryGetProperty("description", out var description) || description.ValueKind != JsonValueKind.String ||
+                    !tool.TryGetProperty("parameters", out var parameters) || parameters.ValueKind != JsonValueKind.Object)
+                    throw InvalidEntry(filePath, lineNumber, $"has invalid {name}.{field} declaration");
+            }
+        }
+    }
+
     private static void ValidateMessageContent(JsonElement value, string name, string filePath, int lineNumber, bool allowText, params string[] allowedTypes)
     {
         if (!value.TryGetProperty("content", out var content))
@@ -1206,6 +1254,7 @@ internal static class JsonlSessionSerialization
                     if (!block.TryGetProperty("arguments", out var arguments) || arguments.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
                         throw InvalidEntry(filePath, lineNumber, $"has invalid {name}.content.arguments");
                     ValidateOptionalMessageString(block, "thoughtSignature", name, filePath, lineNumber);
+                    ValidateOptionalMessageString(block, "namespace", name, filePath, lineNumber, allowEmpty: true);
                     break;
             }
         }
@@ -1219,9 +1268,13 @@ internal static class JsonlSessionSerialization
         throw InvalidEntry(filePath, lineNumber, $"has invalid {name}.timestamp");
     }
 
-    private static void ValidateOptionalMessageString(JsonElement value, string propertyName, string name, string filePath, int lineNumber)
+    /// <summary>【AgentCore】【消息校验】校验可选字符串字段，允许协议明确支持的空值。</summary>
+    /// <param name="value">消息或内容对象。</param><param name="propertyName">字段名。</param><param name="name">错误路径。</param>
+    /// <param name="filePath">会话文件。</param><param name="lineNumber">行号。</param><param name="allowEmpty">是否接受空白或空字符串。</param>
+    private static void ValidateOptionalMessageString(JsonElement value, string propertyName, string name, string filePath, int lineNumber, bool allowEmpty = false)
     {
-        if (value.TryGetProperty(propertyName, out var property) && property.ValueKind != JsonValueKind.Null && (property.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(property.GetString())))
+        if (value.TryGetProperty(propertyName, out var property) && property.ValueKind != JsonValueKind.Null &&
+            (property.ValueKind != JsonValueKind.String || !allowEmpty && string.IsNullOrWhiteSpace(property.GetString())))
             throw InvalidEntry(filePath, lineNumber, $"has invalid {name}.{propertyName}");
     }
 
@@ -1578,7 +1631,11 @@ internal static class JsonlSessionSerialization
                 dto.Details,
                 dto.FromHook == true,
                 ToRetainedTail(dto.RetainedTail, filePath, lineNumber),
-                ToUsage(dto.Usage)),
+                ToUsage(dto.Usage))
+            {
+                SystemMessage = dto.SystemMessage is null ? null : ToMessage(dto.SystemMessage) as SystemMessage
+                    ?? throw InvalidEntry(filePath, lineNumber, "has invalid compaction systemMessage")
+            },
             "custom" when dto.CustomType is not null => new CustomSessionEntry(
                 dto.Id,
                 dto.ParentId,
@@ -1678,6 +1735,12 @@ internal static class JsonlSessionSerialization
             case "compaction":
                 Text(root, "summary", filePath, lineNumber);
                 NonNegativeInt(root, "tokensBefore", filePath, lineNumber);
+                if (root.TryGetProperty("systemMessage", out var systemMessage))
+                {
+                    ValidateAgentMessageShape(systemMessage, "systemMessage", filePath, lineNumber);
+                    if (systemMessage.GetProperty("role").GetString() != "system")
+                        throw InvalidEntry(filePath, lineNumber, "has invalid compaction systemMessage role");
+                }
                 if (root.TryGetProperty("retainedTail", out var retainedTail))
                 {
                     if (retainedTail.ValueKind != JsonValueKind.Array) throw InvalidEntry(filePath, lineNumber, "has invalid retainedTail");
@@ -1766,6 +1829,7 @@ internal static class JsonlSessionSerialization
                 ParentId = compaction.ParentId,
                 Timestamp = compaction.Timestamp,
                 Summary = compaction.Summary,
+                SystemMessage = compaction.SystemMessage is null ? null : FromMessage(compaction.SystemMessage),
                 FirstKeptEntryId = compaction.FirstKeptEntryId,
                 TokensBefore = compaction.TokensBefore,
                 Details = ToJsonElement(compaction.Details),
@@ -1847,9 +1911,21 @@ internal static class JsonlSessionSerialization
             _ => throw new InvalidOperationException($"Unsupported session entry type: {entry.Type}")
         };
 
+    /// <summary>【AgentCore】【会话持久化】把消息及系统声明转换为可保存的 DTO。</summary>
+    /// <param name="message">原始会话消息。</param>
+    /// <returns>保留消息内容和元数据的 DTO。</returns>
     private static SessionMessageDto FromMessage(ChatMessage message) =>
         message switch
         {
+            SystemMessage system => new SessionMessageDto
+            {
+                Role = "system",
+                Content = JsonSerializer.SerializeToElement(system.Content, AgentCoreSessionJsonContext.Default.String),
+                Sections = system.Sections,
+                ToolsAdded = system.ToolsAdded?.Select(tool => new SessionToolDeclarationDto(tool.Name, tool.Description, tool.ParameterSchema, tool.ConstrainedSampling)).ToArray(),
+                ToolsRemoved = system.ToolsRemoved,
+                Timestamp = system.Timestamp
+            },
             UserMessage user => new SessionMessageDto
             {
                 Role = "user",
@@ -1865,6 +1941,8 @@ internal static class JsonlSessionSerialization
                 Provider = Normalize(assistant.Provider),
                 Model = Normalize(assistant.Model),
                 ResponseModel = Normalize(assistant.ResponseModel),
+                ProviderThinkingLevel = assistant.ProviderThinkingLevel,
+                ThinkingLevel = assistant.ThinkingLevel,
                 ResponseId = Normalize(assistant.ResponseId),
                 StopReason = ToWireStopReason(assistant.StopReason),
                 RawStopReason = Normalize(assistant.RawStopReason),
@@ -1882,6 +1960,7 @@ internal static class JsonlSessionSerialization
                 ToolName = Normalize(toolResult.ToolName),
                 Details = ToJsonElement(toolResult.Details),
                 Usage = FromUsage(toolResult.Usage),
+                NestedCalls = toolResult.NestedCalls,
                 AddedToolNames = toolResult.AddedToolNames?.ToArray(),
                 Timestamp = toolResult.Timestamp,
                 IsError = toolResult.IsError
@@ -1927,12 +2006,22 @@ internal static class JsonlSessionSerialization
             }
         };
 
+    /// <summary>【AgentCore】【会话恢复】从已校验 DTO 恢复消息及独立工具 schema。</summary>
+    /// <param name="message">持久化消息。</param>
+    /// <returns>支持的会话消息，未知类型返回 null。</returns>
     private static ChatMessage? ToMessage(SessionMessageDto message)
     {
         var content = ToMessageContent(message.Content);
 
         return message.Role switch
         {
+            "system" => new SystemMessage(string.Join("\n", content.OfType<TextContent>().Select(text => text.Text)))
+            {
+                Sections = message.Sections,
+                ToolsAdded = message.ToolsAdded?.Select(tool => new Tool(tool.Name, tool.Description, tool.Parameters.Clone()) { ConstrainedSampling = tool.ConstrainedSampling }).ToArray(),
+                ToolsRemoved = message.ToolsRemoved,
+                Timestamp = message.Timestamp ?? DateTimeOffset.UnixEpoch
+            },
             "user" => new UserMessage(content) { Timestamp = message.Timestamp },
             "assistant" => new AssistantMessage(content)
             {
@@ -1941,6 +2030,8 @@ internal static class JsonlSessionSerialization
                 Provider = Normalize(message.Provider),
                 Model = Normalize(message.Model),
                 ResponseModel = Normalize(message.ResponseModel),
+                ProviderThinkingLevel = message.ProviderThinkingLevel,
+                ThinkingLevel = message.ThinkingLevel,
                 ResponseId = Normalize(message.ResponseId),
                 StopReason = FromWireStopReason(message.StopReason),
                 RawStopReason = Normalize(message.RawStopReason),
@@ -1958,6 +2049,7 @@ internal static class JsonlSessionSerialization
                 ToolName = Normalize(message.ToolName),
                 Details = message.Details,
                 Usage = ToUsage(message.Usage),
+                NestedCalls = message.NestedCalls,
                 AddedToolNames = message.AddedToolNames,
                 Timestamp = message.Timestamp
             },
@@ -2116,7 +2208,8 @@ internal static class JsonlSessionSerialization
                 Id = toolCall.Id,
                 Name = toolCall.Name,
                 Arguments = ParseToolCallArguments(toolCall.Arguments),
-                ThoughtSignature = Normalize(toolCall.ThoughtSignature)
+                ThoughtSignature = Normalize(toolCall.ThoughtSignature),
+                Namespace = toolCall.Namespace
             },
             _ => new SessionContentDto { Type = content.Type }
         };
@@ -2165,7 +2258,8 @@ internal static class JsonlSessionSerialization
                         ? content.Arguments.Value.GetString() ?? string.Empty
                         : content.Arguments.Value.GetRawText())
                 {
-                    ThoughtSignature = Normalize(content.ThoughtSignature)
+                    ThoughtSignature = Normalize(content.ThoughtSignature),
+                    Namespace = content.Namespace
                 },
             _ => null
         };
@@ -2208,6 +2302,9 @@ internal static class JsonlSessionSerialization
         return blocks;
     }
 
+    /// <summary>【AgentCore】【用量保存】补齐 v4 要求的计数和费用字段，保证本机生成文件能够重新读取。</summary>
+    /// <param name="usage">可选运行用量。</param>
+    /// <returns>完整的标准会话用量对象。</returns>
     private static SessionUsageDto? FromUsage(Usage? usage) =>
         usage is null
             ? null
@@ -2215,16 +2312,16 @@ internal static class JsonlSessionSerialization
             {
                 Input = usage.Value.InputTokens,
                 Output = usage.Value.OutputTokens,
-                CacheRead = usage.Value.CacheReadTokens,
-                CacheWrite = usage.Value.CacheWriteTokens,
+                CacheRead = usage.Value.CacheReadTokens ?? 0,
+                CacheWrite = usage.Value.CacheWriteTokens ?? 0,
                 CacheWrite1h = usage.Value.CacheWrite1hTokens,
                 Reasoning = usage.Value.ReasoningTokens,
-                // pi v4 要求 totalTokens；旧版 Usage 未填时按四个 token 维度推导
+                // 1. 【AgentCore】【用量保存】旧版 Usage 未填总量时按四个 token 维度推导
                 TotalTokens = usage.Value.TotalTokens ??
                     usage.Value.InputTokens + usage.Value.OutputTokens +
                     (usage.Value.CacheReadTokens ?? 0) + (usage.Value.CacheWriteTokens ?? 0),
                 ServiceTier = Normalize(usage.Value.ServiceTier),
-                // pi v4 要求 cost 五个字段始终存在；内部没有计费信息时写入零值
+                // 2. 【AgentCore】【用量保存】没有计费信息时仍写入 v4 要求的五个零费用字段
                 Cost = new SessionUsageCostDto
                 {
                     Input = usage.Value.Cost?.Input ?? 0,

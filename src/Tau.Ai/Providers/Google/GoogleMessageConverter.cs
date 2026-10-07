@@ -1,159 +1,57 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Tau.Ai.Utilities;
 
 namespace Tau.Ai.Providers.Google;
 
-/// <summary>
-/// Converts between Tau message types and Google Gemini API format.
-/// Gemini uses `contents` with role ("user"|"model") and `parts` arrays.
-/// Tool results go into parts as functionResponse.
-/// </summary>
-internal static class GoogleMessageConverter
+internal static partial class GoogleMessageConverter
 {
-    public static List<object> ConvertMessages(IReadOnlyList<ChatMessage> messages)
+    /// <summary>【Google】【工具声明】按模型能力解析严格约束并写入当前工具集合和调用模式。</summary>
+    /// <param name="body">请求报文。</param><param name="model">目标模型。</param><param name="tools">当前工具集合。</param>
+    /// <param name="options">原生或简化选项。</param><param name="useParameters">是否为旧 Cloud Code 后端发送 OpenAPI 参数。</param>
+    public static void ApplyTools(Dictionary<string, object> body, Model model, IReadOnlyList<Tool>? tools,
+        StreamOptions options, bool useParameters = false)
     {
-        var result = new List<object>();
-        var i = 0;
-
-        while (i < messages.Count)
+        if (tools is not { Count: > 0 }) return;
+        var supportsStrictMode = GetGeminiMajorVersion(model.Id) >= 3;
+        var choice = options switch
         {
-            var msg = messages[i];
-
-            switch (msg)
+            GoogleOptions native => native.ToolChoice,
+            GoogleVertexOptions vertex => vertex.ToolChoice,
+            GoogleGeminiCliOptions cli => cli.ToolChoice,
+            SimpleStreamOptions simple => simple.ToolChoice as string,
+            _ => null
+        };
+        var strictMode = false;
+        var declarations = new List<object>();
+        // 1. 【Google】【严格工具】require 不满足时在发送前失败，prefer 可保留原始 Schema
+        foreach (var tool in tools)
+        {
+            var strict = ConstrainedSampling.ResolveJsonSchemaStrictSampling(tool, supportsStrictMode);
+            strictMode |= strict == true;
+            var parameters = ConstrainedSampling.GetJsonSchemaToolParameters(tool, strict);
+            declarations.Add(new Dictionary<string, object>
             {
-                case UserMessage user:
-                    result.Add(BuildContent("user", ConvertUserParts(user)));
-                    i++;
-                    break;
-
-                case AssistantMessage assistant:
-                    result.Add(BuildContent("model", ConvertAssistantParts(assistant)));
-                    i++;
-                    break;
-
-                case ToolResultMessage:
-                    var parts = new List<object>();
-                    while (i < messages.Count && messages[i] is ToolResultMessage tr)
-                    {
-                        parts.Add(BuildFunctionResponsePart(tr));
-                        i++;
-                    }
-                    result.Add(BuildContent("user", parts));
-                    break;
-
-                default:
-                    i++;
-                    break;
-            }
+                ["name"] = tool.Name,
+                ["description"] = tool.Description,
+                [useParameters ? "parameters" : "parametersJsonSchema"] = useParameters ? SanitizeSchema(parameters) : parameters
+            });
         }
-
-        return result;
-    }
-
-    private static Dictionary<string, object> BuildContent(string role, List<object> parts) => new()
-    {
-        ["role"] = role,
-        ["parts"] = parts
-    };
-
-    private static List<object> ConvertUserParts(UserMessage msg)
-    {
-        var parts = new List<object>();
-        foreach (var block in msg.Content)
+        body["tools"] = new List<object> { new Dictionary<string, object> { ["functionDeclarations"] = declarations } };
+        // 2. 【Google】【调用模式】none 和 any 优先，其余选择在严格工具存在时使用 VALIDATED
+        var mode = choice switch
         {
-            switch (block)
-            {
-                case TextContent text:
-                    parts.Add(new Dictionary<string, object> { ["text"] = SanitizeText(text.Text) });
-                    break;
-                case ImageContent image:
-                    parts.Add(new Dictionary<string, object>
-                    {
-                        ["inlineData"] = new Dictionary<string, string>
-                        {
-                            ["mimeType"] = image.MimeType,
-                            ["data"] = image.Data
-                        }
-                    });
-                    break;
-            }
-        }
-        return parts;
-    }
-
-    private static List<object> ConvertAssistantParts(AssistantMessage msg)
-    {
-        var parts = new List<object>();
-        foreach (var block in msg.Content)
+            "none" => "NONE", "any" => "ANY", _ when strictMode => "VALIDATED",
+            _ when !string.IsNullOrEmpty(choice) => "AUTO", _ => null
+        };
+        if (mode is not null) body["toolConfig"] = new Dictionary<string, object>
         {
-            switch (block)
-            {
-                case TextContent text when !string.IsNullOrEmpty(text.Text):
-                    parts.Add(new Dictionary<string, object> { ["text"] = SanitizeText(text.Text) });
-                    break;
-                case ToolCallContent toolCall:
-                    var fn = new Dictionary<string, object>
-                    {
-                        ["name"] = toolCall.Name,
-                        ["args"] = ParseArgs(toolCall.Arguments)
-                    };
-                    parts.Add(new Dictionary<string, object> { ["functionCall"] = fn });
-                    break;
-            }
-        }
-        return parts;
-    }
-
-    private static Dictionary<string, object> BuildFunctionResponsePart(ToolResultMessage msg)
-    {
-        var content = SanitizeText(msg.Content.OfType<TextContent>().FirstOrDefault()?.Text ?? "");
-        return new Dictionary<string, object>
-        {
-            ["functionResponse"] = new Dictionary<string, object>
-            {
-                ["name"] = msg.ToolCallId,
-                ["response"] = new Dictionary<string, object>
-                {
-                    ["content"] = content
-                }
-            }
+            ["functionCallingConfig"] = new Dictionary<string, object> { ["mode"] = mode }
         };
     }
 
-    private static object ParseArgs(string arguments)
-    {
-        if (string.IsNullOrWhiteSpace(arguments))
-            return new Dictionary<string, object>();
-
-        try
-        {
-            return JsonSerializer.Deserialize(arguments, GoogleJsonContext.Default.JsonElement);
-        }
-        catch
-        {
-            return new Dictionary<string, object>();
-        }
-    }
-
-    public static List<object> ConvertTools(IReadOnlyList<Tool> tools)
-    {
-        var functionDeclarations = tools.Select(t => (object)new Dictionary<string, object>
-        {
-            ["name"] = t.Name,
-            ["description"] = t.Description,
-            ["parameters"] = SanitizeSchema(t.ParameterSchema)
-        }).ToList();
-
-        return [new Dictionary<string, object>
-        {
-            ["functionDeclarations"] = functionDeclarations
-        }];
-    }
-
-    /// <summary>
-    /// Gemini rejects JSON Schema keywords it doesn't recognize ($schema, additionalProperties).
-    /// Strip them defensively.
-    /// </summary>
+    /// <summary>【Google】【旧参数格式】仅移除对象层级的元声明，保留数组内容及 additionalProperties。</summary>
+    /// <param name="schema">参数 Schema。</param><returns>独立的 OpenAPI 兼容对象。</returns>
     private static object SanitizeSchema(JsonElement schema)
     {
         if (schema.ValueKind != JsonValueKind.Object)
@@ -162,29 +60,16 @@ internal static class GoogleMessageConverter
         var result = new Dictionary<string, object>();
         foreach (var prop in schema.EnumerateObject())
         {
-            if (prop.Name is "$schema" or "additionalProperties")
+            if (prop.Name is "$schema" or "$id" or "$anchor" or "$dynamicAnchor" or "$vocabulary" or "$comment" or "$defs" or "definitions")
                 continue;
 
-            result[prop.Name] = prop.Value.ValueKind switch
-            {
-                JsonValueKind.Object => SanitizeSchema(prop.Value),
-                JsonValueKind.Array => SanitizeArray(prop.Value),
-                _ => prop.Value
-            };
+            result[prop.Name] = SanitizeSchema(prop.Value);
         }
         return result;
     }
 
-    private static object SanitizeArray(JsonElement array)
-    {
-        var items = new List<object>();
-        foreach (var item in array.EnumerateArray())
-        {
-            items.Add(item.ValueKind == JsonValueKind.Object ? SanitizeSchema(item) : item);
-        }
-        return items;
-    }
-
+    /// <summary>【Google】【文字清理】移除不能进入 UTF-8 报文的无配对代理字符。</summary>
+    /// <param name="text">原始文字。</param><returns>合法 Unicode 文字。</returns>
     private static string SanitizeText(string text) =>
         UnicodeTextSanitizer.RemoveUnpairedSurrogates(text);
 }

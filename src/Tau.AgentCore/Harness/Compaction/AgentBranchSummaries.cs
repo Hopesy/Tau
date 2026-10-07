@@ -214,10 +214,13 @@ public static class AgentBranchSummaries
         return new AgentBranchSummaryResult(summary, details.ReadFiles, details.ModifiedFiles);
     }
 
+    /// <summary>【AgentCore】【分支摘要】提取可总结的对话，系统声明和工具结果不占用摘要预算。</summary>
+    /// <param name="entry">分支条目。</param>
+    /// <returns>摘要输入消息；忽略的条目返回空。</returns>
     private static ChatMessage? GetMessageFromEntry(SessionTreeEntry entry) =>
         entry switch
         {
-            MessageSessionEntry { Message: ToolResultMessage } => null,
+            MessageSessionEntry { Message: ToolResultMessage or SystemMessage } => null,
             MessageSessionEntry message => message.Message,
             CustomMessageSessionEntry custom => AgentHarnessMessages.CreateCustomMessage(
                 custom.CustomType,

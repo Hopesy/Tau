@@ -9,7 +9,10 @@ public sealed record CodingAgentPromptTemplate(
     string? ArgumentHint,
     string Content,
     string FilePath,
-    string Scope);
+    string Scope)
+{
+    public CodingAgentSourceInfo SourceInfo { get; init; } = CodingAgentSourceInfo.ForResource(FilePath, Scope, Path.GetDirectoryName(FilePath));
+}
 
 public sealed partial class CodingAgentPromptTemplateStore
 {
@@ -20,6 +23,9 @@ public sealed partial class CodingAgentPromptTemplateStore
     private readonly IReadOnlyList<string> _explicitPaths;
     private readonly Func<IReadOnlyList<string>>? _additionalPathsProvider;
     private readonly bool _includeDefaults;
+    public bool IsProjectTrusted { get; set; } = true;
+    public Func<IReadOnlyDictionary<string, CodingAgentSourceInfo>>? SourceInfosProvider { get; set; }
+    internal Func<Func<string, string, bool>>? AutoResourceFilterProvider { get; set; }
 
     public CodingAgentPromptTemplateStore(
         string? cwd = null,
@@ -37,13 +43,15 @@ public sealed partial class CodingAgentPromptTemplateStore
         _includeDefaults = includeDefaults;
     }
 
+    /// <summary>【CodingAgent】【提示加载】发现并去重提示模板，附加当前资源来源元数据。</summary>
+    /// <returns>按名称排序的当前提示模板。</returns>
     public IReadOnlyList<CodingAgentPromptTemplate> Load()
     {
         var templates = new List<CodingAgentPromptTemplate>();
         if (_includeDefaults)
         {
             templates.AddRange(LoadFromDirectory(_userPromptsDirectory, "user"));
-            templates.AddRange(LoadFromDirectory(Path.Combine(_cwd, ".tau", "prompts"), "project"));
+            if (IsProjectTrusted) templates.AddRange(LoadFromDirectory(Path.Combine(_cwd, ".tau", "prompts"), "project"));
         }
 
         foreach (var path in GetExplicitPaths())
@@ -63,9 +71,13 @@ public sealed partial class CodingAgentPromptTemplateStore
             }
         }
 
+        var sources = SourceInfosProvider?.Invoke();
+        var filter = AutoResourceFilterProvider?.Invoke();
         return templates
+            .Where(template => filter?.Invoke(template.FilePath, template.Scope) != false)
             .GroupBy(static template => template.Name, StringComparer.Ordinal)
             .Select(static group => group.First())
+            .Select(template => template with { SourceInfo = CodingAgentSourceInfo.ResolveResource(template.SourceInfo, sources) })
             .OrderBy(static template => template.Name, StringComparer.Ordinal)
             .ToArray();
     }

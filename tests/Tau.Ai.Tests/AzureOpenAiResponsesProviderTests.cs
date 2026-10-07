@@ -4,8 +4,41 @@ using Tau.Ai.Providers.OpenAiResponses;
 
 namespace Tau.Ai.Tests;
 
+[Collection("ProcessEnvironment")]
 public sealed class AzureOpenAiResponsesProviderTests
 {
+    /// <summary>【AI】【Azure通用选项】普通 StreamOptions 保留密钥及请求环境中的地址、版本和部署映射。</summary>
+    /// <param name="explicitKey">是否提供优先级更高的显式密钥。</param><returns>异步测试任务。</returns>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task GenericStreamOptionsPreserveAzureAuthAndEnvironment(bool explicitKey)
+    {
+        using var handler = new OpenAiResponsesProviderTests.StubHandler(_ => new(System.Net.HttpStatusCode.BadRequest)
+        {
+            Content = new StringContent("stop")
+        });
+        using var client = new HttpClient(handler);
+        var model = new Model { Id = "model", Name = "Model", Api = "azure-openai-responses", Provider = "azure", BaseUrl = "https://model.invalid/v1" };
+        await OpenAiResponsesProviderTests.CollectAsync(new AzureOpenAiResponsesProvider(client).Stream(model,
+            new() { Messages = [new UserMessage("hi")] }, new StreamOptions
+            {
+                ApiKey = explicitKey ? "synthetic-explicit" : null, MaxRetries = 0,
+                Env = new Dictionary<string, string>
+                {
+                    ["AZURE_OPENAI_API_KEY"] = "synthetic-environment",
+                    ["AZURE_OPENAI_BASE_URL"] = "https://environment.invalid/openai/v1",
+                    ["AZURE_OPENAI_API_VERSION"] = "synthetic-version",
+                    ["AZURE_OPENAI_DEPLOYMENT_NAME_MAP"] = "model=deployment"
+                }
+            }));
+        var request = Assert.Single(handler.Requests);
+        Assert.Equal(explicitKey ? "synthetic-explicit" : "synthetic-environment", Assert.Single(request.Headers.GetValues("api-key")));
+        Assert.Equal("https://environment.invalid/openai/v1/responses?api-version=synthetic-version", handler.RequestUri!.ToString());
+        using var body = JsonDocument.Parse(handler.CapturedBody);
+        Assert.Equal("deployment", body.RootElement.GetProperty("model").GetString());
+    }
+
     [Fact]
     public void RegisterAll_UsesDedicatedAzureResponsesProvider()
     {

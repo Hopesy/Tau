@@ -12,6 +12,7 @@ public sealed class CodingAgentExtensionResourceState
     public IReadOnlyList<string> SkillPaths => _resources.SkillPaths;
     public IReadOnlyList<string> PromptPaths => _resources.PromptPaths;
     public IReadOnlyList<string> ThemePaths => _resources.ThemePaths;
+    public IReadOnlyDictionary<string, CodingAgentSourceInfo> SourceInfos => _resources.SourceInfos;
 
     public void Update(CodingAgentExtensionResources resources)
     {

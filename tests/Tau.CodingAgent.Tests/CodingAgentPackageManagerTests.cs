@@ -76,6 +76,14 @@ public sealed class CodingAgentPackageManagerTests
         Assert.Equal(Path.Combine(packageRoot, "skills"), Assert.Single(resources.SkillPaths));
         Assert.Equal(Path.Combine(packageRoot, "prompts"), Assert.Single(resources.PromptPaths));
         Assert.Equal(Path.Combine(packageRoot, "themes"), Assert.Single(resources.ThemePaths));
+        Assert.Equal(4, resources.SourceInfos.Count);
+        Assert.All(resources.SourceInfos.Values, source =>
+        {
+            Assert.Equal("./pkg", source.Source);
+            Assert.Equal("project", source.Scope);
+            Assert.Equal("package", source.Origin);
+            Assert.Equal(packageRoot, source.BaseDir);
+        });
     }
 
     [Fact]
@@ -606,7 +614,7 @@ public sealed class CodingAgentPackageManagerTests
             }
             """);
 
-        var store = new CodingAgentExtensionCommandStore(
+        using var store = new CodingAgentExtensionCommandStore(
             cwd: temp.Path,
             userExtensionsDirectory: Path.Combine(temp.Path, "missing-user-extensions"),
             explicitPaths: [],

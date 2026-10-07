@@ -214,7 +214,7 @@ public sealed class ReadFileToolTests
     [Fact]
     public async Task ExecuteAsync_WhenImageFileDetected_ReturnsImageAttachment()
     {
-        var bytes = Convert.FromBase64String("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=");
+        var bytes = ImageTestData.CreatePng(1, 1);
         var path = await CreateTempFileAsync(".txt", bytes);
 
         try

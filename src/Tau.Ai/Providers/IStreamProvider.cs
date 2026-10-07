@@ -10,6 +10,9 @@ public interface IStreamProvider
 {
     string Api { get; }
 
+    /// <summary>是否自行处理系统声明；旧实现默认由统一入口合并提示和工具。</summary>
+    bool SupportsTranscriptContext => false;
+
     AssistantMessageStream Stream(Model model, LlmContext context, StreamOptions options);
 
     AssistantMessageStream StreamSimple(Model model, LlmContext context, SimpleStreamOptions options);

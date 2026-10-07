@@ -4,6 +4,7 @@ using Tau.AgentCore.Harness;
 using Tau.Ai;
 using Tau.Ai.Auth.OAuth;
 using Tau.Ai.Observability;
+using Tau.CodingAgent.Tools;
 using Tau.Tui.Abstractions;
 using Tau.Tui.Components;
 using Tau.Tui.Rendering;
@@ -11,7 +12,7 @@ using Tau.Tui.Runtime;
 
 namespace Tau.CodingAgent.Runtime;
 
-public sealed class CodingAgentHost
+public sealed partial class CodingAgentHost
 {
     private const string ContextOverflowCompactionInstructions =
         "Recover from a context overflow. Keep the current goal, decisions, blockers, changed files, and enough recent details to retry the pending user request.";
@@ -21,7 +22,8 @@ public sealed class CodingAgentHost
     private readonly TuiCompositionSession? _compositionSession;
     private readonly CodingAgentSessionStore? _sessionStore;
     private readonly CodingAgentSettingsStore? _settingsStore;
-    private readonly CodingAgentTreeSessionController? _treeSessionController;
+    private readonly CodingAgentTreeSessionController? _initialTreeSessionController;
+    private CodingAgentTreeSessionController? _treeSessionController => _extensionCommandStore?.CurrentTreeSessionController ?? (_runner as RuntimeCodingAgentRunner)?.CurrentTreeSessionController ?? _initialTreeSessionController;
     private readonly CodingAgentPromptTemplateStore? _promptTemplateStore;
     private readonly CodingAgentSkillStore? _skillStore;
     private readonly CodingAgentExtensionCommandStore? _extensionCommandStore;
@@ -51,6 +53,7 @@ public sealed class CodingAgentHost
     private bool _toolOutputExpanded;
     private bool _hiddenThinkingLabelRendered;
     private bool _shutdownRendered;
+    private readonly object _eventRenderGate = new();
 
     public CodingAgentHost(
         InteractiveConsoleSession ui,
@@ -93,7 +96,8 @@ public sealed class CodingAgentHost
         IReadOnlyList<string>? scopedModelsOverride = null,
         CodingAgentFooterDataProvider? footerDataProvider = null,
         Func<CancellationToken, Task<CodingAgentLatestRelease?>>? versionUpdateChecker = null,
-        bool hideThinkingBlock = false)
+        bool hideThinkingBlock = false,
+        Func<Func<CodingAgentMcpMenu>, CancellationToken, Task<string?>>? mcpMenuSelector = null)
     {
         _ui = ui;
         _runner = runner;
@@ -106,13 +110,23 @@ public sealed class CodingAgentHost
             : TuiBashExecutionTheme.Agent;
         _sessionStore = sessionStore;
         _settingsStore = settingsStore;
-        _treeSessionController = treeSessionController;
+        _initialTreeSessionController = treeSessionController;
         _promptTemplateStore = promptTemplateStore;
         _skillStore = skillStore;
+        if (runner is RuntimeCodingAgentRunner runtimeRunner) runtimeRunner.ConfigureInputResources(skillStore, promptTemplateStore);
         _extensionCommandStore = extensionCommandStore;
+        _extensionCommandStore?.BindSession(runner, treeSessionController, sessionStore);
         _autoCompactionBase = autoCompaction ?? CodingAgentAutoCompactionOptions.Disabled;
         _autoCompaction = _autoCompactionBase.WithEnabledOverride(autoCompactionEnabled);
-        _retryOptions = retryOptions ?? CodingAgentRetryOptions.Disabled;
+        if (_runner is RuntimeCodingAgentRunner sessionRunner)
+        {
+            sessionRunner.EnsureSessionContext(treeSessionController, sessionStore);
+            sessionRunner.ConfigureScopedModelPatterns(scopedModelsOverride);
+            if (settingsStore is not null) sessionRunner.ConfigureSessionSettings(settingsStore);
+            sessionRunner.SetAutoCompactionEnabled(autoCompactionEnabled);
+        }
+        _retryOptions = retryOptions ?? (_runner as RuntimeCodingAgentRunner)?.RetryOptions ?? CodingAgentRetryOptions.Disabled;
+        if (_runner is RuntimeCodingAgentRunner summaryRunner) summaryRunner.SummaryRetryOptions = _retryOptions;
         _hideThinkingBlock = hideThinkingBlock;
         _turnInputSource = turnInputSource;
         _initialPrompt = initialPrompt;
@@ -150,12 +164,21 @@ public sealed class CodingAgentHost
             changelogStore: changelogStore,
             autoCompaction: _autoCompactionBase,
             retryOptions: _retryOptions,
-            retryOptionsChanged: options => _retryOptions = options,
-            autoCompactionChanged: enabled => _autoCompaction = _autoCompactionBase.WithEnabledOverride(enabled),
+            retryOptionsChanged: options =>
+            {
+                _retryOptions = options;
+                if (_runner is RuntimeCodingAgentRunner runtime) runtime.SummaryRetryOptions = options;
+            },
+            autoCompactionChanged: enabled =>
+            {
+                _autoCompaction = _autoCompactionBase.WithEnabledOverride(enabled);
+                if (_runner is RuntimeCodingAgentRunner runtime) runtime.SetAutoCompactionEnabled(enabled);
+            },
             hideThinkingBlockChanged: enabled => _hideThinkingBlock = enabled,
             historySnapshotProvider: historySnapshotProvider,
             clearScreenAction: () => _ui.ClearScreen(),
             inputDraftSetter: draft => _ui.SetDraft(draft),
+            inputDraftGetter: () => _ui.GetDraft(),
             treeNavigationPrompt: PromptForTreeNavigationAsync,
             sessionSwitchPrompt: PromptForSessionSwitchAsync,
             treeLabelPrompt: PromptForTreeLabelAsync,
@@ -172,13 +195,26 @@ public sealed class CodingAgentHost
             keyBindings: keyBindings,
             extensionResourceState: extensionResourceState,
             reloadKeyBindings: reloadKeyBindings,
-            scopedModelsOverride: scopedModelsOverride);
+            scopedModelsOverride: scopedModelsOverride,
+            mcpMenuSelector: mcpMenuSelector);
         RefreshExtensionShortcuts();
         _ui.SetInputShortcutHandler(TryHandleExtensionShortcutAsync);
     }
 
+    /// <summary>【CodingAgent】【交互宿主】处理会话输入，在取消或退出时释放扩展进程</summary>
+    /// <param name="cancellationToken">宿主取消信号</param>
+    /// <returns>正常结束时返回零</returns>
     public async Task<int> RunAsync(CancellationToken cancellationToken = default)
     {
+        var background = _runner as RuntimeCodingAgentRunner;
+        if (background is not null) background.BackgroundEvent += HandleBackgroundEventAsync;
+        using var mcpNotificationsCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var mcpNotifications = Task.CompletedTask;
+        using var extensionCancellation = cancellationToken.Register(() =>
+        {
+            _extensionCommandStore?.SetExtensionUiBridge(null);
+            _extensionCommandStore?.ResetRuntime();
+        });
         try
         {
             _compositionSession?.Start();
@@ -193,19 +229,30 @@ public sealed class CodingAgentHost
             }
 
             ShowStartupNoticeIfNeeded();
+            RefreshSessionHistory(initial: true);
+            if (background?.McpService is { } mcp)
+                mcpNotifications = mcp.PresentNotificationsAsync((notice, _) =>
+                {
+                    if (notice.Level == "error") WriteRuntimeError(notice.Message);
+                    else WriteStatus(notice.Message);
+                    return Task.CompletedTask;
+                }, mcpNotificationsCancellation.Token);
+            background?.StartBackgroundDelivery();
             StartVersionUpdateCheck(cancellationToken);
             await RunInitialInputsAsync(cancellationToken).ConfigureAwait(false);
 
-            while (!cancellationToken.IsCancellationRequested)
+            while (!_shutdownRendered && !cancellationToken.IsCancellationRequested && background?.IsShutdownRequested != true)
             {
-                var inputResult = await _ui.ReadInputResultAsync(cancellationToken).ConfigureAwait(false);
+                if (background is not null) await background.WaitForStateNotificationsAsync().ConfigureAwait(false);
+                RefreshSessionHistory();
+                var inputResult = await ReadInputOrShutdownAsync(background, cancellationToken).ConfigureAwait(false);
                 if (inputResult.Kind == InputResultKind.Action)
                 {
                     if (await TryHandleEditorActionAsync(inputResult.Action, cancellationToken).ConfigureAwait(false))
                     {
                         PersistSession();
                     }
-
+                    if (_shutdownRendered) break;
                     continue;
                 }
 
@@ -219,6 +266,8 @@ public sealed class CodingAgentHost
                 {
                     continue;
                 }
+
+                if (TryStartDirectBash(input, cancellationToken)) continue;
 
                 var slashPreparation = await TryPrepareSlashInvocationAsync(input, cancellationToken)
                     .ConfigureAwait(false);
@@ -274,7 +323,19 @@ public sealed class CodingAgentHost
         }
         finally
         {
+            await StopDirectBashAsync().ConfigureAwait(false);
+            await mcpNotificationsCancellation.CancelAsync().ConfigureAwait(false);
+            await mcpNotifications.ConfigureAwait(false);
+            if (background is not null)
+            {
+                await background.StopBackgroundDeliveryAsync().ConfigureAwait(false);
+                background.BackgroundEvent -= HandleBackgroundEventAsync;
+            }
             _extensionCommandStore?.SetExtensionUiBridge(null);
+            if (_extensionCommandStore is not null)
+                await _extensionCommandStore.PublishSessionShutdownAsync(CancellationToken.None).ConfigureAwait(false);
+            PersistSession(refreshStatus: false);
+            _extensionCommandStore?.ResetRuntime();
             _extensionUiBridge?.SetFooterDataProvider(null);
             _compositionSession?.Stop();
             if (_ownsFooterDataProvider)
@@ -284,9 +345,38 @@ public sealed class CodingAgentHost
         }
     }
 
+    /// <summary>【CodingAgent】【退出唤醒】空闲终端同时等待输入和扩展退出，只取消输入读取，不取消已完成的会话操作。</summary>
+    /// <param name="runner">真实会话运行器。</param>
+    /// <param name="token">宿主取消信号。</param>
+    /// <returns>输入结果；主动退出时返回空输入。</returns>
+    private async Task<InputResult> ReadInputOrShutdownAsync(RuntimeCodingAgentRunner? runner, CancellationToken token)
+    {
+        if (runner is null) return await _ui.ReadInputResultAsync(token).ConfigureAwait(false);
+        using var readingCancellation = CancellationTokenSource.CreateLinkedTokenSource(token);
+        var reading = _ui.ReadInputResultAsync(readingCancellation.Token);
+        if (await Task.WhenAny(reading, runner.ShutdownRequested).ConfigureAwait(false) == reading)
+            return await reading.ConfigureAwait(false);
+        await readingCancellation.CancelAsync().ConfigureAwait(false);
+        try { await reading.ConfigureAwait(false); }
+        catch (OperationCanceledException) when (runner.IsShutdownRequested) { }
+        return InputResult.Cancelled;
+    }
+
+    /// <summary>【CodingAgent】【后台显示】把扩展自动回合交给现有终端渲染和会话保存路径。</summary>
+    /// <param name="evt">后台运行事件。</param>
+    /// <param name="token">取消信号。</param>
+    /// <returns>显示及保存完成的任务。</returns>
+    private Task HandleBackgroundEventAsync(AgentEvent evt, CancellationToken token)
+    {
+        HandleEvent(evt);
+        if (evt is MessageEndEvent or AgentEndEvent) PersistSession();
+        return Task.CompletedTask;
+    }
+
+    /// <summary>【CodingAgent】【启动提示】按真实对话判断是否恢复会话，纯系统基线属于新会话。</summary>
     private void ShowStartupNoticeIfNeeded()
     {
-        var notice = _startupNoticeService?.Prepare(_runner.Messages.Count > 0);
+        var notice = _startupNoticeService?.Prepare(_runner.Messages.Any(message => message is not SystemMessage));
         if (notice is null)
         {
             return;
@@ -333,6 +423,7 @@ public sealed class CodingAgentHost
 
     private async Task RunInitialInputsAsync(CancellationToken cancellationToken)
     {
+        if ((_runner as RuntimeCodingAgentRunner)?.IsShutdownRequested == true) return;
         if (_initialPrompt is not null)
         {
             await TryAutoCompactAsync(_initialPrompt.Text, cancellationToken).ConfigureAwait(false);
@@ -342,10 +433,13 @@ public sealed class CodingAgentHost
 
         foreach (var message in _initialMessages)
         {
+            if (_shutdownRendered || (_runner as RuntimeCodingAgentRunner)?.IsShutdownRequested == true) return;
             if (string.IsNullOrWhiteSpace(message))
             {
                 continue;
             }
+
+            if (TryStartDirectBash(message, cancellationToken)) continue;
 
             var slashPreparation = await TryPrepareSlashInvocationAsync(message, cancellationToken)
                 .ConfigureAwait(false);
@@ -381,16 +475,30 @@ public sealed class CodingAgentHost
         }
     }
 
+    /// <summary>【CodingAgent】【编辑器动作】处理输入区命名动作，并复用命令层的会话、思考及剪贴板行为。</summary>
+    /// <param name="action">编辑器请求的动作。</param><param name="cancellationToken">取消信号。</param><returns>宿主是否处理动作。</returns>
     private async Task<bool> TryHandleEditorActionAsync(
         EditorAction action,
         CancellationToken cancellationToken)
     {
+        if (action == EditorAction.ClearEditor) { HandleEditorClear(); return true; }
+        if (action == EditorAction.ExitIfEmpty) { RenderCommandResult(CodingAgentCommandResult.Exit("Goodbye!")); return true; }
+        if (action == EditorAction.Interrupt) { await HandleEditorInterruptAsync(cancellationToken).ConfigureAwait(false); return true; }
+        var previousSessionId = (_runner as RuntimeCodingAgentRunner)?.SessionId;
         var result = action switch
         {
+            EditorAction.CycleThinkingLevel => _runner.Model.Reasoning
+                ? await _commandRouter.TryHandleAsync("/thinking cycle", cancellationToken).ConfigureAwait(false)
+                : CodingAgentCommandResult.Status("Current model does not support thinking"),
+            EditorAction.CopyLastMessage => await _commandRouter.TryHandleAsync("/copy", cancellationToken).ConfigureAwait(false),
+            EditorAction.NewSession => await _commandRouter.TryHandleAsync("/new", cancellationToken).ConfigureAwait(false),
+            EditorAction.OpenSessionTree => await _commandRouter.TryHandleAsync("/tree --interactive", cancellationToken).ConfigureAwait(false),
+            EditorAction.ForkSession => await _commandRouter.TryHandleAsync("/fork", cancellationToken).ConfigureAwait(false),
+            EditorAction.ResumeSession => await _commandRouter.TryHandleAsync("/resume", cancellationToken).ConfigureAwait(false),
             EditorAction.CycleModelForward => _commandRouter.CycleModel("forward"),
             EditorAction.CycleModelBackward => _commandRouter.CycleModel("backward"),
             EditorAction.SelectModel => await _commandRouter.SelectModelAsync(cancellationToken: cancellationToken).ConfigureAwait(false),
-            EditorAction.PasteImage => await PasteClipboardImageAsync(cancellationToken).ConfigureAwait(false),
+            EditorAction.PasteImage => await PasteClipboardAsync(cancellationToken).ConfigureAwait(false),
             EditorAction.ToggleThinkingBlock => ToggleThinkingBlockVisibility(),
             EditorAction.ToggleToolOutputExpansion => ToggleToolOutputExpansion(),
             EditorAction.OpenExternalEditor => await OpenExternalEditorAsync(cancellationToken).ConfigureAwait(false),
@@ -404,6 +512,11 @@ public sealed class CodingAgentHost
             return false;
         }
 
+        // 1. 【CodingAgent】【会话草稿】成功新建或恢复后释放旧草稿，取消或失败仍保留原内容
+        if (action is EditorAction.NewSession or EditorAction.ResumeSession && previousSessionId is not null &&
+            _runner is RuntimeCodingAgentRunner changedSession && changedSession.SessionId != previousSessionId)
+            _ui.SetDraft(string.Empty);
+
         RenderCommandResult(result);
         return true;
     }
@@ -413,7 +526,16 @@ public sealed class CodingAgentHost
             _ui.InputKeyBindings,
             EditorAction.ToggleToolOutputExpansion);
 
+    /// <summary>【CodingAgent】【生成中显示】串行化工具显示切换与运行事件，避免在工具集合更新时枚举。</summary>
+    /// <returns>显示切换结果。</returns>
     private CodingAgentCommandResult ToggleToolOutputExpansion()
+    {
+        lock (_eventRenderGate) return ToggleToolOutputExpansionCore();
+    }
+
+    /// <summary>【CodingAgent】【工具显示】在渲染锁内更新当前工具及自定义消息的展开状态。</summary>
+    /// <returns>显示状态。</returns>
+    private CodingAgentCommandResult ToggleToolOutputExpansionCore()
     {
         _toolOutputExpanded = !_toolOutputExpanded;
         foreach (var pair in _activeBashExecutions)
@@ -427,6 +549,7 @@ public sealed class CodingAgentHost
             pair.Value.SetExpanded(_toolOutputExpanded);
             _ui.WriteToolComponent(pair.Value, key: pair.Key);
         }
+        foreach (var entry in _displayedCustomEntries.Values.ToArray()) RenderCustomEntry(entry);
 
         return CodingAgentCommandResult.Status($"tool output: {(_toolOutputExpanded ? "expanded" : "collapsed")}");
     }
@@ -441,22 +564,6 @@ public sealed class CodingAgentHost
         }
 
         return CodingAgentCommandResult.Status($"thinking blocks: {(_hideThinkingBlock ? "hidden" : "visible")}");
-    }
-
-    private async Task<CodingAgentCommandResult> PasteClipboardImageAsync(CancellationToken cancellationToken)
-    {
-        var image = await _clipboard.ReadImageAsync(cancellationToken).ConfigureAwait(false);
-        if (image is null)
-        {
-            return CodingAgentCommandResult.NotCommand;
-        }
-
-        var prompt = new CodingAgentInitialPrompt(
-            "[Clipboard image]",
-            [new ImageContent(Convert.ToBase64String(image.Bytes), image.MimeType)]);
-        await TryAutoCompactAsync(prompt.Text, cancellationToken).ConfigureAwait(false);
-        await RunTurnWithRetryAsync(prompt, cancellationToken).ConfigureAwait(false);
-        return CodingAgentCommandResult.Status("pasted clipboard image");
     }
 
     private async Task<CodingAgentCommandResult> OpenExternalEditorAsync(CancellationToken cancellationToken)
@@ -558,14 +665,24 @@ public sealed class CodingAgentHost
             return false;
         }
 
-        if (!_extensionCommandStore.TryInvokeShortcut(shortcut, out var invocation) || invocation is null)
+        if (!_extensionCommandStore.TryInvokeShortcut(shortcut, out var invocation, cancellationToken,
+            preserveMessageActions: _runner is RuntimeCodingAgentRunner) || invocation is null)
         {
             return false;
         }
 
-        if (invocation.IsError)
+        if (invocation.IsError && invocation.MessageActions is null)
         {
             WriteRuntimeError(invocation.Message);
+            return true;
+        }
+
+        if (_runner is RuntimeCodingAgentRunner runtime && invocation.MessageActions is { } actions)
+        {
+            await RunExtensionDeliveriesAsync(runtime, actions, cancellationToken).ConfigureAwait(false);
+            if (invocation.IsError) WriteRuntimeError(invocation.Message);
+            else if (!string.IsNullOrWhiteSpace(invocation.Message)) WriteStatus(invocation.Message);
+            PersistSession();
             return true;
         }
 
@@ -596,6 +713,7 @@ public sealed class CodingAgentHost
 
     private void RefreshExtensionShortcuts()
     {
+        RefreshMarkdownTransformers();
         if (_extensionCommandStore is null || _ui.InputKeyBindings is null)
         {
             _extensionShortcuts = new Dictionary<KeyBinding, CodingAgentExtensionShortcut>();
@@ -614,7 +732,7 @@ public sealed class CodingAgentHost
     {
         return _extensionCommandStore is null
             ? Task.FromResult<IReadOnlyList<CodingAgentExtensionLifecycleEventError>>([])
-            : _extensionCommandStore.PublishSessionStartAsync("startup", cancellationToken);
+            : _extensionCommandStore.EnsureSessionStartedAsync(cancellationToken);
     }
 
     private static int CountAvailableProviders(ICodingAgentRunner runner, IReadOnlyList<string>? scopedModelsOverride)
@@ -645,9 +763,14 @@ public sealed class CodingAgentHost
                trimmed.StartsWith("/reload ", StringComparison.Ordinal);
     }
 
+    /// <summary>【CodingAgent】【自动压缩】真实对话足够且超过阈值时生成摘要。</summary>
+    /// <param name="pendingInput">即将执行的用户输入。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>检查和压缩任务。</returns>
     private async Task TryAutoCompactAsync(string pendingInput, CancellationToken cancellationToken)
     {
-        if (!_autoCompaction.IsEnabled || _runner.Messages.Count < 2)
+        if (_runner is RuntimeCodingAgentRunner) return;
+        if (!_autoCompaction.IsEnabled || _runner.Messages.Count(message => message is not SystemMessage) < 2)
         {
             return;
         }
@@ -661,9 +784,9 @@ public sealed class CodingAgentHost
         try
         {
             _treeSessionController?.SyncFromRunner(_runner);
-            var result = await _runner
-                .CompactAsync(_autoCompaction.Instructions, cancellationToken)
-                .ConfigureAwait(false);
+            var result = await (_runner is RuntimeCodingAgentRunner runtime
+                ? runtime.CompactForReasonAsync(_autoCompaction.Instructions, "threshold", false, cancellationToken)
+                : _runner.CompactAsync(_autoCompaction.Instructions, cancellationToken)).ConfigureAwait(false);
             _treeSessionController?.RecordCompaction(_runner, result with { FromHook = true });
             var messagesAfter = _treeSessionController is null ? result.MessagesAfter : _runner.Messages.Count;
             WriteStatus(
@@ -810,6 +933,15 @@ public sealed class CodingAgentHost
         var overflowRecoveryAttempted = false;
         RenderDisplayedMessages(displayedInput);
 
+        // 1. 【CodingAgent】【统一恢复】真实运行器负责重试和记录省略，宿主完整消费所有后续事件
+        if (_runner is RuntimeCodingAgentRunner)
+        {
+            var completed = await runAttempt(logContext, cancellationToken).ConfigureAwait(false);
+            if (!completed.IsSuccess && !completed.IsCancelled && !completed.ErrorAlreadyRendered && completed.ErrorMessage is { } error)
+                WriteRuntimeError(error);
+            return;
+        }
+
         while (true)
         {
             var result = await runAttempt(logContext, cancellationToken).ConfigureAwait(false);
@@ -917,28 +1049,32 @@ public sealed class CodingAgentHost
         CancellationToken cancellationToken)
     {
         var errorAlreadyRendered = false;
+        string? finalError = null;
         using var turnInputCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         Task? turnInputTask = null;
 
         try
         {
             RefreshCompositionStatus(GetRunningStatusText());
-            var events = _runner.RunAsync(input, logContext, cancellationToken);
-            turnInputTask = StartTurnInputListener(turnInputCts.Token);
+            var events = _runner.RunAsync(input, logContext, turnInputCts.Token);
+            turnInputTask = StartTurnInputListener(turnInputCts, cancellationToken);
 
             await foreach (var evt in events.ConfigureAwait(false))
             {
-                if (evt is AgentEndEvent { ErrorMessage: not null } end)
+                if (evt is AgentEndEvent end)
                 {
-                    HandleEvent(evt);
-                    errorAlreadyRendered = true;
-                    return CodingAgentTurnAttemptResult.Failed(end.ErrorMessage, errorAlreadyRendered);
+                    finalError = end.ErrorMessage;
+                    if (finalError is not null && _runner is not RuntimeCodingAgentRunner)
+                    {
+                        HandleEvent(evt);
+                        return CodingAgentTurnAttemptResult.Failed(finalError, errorAlreadyRendered: true);
+                    }
+                    errorAlreadyRendered = finalError is not null;
                 }
-
                 HandleEvent(evt);
             }
 
-            return CodingAgentTurnAttemptResult.Success();
+            return finalError is null ? CodingAgentTurnAttemptResult.Success() : CodingAgentTurnAttemptResult.Failed(finalError, errorAlreadyRendered);
         }
         catch (OperationCanceledException)
         {
@@ -972,28 +1108,32 @@ public sealed class CodingAgentHost
         CancellationToken cancellationToken)
     {
         var errorAlreadyRendered = false;
+        string? finalError = null;
         using var turnInputCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         Task? turnInputTask = null;
 
         try
         {
             RefreshCompositionStatus(GetRunningStatusText());
-            var events = _runner.RunAsync(input, logContext, cancellationToken);
-            turnInputTask = StartTurnInputListener(turnInputCts.Token);
+            var events = _runner.RunAsync(input, logContext, turnInputCts.Token);
+            turnInputTask = StartTurnInputListener(turnInputCts, cancellationToken);
 
             await foreach (var evt in events.ConfigureAwait(false))
             {
-                if (evt is AgentEndEvent { ErrorMessage: not null } end)
+                if (evt is AgentEndEvent end)
                 {
-                    HandleEvent(evt);
-                    errorAlreadyRendered = true;
-                    return CodingAgentTurnAttemptResult.Failed(end.ErrorMessage, errorAlreadyRendered);
+                    finalError = end.ErrorMessage;
+                    if (finalError is not null && _runner is not RuntimeCodingAgentRunner)
+                    {
+                        HandleEvent(evt);
+                        return CodingAgentTurnAttemptResult.Failed(finalError, errorAlreadyRendered: true);
+                    }
+                    errorAlreadyRendered = finalError is not null;
                 }
-
                 HandleEvent(evt);
             }
 
-            return CodingAgentTurnAttemptResult.Success();
+            return finalError is null ? CodingAgentTurnAttemptResult.Success() : CodingAgentTurnAttemptResult.Failed(finalError, errorAlreadyRendered);
         }
         catch (OperationCanceledException)
         {
@@ -1202,6 +1342,7 @@ public sealed class CodingAgentHost
         CancellationToken cancellationToken)
     {
         var errorAlreadyRendered = false;
+        string? finalError = null;
         using var turnInputCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         Task? turnInputTask = null;
 
@@ -1209,23 +1350,26 @@ public sealed class CodingAgentHost
         {
             RefreshCompositionStatus(GetRunningStatusText());
             var events = prompt.HasImages
-                ? _runner.RunAsync(prompt.ToContentBlocks(), logContext, cancellationToken)
-                : _runner.RunAsync(prompt.Text, logContext, cancellationToken);
-            turnInputTask = StartTurnInputListener(turnInputCts.Token);
+                ? _runner.RunAsync(prompt.ToContentBlocks(), logContext, turnInputCts.Token)
+                : _runner.RunAsync(prompt.Text, logContext, turnInputCts.Token);
+            turnInputTask = StartTurnInputListener(turnInputCts, cancellationToken);
 
             await foreach (var evt in events.ConfigureAwait(false))
             {
-                if (evt is AgentEndEvent { ErrorMessage: not null } end)
+                if (evt is AgentEndEvent end)
                 {
-                    HandleEvent(evt);
-                    errorAlreadyRendered = true;
-                    return CodingAgentTurnAttemptResult.Failed(end.ErrorMessage, errorAlreadyRendered);
+                    finalError = end.ErrorMessage;
+                    if (finalError is not null && _runner is not RuntimeCodingAgentRunner)
+                    {
+                        HandleEvent(evt);
+                        return CodingAgentTurnAttemptResult.Failed(finalError, errorAlreadyRendered: true);
+                    }
+                    errorAlreadyRendered = finalError is not null;
                 }
-
                 HandleEvent(evt);
             }
 
-            return CodingAgentTurnAttemptResult.Success();
+            return finalError is null ? CodingAgentTurnAttemptResult.Success() : CodingAgentTurnAttemptResult.Failed(finalError, errorAlreadyRendered);
         }
         catch (OperationCanceledException)
         {
@@ -1265,9 +1409,9 @@ public sealed class CodingAgentHost
         try
         {
             _treeSessionController?.SyncFromRunner(_runner);
-            var result = await _runner
-                .CompactAsync(ContextOverflowCompactionInstructions, cancellationToken)
-                .ConfigureAwait(false);
+            var result = await (_runner is RuntimeCodingAgentRunner runtime
+                ? runtime.CompactForReasonAsync(ContextOverflowCompactionInstructions, "overflow", true, cancellationToken)
+                : _runner.CompactAsync(ContextOverflowCompactionInstructions, cancellationToken)).ConfigureAwait(false);
             _treeSessionController?.RecordCompaction(_runner, result with { FromHook = true });
             var messagesAfter = _treeSessionController is null ? result.MessagesAfter : _runner.Messages.Count;
             WriteStatus(
@@ -1313,28 +1457,32 @@ public sealed class CodingAgentHost
         CancellationToken cancellationToken)
     {
         var errorAlreadyRendered = false;
+        string? finalError = null;
         using var turnInputCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         Task? turnInputTask = null;
 
         try
         {
             RefreshCompositionStatus(GetRunningStatusText());
-            var events = _runner.RunAsync(input, logContext, cancellationToken);
-            turnInputTask = StartTurnInputListener(turnInputCts.Token);
+            var events = _runner.RunAsync(input, logContext, turnInputCts.Token);
+            turnInputTask = StartTurnInputListener(turnInputCts, cancellationToken);
 
             await foreach (var evt in events.ConfigureAwait(false))
             {
-                if (evt is AgentEndEvent { ErrorMessage: not null } end)
+                if (evt is AgentEndEvent end)
                 {
-                    HandleEvent(evt);
-                    errorAlreadyRendered = true;
-                    return CodingAgentTurnAttemptResult.Failed(end.ErrorMessage, errorAlreadyRendered);
+                    finalError = end.ErrorMessage;
+                    if (finalError is not null && _runner is not RuntimeCodingAgentRunner)
+                    {
+                        HandleEvent(evt);
+                        return CodingAgentTurnAttemptResult.Failed(finalError, errorAlreadyRendered: true);
+                    }
+                    errorAlreadyRendered = finalError is not null;
                 }
-
                 HandleEvent(evt);
             }
 
-            return CodingAgentTurnAttemptResult.Success();
+            return finalError is null ? CodingAgentTurnAttemptResult.Success() : CodingAgentTurnAttemptResult.Failed(finalError, errorAlreadyRendered);
         }
         catch (OperationCanceledException)
         {
@@ -1362,51 +1510,11 @@ public sealed class CodingAgentHost
         }
     }
 
-    private Task? StartTurnInputListener(CancellationToken cancellationToken)
-    {
-        if (_turnInputSource is null)
-        {
-            return null;
-        }
-
-        return Task.Run(() => ConsumeTurnInputsAsync(cancellationToken), CancellationToken.None);
-    }
-
-    private async Task ConsumeTurnInputsAsync(CancellationToken cancellationToken)
-    {
-        try
-        {
-            await foreach (var turnInput in _turnInputSource!.ReadInputsAsync(cancellationToken).ConfigureAwait(false))
-            {
-                var text = turnInput.Text.Trim();
-                if (text.Length == 0)
-                {
-                    continue;
-                }
-
-                if (turnInput.Kind == CodingAgentTurnInputKind.FollowUp)
-                {
-                    _runner.FollowUp(text);
-                }
-                else
-                {
-                    _runner.Steer(text);
-                }
-            }
-        }
-        catch (OperationCanceledException)
-        {
-            // Normal turn completion path.
-        }
-        catch (Exception ex)
-        {
-            WriteRuntimeError($"turn input listener failed: {ex.Message}");
-        }
-    }
-
     private void RenderCommandResult(CodingAgentCommandResult result)
     {
-        RenderDisplayedMessages(result.DisplayMessages);
+        var rebuilt = RefreshSessionHistory();
+        RenderDisplayedMessages(rebuilt ? result.DisplayMessages?.Where(message => message.Kind is not
+            (CodingAgentMessageDisplayFormatter.CompactionSummaryKind or CodingAgentMessageDisplayFormatter.BranchSummaryKind)).ToArray() : result.DisplayMessages);
 
         if (!string.IsNullOrWhiteSpace(result.Message))
         {
@@ -1447,8 +1555,16 @@ public sealed class CodingAgentHost
             return CodingAgentSlashInvocationResult.None(input);
         }
 
-        if (_extensionCommandStore?.TryInvoke(input, out var invocation) == true && invocation is not null)
+        if (_extensionCommandStore?.TryInvoke(input, out var invocation, cancellationToken,
+            preserveMessageActions: _runner is RuntimeCodingAgentRunner) == true && invocation is not null)
         {
+            if (_runner is RuntimeCodingAgentRunner runtime && invocation.MessageActions is { } actions)
+            {
+                await RunExtensionDeliveriesAsync(runtime, actions, cancellationToken).ConfigureAwait(false);
+                if (invocation.IsError) WriteRuntimeError(invocation.Message);
+                else if (!string.IsNullOrWhiteSpace(invocation.Message)) WriteStatus(invocation.Message);
+                return CodingAgentSlashInvocationResult.Consumed(input);
+            }
             if (invocation.SendToRunner)
             {
                 var sendToRunnerCustomHandled = await HandleExtensionCustomMessagesAsync(
@@ -1478,6 +1594,8 @@ public sealed class CodingAgentHost
             return CodingAgentSlashInvocationResult.Handled(input, handledResult);
         }
 
+        // 1. 【CodingAgent】【输入顺序】真实运行器统一执行 input 钩子和技能模板展开，避免在钩子前提前展开
+        if (_runner is RuntimeCodingAgentRunner) return CodingAgentSlashInvocationResult.Expanded(input);
         if (_skillStore?.TryExpand(input, out var preparedInput, out _) == true)
         {
             return CodingAgentSlashInvocationResult.Expanded(preparedInput);
@@ -1489,6 +1607,33 @@ public sealed class CodingAgentHost
         }
 
         return CodingAgentSlashInvocationResult.Expanded(preparedInput);
+    }
+
+    /// <summary>【CodingAgent】【命令回合】投递完整消息期间保持终端输入监听，结束或取消时释放监听器。</summary>
+    /// <param name="runtime">真实会话运行器。</param>
+    /// <param name="actions">命令或快捷键生成的消息动作。</param>
+    /// <param name="token">宿主取消信号。</param>
+    /// <returns>消息投递及终端输入清理完成的任务。</returns>
+    private async Task RunExtensionDeliveriesAsync(RuntimeCodingAgentRunner runtime,
+        IReadOnlyList<CodingAgentExtensionMessageDelivery> actions, CancellationToken token)
+    {
+        using var inputCancellation = CancellationTokenSource.CreateLinkedTokenSource(token);
+        var shouldListen = !runtime.IsStreaming && actions.Any(action => action.Message is UserMessage || action.TriggerTurn == true);
+        var listener = shouldListen ? StartTurnInputListener(inputCancellation, token) : null;
+        try
+        {
+            await foreach (var evt in runtime.DeliverExtensionMessagesAsync(actions, inputCancellation.Token).ConfigureAwait(false)) HandleEvent(evt);
+        }
+        catch (OperationCanceledException) { WriteCancelled(); }
+        catch (Exception ex) { WriteRuntimeError(ex.Message); }
+        finally
+        {
+            await inputCancellation.CancelAsync().ConfigureAwait(false);
+            if (listener is not null)
+                try { await listener.ConfigureAwait(false); }
+                catch (OperationCanceledException) { }
+            PersistSession();
+        }
     }
 
     private CodingAgentSessionSnapshot CreateRollbackSnapshot() =>
@@ -1738,13 +1883,15 @@ public sealed class CodingAgentHost
         return CodingAgentTreeLabelPromptResult.Saved(normalized);
     }
 
-    private void PersistSession()
+    /// <summary>【CodingAgent】【会话保存】保存消息和树游标，退出收尾时保留终端已有的告别状态。</summary>
+    /// <param name="refreshStatus">是否同时刷新终端状态栏。</param>
+    private void PersistSession(bool refreshStatus = true)
     {
         if (_sessionStore is not null)
         {
             try
             {
-                _sessionStore.Save(_runner.Messages, _runner.Model, _runner.SessionName);
+                _sessionStore.Save(_runner.Messages, _runner.Model, _runner.SessionName, CodingAgentThinkingLevels.Format(_runner.ThinkingLevel));
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
             {
@@ -1761,13 +1908,70 @@ public sealed class CodingAgentHost
             WriteRuntimeError($"tree session save failed: {ex.Message}");
         }
 
-        RefreshCompositionStatus();
+        if (refreshStatus) RefreshCompositionStatus();
     }
 
+    /// <summary>【CodingAgent】【事件渲染】将运行事件与流式输入显示动作串行化。</summary>
+    /// <param name="evt">本次 Agent 事件。</param>
     private void HandleEvent(AgentEvent evt)
+    {
+        lock (_eventRenderGate) HandleEventCore(evt);
+    }
+
+    /// <summary>【CodingAgent】【事件应用】在渲染锁内更新终端、工具组件和会话显示状态。</summary>
+    /// <param name="evt">Agent 事件。</param>
+    private void HandleEventCore(AgentEvent evt)
     {
         switch (evt)
         {
+            case CodingAgentQueueUpdateEvent:
+                RefreshCompositionStatus();
+                break;
+            case CodingAgentEntryAppendedEvent appended when appended.Entry.TryGetProperty("kind", out var kind) && kind.GetString() == "cache_warm":
+                if (_settingsStore?.GetShowCacheMissNotices() == true) WriteStatus(CodingAgentCacheWarmingFormatter.FormatUsage(appended.Entry));
+                RefreshCompositionStatus();
+                break;
+            case CodingAgentEntryAppendedEvent appended when appended.Entry.TryGetProperty("type", out var entryType) && entryType.GetString() == "custom":
+                if (_displayedHistoryRevision >= 0) RenderCustomEntry(appended.Entry);
+                break;
+            case CodingAgentAutoRetryStartEvent retry:
+                WriteStatus($"auto-retry {retry.Attempt}/{retry.MaxAttempts} after {retry.DelayMs}ms: {retry.ErrorMessage}");
+                break;
+
+            case CodingAgentAutoRetryEndEvent retry:
+                WriteStatus(retry.Success ? $"auto-retry recovered after {retry.Attempt} attempts" : retry.FinalError ?? "auto-retry failed");
+                RefreshCompositionStatus();
+                break;
+            case CodingAgentSummaryRetryScheduledEvent retry:
+                WriteStatus($"summary retry {retry.Attempt}/{retry.MaxAttempts} after {retry.DelayMs}ms: {retry.ErrorMessage}");
+                break;
+
+            case CodingAgentSummaryRetryAttemptEvent retry:
+                RefreshCompositionStatus(retry.Source == "compaction" ? "Compacting..." : "Summarizing branch...");
+                break;
+
+            case CodingAgentSummaryRetryFinishedEvent:
+                RefreshCompositionStatus();
+                break;
+
+            case CodingAgentCompactionStartEvent:
+                RefreshCompositionStatus("Compacting...");
+                break;
+
+            case CodingAgentCompactionEndEvent:
+                RefreshSessionHistory();
+                RefreshCompositionStatus();
+                break;
+
+            case CodingAgentExtensionErrorEvent extensionError:
+                WriteRuntimeError(extensionError.Error);
+                break;
+
+            case MessageEndEvent { Message: AgentCustomMessage { Display: true } custom }:
+                RenderDisplayedMessage(_extensionCommandStore?.TryRenderCustomMessage(custom, out var rendered) == true && rendered is not null
+                    ? rendered : CodingAgentMessageDisplayFormatter.FormatCustomMessage(custom));
+                break;
+
             case MessageUpdateEvent { StreamEvent: TextDeltaEvent delta }:
                 _hiddenThinkingLabelRendered = false;
                 _ui.WriteAssistantText(delta.Delta);
@@ -1789,6 +1993,16 @@ public sealed class CodingAgentHost
                 HandleToolEnd(toolEnd);
                 break;
 
+            case AgentEndEvent { WillRetry: true }:
+                _ui.CompleteAssistantTurn();
+                break;
+
+            case MessageEndEvent { Message: AssistantMessage { StopReason: not (StopReason.Aborted or StopReason.Error) } }:
+                if (_settingsStore?.GetShowCacheMissNotices() == true && _runner is RuntimeCodingAgentRunner cacheRunner &&
+                    cacheRunner.GetLastCacheMiss() is { } miss && CodingAgentCacheStats.FormatNotice(miss) is { } notice)
+                    WriteStatus(notice);
+                break;
+
             case AgentEndEvent end when end.ErrorMessage is not null:
                 WriteRuntimeError(end.ErrorMessage);
                 break;
@@ -1800,8 +2014,11 @@ public sealed class CodingAgentHost
         }
     }
 
+    /// <summary>【CodingAgent】【工具开始显示】创建顶层工具组件并选择宿主专用正文呈现。</summary><param name="toolStart">工具开始事件。</param>
     private void HandleToolStart(ToolExecutionStartEvent toolStart)
     {
+        // 1. 【CodingAgent】【嵌套工具显示】子调用由父工具详情呈现，不再创建独立工具行
+        if (toolStart.ParentToolCallId is not null) return;
         if (IsBashTool(toolStart.ToolName))
         {
             var bash = new TuiBashExecution(
@@ -1818,7 +2035,7 @@ public sealed class CodingAgentHost
             toolStart.ToolName,
             toolStart.ToolCallId,
             toolStart.Args,
-            _toolExecutionTheme);
+            _toolExecutionTheme, bodyRenderer: ToolBodyRenderer(toolStart.ToolName));
         tool.SetExpanded(_toolOutputExpanded);
         tool.SetExpandKeyHint(ToolOutputExpandKeyHint());
         tool.MarkExecutionStarted();
@@ -1827,14 +2044,18 @@ public sealed class CodingAgentHost
         _ui.WriteToolComponent(tool, key: toolStart.ToolCallId);
     }
 
+    /// <summary>【CodingAgent】【工具进度显示】用最新结果快照更新顶层组件，嵌套事件由父组件负责显示。</summary><param name="toolUpdate">工具进度事件。</param>
     private void HandleToolUpdate(ToolExecutionUpdateEvent toolUpdate)
     {
+        // 1. 【CodingAgent】【嵌套工具显示】保留事件供扩展和持久化使用，终端只更新父工具组件
+        if (toolUpdate.ParentToolCallId is not null) return;
         if (_activeBashExecutions.TryGetValue(toolUpdate.ToolCallId, out var bash))
         {
             var output = !string.IsNullOrEmpty(toolUpdate.Update.Text)
                 ? toolUpdate.Update.Text
                 : ExtractText(toolUpdate.PartialResult);
-            bash.AppendOutput(output);
+            if (toolUpdate.Update.Details is ShellToolDetails || toolUpdate.PartialResult?.Details is ShellToolDetails) bash.SetOutput(output);
+            else bash.AppendOutput(output);
             _ui.WriteToolComponent(bash, key: toolUpdate.ToolCallId);
             return;
         }
@@ -1845,7 +2066,7 @@ public sealed class CodingAgentHost
                 string.IsNullOrWhiteSpace(toolUpdate.ToolName) ? "tool" : toolUpdate.ToolName,
                 toolUpdate.ToolCallId,
                 toolUpdate.Args,
-                _toolExecutionTheme);
+                _toolExecutionTheme, bodyRenderer: ToolBodyRenderer(toolUpdate.ToolName));
             tool.SetExpanded(_toolOutputExpanded);
             tool.MarkExecutionStarted();
             _activeToolExecutions[toolUpdate.ToolCallId] = tool;
@@ -1875,18 +2096,27 @@ public sealed class CodingAgentHost
         _ui.WriteToolComponent(tool, key: toolUpdate.ToolCallId);
     }
 
+    /// <summary>【CodingAgent】【工具结束显示】发布最终输出并移除活动组件，保留终端历史条目。</summary><param name="toolEnd">工具结束事件。</param>
     private void HandleToolEnd(ToolExecutionEndEvent toolEnd)
     {
+        // 1. 【CodingAgent】【嵌套工具显示】结束事件也不创建兜底子工具行
+        if (toolEnd.ParentToolCallId is not null) return;
         if (_activeBashExecutions.TryGetValue(toolEnd.ToolCallId, out var bash))
         {
-            if (bash.OutputLines.Count == 0)
+            if (toolEnd.Result.StructuredContent is not null || toolEnd.Result.Details is ShellToolDetails || toolEnd.Result.IsError)
+            {
+                bash.SetOutput(ExtractText(toolEnd.Result));
+            }
+            else if (bash.OutputLines.Count == 0)
             {
                 bash.AppendOutput(ExtractText(toolEnd.Result));
             }
 
             bash.SetComplete(
                 TryGetExitCode(toolEnd.Result) ?? (toolEnd.Result.IsError ? 1 : 0),
-                cancelled: false);
+                cancelled: toolEnd.Result.IsError && ExtractText(toolEnd.Result).EndsWith("Command aborted", StringComparison.Ordinal),
+                truncated: (toolEnd.Result.Details as ShellToolDetails)?.Truncation?.Truncated == true,
+                fullOutputPath: (toolEnd.Result.Details as ShellToolDetails)?.FullOutputPath);
             _ui.WriteToolComponent(bash, key: toolEnd.ToolCallId);
             _activeBashExecutions.Remove(toolEnd.ToolCallId);
             return;
@@ -1897,7 +2127,7 @@ public sealed class CodingAgentHost
             tool = new TuiToolExecution(
                 string.IsNullOrWhiteSpace(toolEnd.ToolName) ? "tool" : toolEnd.ToolName,
                 toolEnd.ToolCallId,
-                theme: _toolExecutionTheme);
+                theme: _toolExecutionTheme, bodyRenderer: ToolBodyRenderer(toolEnd.ToolName));
             tool.SetExpanded(_toolOutputExpanded);
         }
 
@@ -1906,8 +2136,15 @@ public sealed class CodingAgentHost
         _activeToolExecutions.Remove(toolEnd.ToolCallId);
     }
 
+    /// <summary>【CodingAgent】【工具专用呈现】只为实际注册的内置脚本工具安装渲染器，不改变同名扩展工具。</summary>
+    /// <param name="name">事件工具名。</param><returns>专用正文渲染器或空值。</returns>
+    private Func<TuiToolExecutionRenderContext, IReadOnlyList<string>>? ToolBodyRenderer(string? name) =>
+        name == "codemode" && _runner is RuntimeCodingAgentRunner runtime && runtime.GetRegisteredTools().Any(tool => tool is CodingAgentCodeModeTool)
+            ? context => CodingAgentCodeModeRenderer.Render(context, _compositionSession is not null) : null;
+
     private static bool IsBashTool(string? toolName) =>
         string.Equals(toolName, "bash", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(toolName, "powershell", StringComparison.OrdinalIgnoreCase) ||
         string.Equals(toolName, "shell", StringComparison.OrdinalIgnoreCase);
 
     private static string? TryGetCommandFromArgs(string? args)
@@ -1973,6 +2210,8 @@ public sealed class CodingAgentHost
 
     private static int? TryGetExitCode(ToolResult result)
     {
+        if (result.StructuredContent is { ValueKind: JsonValueKind.Object } structured
+            && structured.TryGetProperty("exit_code", out var code) && code.TryGetInt32(out var valueCode)) return valueCode;
         foreach (var line in ExtractText(result).Split('\n'))
         {
             var trimmed = line.Trim();
@@ -2011,7 +2250,7 @@ public sealed class CodingAgentHost
                 _runner.ThinkingLevel,
                 _footerDataProvider,
                 stats,
-                _autoCompaction.IsEnabled));
+                (_runner as RuntimeCodingAgentRunner)?.AutoCompactionEnabled ?? _autoCompaction.IsEnabled));
             return;
         }
 
@@ -2021,7 +2260,7 @@ public sealed class CodingAgentHost
             _runner.ThinkingLevel,
             _footerDataProvider,
             stats,
-            _autoCompaction.IsEnabled);
+            (_runner as RuntimeCodingAgentRunner)?.AutoCompactionEnabled ?? _autoCompaction.IsEnabled);
         _compositionSession.SetStatus(left, right);
     }
 
@@ -2031,11 +2270,13 @@ public sealed class CodingAgentHost
     private string? GetHiddenThinkingLabel() =>
         CodingAgentFooterFormatter.SanitizeStatusText(_footerDataProvider?.GetHiddenThinkingLabel());
 
-    private void WriteAssistantThinking(string delta)
+    /// <summary>【CodingAgent】【思考显示】根据可见性输出正文或固定标签，并保留实时/历史标记。</summary>
+    /// <param name="delta">思考正文。</param><param name="isStreaming">是否为正在接收的响应。</param>
+    private void WriteAssistantThinking(string delta, bool isStreaming = true)
     {
         if (!_hideThinkingBlock)
         {
-            _ui.WriteAssistantThinking(delta, GetHiddenThinkingLabel());
+            _ui.WriteAssistantThinking(delta, GetHiddenThinkingLabel(), isStreaming: isStreaming);
             return;
         }
 
@@ -2047,7 +2288,7 @@ public sealed class CodingAgentHost
         _hiddenThinkingLabelRendered = true;
         _ui.WriteAssistantThinking(
             CodingAgentMessageDisplayFormatter.DefaultHiddenThinkingLabel,
-            GetHiddenThinkingLabel());
+            GetHiddenThinkingLabel(), applyMarkdownTransform: false);
     }
 
     private CodingAgentSessionStats? GetFooterSessionStats()
@@ -2057,7 +2298,7 @@ public sealed class CodingAgentHost
             var stats = _runner.GetSessionStats(_sessionStore?.Path);
             return _treeSessionController is null
                 ? stats
-                : stats.WithUsage(_treeSessionController.GetCurrentBranchUsageSummary());
+                : stats.WithUsage(_treeSessionController.GetSessionUsageSummary());
         }
         catch (Exception ex) when (
             ex is IOException or

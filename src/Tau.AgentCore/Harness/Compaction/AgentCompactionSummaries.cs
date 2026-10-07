@@ -1,6 +1,9 @@
 using System.Text;
 using Tau.Ai;
+using Tau.Ai.Auth;
+using Tau.Ai.Registry;
 using Tau.Ai.Providers;
+using Tau.Ai.Utilities;
 
 namespace Tau.AgentCore.Harness;
 
@@ -19,12 +22,24 @@ public sealed record AgentSummaryGenerationOptions
 {
     public required ProviderRegistry ProviderRegistry { get; init; }
     public required Model Model { get; init; }
+    /// <summary>【AgentCore】【摘要请求】沿用会话的模型配置来源。</summary>
+    public ModelConfigurationStore? ConfigurationStore { get; init; }
+    /// <summary>【AgentCore】【摘要请求】沿用会话的认证解析器。</summary>
+    public ProviderAuthResolver? AuthResolver { get; init; }
+    /// <summary>【AgentCore】【摘要请求】基础请求选项；摘要预算和取消信号单独覆盖。</summary>
+    public SimpleStreamOptions? StreamOptions { get; init; }
     public string? CustomInstructions { get; init; }
     public bool ReplaceInstructions { get; init; }
     public int? ReserveTokens { get; init; }
     public int? MaxTokens { get; init; }
     public ThinkingLevel? ThinkingLevel { get; init; }
     public CancellationToken CancellationToken { get; init; }
+    /// <summary>【AgentCore】【摘要用量】接收摘要及拆分前缀的模型终值，供宿主记录独立用量。</summary>
+    public Action<AssistantMessage>? OnSummaryResponse { get; init; }
+    /// <summary>【AgentCore】【摘要重试】复用与普通助手相同的暂时错误分类和退避预算。</summary>
+    public AssistantRetryPolicy? RetryPolicy { get; init; }
+    /// <summary>【AgentCore】【摘要通知】通知宿主重试等待、重新请求和结束。</summary>
+    public AssistantRetryCallbacks? RetryCallbacks { get; init; }
 }
 
 public sealed record AgentCompactionResult(
@@ -259,13 +274,12 @@ public static class AgentCompactionSummaries
         string summary;
         if (preparation.IsSplitTurn && preparation.TurnPrefixMessages.Count > 0)
         {
-            var historyTask = preparation.MessagesToSummarize.Count > 0
-                ? GenerateHistorySummaryAsync(preparation, effectiveOptions)
-                : Task.FromResult("No prior history.");
-            var turnPrefixTask = GenerateTurnPrefixSummaryAsync(preparation.TurnPrefixMessages, effectiveOptions);
-
-            await Task.WhenAll(historyTask, turnPrefixTask).ConfigureAwait(false);
-            summary = $"{historyTask.Result}\n\n---\n\n**Turn Context (split turn):**\n\n{turnPrefixTask.Result}";
+            // 1. 【AgentCore】【摘要顺序】历史完成后再生成回合前缀，没有新增历史时保留上一份摘要
+            var history = preparation.MessagesToSummarize.Count > 0
+                ? await GenerateHistorySummaryAsync(preparation, effectiveOptions).ConfigureAwait(false)
+                : preparation.PreviousSummary ?? "No prior history.";
+            var turnPrefix = await GenerateTurnPrefixSummaryAsync(preparation.TurnPrefixMessages, effectiveOptions).ConfigureAwait(false);
+            summary = $"{history}\n\n---\n\n**Turn Context (split turn):**\n\n{turnPrefix}";
         }
         else
         {
@@ -291,10 +305,12 @@ public static class AgentCompactionSummaries
         ArgumentNullException.ThrowIfNull(prompt);
         ArgumentNullException.ThrowIfNull(options);
 
-        var streamOptions = new SimpleStreamOptions
+        var streamOptions = (options.StreamOptions ?? new SimpleStreamOptions()) with
         {
             MaxTokens = maxTokens,
-            Signal = options.CancellationToken
+            Signal = options.CancellationToken,
+            CacheRetention = CacheRetention.None,
+            SessionId = options.StreamOptions?.SessionId ?? Guid.CreateVersion7().ToString()
         };
         if (options.Model.Reasoning && options.ThinkingLevel is { } thinkingLevel)
             streamOptions = streamOptions with { Reasoning = thinkingLevel };
@@ -302,14 +318,15 @@ public static class AgentCompactionSummaries
         AssistantMessage response;
         try
         {
-            response = await StreamFunctions.CompleteSimpleAsync(
+            response = await AssistantRetry.RetryAssistantCallAsync(() => StreamFunctions.CompleteSimpleAsync(
                 options.ProviderRegistry,
                 options.Model,
                 new LlmContext(
                     SummarizationSystemPrompt,
                     [new UserMessage([new TextContent(prompt)])],
                     Tools: null),
-                streamOptions).ConfigureAwait(false);
+                streamOptions, options.ConfigurationStore, options.AuthResolver), options.RetryPolicy,
+                options.CancellationToken, options.RetryCallbacks).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (options.CancellationToken.IsCancellationRequested)
         {
@@ -320,12 +337,17 @@ public static class AgentCompactionSummaries
             throw new AgentSummaryException("summarization_failed", $"{failurePrefix}: {ex.Message}", ex);
         }
 
+        options.OnSummaryResponse?.Invoke(response);
         if (response.StopReason == StopReason.Aborted)
             throw new AgentSummaryException("aborted", response.ErrorMessage ?? abortedMessage);
         if (response.StopReason == StopReason.Error)
             throw new AgentSummaryException(
                 "summarization_failed",
                 $"{failurePrefix}: {response.ErrorMessage ?? "Unknown error"}");
+        if (response.StopReason == StopReason.MaxTokens)
+            throw new AgentSummaryException("summarization_failed", $"{failurePrefix}: generation hit the token cap and the summary is incomplete");
+        if (response.Content.OfType<ToolCallContent>().Any())
+            throw new AgentSummaryException("summarization_failed", "Summarization attempted to call a tool");
 
         return string.Join("\n", response.Content.OfType<TextContent>().Select(static content => content.Text));
     }

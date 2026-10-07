@@ -12,6 +12,7 @@ namespace Tau.CodingAgent.Tests;
 
 public class RuntimeCodingAgentRunnerTests
 {
+    /// <summary>显式模型配置应初始化对应模型和系统基线。</summary>
     [Fact]
     public void Create_WithExplicitProviderAndModel_UsesRequestedModel()
     {
@@ -19,7 +20,7 @@ public class RuntimeCodingAgentRunnerTests
 
         Assert.Equal("google", runner.Model.Provider, ignoreCase: true);
         Assert.Equal("gemini-2.5-pro", runner.Model.Id, ignoreCase: true);
-        Assert.Empty(runner.Messages);
+        Assert.IsType<SystemMessage>(Assert.Single(runner.Messages));
     }
 
     [Fact]
@@ -54,7 +55,7 @@ public class RuntimeCodingAgentRunnerTests
             "test-model",
             toolsOverride: [],
             providerRegistryOverride: registry,
-            modelCatalogOverride: catalog);
+            modelCatalogOverride: catalog, apiKey: "synthetic");
         runner.InstallTelemetryEnabled = true;
 
         await foreach (var _ in runner.RunAsync("hello")) { }
@@ -88,7 +89,7 @@ public class RuntimeCodingAgentRunnerTests
             "test-model",
             toolsOverride: [],
             providerRegistryOverride: registry,
-            modelCatalogOverride: catalog);
+            modelCatalogOverride: catalog, apiKey: "synthetic");
         runner.InstallTelemetryEnabled = false;
 
         await foreach (var _ in runner.RunAsync("hello")) { }
@@ -126,7 +127,7 @@ public class RuntimeCodingAgentRunnerTests
             "router-model",
             toolsOverride: [],
             providerRegistryOverride: registry,
-            modelCatalogOverride: catalog);
+            modelCatalogOverride: catalog, apiKey: "synthetic");
         runner.InstallTelemetryEnabled = true;
 
         runner.SelectModel("nvidia", "nim-model");
@@ -155,14 +156,14 @@ public class RuntimeCodingAgentRunnerTests
     [Fact]
     public void CreateDefaultTools_WithExtensionTools_OverridesBuiltInToolByName()
     {
-        var readOverride = new StaticAgentTool("read_file", "Extension Read");
+        var readOverride = new StaticAgentTool("read", "Extension Read");
         var customTool = new StaticAgentTool("extension_tool", "Extension Tool");
 
         var tools = RuntimeCodingAgentRunner.CreateDefaultTools(extensionTools: [readOverride, customTool]);
 
-        Assert.Same(readOverride, Assert.Single(tools, static tool => tool.Name == "read_file"));
+        Assert.Same(readOverride, Assert.Single(tools, static tool => tool.Name == "read"));
         Assert.Same(customTool, Assert.Single(tools, static tool => tool.Name == "extension_tool"));
-        Assert.Contains(tools, static tool => tool.Name == "shell");
+        Assert.Contains(tools, static tool => tool.Name == "bash");
     }
 
     [Fact]
@@ -170,22 +171,22 @@ public class RuntimeCodingAgentRunnerTests
     {
         var tools = RuntimeCodingAgentRunner.CreateDefaultTools(selectedBuiltInToolNames: null);
 
-        Assert.Equal(7, tools.Length);
-        Assert.Contains(tools, static tool => tool.Name == "read_file");
-        Assert.Contains(tools, static tool => tool.Name == "shell");
-        Assert.Contains(tools, static tool => tool.Name == "glob");
+        Assert.Equal(8, tools.Length);
+        Assert.Contains(tools, static tool => tool.Name == "read");
+        Assert.Contains(tools, static tool => tool.Name == "bash");
+        Assert.Contains(tools, static tool => tool.Name == "find");
     }
 
     [Fact]
     public void CreateDefaultTools_WithExplicitSelection_EnablesOnlyNamedBuiltIns()
     {
         var tools = RuntimeCodingAgentRunner.CreateDefaultTools(
-            selectedBuiltInToolNames: ["read_file", "grep"]);
+            selectedBuiltInToolNames: ["read", "grep"]);
 
         Assert.Equal(2, tools.Length);
-        Assert.Contains(tools, static tool => tool.Name == "read_file");
+        Assert.Contains(tools, static tool => tool.Name == "read");
         Assert.Contains(tools, static tool => tool.Name == "grep");
-        Assert.DoesNotContain(tools, static tool => tool.Name == "shell");
+        Assert.DoesNotContain(tools, static tool => tool.Name == "bash");
     }
 
     [Fact]
@@ -205,11 +206,11 @@ public class RuntimeCodingAgentRunnerTests
     {
         var map = CodingAgentCliArguments.CliToolNameToTauToolName;
 
-        Assert.Equal("read_file", map["read"]);
-        Assert.Equal("shell", map["bash"]);
-        Assert.Equal("edit_file", map["edit"]);
-        Assert.Equal("write_file", map["write"]);
-        Assert.Equal("glob", map["find"]);
+        Assert.Equal("read", map["read"]);
+        Assert.Equal("bash", map["bash"]);
+        Assert.Equal("edit", map["edit"]);
+        Assert.Equal("write", map["write"]);
+        Assert.Equal("find", map["find"]);
         Assert.Equal("grep", map["grep"]);
         Assert.Equal("ls", map["ls"]);
     }
@@ -242,6 +243,7 @@ public class RuntimeCodingAgentRunnerTests
         Assert.Equal("sk-cli-supplied-key", capturedApiKey);
     }
 
+    /// <summary>旧对话恢复后应在原消息之前补齐系统基线。</summary>
     [Fact]
     public void Create_WithInitialMessages_RehydratesConversationState()
     {
@@ -250,11 +252,13 @@ public class RuntimeCodingAgentRunnerTests
             "gpt-5.4",
             [new UserMessage("hello"), new AssistantMessage([new TextContent("world")])]);
 
-        Assert.Equal(2, runner.Messages.Count);
-        Assert.IsType<UserMessage>(runner.Messages[0]);
-        Assert.IsType<AssistantMessage>(runner.Messages[1]);
+        Assert.Equal(3, runner.Messages.Count);
+        Assert.IsType<SystemMessage>(runner.Messages[0]);
+        Assert.IsType<UserMessage>(runner.Messages[1]);
+        Assert.IsType<AssistantMessage>(runner.Messages[2]);
     }
 
+    /// <summary>重置清空普通对话并保留模型与系统基线。</summary>
     [Fact]
     public void ResetSession_ClearsConversationStateAndKeepsModel()
     {
@@ -265,11 +269,12 @@ public class RuntimeCodingAgentRunnerTests
 
         runner.ResetSession();
 
-        Assert.Empty(runner.Messages);
+        Assert.IsType<SystemMessage>(Assert.Single(runner.Messages));
         Assert.Equal("openai", runner.Model.Provider, ignoreCase: true);
         Assert.Equal("gpt-5.4", runner.Model.Id, ignoreCase: true);
     }
 
+    /// <summary>会话总数包含基线，用户、助手和工具统计仍独立计数。</summary>
     [Fact]
     public void GetSessionStats_CountsFlatSessionMessagesAndToolCalls()
     {
@@ -302,7 +307,7 @@ public class RuntimeCodingAgentRunnerTests
         Assert.Equal("openai", stats.Provider, ignoreCase: true);
         Assert.Equal("gpt-5.4", stats.Model, ignoreCase: true);
         Assert.Equal("stats session", stats.SessionName);
-        Assert.Equal(3, stats.TotalMessages);
+        Assert.Equal(4, stats.TotalMessages);
         Assert.Equal(1, stats.UserMessages);
         Assert.Equal(1, stats.AssistantMessages);
         Assert.Equal(1, stats.ToolResultMessages);
@@ -361,6 +366,8 @@ public class RuntimeCodingAgentRunnerTests
         }
     }
 
+    /// <summary>压缩将普通对话替换为摘要并保留原系统基线与文件操作摘要。</summary>
+    /// <returns>测试任务。</returns>
     [Fact]
     public async Task CompactAsync_ReplacesConversationWithCompactionSummaryMessage()
     {
@@ -401,12 +408,13 @@ public class RuntimeCodingAgentRunnerTests
         Assert.Contains("summary result", result.Summary, StringComparison.Ordinal);
         Assert.Contains("<read-files>\nREADME.md\n</read-files>", result.Summary, StringComparison.Ordinal);
         Assert.Contains("<modified-files>\nsrc/New.cs\n</modified-files>", result.Summary, StringComparison.Ordinal);
-        Assert.Equal(2, result.MessagesBefore);
-        Assert.Equal(1, result.MessagesAfter);
+        Assert.Equal(3, result.MessagesBefore);
+        Assert.Equal(2, result.MessagesAfter);
         Assert.NotNull(capturedContext);
         Assert.Equal(AgentCompactionSummaries.SummarizationSystemPrompt, capturedContext!.Value.SystemPrompt);
 
-        var compacted = Assert.Single(runner.Messages);
+        Assert.Equal("test", Assert.IsType<SystemMessage>(runner.Messages[0]).Content);
+        var compacted = runner.Messages[1];
         var user = Assert.IsType<UserMessage>(compacted);
         var text = Assert.IsType<TextContent>(Assert.Single(user.Content)).Text;
         Assert.Contains("The conversation history before this point was compacted", text);
@@ -423,7 +431,7 @@ public class RuntimeCodingAgentRunnerTests
             "test-model",
             toolsOverride: [],
             providerRegistryOverride: CreatePromptCapturingRegistry(context => capturedContext = context),
-            modelCatalogOverride: CreatePromptCapturingModelCatalog());
+            apiKey: "synthetic", modelCatalogOverride: CreatePromptCapturingModelCatalog());
 
         var result = await runner.SummarizeBranchAsync(
             [new UserMessage("investigate branch"), new AssistantMessage([new TextContent("found issue")])],
@@ -552,7 +560,7 @@ public class RuntimeCodingAgentRunnerTests
         try
         {
             var sink = new RecordingLogSink();
-            var extensionStore = new CodingAgentExtensionCommandStore(
+            using var extensionStore = new CodingAgentExtensionCommandStore(
                 cwd: directory,
                 userExtensionsDirectory: Path.Combine(directory, "missing-user-extensions"),
                 javaScriptRuntime: new CodingAgentJavaScriptExtensionRuntime(directory, nodeExecutable: "node"));
@@ -562,7 +570,7 @@ public class RuntimeCodingAgentRunnerTests
                 toolsOverride: [],
                 logSink: sink,
                 providerRegistryOverride: CreatePromptCapturingRegistry(_ => { }),
-                modelCatalogOverride: CreatePromptCapturingModelCatalog(),
+                apiKey: "synthetic", modelCatalogOverride: CreatePromptCapturingModelCatalog(),
                 extensionLifecycleEventSink: extensionStore.LoadLifecycleEventSink());
 
             var events = new List<AgentEvent>();
@@ -574,11 +582,15 @@ public class RuntimeCodingAgentRunnerTests
             Assert.NotEmpty(events);
             Assert.Contains(sink.Events, e => e.Category == "agent" && e.Event == "run.end");
             Assert.DoesNotContain(sink.Events, e => e.Category == "agent" && e.Event == "run.error");
-            var errorEvent = Assert.Single(sink.Events, e => e.Category == "extension" && e.Event == "event.error");
-            Assert.Equal("message_start", errorEvent.Fields["eventType"]);
-            Assert.Equal("project", errorEvent.Fields["scope"]);
-            Assert.Equal("javascript", errorEvent.Fields["runtime"]);
-            Assert.Contains("lifecycle boom", errorEvent.Fields["error"], StringComparison.Ordinal);
+            var errors = sink.Events.Where(e => e.Category == "extension" && e.Event == "event.error").ToArray();
+            Assert.Equal(2, errors.Length);
+            Assert.All(errors, errorEvent =>
+            {
+                Assert.Equal("message_start", errorEvent.Fields["eventType"]);
+                Assert.Equal("project", errorEvent.Fields["scope"]);
+                Assert.Equal("javascript", errorEvent.Fields["runtime"]);
+                Assert.Contains("lifecycle boom", errorEvent.Fields["error"], StringComparison.Ordinal);
+            });
         }
         finally
         {
@@ -603,7 +615,7 @@ public class RuntimeCodingAgentRunnerTests
         await foreach (var _ in runner.RunAsync("hello")) { }
 
         Assert.NotNull(capturedPrompt);
-        Assert.Contains("# Project Context", capturedPrompt, StringComparison.Ordinal);
+        Assert.Contains("<project_context>", capturedPrompt, StringComparison.Ordinal);
         Assert.Contains("/AGENTS.md", capturedPrompt, StringComparison.Ordinal);
         Assert.Contains("follow project rules", capturedPrompt, StringComparison.Ordinal);
     }
@@ -627,7 +639,7 @@ public class RuntimeCodingAgentRunnerTests
     }
 
     [Fact]
-    public async Task RefreshSystemPromptResources_WhenSystemPromptIsCustom_DoesNotOverwritePrompt()
+    public async Task RefreshSystemPromptResources_WhenSystemPromptIsCustom_PreservesPreambleAndUpdatesContext()
     {
         string? capturedPrompt = null;
         var runner = RuntimeCodingAgentRunner.Create(
@@ -640,16 +652,18 @@ public class RuntimeCodingAgentRunnerTests
                 new CodingAgentContextFile(Path.Combine(Path.GetTempPath(), "AGENTS.md"), "initial context", "project")
             ],
             providerRegistryOverride: CreatePromptCapturingRegistry(context => capturedPrompt = context.SystemPrompt),
-            modelCatalogOverride: CreatePromptCapturingModelCatalog());
+            apiKey: "synthetic", modelCatalogOverride: CreatePromptCapturingModelCatalog());
 
         var refreshed = runner.RefreshSystemPromptResources(
             [],
             [new CodingAgentContextFile(Path.Combine(Path.GetTempPath(), "CLAUDE.md"), "new context", "project")]);
 
-        Assert.False(refreshed);
+        Assert.True(refreshed);
         await foreach (var _ in runner.RunAsync("hello")) { }
 
-        Assert.Equal("custom system prompt", capturedPrompt);
+        Assert.StartsWith("custom system prompt\n\n", capturedPrompt);
+        Assert.Contains("new context", capturedPrompt);
+        Assert.DoesNotContain("initial context", capturedPrompt);
     }
 
     [Fact]
@@ -661,14 +675,14 @@ public class RuntimeCodingAgentRunnerTests
             "test-model",
             toolsOverride: [],
             providerRegistryOverride: CreatePromptCapturingRegistry(context => capturedPrompt = context.SystemPrompt),
-            modelCatalogOverride: CreatePromptCapturingModelCatalog(),
+            apiKey: "synthetic", modelCatalogOverride: CreatePromptCapturingModelCatalog(),
             appendSystemPrompt: "EXTRA SYSTEM RULE");
 
         await foreach (var _ in runner.RunAsync("hello")) { }
 
         Assert.NotNull(capturedPrompt);
         Assert.Contains("You are Tau", capturedPrompt, StringComparison.Ordinal);
-        Assert.EndsWith("EXTRA SYSTEM RULE", capturedPrompt!.TrimEnd(), StringComparison.Ordinal);
+        Assert.Contains("<addendum>\nEXTRA SYSTEM RULE\n</addendum>", capturedPrompt, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -681,12 +695,12 @@ public class RuntimeCodingAgentRunnerTests
             toolsOverride: [],
             systemPromptOverride: "custom system prompt",
             providerRegistryOverride: CreatePromptCapturingRegistry(context => capturedPrompt = context.SystemPrompt),
-            modelCatalogOverride: CreatePromptCapturingModelCatalog(),
+            apiKey: "synthetic", modelCatalogOverride: CreatePromptCapturingModelCatalog(),
             appendSystemPrompt: "EXTRA RULE");
 
         await foreach (var _ in runner.RunAsync("hello")) { }
 
-        Assert.Equal("custom system prompt\n\nEXTRA RULE", capturedPrompt);
+        Assert.StartsWith("custom system prompt\n\n<addendum>\nEXTRA RULE\n</addendum>", capturedPrompt);
     }
 
     [Fact]
@@ -698,7 +712,7 @@ public class RuntimeCodingAgentRunnerTests
             "test-model",
             toolsOverride: [],
             providerRegistryOverride: CreatePromptCapturingRegistry(context => capturedPrompt = context.SystemPrompt),
-            modelCatalogOverride: CreatePromptCapturingModelCatalog(),
+            apiKey: "synthetic", modelCatalogOverride: CreatePromptCapturingModelCatalog(),
             appendSystemPrompt: "PERSISTENT APPEND");
 
         var refreshed = runner.RefreshSystemPromptResources(
@@ -713,6 +727,8 @@ public class RuntimeCodingAgentRunnerTests
         Assert.Contains("PERSISTENT APPEND", capturedPrompt, StringComparison.Ordinal);
     }
 
+    /// <summary>带系统基线的会话仍将自定义消息内容转换为模型用户输入。</summary>
+    /// <returns>测试任务。</returns>
     [Fact]
     public async Task RunAsync_WithCustomMessageConvertsCustomContentToLlmUserMessage()
     {
@@ -722,7 +738,7 @@ public class RuntimeCodingAgentRunnerTests
             "test-model",
             toolsOverride: [],
             providerRegistryOverride: CreatePromptCapturingRegistry(context => capturedContext = context),
-            modelCatalogOverride: CreatePromptCapturingModelCatalog());
+            apiKey: "synthetic", modelCatalogOverride: CreatePromptCapturingModelCatalog());
 
         await foreach (var _ in runner.RunAsync(new AgentCustomMessage("file-trigger", "changed", display: true)))
         {
@@ -731,7 +747,7 @@ public class RuntimeCodingAgentRunnerTests
         Assert.NotNull(capturedContext);
         var user = Assert.IsType<UserMessage>(Assert.Single(capturedContext!.Value.Messages));
         Assert.Equal("changed", Assert.IsType<TextContent>(Assert.Single(user.Content)).Text);
-        var stored = Assert.IsType<AgentCustomMessage>(runner.Messages[0]);
+        var stored = Assert.Single(runner.Messages.OfType<AgentCustomMessage>());
         Assert.Equal("file-trigger", stored.CustomType);
     }
 
@@ -762,7 +778,7 @@ public class RuntimeCodingAgentRunnerTests
 
         try
         {
-            var extensionStore = new CodingAgentExtensionCommandStore(
+            using var extensionStore = new CodingAgentExtensionCommandStore(
                 cwd: directory,
                 userExtensionsDirectory: Path.Combine(directory, "missing-user-extensions"),
                 javaScriptRuntime: new CodingAgentJavaScriptExtensionRuntime(directory, nodeExecutable: "node"));
@@ -771,7 +787,7 @@ public class RuntimeCodingAgentRunnerTests
                 "test-model",
                 toolsOverride: [],
                 providerRegistryOverride: CreatePromptCapturingRegistry(_ => { }),
-                modelCatalogOverride: CreatePromptCapturingModelCatalog(),
+                apiKey: "synthetic", modelCatalogOverride: CreatePromptCapturingModelCatalog(),
                 extensionLifecycleEventSink: extensionStore.LoadLifecycleEventSink());
 
             await foreach (var _ in runner.RunAsync("hello")) { }
@@ -821,7 +837,7 @@ public class RuntimeCodingAgentRunnerTests
 
         try
         {
-            var extensionStore = new CodingAgentExtensionCommandStore(
+            using var extensionStore = new CodingAgentExtensionCommandStore(
                 cwd: directory,
                 userExtensionsDirectory: Path.Combine(directory, "missing-user-extensions"),
                 javaScriptRuntime: new CodingAgentJavaScriptExtensionRuntime(directory, nodeExecutable: "node"));
@@ -845,7 +861,7 @@ public class RuntimeCodingAgentRunnerTests
                             Timestamp: DateTimeOffset.FromUnixTimeMilliseconds(456)));
                     }
                 }),
-                modelCatalogOverride: CreatePromptCapturingModelCatalog(),
+                apiKey: "synthetic", modelCatalogOverride: CreatePromptCapturingModelCatalog(),
                 extensionLifecycleEventSink: extensionStore.LoadLifecycleEventSink());
 
             await foreach (var _ in runner.RunAsync("hello")) { }
@@ -894,7 +910,7 @@ public class RuntimeCodingAgentRunnerTests
             var contexts = new List<LlmContext>();
             RuntimeCodingAgentRunner? runner = null;
             var callCount = 0;
-            var extensionStore = new CodingAgentExtensionCommandStore(
+            using var extensionStore = new CodingAgentExtensionCommandStore(
                 cwd: directory,
                 userExtensionsDirectory: Path.Combine(directory, "missing-user-extensions"),
                 javaScriptRuntime: new CodingAgentJavaScriptExtensionRuntime(directory, nodeExecutable: "node"));
@@ -911,7 +927,7 @@ public class RuntimeCodingAgentRunnerTests
                         runner!.Steer(new UserMessage("queued prompt"));
                     }
                 }),
-                modelCatalogOverride: CreatePromptCapturingModelCatalog(),
+                apiKey: "synthetic", modelCatalogOverride: CreatePromptCapturingModelCatalog(),
                 extensionLifecycleEventSink: extensionStore.LoadLifecycleEventSink());
 
             var events = new List<AgentEvent>();
@@ -966,7 +982,7 @@ public class RuntimeCodingAgentRunnerTests
         try
         {
             var sink = new RecordingLogSink();
-            var extensionStore = new CodingAgentExtensionCommandStore(
+            using var extensionStore = new CodingAgentExtensionCommandStore(
                 cwd: directory,
                 userExtensionsDirectory: Path.Combine(directory, "missing-user-extensions"),
                 javaScriptRuntime: new CodingAgentJavaScriptExtensionRuntime(directory, nodeExecutable: "node"));
@@ -976,7 +992,7 @@ public class RuntimeCodingAgentRunnerTests
                 toolsOverride: [],
                 logSink: sink,
                 providerRegistryOverride: CreatePromptCapturingRegistry(_ => { }),
-                modelCatalogOverride: CreatePromptCapturingModelCatalog(),
+                apiKey: "synthetic", modelCatalogOverride: CreatePromptCapturingModelCatalog(),
                 extensionLifecycleEventSink: extensionStore.LoadLifecycleEventSink());
 
             await foreach (var _ in runner.RunAsync("hello")) { }
@@ -1017,7 +1033,7 @@ public class RuntimeCodingAgentRunnerTests
                 Tools = [],
                 LogContext = logContext,
                 SystemPrompt = "test",
-                StreamOptions = new SimpleStreamOptions { MaxTokens = 256 }
+                StreamOptions = new SimpleStreamOptions { MaxTokens = 256, ApiKey = "synthetic" }
             },
             new Tau.Ai.Registry.ModelCatalog(),
             logSink: sink,
@@ -1034,7 +1050,7 @@ public class RuntimeCodingAgentRunnerTests
             toolsOverride: [],
             contextFiles: contextFiles,
             providerRegistryOverride: CreatePromptCapturingRegistry(capture),
-            modelCatalogOverride: CreatePromptCapturingModelCatalog());
+            apiKey: "synthetic", modelCatalogOverride: CreatePromptCapturingModelCatalog());
     }
 
     private static ProviderRegistry CreatePromptCapturingRegistry(Action<LlmContext> capture)

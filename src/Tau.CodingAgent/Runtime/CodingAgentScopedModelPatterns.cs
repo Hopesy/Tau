@@ -69,6 +69,8 @@ internal static class CodingAgentScopedModelPatterns
         return CodingAgentThinkingLevels.ParseOrNull(value);
     }
 
+    /// <summary>【CodingAgent】【模型范围】规范化模型后缀中的推理等级及兼容别名。</summary>
+    /// <param name="value">原始等级。</param><param name="normalized">规范等级。</param><returns>等级有效时返回真。</returns>
     public static bool TryNormalizeThinkingLevel(string value, out string normalized)
     {
         normalized = string.Empty;
@@ -85,6 +87,7 @@ internal static class CodingAgentScopedModelPatterns
             "medium" or "med" => "medium",
             "high" => "high",
             "xhigh" or "extrahigh" or "extra-high" => "xhigh",
+            "max" => "max",
             _ => string.Empty
         };
         return normalized.Length > 0;

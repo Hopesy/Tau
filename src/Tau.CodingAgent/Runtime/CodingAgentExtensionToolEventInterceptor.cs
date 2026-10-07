@@ -43,7 +43,7 @@ public sealed class CodingAgentExtensionToolEventInterceptor : IToolInterceptor
                 module.FilePath,
                 effectiveContext.ToolName,
                 effectiveContext.ToolCallId,
-                effectiveContext.Arguments);
+                effectiveContext.Arguments, ct, effectiveContext.ParentToolCallId);
             if (!result.Success)
             {
                 throw new InvalidOperationException(
@@ -93,18 +93,21 @@ public sealed class CodingAgentExtensionToolEventInterceptor : IToolInterceptor
                 context.ToolName,
                 context.ToolCallId,
                 context.Arguments,
-                current);
+                current, ct, context.ParentToolCallId);
             if (!eventResult.Success)
             {
                 throw new InvalidOperationException(
                     eventResult.Error ?? $"extension tool_result handler failed for '{context.ToolName}'");
             }
 
-            current = new ToolResult(
-                eventResult.Content.Select(static text => new TextContent(text)).ToArray(),
-                eventResult.IsError,
-                eventResult.Details.HasValue ? eventResult.Details.Value.Clone() : null,
-                current.Terminate);
+            current = current with
+            {
+                Content = eventResult.Content,
+                IsError = eventResult.IsError,
+                Details = eventResult.Details.HasValue ? eventResult.Details.Value.Clone() : null,
+                Usage = eventResult.Usage,
+                StructuredContent = eventResult.StructuredContent
+            };
         }
 
         return Task.FromResult(current);

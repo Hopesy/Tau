@@ -192,24 +192,40 @@ public sealed class AgentHarnessSession<TMetadata>
                 activeToolNames.ToArray()),
             cancellationToken).ConfigureAwait(false);
 
+    /// <summary>【AgentCore】【压缩基线】保存摘要及当前分支重放后的系统声明。</summary>
+    /// <param name="summary">压缩摘要。</param>
+    /// <param name="firstKeptEntryId">保留尾部的起点；不匹配时不保留旧消息。</param>
+    /// <param name="tokensBefore">压缩前的 token 数。</param>
+    /// <param name="details">压缩附加信息。</param>
+    /// <param name="fromHook">是否由扩展提供摘要。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>新压缩条目的标识。</returns>
     public async Task<string> AppendCompactionAsync(
         string summary,
         string firstKeptEntryId,
         int tokensBefore,
         object? details = null,
         bool fromHook = false,
-        CancellationToken cancellationToken = default) =>
-        await AppendTypedEntryAsync(
+        CancellationToken cancellationToken = default)
+    {
+        var context = await BuildContextAsync(cancellationToken).ConfigureAwait(false);
+        var system = Transcript.GetCurrentSystemMessage(context.Messages);
+        var timestamp = DateTimeOffset.UtcNow;
+        return await AppendTypedEntryAsync(
             new CompactionSessionEntry(
                 await _storage.CreateEntryIdAsync(cancellationToken).ConfigureAwait(false),
                 await _storage.GetLeafIdAsync(cancellationToken).ConfigureAwait(false),
-                DateTimeOffset.UtcNow,
+                timestamp,
                 summary,
                 firstKeptEntryId,
                 tokensBefore,
                 details,
-                fromHook),
+                fromHook)
+            {
+                SystemMessage = system is null ? null : system with { Timestamp = timestamp }
+            },
             cancellationToken).ConfigureAwait(false);
+    }
 
     public async Task<string> AppendCustomEntryAsync(
         string customType,
@@ -315,6 +331,9 @@ public sealed class AgentHarnessSession<TMetadata>
             cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>【AgentCore】【会话恢复】投影当前分支，以最新压缩基线替代压缩前的系统增量。</summary>
+    /// <param name="pathEntries">从根到当前叶节点的条目。</param>
+    /// <returns>恢复后的消息、模型、推理等级和工具选择。</returns>
     public static SessionContext BuildSessionContext(IReadOnlyList<SessionTreeEntry> pathEntries)
     {
         var thinkingLevel = "off";
@@ -371,6 +390,8 @@ public sealed class AgentHarnessSession<TMetadata>
 
         if (compaction is not null)
         {
+            // 1. 【AgentCore】【压缩基线】先恢复有效声明，再恢复摘要与普通尾部，避免重复应用旧增量
+            if (compaction.SystemMessage is not null) messages.Add(compaction.SystemMessage);
             messages.Add(AgentHarnessMessages.CreateCompactionSummaryMessage(
                 compaction.Summary,
                 compaction.TokensBefore,
@@ -385,7 +406,7 @@ public sealed class AgentHarnessSession<TMetadata>
                 var entry = pathEntries[i];
                 if (entry.Id == compaction.FirstKeptEntryId)
                     foundFirstKept = true;
-                if (foundFirstKept)
+                if (foundFirstKept && entry is not MessageSessionEntry { Message: SystemMessage })
                     AppendMessage(entry);
             }
 

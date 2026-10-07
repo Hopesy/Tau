@@ -2,6 +2,7 @@ using System.Net;
 
 namespace Tau.Ai.Tests;
 
+[Collection("ProcessEnvironment")]
 public sealed class NodeHttpProxyResolverTests
 {
     [Fact]

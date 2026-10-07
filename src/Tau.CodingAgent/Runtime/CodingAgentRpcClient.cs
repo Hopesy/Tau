@@ -161,12 +161,15 @@ public sealed class CodingAgentRpcClient : IAsyncDisposable
         return SendCommandAsync(type, properties, timeout, cancellationToken);
     }
 
-    public Task PromptAsync(
+    /// <summary>【CodingAgent】【RPC 提示】返回处理、排队或启动结果；handled 不会为该提示产生结算事件。</summary>
+    /// <param name="message">用户文本。</param><param name="images">可选图片。</param><param name="streamingBehavior">运行中投递方式。</param>
+    /// <param name="cancellationToken">请求取消信号。</param><returns>提示接收结果。</returns>
+    public async Task<CodingAgentPromptDisposition> PromptAsync(
         string message,
         IReadOnlyList<ImageContent>? images = null,
         string? streamingBehavior = null,
         CancellationToken cancellationToken = default) =>
-        SendAndRequireSuccessAsync(
+        ReadPromptDisposition(await SendForDataAsync(
             "prompt",
             new Dictionary<string, object?>
             {
@@ -174,33 +177,63 @@ public sealed class CodingAgentRpcClient : IAsyncDisposable
                 ["images"] = images,
                 ["streamingBehavior"] = streamingBehavior
             },
-            cancellationToken: cancellationToken);
+            cancellationToken: cancellationToken).ConfigureAwait(false));
 
-    public Task SteerAsync(
+    /// <summary>【CodingAgent】【RPC 引导】提交引导输入并返回扩展处理或排队结果。</summary>
+    /// <param name="message">文本。</param><param name="images">可选图片。</param><param name="cancellationToken">取消信号。</param><returns>队列接收结果。</returns>
+    public async Task<CodingAgentQueuedInputDisposition> SteerAsync(
         string message,
         IReadOnlyList<ImageContent>? images = null,
         CancellationToken cancellationToken = default) =>
-        SendAndRequireSuccessAsync(
+        ReadQueuedDisposition(await SendForDataAsync(
             "steer",
             new Dictionary<string, object?>
             {
                 ["message"] = message,
                 ["images"] = images
             },
-            cancellationToken: cancellationToken);
+            cancellationToken: cancellationToken).ConfigureAwait(false));
 
-    public Task FollowUpAsync(
+    /// <summary>【CodingAgent】【RPC 跟进】提交跟进输入并返回扩展处理或排队结果。</summary>
+    /// <param name="message">文本。</param><param name="images">可选图片。</param><param name="cancellationToken">取消信号。</param><returns>队列接收结果。</returns>
+    public async Task<CodingAgentQueuedInputDisposition> FollowUpAsync(
         string message,
         IReadOnlyList<ImageContent>? images = null,
         CancellationToken cancellationToken = default) =>
-        SendAndRequireSuccessAsync(
+        ReadQueuedDisposition(await SendForDataAsync(
             "follow_up",
             new Dictionary<string, object?>
             {
                 ["message"] = message,
                 ["images"] = images
             },
-            cancellationToken: cancellationToken);
+            cancellationToken: cancellationToken).ConfigureAwait(false));
+
+    /// <summary>【CodingAgent】【提示响应】解析原生结果，旧服务端缺少字段时沿用已启动语义。</summary>
+    /// <param name="data">响应数据。</param><returns>提示处理方式。</returns>
+    private static CodingAgentPromptDisposition ReadPromptDisposition(JsonElement? data) => ReadDisposition(data) switch
+    {
+        null or "started" => CodingAgentPromptDisposition.Started, "handled" => CodingAgentPromptDisposition.Handled,
+        "queued" => CodingAgentPromptDisposition.Queued, _ => throw new InvalidDataException("Invalid prompt disposition.")
+    };
+
+    /// <summary>【CodingAgent】【队列响应】拒绝队列接口不允许的 started 值，旧服务端回退为 queued。</summary>
+    /// <param name="data">响应数据。</param><returns>队列处理方式。</returns>
+    private static CodingAgentQueuedInputDisposition ReadQueuedDisposition(JsonElement? data) => ReadDisposition(data) switch
+    {
+        null or "queued" => CodingAgentQueuedInputDisposition.Queued, "handled" => CodingAgentQueuedInputDisposition.Handled,
+        _ => throw new InvalidDataException("Invalid queued input disposition.")
+    };
+
+    /// <summary>【CodingAgent】【接收结果字段】读取可选字符串字段，拒绝已存在但无效的类型。</summary>
+    /// <param name="data">响应数据。</param><returns>原始处理方式；字段不存在时为空。</returns>
+    private static string? ReadDisposition(JsonElement? data)
+    {
+        if (data is null || data.Value.ValueKind == JsonValueKind.Null) return null;
+        if (data.Value.ValueKind != JsonValueKind.Object) throw new InvalidDataException("Invalid disposition response.");
+        if (!data.Value.TryGetProperty("disposition", out var disposition)) return null;
+        return disposition.ValueKind == JsonValueKind.String ? disposition.GetString() : throw new InvalidDataException("Invalid disposition value.");
+    }
 
     public Task AbortAsync(CancellationToken cancellationToken = default) =>
         SendAndRequireSuccessAsync("abort", cancellationToken: cancellationToken);
@@ -365,6 +398,9 @@ public sealed class CodingAgentRpcClient : IAsyncDisposable
     public Task<JsonElement?> GetCommandsAsync(CancellationToken cancellationToken = default) =>
         SendForDataAsync("get_commands", cancellationToken: cancellationToken);
 
+    /// <summary>【CodingAgent】【RPC 结算】等待完整用户运行结算，普通 agent_end 和重试结束不会提前完成</summary>
+    /// <param name="timeout">最大等待时间，缺省为六十秒</param><param name="cancellationToken">调用方取消信号</param>
+    /// <returns>收到 agent_settled 后完成的任务</returns>
     public async Task WaitForIdleAsync(
         TimeSpan? timeout = null,
         CancellationToken cancellationToken = default)
@@ -377,7 +413,7 @@ public sealed class CodingAgentRpcClient : IAsyncDisposable
 
         subscription = OnEvent(evt =>
         {
-            if (GetEventType(evt).Equals("agent_end", StringComparison.Ordinal))
+            if (GetEventType(evt).Equals("agent_settled", StringComparison.Ordinal))
             {
                 completion.TrySetResult();
             }
@@ -391,6 +427,9 @@ public sealed class CodingAgentRpcClient : IAsyncDisposable
             () => $"Timeout waiting for agent to become idle. Stderr: {Stderr}").ConfigureAwait(false);
     }
 
+    /// <summary>【CodingAgent】【RPC 结算】收集完整运行事件，包含重试、边界追加及最终结算通知</summary>
+    /// <param name="timeout">最大等待时间，缺省为六十秒</param><param name="cancellationToken">调用方取消信号</param>
+    /// <returns>截至 agent_settled 的事件快照</returns>
     public async Task<IReadOnlyList<JsonElement>> CollectEventsAsync(
         TimeSpan? timeout = null,
         CancellationToken cancellationToken = default)
@@ -405,7 +444,7 @@ public sealed class CodingAgentRpcClient : IAsyncDisposable
         subscription = OnEvent(evt =>
         {
             events.Add(evt.Clone());
-            if (GetEventType(evt).Equals("agent_end", StringComparison.Ordinal))
+            if (GetEventType(evt).Equals("agent_settled", StringComparison.Ordinal))
             {
                 completion.TrySetResult();
             }
@@ -420,15 +459,32 @@ public sealed class CodingAgentRpcClient : IAsyncDisposable
             () => $"Timeout collecting events. Stderr: {Stderr}").ConfigureAwait(false);
     }
 
+    /// <summary>【CodingAgent】【提示等待】先订阅避免漏事件，handled 立即返回，其余输入等待最终结算。</summary>
+    /// <param name="message">提示文本。</param><param name="images">可选图片。</param><param name="timeout">整个操作的超时。</param>
+    /// <param name="cancellationToken">调用方取消信号。</param><returns>等待期间收到的事件快照。</returns>
     public async Task<IReadOnlyList<JsonElement>> PromptAndWaitAsync(
         string message,
         IReadOnlyList<ImageContent>? images = null,
         TimeSpan? timeout = null,
         CancellationToken cancellationToken = default)
     {
-        var eventsTask = CollectEventsAsync(timeout, cancellationToken);
-        await PromptAsync(message, images, cancellationToken: cancellationToken).ConfigureAwait(false);
-        return await eventsTask.ConfigureAwait(false);
+        var events = new List<JsonElement>();
+        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var timeoutCts = new CancellationTokenSource(timeout ?? TimeSpan.FromSeconds(60));
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
+        using var subscription = OnEvent(evt =>
+        {
+            lock (events) events.Add(evt.Clone());
+            if (GetEventType(evt) == "agent_settled") completion.TrySetResult();
+        });
+        try
+        {
+            var disposition = await PromptAsync(message, images, cancellationToken: linkedCts.Token).ConfigureAwait(false);
+            if (disposition != CodingAgentPromptDisposition.Handled) await completion.Task.WaitAsync(linkedCts.Token).ConfigureAwait(false);
+            lock (events) return events.ToArray();
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && timeoutCts.IsCancellationRequested)
+        { throw new TimeoutException($"Timeout collecting events. Stderr: {Stderr}"); }
     }
 
     public async ValueTask DisposeAsync()

@@ -9,6 +9,7 @@ public static class EnvironmentApiKeyResolver
         {
             ["ant-ling"] = ["ANT_LING_API_KEY"],
             ["openai"] = ["OPENAI_API_KEY"],
+            ["typesafe"] = ["TYPESAFE_API_KEY"],
             ["azure-openai-responses"] = ["AZURE_OPENAI_API_KEY"],
             ["nvidia"] = ["NVIDIA_API_KEY"],
             ["deepseek"] = ["DEEPSEEK_API_KEY"],
@@ -17,6 +18,7 @@ public static class EnvironmentApiKeyResolver
             ["groq"] = ["GROQ_API_KEY"],
             ["cerebras"] = ["CEREBRAS_API_KEY"],
             ["xai"] = ["XAI_API_KEY"],
+            ["meta"] = ["META_API_KEY"],
             ["openrouter"] = ["OPENROUTER_API_KEY"],
             ["vercel-ai-gateway"] = ["AI_GATEWAY_API_KEY"],
             ["zai"] = ["ZAI_API_KEY"],

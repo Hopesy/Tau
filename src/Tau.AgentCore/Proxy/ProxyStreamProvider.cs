@@ -275,6 +275,7 @@ public sealed class ProxyStreamProvider : IStreamProvider
                 break;
         }
 
+        if (block is ToolCallContent { Namespace: { } toolNamespace }) result["namespace"] = toolNamespace;
         return result;
     }
 
@@ -387,7 +388,24 @@ public sealed class ProxyStreamProvider : IStreamProvider
             case "toolcall_end":
             {
                 var index = RequireContentIndex(root);
-                return new ToolCallEndEvent(index, partial);
+                if (index < 0 || index >= partial.Content.Count || partial.Content[index] is not ToolCallContent current) return null;
+                // 1. 【AgentCore】【代理工具完成】终值覆盖增量并保留供应商签名与命名空间
+                if (root.TryGetProperty("toolCall", out var completed) && completed.ValueKind == JsonValueKind.Object)
+                {
+                    var arguments = completed.TryGetProperty("arguments", out var value)
+                        ? value.ValueKind == JsonValueKind.String ? value.GetString() ?? "{}" : value.GetRawText()
+                        : current.Arguments;
+                    current = current with
+                    {
+                        Id = GetString(completed, "id") ?? current.Id,
+                        Name = GetString(completed, "name") ?? current.Name,
+                        Arguments = arguments,
+                        ThoughtSignature = GetString(completed, "thoughtSignature") ?? current.ThoughtSignature,
+                        Namespace = GetString(completed, "namespace") ?? current.Namespace
+                    };
+                    SetBlock(ref partial, index, current);
+                }
+                return new ToolCallEndEvent(index, partial, current);
             }
             case "done":
             {

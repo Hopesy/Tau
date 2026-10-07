@@ -152,7 +152,9 @@ public sealed class OpenAiProviderSerializationTests
         Assert.False(root.TryGetProperty("stream_options", out _));
         Assert.False(root.GetProperty("store").GetBoolean());
         Assert.Equal(42, root.GetProperty("max_tokens").GetInt32());
-        Assert.True(root.GetProperty("enable_thinking").GetBoolean());
+        Assert.Equal("enabled", root.GetProperty("thinking").GetProperty("type").GetString());
+        Assert.False(root.GetProperty("thinking").GetProperty("clear_thinking").GetBoolean());
+        Assert.False(root.TryGetProperty("enable_thinking", out _));
         Assert.True(root.GetProperty("tool_stream").GetBoolean());
         Assert.Equal("system", root.GetProperty("messages")[0].GetProperty("role").GetString());
         Assert.Equal(
@@ -246,7 +248,7 @@ public sealed class OpenAiProviderSerializationTests
         var root = doc.RootElement;
         Assert.Equal("enabled", root.GetProperty("thinking").GetProperty("type").GetString());
         Assert.Equal("system", root.GetProperty("messages")[0].GetProperty("role").GetString());
-        Assert.False(root.TryGetProperty("reasoning_effort", out _));
+        Assert.Equal("high", root.GetProperty("reasoning_effort").GetString());
     }
 
     [Fact]

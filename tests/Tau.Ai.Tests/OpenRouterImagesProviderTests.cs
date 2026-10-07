@@ -7,6 +7,7 @@ using Tau.Ai.Providers.OpenRouter;
 
 namespace Tau.Ai.Tests;
 
+[Collection("ProcessEnvironment")]
 public sealed class OpenRouterImagesProviderTests
 {
     [Fact]

@@ -28,7 +28,7 @@ public class CodingAgentSettingsSelectorTests
 
         var selector = CodingAgentSettingsSelector.CreateSelectList(state);
 
-        Assert.Equal(7, selector.FilteredItems.Count);
+        Assert.Equal(9, selector.FilteredItems.Count);
         Assert.Collection(
             selector.FilteredItems,
             item =>
@@ -67,6 +67,16 @@ public class CodingAgentSettingsSelectorTests
             {
                 Assert.Equal(CodingAgentSettingsSelector.ThemeAction, item.Value);
                 Assert.Equal("solarized", item.Description);
+            },
+            item =>
+            {
+                Assert.Equal(CodingAgentSettingsSelector.CacheWarmingAction, item.Value);
+                Assert.Equal("streaming", item.Description);
+            },
+            item =>
+            {
+                Assert.Equal(CodingAgentSettingsSelector.CacheMissNoticesAction, item.Value);
+                Assert.Equal("false", item.Description);
             });
     }
 
@@ -111,7 +121,7 @@ public class CodingAgentSettingsSelectorTests
 
         var selector = CodingAgentSettingsSelector.CreateSettingsList(state);
 
-        Assert.Equal(19, selector.FilteredItems.Count);
+        Assert.Equal(21, selector.FilteredItems.Count);
         Assert.Collection(
             selector.FilteredItems,
             item =>
@@ -217,6 +227,18 @@ public class CodingAgentSettingsSelectorTests
             {
                 Assert.Equal(CodingAgentSettingsSelector.ThemeAction, item.Id);
                 Assert.Equal("solarized", item.CurrentValue);
+            },
+            item =>
+            {
+                Assert.Equal(CodingAgentSettingsSelector.CacheWarmingAction, item.Id);
+                Assert.Equal("streaming", item.CurrentValue);
+                Assert.Equal(["off", "streaming", "idle"], item.Values);
+            },
+            item =>
+            {
+                Assert.Equal(CodingAgentSettingsSelector.CacheMissNoticesAction, item.Id);
+                Assert.Equal("false", item.CurrentValue);
+                Assert.Equal(["false", "true"], item.Values);
             });
     }
 

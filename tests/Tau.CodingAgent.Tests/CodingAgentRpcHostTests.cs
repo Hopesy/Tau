@@ -139,6 +139,7 @@ public sealed class CodingAgentRpcHostTests
         Assert.Equal(JsonValueKind.Object, toolCallArguments.ValueKind);
         Assert.Equal("pwd", toolCallArguments.GetProperty("command").GetString());
         Assert.Equal("sig_1", toolCallEnd.GetProperty("toolCall").GetProperty("thoughtSignature").GetString());
+        Assert.Equal("rpc-tools", toolCallEnd.GetProperty("toolCall").GetProperty("namespace").GetString());
         Assert.Equal(
             JsonValueKind.Object,
             toolCallEnd.GetProperty("partial").GetProperty("content")[0].GetProperty("arguments").ValueKind);
@@ -391,7 +392,7 @@ public sealed class CodingAgentRpcHostTests
         runner.MutableMessages.Add(new AssistantMessage([
             new ToolCallContent("call_1", "bash", """{"command":"pwd","limit":3}""")
             {
-                ThoughtSignature = "sig_1"
+                ThoughtSignature = "sig_1", Namespace = "rpc-tools"
             }
         ]));
         var output = new StringWriter();
@@ -411,6 +412,7 @@ public sealed class CodingAgentRpcHostTests
         Assert.Equal("call_1", toolCall.GetProperty("id").GetString());
         Assert.Equal("bash", toolCall.GetProperty("name").GetString());
         Assert.Equal("sig_1", toolCall.GetProperty("thoughtSignature").GetString());
+        Assert.Equal("rpc-tools", toolCall.GetProperty("namespace").GetString());
 
         var arguments = toolCall.GetProperty("arguments");
         Assert.Equal(JsonValueKind.Object, arguments.ValueKind);
@@ -891,7 +893,7 @@ public sealed class CodingAgentRpcHostTests
               });
             }
             """);
-        var store = new CodingAgentExtensionCommandStore(
+        using var store = new CodingAgentExtensionCommandStore(
             cwd: temp.Path,
             userExtensionsDirectory: System.IO.Path.Combine(temp.Path, "missing-user-extensions"),
             javaScriptRuntime: new CodingAgentJavaScriptExtensionRuntime(temp.Path, nodeExecutable: "node"));
@@ -968,7 +970,7 @@ public sealed class CodingAgentRpcHostTests
               });
             }
             """);
-        var store = new CodingAgentExtensionCommandStore(
+        using var store = new CodingAgentExtensionCommandStore(
             cwd: temp.Path,
             userExtensionsDirectory: System.IO.Path.Combine(temp.Path, "missing-user-extensions"),
             javaScriptRuntime: new CodingAgentJavaScriptExtensionRuntime(temp.Path, nodeExecutable: "node"));
@@ -1197,7 +1199,7 @@ public sealed class CodingAgentRpcHostTests
     }
 
     [Fact]
-    public async Task RunAsync_SetAndCycleThinkingLevelPersistSettings()
+    public async Task RunAsync_SetAndCycleThinkingLevelPreserveDefaults()
     {
         using var temp = TempDirectory.Create();
         var settingsPath = Path.Combine(temp.Path, "settings.json");
@@ -1242,7 +1244,7 @@ public sealed class CodingAgentRpcHostTests
             .Where(line => line.GetProperty("type").GetString() == "response")
             .Where(line => line.GetProperty("command").GetString() == "cycle_thinking_level")
             .Last();
-        Assert.Equal(JsonValueKind.Null, secondCycle.GetProperty("data").ValueKind);
+        Assert.Equal("off", secondCycle.GetProperty("data").GetProperty("level").GetString());
         Assert.Null(runner.ThinkingLevel);
 
         var saved = settingsStore.Load();
@@ -1282,7 +1284,7 @@ public sealed class CodingAgentRpcHostTests
         Assert.True(FindResponse(lines, "set_thinking_level").GetProperty("success").GetBoolean());
         Assert.Equal(ThinkingLevel.High, runner.ThinkingLevel);
         Assert.Equal("high", FindResponse(lines, "get_state").GetProperty("data").GetProperty("thinkingLevel").GetString());
-        Assert.Equal("high", settingsStore.Load().DefaultThinkingLevel);
+        Assert.Null(settingsStore.Load().DefaultThinkingLevel);
     }
 
     [Fact]
@@ -1312,11 +1314,11 @@ public sealed class CodingAgentRpcHostTests
         Assert.True(FindResponse(lines, "set_thinking_level").GetProperty("success").GetBoolean());
         Assert.Null(runner.ThinkingLevel);
         Assert.Equal("off", FindResponse(lines, "get_state").GetProperty("data").GetProperty("thinkingLevel").GetString());
-        Assert.Null(settingsStore.Load().DefaultThinkingLevel);
+        Assert.Equal("high", settingsStore.Load().DefaultThinkingLevel);
     }
 
     [Fact]
-    public async Task RunAsync_ThinkingLevelCommandsValidateInputAndRejectActivePrompt()
+    public async Task RunAsync_ThinkingLevelCommandsValidateInputAndAllowActivePrompt()
     {
         var runner = new FakeCodingAgentRunner((_, ct) => BlockingRun(ct));
         var output = new StringWriter();
@@ -1338,17 +1340,15 @@ public sealed class CodingAgentRpcHostTests
         Assert.Contains("Unsupported thinking level", invalid.GetProperty("error").GetString(), StringComparison.Ordinal);
 
         var setWhileActive = FindResponseById(lines, "t1");
-        Assert.False(setWhileActive.GetProperty("success").GetBoolean());
-        Assert.Contains("agent is running", setWhileActive.GetProperty("error").GetString(), StringComparison.OrdinalIgnoreCase);
+        Assert.True(setWhileActive.GetProperty("success").GetBoolean());
 
         var cycleWhileActive = FindResponseById(lines, "c1");
-        Assert.False(cycleWhileActive.GetProperty("success").GetBoolean());
-        Assert.Contains("agent is running", cycleWhileActive.GetProperty("error").GetString(), StringComparison.OrdinalIgnoreCase);
-        Assert.Null(runner.ThinkingLevel);
+        Assert.True(cycleWhileActive.GetProperty("success").GetBoolean());
+        Assert.Equal(ThinkingLevel.Medium, runner.ThinkingLevel);
     }
 
     [Fact]
-    public async Task RunAsync_CycleModelPersistsDefaultModelAndReturnsScopedFlag()
+    public async Task RunAsync_CycleModelPreservesDefaultsAndReturnsScopedFlag()
     {
         using var temp = TempDirectory.Create();
         var settingsPath = Path.Combine(temp.Path, "settings.json");
@@ -1394,8 +1394,8 @@ public sealed class CodingAgentRpcHostTests
         Assert.Equal("gemini-2.5-pro", state.GetProperty("data").GetProperty("model").GetProperty("id").GetString());
 
         var saved = settingsStore.Load();
-        Assert.Equal("google", saved.DefaultProvider);
-        Assert.Equal("gemini-2.5-pro", saved.DefaultModel);
+        Assert.Equal("openai", saved.DefaultProvider);
+        Assert.Equal("gpt-5.4", saved.DefaultModel);
         Assert.Equal("user-only", saved.TreeFilterMode);
         Assert.Equal(3, saved.RetryMaxAttempts);
         Assert.Equal(250, saved.RetryBaseDelayMilliseconds);
@@ -1437,9 +1437,9 @@ public sealed class CodingAgentRpcHostTests
         Assert.Null(runner.ThinkingLevel);
 
         var saved = settingsStore.Load();
-        Assert.Equal("google", saved.DefaultProvider);
-        Assert.Equal("gemini-2.5-pro", saved.DefaultModel);
-        Assert.Null(saved.DefaultThinkingLevel);
+        Assert.Equal("openai", saved.DefaultProvider);
+        Assert.Equal("gpt-5.4", saved.DefaultModel);
+        Assert.Equal("high", saved.DefaultThinkingLevel);
         Assert.Equal(["openai/gpt-5.4", "google/gemini-2.5-pro:off"], saved.EnabledModels);
     }
 
@@ -1477,9 +1477,9 @@ public sealed class CodingAgentRpcHostTests
         Assert.Equal(ThinkingLevel.High, runner.ThinkingLevel);
 
         var saved = settingsStore.Load();
-        Assert.Equal("google", saved.DefaultProvider);
-        Assert.Equal("gemini-2.5-pro", saved.DefaultModel);
-        Assert.Equal("high", saved.DefaultThinkingLevel);
+        Assert.Equal("openai", saved.DefaultProvider);
+        Assert.Equal("gpt-5.4", saved.DefaultModel);
+        Assert.Equal("low", saved.DefaultThinkingLevel);
         Assert.Equal(["openai/gpt-5.4", "google/gemini-2.5-pro:xhigh"], saved.EnabledModels);
     }
 
@@ -1512,9 +1512,10 @@ public sealed class CodingAgentRpcHostTests
     }
 
     [Fact]
-    public async Task RunAsync_CycleModelRejectsActivePrompt()
+    public async Task RunAsync_CycleModelAllowsActivePrompt()
     {
         var runner = new FakeCodingAgentRunner((_, ct) => BlockingRun(ct));
+        runner.ConfigureAuth("openai", "google");
         var output = new StringWriter();
         var input = string.Join(
             "\n",
@@ -1527,10 +1528,9 @@ public sealed class CodingAgentRpcHostTests
         await host.RunAsync();
 
         var response = FindResponseById(ReadJsonLines(output), "m1");
-        Assert.False(response.GetProperty("success").GetBoolean());
-        Assert.Contains("agent is running", response.GetProperty("error").GetString(), StringComparison.OrdinalIgnoreCase);
-        Assert.Equal("openai", runner.Model.Provider);
-        Assert.Equal("gpt-5.4", runner.Model.Id);
+        Assert.True(response.GetProperty("success").GetBoolean());
+        Assert.Equal("google", runner.Model.Provider);
+        Assert.Equal("gemini-2.5-pro", runner.Model.Id);
     }
 
     [Fact]
@@ -2913,13 +2913,13 @@ public sealed class CodingAgentRpcHostTests
         var tool = new AssistantMessage([
             new ToolCallContent("call_1", "bash", """{"command":"pwd"}""")
             {
-                ThoughtSignature = "sig_1"
+                ThoughtSignature = "sig_1", Namespace = "rpc-tools"
             }
         ]);
         var done = new AssistantMessage([
             new ToolCallContent("call_1", "bash", """{"command":"pwd"}""")
             {
-                ThoughtSignature = "sig_1"
+                ThoughtSignature = "sig_1", Namespace = "rpc-tools"
             }
         ])
         {

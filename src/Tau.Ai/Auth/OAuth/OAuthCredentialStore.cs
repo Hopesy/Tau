@@ -2,13 +2,13 @@ using System.Text.Json;
 
 namespace Tau.Ai.Auth.OAuth;
 
-public sealed class OAuthCredentialStore
+public sealed partial class OAuthCredentialStore : IProviderCredentialStore
 {
     private readonly string[] _searchPaths;
 
     public OAuthCredentialStore(IEnumerable<string>? searchPaths = null)
     {
-        _searchPaths = searchPaths?.ToArray() ?? GetDefaultSearchPaths().ToArray();
+        _searchPaths = (searchPaths ?? GetDefaultSearchPaths()).Select(Path.GetFullPath).ToArray();
     }
 
     public IReadOnlyDictionary<string, OAuthCredentials> Load()
@@ -21,33 +21,22 @@ public sealed class OAuthCredentialStore
                 StringComparer.OrdinalIgnoreCase);
     }
 
+    /// <summary>【AI】【凭据保存】在跨进程锁内保存提供方的 OAuth 凭据。</summary>
+    /// <param name="providerId">提供方标识。</param><param name="credentials">待保存凭据。</param>
     public void Save(string providerId, OAuthCredentials credentials)
     {
-        var path = _searchPaths.FirstOrDefault(File.Exists) ?? _searchPaths.First();
-        var directory = Path.GetDirectoryName(path);
-        if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
-        {
-            Directory.CreateDirectory(directory);
-        }
+        ArgumentException.ThrowIfNullOrWhiteSpace(providerId);
+        ArgumentNullException.ThrowIfNull(credentials);
+        var path = ResolveWritePath();
+        using var lease = AcquireCredentialLockAsync(path, default).GetAwaiter().GetResult();
+        SaveCore(path, providerId, credentials);
+    }
 
-        Dictionary<string, JsonElement> existing = new(StringComparer.OrdinalIgnoreCase);
-        if (File.Exists(path))
-        {
-            try
-            {
-                using var doc = JsonDocument.Parse(File.ReadAllText(path));
-                if (doc.RootElement.ValueKind == JsonValueKind.Object)
-                {
-                    foreach (var prop in doc.RootElement.EnumerateObject())
-                    {
-                        existing[prop.Name] = prop.Value.Clone();
-                    }
-                }
-            }
-            catch
-            {
-            }
-        }
+    /// <summary>【AI】【凭据保存】保留其他条目并原子提交原生期限及兼容日期。</summary>
+    /// <param name="path">凭据文件。</param><param name="providerId">提供方标识。</param><param name="credentials">待保存凭据。</param>
+    private static void SaveCore(string path, string providerId, OAuthCredentials credentials)
+    {
+        var existing = ReadCredentialDocument(path);
 
         using var stream = new MemoryStream();
         using (var writer = new Utf8JsonWriter(stream, new JsonWriterOptions { Indented = true }))
@@ -71,14 +60,21 @@ public sealed class OAuthCredentialStore
             writer.WriteString("refresh", credentials.Refresh);
             writer.WriteString("access", credentials.Access);
             writer.WriteString("expiresAt", credentials.ExpiresAt.ToString("O"));
+            writer.WriteNumber("expires", OAuthCredentialJson.GetExpiryMilliseconds(credentials));
             foreach (var (metaKey, metaValue) in credentials.Metadata)
             {
-                if (IsReservedCredentialProperty(metaKey))
+                if (OAuthCredentialJson.IsReserved(metaKey))
                 {
                     continue;
                 }
 
                 writer.WriteString(metaKey, metaValue);
+            }
+            foreach (var (key, value) in credentials.Properties)
+            {
+                if (OAuthCredentialJson.IsReserved(key) || credentials.Metadata.ContainsKey(key)) continue;
+                writer.WritePropertyName(key);
+                value.WriteTo(writer);
             }
             writer.WriteEndObject();
 
@@ -88,25 +84,28 @@ public sealed class OAuthCredentialStore
         WriteAuthFile(path, stream.ToArray());
     }
 
+    /// <summary>【AI】【凭据删除】在跨进程文件锁内删除提供方，避免并发刷新复活已退出的认证。</summary>
+    /// <param name="providerId">提供方标识。</param><returns>是否删除已有凭据。</returns>
     public bool Remove(string providerId)
     {
-        if (string.IsNullOrWhiteSpace(providerId))
-        {
-            return false;
-        }
-
+        if (string.IsNullOrWhiteSpace(providerId)) return false;
         var path = _searchPaths.FirstOrDefault(File.Exists);
-        if (path is null)
-        {
-            return false;
-        }
+        if (path is null) return false;
+        using var lease = AcquireCredentialLockAsync(path, default).GetAwaiter().GetResult();
+        return RemoveCore(path, providerId);
+    }
 
+    /// <summary>【AI】【凭据删除】调用方已持锁时重写凭据文件，保留其他提供方条目。</summary>
+    /// <param name="path">凭据路径。</param><param name="providerId">待删除标识。</param><param name="strict">是否报告损坏及读取错误。</param><returns>是否存在并删除目标。</returns>
+    private static bool RemoveCore(string path, string providerId, bool strict = false)
+    {
         Dictionary<string, JsonElement> existing = new(StringComparer.OrdinalIgnoreCase);
         try
         {
             using var doc = JsonDocument.Parse(File.ReadAllText(path));
             if (doc.RootElement.ValueKind != JsonValueKind.Object)
             {
+                if (strict) throw new JsonException("Credential storage must contain an object.");
                 return false;
             }
 
@@ -115,7 +114,8 @@ public sealed class OAuthCredentialStore
                 existing[prop.Name] = prop.Value.Clone();
             }
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+        catch (FileNotFoundException) { return false; }
+        catch (Exception ex) when (!strict && ex is IOException or UnauthorizedAccessException or JsonException)
         {
             return false;
         }
@@ -215,7 +215,7 @@ public sealed class OAuthCredentialStore
                     return new StoredProviderAuth { ApiKey = key, Env = env };
                 }
 
-                return null;
+                return new StoredProviderAuth { Env = env };
             }
         }
 
@@ -227,18 +227,22 @@ public sealed class OAuthCredentialStore
         return null;
     }
 
+    /// <summary>【AI】【凭据读取】解析 OAuth 字段并保留字符串、结构化扩展字段与原生期限。</summary>
+    /// <param name="element">凭据对象。</param><returns>OAuth 条目，无访问和刷新字段时为空。</returns>
     private static StoredProviderAuth? ParseOauthEntry(JsonElement element)
     {
-        if (!TryGetString(element, "refresh", out var refresh) || !TryGetString(element, "access", out var access))
+        if (!element.TryGetProperty("refresh", out var refreshValue) || refreshValue.ValueKind != JsonValueKind.String ||
+            !element.TryGetProperty("access", out var accessValue) || accessValue.ValueKind != JsonValueKind.String)
         {
             return null;
         }
 
-        var expiresAt = ParseExpiry(element);
+        var (expiresAt, nativeExpiry) = ParseExpiry(element);
         var metadata = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var properties = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
         foreach (var prop in element.EnumerateObject())
         {
-            if (prop.NameEquals("refresh") || prop.NameEquals("access") || prop.NameEquals("expires") || prop.NameEquals("expiresAt"))
+            if (OAuthCredentialJson.IsReserved(prop.Name))
             {
                 continue;
             }
@@ -247,51 +251,42 @@ public sealed class OAuthCredentialStore
             {
                 metadata[prop.Name] = prop.Value.GetString() ?? string.Empty;
             }
+            else properties[prop.Name] = prop.Value.Clone();
         }
 
         return new StoredProviderAuth
         {
             OAuth = new OAuthCredentials
             {
-                Refresh = refresh!,
-                Access = access!,
+                Refresh = refreshValue.GetString()!,
+                Access = accessValue.GetString()!,
                 ExpiresAt = expiresAt,
-                Metadata = metadata
+                ExpiresUnixTimeMilliseconds = nativeExpiry,
+                Metadata = metadata,
+                Properties = properties
             }
         };
     }
 
-    private static DateTimeOffset ParseExpiry(JsonElement element)
+    /// <summary>【AI】【凭据期限】优先读取原生 expires，同时兼容旧文件的 expiresAt 日期。</summary>
+    /// <param name="element">凭据对象。</param><returns>可表示日期及原始毫秒值。</returns>
+    private static (DateTimeOffset Date, long? Milliseconds) ParseExpiry(JsonElement element)
     {
-        if (element.TryGetProperty("expiresAt", out var expiresAtProp))
+        foreach (var name in new[] { "expires", "expiresAt" })
         {
-            if (expiresAtProp.ValueKind == JsonValueKind.String &&
-                DateTimeOffset.TryParse(expiresAtProp.GetString(), out var expiresAt))
+            if (!element.TryGetProperty(name, out var expiry)) continue;
+            if (expiry.ValueKind == JsonValueKind.String && DateTimeOffset.TryParse(expiry.GetString(), System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var date)) return (date, null);
+            if (expiry.ValueKind == JsonValueKind.Number && expiry.TryGetInt64(out var milliseconds))
             {
-                return expiresAt;
-            }
-
-            if (expiresAtProp.ValueKind == JsonValueKind.Number && expiresAtProp.TryGetInt64(out var unixMs))
-            {
-                return DateTimeOffset.FromUnixTimeMilliseconds(unixMs);
+                var dateView = OAuthCredentialJson.ClampExpiry(milliseconds);
+                // 1. 【AI】【凭据期限】兼容日期和原生期限指向同一毫秒时，保留旧 .NET 文件的更细时间精度
+                if (name == "expires" && element.TryGetProperty("expiresAt", out var legacy) && legacy.ValueKind == JsonValueKind.String
+                    && DateTimeOffset.TryParse(legacy.GetString(), System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var precise)
+                    && precise.ToUnixTimeMilliseconds() == milliseconds) dateView = precise;
+                return (dateView, milliseconds);
             }
         }
-
-        if (element.TryGetProperty("expires", out var expiresProp))
-        {
-            if (expiresProp.ValueKind == JsonValueKind.String &&
-                DateTimeOffset.TryParse(expiresProp.GetString(), out var expires))
-            {
-                return expires;
-            }
-
-            if (expiresProp.ValueKind == JsonValueKind.Number && expiresProp.TryGetInt64(out var unixMs))
-            {
-                return DateTimeOffset.FromUnixTimeMilliseconds(unixMs);
-            }
-        }
-
-        return DateTimeOffset.UtcNow.AddMinutes(-1);
+        return (DateTimeOffset.UtcNow.AddMinutes(-1), null);
     }
 
     private static bool TryGetString(JsonElement element, string propertyName, out string? value)
@@ -305,16 +300,6 @@ public sealed class OAuthCredentialStore
         value = property.GetString();
         return !string.IsNullOrWhiteSpace(value);
     }
-
-    private static bool IsReservedCredentialProperty(string propertyName) =>
-        propertyName.Equals("type", StringComparison.OrdinalIgnoreCase) ||
-        propertyName.Equals("refresh", StringComparison.OrdinalIgnoreCase) ||
-        propertyName.Equals("access", StringComparison.OrdinalIgnoreCase) ||
-        propertyName.Equals("expires", StringComparison.OrdinalIgnoreCase) ||
-        propertyName.Equals("expiresAt", StringComparison.OrdinalIgnoreCase) ||
-        propertyName.Equals("key", StringComparison.OrdinalIgnoreCase) ||
-        propertyName.Equals("apiKey", StringComparison.OrdinalIgnoreCase) ||
-        propertyName.Equals("env", StringComparison.OrdinalIgnoreCase);
 
     private static IReadOnlyDictionary<string, string>? ParseEnv(JsonElement element)
     {
@@ -341,21 +326,23 @@ public sealed class OAuthCredentialStore
         return result.Count == 0 ? null : result;
     }
 
+    /// <summary>【AI】【凭据提交】通过同目录临时文件原子替换，短暂共享冲突时保留完整旧文件并重试。</summary>
+    /// <param name="path">凭据目标。</param><param name="content">完整新内容。</param>
     private static void WriteAuthFile(string path, byte[] content)
     {
-        if (OperatingSystem.IsWindows())
-        {
-            File.WriteAllBytes(path, content);
-            return;
-        }
-
         var tempPath = $"{path}.{Guid.NewGuid():N}.tmp";
         try
         {
             File.WriteAllBytes(tempPath, content);
-            File.SetUnixFileMode(tempPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
-            File.Move(tempPath, path, overwrite: true);
-            File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+            if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(tempPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+            // 1. 【AI】【凭据提交】Windows 读取者或扫描器可能短暂禁止替换，不能退化为截断写入
+            for (var attempt = 0; ; attempt++)
+            {
+                try { File.Move(tempPath, path, overwrite: true); break; }
+                catch (Exception error) when (attempt < 20 && IsTransientCredentialReplaceError(error, path))
+                { Thread.Sleep(25); }
+            }
+            if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
         }
         finally
         {
@@ -364,6 +351,18 @@ public sealed class OAuthCredentialStore
                 File.Delete(tempPath);
             }
         }
+    }
+
+    /// <summary>【AI】【凭据提交】只重试 Windows 共享冲突及非只读文件的短暂访问拒绝。</summary>
+    /// <param name="error">替换异常。</param><param name="path">原目标。</param><returns>是否适合有界重试。</returns>
+    private static bool IsTransientCredentialReplaceError(Exception error, string path)
+    {
+        if (!OperatingSystem.IsWindows()) return false;
+        if (error is IOException && (error.HResult & 0xffff) is 32 or 33) return true;
+        if (error is not UnauthorizedAccessException || (error.HResult & 0xffff) != 5) return false;
+        try { return File.Exists(path) && !File.GetAttributes(path).HasFlag(FileAttributes.ReadOnly); }
+        catch (IOException) { return false; }
+        catch (UnauthorizedAccessException) { return false; }
     }
 
     private static IEnumerable<string> GetDefaultSearchPaths()

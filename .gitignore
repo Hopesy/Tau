@@ -63,6 +63,7 @@ output/
 packages/
 *.trx
 *.binlog
+/tools/diagnostics/
 *.csproj.lscache
 
 # Python

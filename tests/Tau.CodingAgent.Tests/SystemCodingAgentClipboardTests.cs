@@ -4,7 +4,7 @@ using Tau.Tui.Rendering;
 
 namespace Tau.CodingAgent.Tests;
 
-public sealed class SystemCodingAgentClipboardTests
+public sealed partial class SystemCodingAgentClipboardTests
 {
     [Theory]
     [InlineData("image/png", "png")]
@@ -35,12 +35,11 @@ public sealed class SystemCodingAgentClipboardTests
     }
 
     [Fact]
-    public async Task ReadImageAsync_OnXclipFallsBackThroughSupportedTypes()
+    public async Task ReadImageAsync_OnXclipUsesDeclaredPreferredType()
     {
         var jpegBytes = ImageTestData.CreateJpeg(11, 7);
         var runner = new FakeClipboardCommandRunner();
-        runner.Enqueue("xclip", ["-selection", "clipboard", "-t", "TARGETS", "-o"], Encoding.UTF8.GetBytes("text/plain\n"));
-        runner.EnqueueFailure("xclip", ["-selection", "clipboard", "-t", "image/png", "-o"]);
+        runner.Enqueue("xclip", ["-selection", "clipboard", "-t", "TARGETS", "-o"], Encoding.UTF8.GetBytes("text/plain\nimage/jpeg\n"));
         runner.Enqueue("xclip", ["-selection", "clipboard", "-t", "image/jpeg", "-o"], jpegBytes);
         var clipboard = CreateClipboard(runner, new Dictionary<string, string?>(), CodingAgentClipboardPlatform.Linux);
 
@@ -116,7 +115,7 @@ public sealed class SystemCodingAgentClipboardTests
         IReadOnlyDictionary<string, string?> env,
         CodingAgentClipboardPlatform platform,
         Func<string>? tempPngPathFactory = null) =>
-        new(runner, env, platform, tempPngPathFactory);
+        new(runner, env, platform, tempPngPathFactory) { KernelVersionReader = static () => string.Empty };
 
     private sealed class FakeClipboardCommandRunner : ICodingAgentClipboardCommandRunner
     {
@@ -139,7 +138,7 @@ public sealed class SystemCodingAgentClipboardTests
             int maxBufferBytes,
             CancellationToken cancellationToken)
         {
-            var command = new FakeCommand(fileName, arguments.ToArray());
+            var command = new FakeCommand(fileName, arguments.ToArray(), stdin?.ToArray(), timeoutMs);
             Commands.Add(command);
             OnRun?.Invoke(command);
             var response = Assert.Single(_responses.Take(1));
@@ -154,7 +153,7 @@ public sealed class SystemCodingAgentClipboardTests
         }
     }
 
-    private sealed record FakeCommand(string FileName, IReadOnlyList<string> Arguments);
+    private sealed record FakeCommand(string FileName, IReadOnlyList<string> Arguments, byte[]? Input, int TimeoutMs);
 
     private sealed record FakeCommandResponse(
         string FileName,

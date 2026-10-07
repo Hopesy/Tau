@@ -5,6 +5,24 @@ namespace Tau.CodingAgent.Tests;
 
 public class CodingAgentThinkingLevelsTests
 {
+    /// <summary>【CodingAgent】【思考选择】显式等级表只显示允许等级，支持 max、循环及禁用等级钳制。</summary>
+    [Fact]
+    public void ExplicitThinkingMapControlsSelectionAndMaximum()
+    {
+        var model = new Model { Id = "virtual", Provider = "router", Name = "Auto", Api = "pi-virtual", Reasoning = true,
+            ThinkingLevelMap = new Dictionary<string, string?> { ["off"] = "off", ["minimal"] = null, ["low"] = null,
+                ["medium"] = null, ["high"] = "high", ["xhigh"] = null, ["max"] = "max" } };
+        Assert.Equal(["off", "high", "max"], CodingAgentThinkingLevels.AvailableForModel(model));
+        Assert.True(CodingAgentThinkingLevels.TryParse("max", out var maximum));
+        Assert.Equal(ThinkingLevel.Max, maximum);
+        Assert.Equal("max", CodingAgentThinkingLevels.Format(maximum));
+        Assert.Equal(ThinkingLevel.High, CodingAgentThinkingLevels.CycleForModel(model, null));
+        Assert.Equal(ThinkingLevel.Max, CodingAgentThinkingLevels.CycleForModel(model, ThinkingLevel.High));
+        Assert.Null(CodingAgentThinkingLevels.CycleForModel(model, ThinkingLevel.Max));
+        Assert.Equal(ThinkingLevel.Max, CodingAgentThinkingLevels.ClampForModel(model, ThinkingLevel.ExtraHigh));
+        Assert.Equal(ThinkingLevel.High, CodingAgentThinkingLevels.ClampForModel(model, ThinkingLevel.Minimal));
+    }
+
     [Fact]
     public void ClampForModel_ReturnsOffForNonReasoningAndHighForNonXhighReasoning()
     {

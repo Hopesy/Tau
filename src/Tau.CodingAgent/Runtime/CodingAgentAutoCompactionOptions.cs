@@ -28,9 +28,15 @@ public sealed record CodingAgentAutoCompactionOptions(int ThresholdTokens, strin
 
 public static class CodingAgentTokenEstimator
 {
+    /// <summary>【CodingAgent】【上下文估算】估算当前对话与有效系统声明，避免累计已被替换的分节和工具。</summary>
+    /// <param name="messages">会话消息。</param>
+    /// <param name="pendingInput">尚未加入会话的输入。</param>
+    /// <returns>估算的 token 总数。</returns>
     public static int Estimate(IReadOnlyList<ChatMessage> messages, string? pendingInput = null)
     {
-        var characters = messages.Sum(EstimateCharacters);
+        var system = Transcript.GetCurrentSystemMessage(messages);
+        var characters = messages.Where(message => message is not SystemMessage).Sum(EstimateCharacters)
+            + (system is null ? 0 : Tau.AgentCore.Harness.AgentCompaction.EstimateSystemMessageCharacters(system));
         if (!string.IsNullOrEmpty(pendingInput))
         {
             characters += pendingInput.Length;

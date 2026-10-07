@@ -16,13 +16,19 @@ internal sealed class AnthropicStreamParser
 {
     private AssistantMessage _partial;
     private readonly AssistantMessageStream _stream;
+    private readonly Func<string, string>? _restoreToolName;
     private readonly Dictionary<int, ToolInputAccumulator> _toolInputs = new();
     private readonly Dictionary<int, int> _contentIndexes = new();
 
-    public AnthropicStreamParser(AssistantMessage initial, AssistantMessageStream stream)
+    /// <summary>【AI】【Anthropic 响应】初始化流解析器并保留本轮 effort 和可选 OAuth 名称恢复器。</summary>
+    /// <param name="initial">含供应商信息的初始消息。</param>
+    /// <param name="stream">事件输出流。</param>
+    /// <param name="restoreToolName">响应工具名到本地名称的映射。</param>
+    public AnthropicStreamParser(AssistantMessage initial, AssistantMessageStream stream, Func<string, string>? restoreToolName = null)
     {
         _partial = initial;
         _stream = stream;
+        _restoreToolName = restoreToolName;
     }
 
     public AssistantMessage Partial => _partial;
@@ -103,6 +109,8 @@ internal sealed class AnthropicStreamParser
         _stream.Push(new StartEvent(_partial));
     }
 
+    /// <summary>【AI】【Anthropic 响应】保留首块正文和签名，再将恢复本地名称的调用加入流状态。</summary>
+    /// <param name="root">content_block_start 事件。</param>
     private void HandleContentBlockStart(JsonElement root)
     {
         var providerIndex = root.GetProperty("index").GetInt32();
@@ -111,8 +119,11 @@ internal sealed class AnthropicStreamParser
 
         ContentBlock newBlock = blockType switch
         {
-            "text" => new TextContent(""),
-            "thinking" => new ThinkingContent(""),
+            "text" => new TextContent(block.TryGetProperty("text", out var text) && text.ValueKind == JsonValueKind.String ? text.GetString()! : ""),
+            "thinking" => new ThinkingContent(block.TryGetProperty("thinking", out var thinking) && thinking.ValueKind == JsonValueKind.String ? thinking.GetString()! : "")
+            {
+                ThinkingSignature = block.TryGetProperty("signature", out var signature) && signature.ValueKind == JsonValueKind.String ? signature.GetString() : null
+            },
             "redacted_thinking" => new ThinkingContent("[Reasoning redacted]")
             {
                 Redacted = true,
@@ -122,7 +133,7 @@ internal sealed class AnthropicStreamParser
             },
             "tool_use" => new ToolCallContent(
                 block.GetProperty("id").GetString()!,
-                block.GetProperty("name").GetString()!,
+                _restoreToolName?.Invoke(block.GetProperty("name").GetString()!) ?? block.GetProperty("name").GetString()!,
                 StreamingJsonParser.ParseStreamingJsonObjectRawText(
                     block.TryGetProperty("input", out var input) ? input.GetRawText() : null)),
             _ => new TextContent("")
@@ -138,7 +149,7 @@ internal sealed class AnthropicStreamParser
         {
             TextContent => new TextStartEvent(contentIndex, _partial),
             ThinkingContent => new ThinkingStartEvent(contentIndex, _partial),
-            ToolCallContent => new ToolCallStartEvent(contentIndex, _partial),
+            ToolCallContent call => new ToolCallStartEvent(contentIndex, _partial, call.Id, call.Name),
             _ => new TextStartEvent(contentIndex, _partial)
         };
         _stream.Push(evt);
@@ -294,13 +305,19 @@ internal sealed class AnthropicStreamParser
         _partial = _partial with { Content = list };
     }
 
+    /// <summary>【AI】【Anthropic 响应】完成工具参数解析，并在结束事件中携带已恢复本地名称的工具调用。</summary>
+    /// <param name="providerIndex">服务端内容块索引。</param>
+    /// <param name="contentIndex">本地内容索引。</param>
+    /// <param name="toolCall">待完成的工具调用。</param>
+    /// <returns>包含最终参数和名称的结束事件。</returns>
     private ToolCallEndEvent FinalizeToolCall(int providerIndex, int contentIndex, ToolCallContent toolCall)
     {
         var rawArguments = _toolInputs.TryGetValue(providerIndex, out var acc) && acc.Builder.Length > 0
             ? acc.Builder.ToString()
             : toolCall.Arguments;
-        ReplaceContent(contentIndex, toolCall with { Arguments = StreamingJsonParser.ParseStreamingJsonObjectRawText(rawArguments) });
-        return new ToolCallEndEvent(contentIndex, _partial);
+        var completed = toolCall with { Arguments = StreamingJsonParser.ParseStreamingJsonObjectRawText(rawArguments) };
+        ReplaceContent(contentIndex, completed);
+        return new ToolCallEndEvent(contentIndex, _partial, completed);
     }
 
     private static Usage ExtractUsage(JsonElement usage)

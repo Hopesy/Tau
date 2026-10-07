@@ -414,4 +414,5 @@ internal sealed class OpenRouterImageUrlConverter : JsonConverter<OpenRouterImag
 [JsonSerializable(typeof(bool))]
 [JsonSerializable(typeof(object))]
 [JsonSerializable(typeof(OpenRouterImagesResponse))]
+[JsonSerializable(typeof(JsonElement))]
 internal partial class OpenRouterImagesJsonContext : JsonSerializerContext;

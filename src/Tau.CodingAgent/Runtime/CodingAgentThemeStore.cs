@@ -11,6 +11,9 @@ public sealed record CodingAgentTheme(
     IReadOnlyDictionary<string, string> Colors,
     IReadOnlyDictionary<string, string> ExportColors)
 {
+    public CodingAgentSourceInfo SourceInfo { get; init; } = FilePath is null
+        ? new("builtin:theme:" + Name, "builtin") : CodingAgentSourceInfo.ForResource(FilePath, Scope, Path.GetDirectoryName(FilePath));
+
     public TuiSyntaxHighlightTheme ToSyntaxHighlightTheme() =>
         TuiSyntaxHighlightTheme.FromAnsiColors(Colors);
 }
@@ -97,6 +100,9 @@ public sealed class CodingAgentThemeStore
     private readonly IReadOnlyList<string> _explicitPaths;
     private readonly Func<IReadOnlyList<string>>? _additionalPathsProvider;
     private readonly bool _includeDefaults;
+    public bool IsProjectTrusted { get; set; } = true;
+    public Func<IReadOnlyDictionary<string, CodingAgentSourceInfo>>? SourceInfosProvider { get; set; }
+    internal Func<Func<string, string, bool>>? AutoResourceFilterProvider { get; set; }
 
     public CodingAgentThemeStore(
         string? cwd = null,
@@ -114,6 +120,8 @@ public sealed class CodingAgentThemeStore
         _includeDefaults = includeDefaults;
     }
 
+    /// <summary>【CodingAgent】【主题加载】加载主题与诊断，附加当前包或扩展提供的来源。</summary>
+    /// <returns>去重后的主题及诊断。</returns>
     public CodingAgentThemeStatus LoadStatus()
     {
         var loaded = new List<CodingAgentTheme>();
@@ -124,7 +132,7 @@ public sealed class CodingAgentThemeStore
             loaded.Add(CreateBuiltInTheme("dark"));
             loaded.Add(CreateBuiltInTheme("light"));
             LoadFromDirectory(_userThemesDirectory, "user", loaded, diagnostics, reportMissing: false);
-            LoadFromDirectory(Path.Combine(_cwd, ".tau", "themes"), "project", loaded, diagnostics, reportMissing: false);
+            if (IsProjectTrusted) LoadFromDirectory(Path.Combine(_cwd, ".tau", "themes"), "project", loaded, diagnostics, reportMissing: false);
         }
 
         foreach (var path in GetExplicitPaths())
@@ -156,9 +164,11 @@ public sealed class CodingAgentThemeStore
             }
         }
 
-        var deduped = DedupeLastWins(loaded, diagnostics);
+        var filter = AutoResourceFilterProvider?.Invoke();
+        var deduped = DedupeLastWins(loaded.Where(theme => theme.FilePath is null || filter?.Invoke(theme.FilePath, theme.Scope) != false).ToArray(), diagnostics);
+        var sources = SourceInfosProvider?.Invoke();
         return new CodingAgentThemeStatus(
-            deduped.OrderBy(static theme => theme.Name, StringComparer.OrdinalIgnoreCase).ToArray(),
+            deduped.Select(theme => theme with { SourceInfo = CodingAgentSourceInfo.ResolveResource(theme.SourceInfo, sources) }).OrderBy(static theme => theme.Name, StringComparer.OrdinalIgnoreCase).ToArray(),
             diagnostics.ToArray());
     }
 

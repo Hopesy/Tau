@@ -81,10 +81,13 @@ internal static class BedrockMessageConverter
         return result;
     }
 
+    /// <summary>【AI】【Bedrock 历史】转换共享重放结果，连续工具结果保持同一个 user 消息。</summary>
+    /// <param name="messages">历史内容。</param><param name="model">目标模型。</param><param name="cacheRetention">缓存策略。</param>
+    /// <returns>协议消息列表。</returns>
     private static List<object> ConvertMessages(IReadOnlyList<ChatMessage> messages, Model model, CacheRetention cacheRetention)
     {
         var result = new List<object>();
-        var toolCallIds = new Dictionary<string, string>(StringComparer.Ordinal);
+        messages = MessageTransformer.TransformMessages(messages, model, static (id, _, _) => NormalizeToolCallId(id));
 
         for (var i = 0; i < messages.Count; i++)
         {
@@ -99,7 +102,7 @@ internal static class BedrockMessageConverter
                     break;
 
                 case AssistantMessage assistant:
-                    var assistantContent = ConvertAssistantContent(assistant.Content, model, toolCallIds);
+                    var assistantContent = ConvertAssistantContent(assistant.Content, model);
                     if (assistantContent.Count > 0)
                     {
                         result.Add(new Dictionary<string, object>
@@ -115,7 +118,7 @@ internal static class BedrockMessageConverter
                     var cursor = i;
                     while (cursor < messages.Count && messages[cursor] is ToolResultMessage toolResult)
                     {
-                        toolResults.Add(ConvertToolResult(toolResult, toolCallIds));
+                        toolResults.Add(ConvertToolResult(toolResult));
                         cursor++;
                     }
 
@@ -143,6 +146,8 @@ internal static class BedrockMessageConverter
         return result;
     }
 
+    /// <summary>【AI】【Bedrock 用户内容】过滤清理后的空白正文，为空数组提供协议占位。</summary>
+    /// <param name="content">用户内容。</param><returns>至少含一项的内容数组。</returns>
     private static List<object> ConvertUserContent(IReadOnlyList<ContentBlock> content)
     {
         var result = new List<object>();
@@ -151,7 +156,7 @@ internal static class BedrockMessageConverter
             switch (block)
             {
                 case TextContent text:
-                    result.Add(new Dictionary<string, object> { ["text"] = SanitizeText(text.Text) });
+                    if (CreateTextBlock(text.Text) is { } textBlock) result.Add(textBlock);
                     break;
                 case ImageContent image:
                     result.Add(new Dictionary<string, object> { ["image"] = CreateImageBlock(image) });
@@ -159,13 +164,15 @@ internal static class BedrockMessageConverter
             }
         }
 
+        if (result.Count == 0) result.Add(new Dictionary<string, object> { ["text"] = "<empty>" });
         return result;
     }
 
+    /// <summary>【AI】【Bedrock 助手】保留同模型有效思考，工具标识由共享转换层处理。</summary>
+    /// <param name="content">已归一内容。</param><param name="model">目标模型。</param><returns>有效协议块。</returns>
     private static List<object> ConvertAssistantContent(
         IReadOnlyList<ContentBlock> content,
-        Model model,
-        IDictionary<string, string> toolCallIds)
+        Model model)
     {
         var result = new List<object>();
         foreach (var block in content)
@@ -173,11 +180,11 @@ internal static class BedrockMessageConverter
             switch (block)
             {
                 case TextContent text when !string.IsNullOrWhiteSpace(text.Text):
-                    result.Add(new Dictionary<string, object> { ["text"] = SanitizeText(text.Text) });
+                    if (CreateTextBlock(text.Text) is { } textBlock) result.Add(textBlock);
                     break;
 
                 case ThinkingContent thinking when !thinking.Redacted && !string.IsNullOrWhiteSpace(thinking.Thinking):
-                    result.Add(ConvertThinkingContent(thinking, model));
+                    if (CreateTextBlock(thinking.Thinking) is not null) result.Add(ConvertThinkingContent(thinking, model));
                     break;
 
                 case ThinkingContent thinking when thinking.Redacted:
@@ -194,13 +201,11 @@ internal static class BedrockMessageConverter
                     break;
 
                 case ToolCallContent toolCall:
-                    var toolUseId = NormalizeToolCallId(toolCall.Id);
-                    toolCallIds[toolCall.Id] = toolUseId;
                     result.Add(new Dictionary<string, object>
                     {
                         ["toolUse"] = new Dictionary<string, object>
                         {
-                            ["toolUseId"] = toolUseId,
+                            ["toolUseId"] = toolCall.Id,
                             ["name"] = toolCall.Name,
                             ["input"] = ParseArguments(toolCall.Arguments)
                         }
@@ -212,8 +217,12 @@ internal static class BedrockMessageConverter
         return result;
     }
 
+    /// <summary>【AI】【Bedrock 思考】Claude 缺少签名时降为正文，其他模型仅回放无签名推理文本。</summary>
+    /// <param name="thinking">有效思考。</param><param name="model">模型身份。</param><returns>正文或推理块。</returns>
     private static object ConvertThinkingContent(ThinkingContent thinking, Model model)
     {
+        if (SupportsThinkingSignature(model) && string.IsNullOrWhiteSpace(thinking.ThinkingSignature))
+            return new Dictionary<string, object> { ["text"] = SanitizeText(thinking.Thinking) };
         var reasoningText = new Dictionary<string, object>
         {
             ["text"] = SanitizeText(thinking.Thinking)
@@ -232,25 +241,23 @@ internal static class BedrockMessageConverter
         };
     }
 
-    private static Dictionary<string, object> ConvertToolResult(
-        ToolResultMessage toolResult,
-        IDictionary<string, string> toolCallIds)
+    /// <summary>【AI】【Bedrock 工具结果】使用共享转换后的配对标识和明确的成功或失败状态。</summary>
+    /// <param name="toolResult">执行结果。</param><returns>协议结果块。</returns>
+    private static Dictionary<string, object> ConvertToolResult(ToolResultMessage toolResult)
     {
-        var toolUseId = toolCallIds.TryGetValue(toolResult.ToolCallId, out var normalized)
-            ? normalized
-            : NormalizeToolCallId(toolResult.ToolCallId);
-
         return new Dictionary<string, object>
         {
             ["toolResult"] = new Dictionary<string, object>
             {
-                ["toolUseId"] = toolUseId,
+                ["toolUseId"] = toolResult.ToolCallId,
                 ["content"] = ConvertToolResultContent(toolResult.Content),
                 ["status"] = toolResult.IsError ? "error" : "success"
             }
         };
     }
 
+    /// <summary>【AI】【Bedrock 结果内容】保留图像和非空正文，空结果使用必需占位。</summary>
+    /// <param name="content">工具内容。</param><returns>至少一项的结果块。</returns>
     private static List<object> ConvertToolResultContent(IReadOnlyList<ContentBlock> content)
     {
         var result = new List<object>();
@@ -259,7 +266,7 @@ internal static class BedrockMessageConverter
             switch (block)
             {
                 case TextContent text:
-                    result.Add(new Dictionary<string, object> { ["text"] = SanitizeText(text.Text) });
+                    if (CreateTextBlock(text.Text) is { } textBlock) result.Add(textBlock);
                     break;
                 case ImageContent image:
                     result.Add(new Dictionary<string, object> { ["image"] = CreateImageBlock(image) });
@@ -269,7 +276,7 @@ internal static class BedrockMessageConverter
 
         if (result.Count == 0)
         {
-            result.Add(new Dictionary<string, object> { ["text"] = string.Empty });
+            result.Add(new Dictionary<string, object> { ["text"] = "<empty>" });
         }
 
         return result;
@@ -277,6 +284,14 @@ internal static class BedrockMessageConverter
 
     private static string SanitizeText(string text) =>
         UnicodeTextSanitizer.RemoveUnpairedSurrogates(text);
+
+    /// <summary>【AI】【Bedrock 文本】先清除无配对代理字符，再检查协议要求的非空白内容。</summary>
+    /// <param name="text">原文本。</param><returns>有效文本块或 null。</returns>
+    private static Dictionary<string, object>? CreateTextBlock(string text)
+    {
+        var sanitized = SanitizeText(text);
+        return string.IsNullOrWhiteSpace(sanitized) ? null : new Dictionary<string, object> { ["text"] = sanitized };
+    }
 
     private static Dictionary<string, object> CreateImageBlock(ImageContent image) => new()
     {
@@ -402,6 +417,8 @@ internal static class BedrockMessageConverter
         blocks.Add(new Dictionary<string, object> { ["cachePoint"] = cachePoint });
     }
 
+    /// <summary>【AI】【Bedrock 参数】解析历史参数并递归清理服务端不支持的空属性名。</summary>
+    /// <param name="arguments">参数 JSON。</param><returns>清理后的文档，损坏输入回退为空对象。</returns>
     private static object ParseArguments(string arguments)
     {
         if (string.IsNullOrWhiteSpace(arguments))
@@ -412,13 +429,23 @@ internal static class BedrockMessageConverter
         try
         {
             using var doc = JsonDocument.Parse(arguments);
-            return doc.RootElement.Clone();
+            return SanitizeDocument(doc.RootElement);
         }
         catch (JsonException)
         {
             return new Dictionary<string, object>();
         }
     }
+
+    /// <summary>【AI】【Bedrock 文档】递归过滤空键，保留数组顺序和其他键值。</summary>
+    /// <param name="value">JSON 节点。</param><returns>独立且可序列化的文档。</returns>
+    private static object SanitizeDocument(JsonElement value) => value.ValueKind switch
+    {
+        JsonValueKind.Object => value.EnumerateObject().Where(property => property.Name.Length > 0)
+            .ToDictionary(property => property.Name, property => SanitizeDocument(property.Value), StringComparer.Ordinal),
+        JsonValueKind.Array => value.EnumerateArray().Select(SanitizeDocument).ToList(),
+        _ => value.Clone()
+    };
 
     private static byte[]? TryDecodeRedactedContent(string? signature)
     {
@@ -435,13 +462,10 @@ internal static class BedrockMessageConverter
         }
     }
 
+    /// <summary>【AI】【Bedrock 调用标识】仅跨模型调用进入此转换，保留至多 64 个协议字符。</summary>
+    /// <param name="id">原始标识。</param><returns>规范标识。</returns>
     private static string NormalizeToolCallId(string id)
     {
-        if (string.IsNullOrWhiteSpace(id))
-        {
-            return "tool_call";
-        }
-
         var normalized = new string(id
             .Select(ch => char.IsAsciiLetterOrDigit(ch) || ch is '_' or '-' ? ch : '_')
             .ToArray());

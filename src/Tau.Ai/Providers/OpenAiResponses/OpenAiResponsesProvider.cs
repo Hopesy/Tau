@@ -18,8 +18,11 @@ public sealed class OpenAiResponsesProvider : IStreamProvider
 
     public string Api => "openai-responses";
 
+    public bool SupportsTranscriptContext => true;
+
     public AssistantMessageStream Stream(Model model, LlmContext context, StreamOptions options)
     {
+        options = StreamOptionHelpers.WithCacheDefaults(options);
         var stream = new AssistantMessageStream();
         _ = Task.Run(async () =>
         {
@@ -41,6 +44,7 @@ public sealed class OpenAiResponsesProvider : IStreamProvider
 
     public AssistantMessageStream StreamSimple(Model model, LlmContext context, SimpleStreamOptions options)
     {
+        options = SimpleTokenOptions.WithContextLimit(model, context, options);
         var reasoningEffort = OpenAiResponsesShared.MapReasoningEffort(options.Reasoning, model);
         var responseOptions = new OpenAiResponsesOptions
         {
@@ -51,7 +55,9 @@ public sealed class OpenAiResponsesProvider : IStreamProvider
             Signal = options.Signal,
             OnResponse = options.OnResponse,
             OnPayload = options.OnPayload,
-            CacheRetention = options.CacheRetention,
+            TransformHeaders = options.TransformHeaders,
+            OnProviderStreamEvent = options.OnProviderStreamEvent,
+            CacheRetention = StreamOptionHelpers.ResolveCacheRetention(options),
             SessionId = options.SessionId,
             Headers = options.Headers,
             Timeout = options.Timeout,
@@ -68,6 +74,12 @@ public sealed class OpenAiResponsesProvider : IStreamProvider
         return Stream(model, context, responseOptions);
     }
 
+    /// <summary>【AI】【Responses 请求】共用原始语法映射完成报文发送与响应还原。</summary>
+    /// <param name="model">目标模型。</param>
+    /// <param name="context">原始上下文。</param>
+    /// <param name="options">请求选项。</param>
+    /// <param name="stream">事件输出。</param>
+    /// <returns>请求处理任务。</returns>
     private async Task StreamInternalAsync(
         Model model,
         LlmContext context,
@@ -81,10 +93,11 @@ public sealed class OpenAiResponsesProvider : IStreamProvider
 
         var baseUrl = model.BaseUrl?.TrimEnd('/') ?? "https://api.openai.com/v1";
         var url = $"{baseUrl}/responses";
+        var grammarInputs = OpenAiResponsesShared.CreateGrammarToolInputProperties(model, context);
         var body = await StreamOptionHelpers.ApplyPayloadCallbackAsync(
             options,
             model,
-            BuildRequestBody(model, context, options)).ConfigureAwait(false);
+            BuildRequestBody(model, context, options, grammarInputs)).ConfigureAwait(false);
         var json = JsonSerializer.Serialize(body, OpenAiResponsesJsonContext.Default.DictionaryStringObject);
 
         using var request = new HttpRequestMessage(HttpMethod.Post, url)
@@ -92,7 +105,7 @@ public sealed class OpenAiResponsesProvider : IStreamProvider
             Content = new StringContent(json, Encoding.UTF8, "application/json")
         };
         ApplyAuthHeader(request, options.ApiKey);
-        ApplySessionAffinityHeader(request, model, options);
+        SessionAffinityHeaders.Apply(request, model, options, "openai-responses");
         ApplyHeaders(request, model.Headers);
         ApplyHeaders(request, ResolveDynamicHeaders(model, context));
         ApplyHeaders(request, options.Headers);
@@ -101,11 +114,9 @@ public sealed class OpenAiResponsesProvider : IStreamProvider
         using var requestTimeout = StreamOptionHelpers.CreateRequestTimeout(options);
         try
         {
-            using var response = await _httpClient.SendAsync(
-                request,
-                HttpCompletionOption.ResponseHeadersRead,
-                requestTimeout.Token).ConfigureAwait(false);
-            await StreamOptionHelpers.InvokeResponseCallbackAsync(options, model, response).ConfigureAwait(false);
+            await StreamOptionHelpers.ApplyHeadersCallbackAsync(options, model, request).ConfigureAwait(false);
+            using var response = await ProviderHttpRetry.SendAsync(_httpClient, request, model, options, requestTimeout.Token,
+                retryTransportErrors: true).ConfigureAwait(false);
             if (!response.IsSuccessStatusCode)
             {
                 var errorBody = await response.Content.ReadAsStringAsync(requestTimeout.Token).ConfigureAwait(false);
@@ -128,7 +139,10 @@ public sealed class OpenAiResponsesProvider : IStreamProvider
                 partial,
                 stream,
                 requestedServiceTier: (options as OpenAiResponsesOptions)?.ServiceTier,
-                cancellationToken: requestTimeout.Token).ConfigureAwait(false);
+                cancellationToken: requestTimeout.Token,
+                grammarToolInputProperties: grammarInputs,
+                mapCancellation: exception => requestTimeout.IsTimeoutCancellation ? requestTimeout.CreateTimeoutException(exception) : exception,
+                onProviderStreamEvent: json => StreamOptionHelpers.InvokeProviderStreamEventAsync(options, model, json)).ConfigureAwait(false);
         }
         catch (OperationCanceledException ex) when (requestTimeout.IsTimeoutCancellation)
         {
@@ -136,17 +150,26 @@ public sealed class OpenAiResponsesProvider : IStreamProvider
         }
     }
 
-    private static Dictionary<string, object> BuildRequestBody(Model model, LlmContext context, StreamOptions options)
+    /// <summary>【AI】【Responses】按模型能力组装会话声明与顶层工具。</summary>
+    /// <param name="model">请求模型。</param>
+    /// <param name="context">请求上下文。</param>
+    /// <param name="options">生成选项。</param>
+    /// <param name="grammarInputs">折叠前的语法输入映射。</param>
+    /// <returns>Responses 请求报文。</returns>
+    private static Dictionary<string, object> BuildRequestBody(Model model, LlmContext context, StreamOptions options, IReadOnlyDictionary<string, string> grammarInputs)
     {
+        context = Transcript.ResolveTranscript(context, model.Compat?.SupportsMidConvoSystemMessages == true);
+        var transcriptTools = Transcript.ResolveTranscriptTools(context.Messages,
+            model.Compat?.SupportsAdditionalTools == true || model.Compat?.SupportsToolSearch == true);
         var body = new Dictionary<string, object>
         {
             ["model"] = model.Id,
-            ["input"] = OpenAiResponsesShared.ConvertResponsesMessages(model, context),
+            ["input"] = OpenAiResponsesShared.ConvertResponsesMessages(model, context, includeSystemPrompt: true, grammarInputs),
             ["stream"] = true,
             ["store"] = false
         };
 
-        var tools = OpenAiResponsesShared.ConvertResponsesTools(context.Tools);
+        var tools = OpenAiResponsesShared.ConvertResponsesToolsForModel(transcriptTools.RequestTools, model);
         if (tools.Count > 0)
         {
             body["tools"] = tools;
@@ -160,11 +183,8 @@ public sealed class OpenAiResponsesProvider : IStreamProvider
         }
 
         OpenAiResponsesShared.AddBaseParameters(body, model, options);
-        // xAI Responses 要求显式声明加密 reasoning 内容，否则 reasoning item 可能不会出现在流中
-        if (model.Provider.Equals("xai", StringComparison.OrdinalIgnoreCase) && model.Reasoning)
-        {
-            body["include"] = new[] { "reasoning.encrypted_content" };
-        }
+        OpenAiResponsesShared.AddResponsesReasoning(body, model,
+            (options as OpenAiResponsesOptions)?.ReasoningEffort, (options as OpenAiResponsesOptions)?.ReasoningSummary);
         if (options is OpenAiResponsesOptions responseOptions)
         {
             AddResponsesOptions(body, responseOptions);
@@ -175,28 +195,14 @@ public sealed class OpenAiResponsesProvider : IStreamProvider
         return body;
     }
 
+    /// <summary>【AI】【Responses 请求】附加工具选择和服务等级。</summary>
+    /// <param name="body">待填充的请求体。</param>
+    /// <param name="options">供应商专用选项。</param>
     private static void AddResponsesOptions(Dictionary<string, object> body, OpenAiResponsesOptions options)
     {
         if (options.ToolChoice is not null)
         {
             body["tool_choice"] = options.ToolChoice;
-        }
-
-        if (!string.IsNullOrWhiteSpace(options.ReasoningEffort) ||
-            !string.IsNullOrWhiteSpace(options.ReasoningSummary))
-        {
-            var reasoning = new Dictionary<string, object>();
-            if (!string.IsNullOrWhiteSpace(options.ReasoningEffort))
-            {
-                reasoning["effort"] = options.ReasoningEffort!;
-            }
-
-            if (!string.IsNullOrWhiteSpace(options.ReasoningSummary))
-            {
-                reasoning["summary"] = options.ReasoningSummary!;
-            }
-
-            body["reasoning"] = reasoning;
         }
 
         if (!string.IsNullOrWhiteSpace(options.ServiceTier))
@@ -213,16 +219,6 @@ public sealed class OpenAiResponsesProvider : IStreamProvider
         }
 
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
-    }
-
-    private static void ApplySessionAffinityHeader(HttpRequestMessage request, Model model, StreamOptions options)
-    {
-        if (model.Compat?.SendSessionAffinityHeaders == true &&
-            !string.IsNullOrWhiteSpace(options.SessionId))
-        {
-            request.Headers.Remove("x-session-affinity");
-            request.Headers.TryAddWithoutValidation("x-session-affinity", options.SessionId);
-        }
     }
 
     private static void ApplyHeaders(HttpRequestMessage request, IDictionary<string, string>? headers)

@@ -1,15 +1,13 @@
 using System.Net.Http.Headers;
-using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using Tau.Ai.Providers.OpenAi;
 using Tau.Ai.Streaming;
 using Tau.Ai.Utilities;
 
 namespace Tau.Ai.Providers.Mistral;
 
-public sealed class MistralProvider : IStreamProvider
+public sealed partial class MistralProvider : IStreamProvider
 {
     private const int MistralToolCallIdLength = 9;
     private readonly HttpClient _httpClient;
@@ -20,23 +18,26 @@ public sealed class MistralProvider : IStreamProvider
     }
 
     public string Api => "mistral-conversations";
+    /// <summary>【Mistral】【会话声明】由本协议按模型能力处理系统消息，避免入口提前折叠。</summary>
+    public bool SupportsTranscriptContext => true;
 
     public AssistantMessageStream Stream(Model model, LlmContext context, StreamOptions options)
     {
         var stream = new AssistantMessageStream();
+        var state = new MistralStreamState(model, Api, stream);
         _ = Task.Run(async () =>
         {
             try
             {
-                await StreamInternalAsync(model, context, options, stream).ConfigureAwait(false);
+                await StreamInternalAsync(model, context, options, state).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (options.Signal.IsCancellationRequested)
             {
-                StreamOptionHelpers.PushAborted(stream, model, Api);
+                state.Fail(StreamOptionHelpers.AbortedErrorMessage, StopReason.Aborted);
             }
             catch (Exception ex)
             {
-                stream.Push(new ErrorEvent(ex.Message));
+                state.Fail(ex.Message);
             }
         });
         return stream;
@@ -44,6 +45,8 @@ public sealed class MistralProvider : IStreamProvider
 
     public AssistantMessageStream StreamSimple(Model model, LlmContext context, SimpleStreamOptions options)
     {
+        options = SimpleTokenOptions.WithContextLimit(model, context, options);
+        var thinking = ResolveThinkingOptions(model, options.Reasoning);
         var nativeOptions = new MistralOptions
         {
             Temperature = options.Temperature,
@@ -53,7 +56,9 @@ public sealed class MistralProvider : IStreamProvider
             Signal = options.Signal,
             OnResponse = options.OnResponse,
             OnPayload = options.OnPayload,
-            CacheRetention = options.CacheRetention,
+            TransformHeaders = options.TransformHeaders,
+            OnProviderStreamEvent = options.OnProviderStreamEvent,
+            CacheRetention = StreamOptionHelpers.ResolveCacheRetention(options),
             SessionId = options.SessionId,
             Headers = options.Headers,
             Timeout = options.Timeout,
@@ -64,29 +69,25 @@ public sealed class MistralProvider : IStreamProvider
             Env = options.Env,
             SamplingParams = options.SamplingParams,
             Deferred = options.Deferred,
-            PromptMode = model.Reasoning && options.Reasoning is not null && !UsesReasoningEffort(model)
-                ? "reasoning"
-                : null,
-            ReasoningEffort = model.Reasoning && options.Reasoning is not null && UsesReasoningEffort(model)
-                ? "high"
-                : null
+            ToolChoice = ConvertToolChoice(options.ToolChoice),
+            PromptMode = thinking.PromptMode,
+            ReasoningEffort = thinking.ReasoningEffort
         };
         return Stream(model, context, nativeOptions);
     }
 
+    /// <summary>【Mistral】【请求传输】组装原生请求、应用覆盖并将 SSE 和传输错误写入同一状态。</summary>
+    /// <param name="model">目标模型。</param><param name="context">会话。</param><param name="options">请求选项。</param>
+    /// <param name="state">本次请求状态。</param><returns>流读取任务。</returns>
     private async Task StreamInternalAsync(
         Model model,
         LlmContext context,
         StreamOptions options,
-        AssistantMessageStream stream)
+        MistralStreamState state)
     {
-        if (StreamOptionHelpers.PushAbortedIfCanceled(options, stream, model, Api))
-        {
-            return;
-        }
-
-        var baseUrl = model.BaseUrl?.TrimEnd('/') ?? "https://api.mistral.ai/v1";
-        var url = $"{baseUrl}/chat/completions";
+        options.Signal.ThrowIfCancellationRequested();
+        if (string.IsNullOrEmpty(options.ApiKey)) throw new InvalidOperationException($"No API key for provider: {model.Provider}");
+        var url = BuildEndpoint(model.BaseUrl);
         var body = await StreamOptionHelpers.ApplyPayloadCallbackAsync(
             options,
             model,
@@ -98,18 +99,19 @@ public sealed class MistralProvider : IStreamProvider
             Content = new StringContent(json, Encoding.UTF8, "application/json")
         };
         ApplyAuthHeader(request, options.ApiKey);
-        ApplyHeaders(request, model.Headers);
-        ApplyHeaders(request, options.Headers);
-        if (!string.IsNullOrWhiteSpace(options.SessionId) && !request.Headers.Contains("x-affinity"))
+        request.Headers.TryAddWithoutValidation("User-Agent", ProviderHttpHeaders.UserAgent());
+        request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
+        ProviderHttpHeaders.Apply(request, model.Headers);
+        ProviderHttpHeaders.Apply(request, options.Headers);
+        if (UsesPromptCaching(options) && !HasAffinityOverride(model.Headers) && !HasAffinityOverride(options.Headers))
         {
             request.Headers.TryAddWithoutValidation("x-affinity", options.SessionId);
         }
 
-        request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
-
-        using var requestTimeout = StreamOptionHelpers.CreateRequestTimeout(options);
+        using var requestTimeout = StreamOptionHelpers.CreateRequestTimeout(options with { Timeout = options.Timeout ?? TimeSpan.FromSeconds(60) });
         try
         {
+            await StreamOptionHelpers.ApplyHeadersCallbackAsync(options, model, request).ConfigureAwait(false);
             using var response = await _httpClient.SendAsync(
                 request,
                 HttpCompletionOption.ResponseHeadersRead,
@@ -118,87 +120,58 @@ public sealed class MistralProvider : IStreamProvider
             if (!response.IsSuccessStatusCode)
             {
                 var errorBody = await response.Content.ReadAsStringAsync(requestTimeout.Token).ConfigureAwait(false);
-                stream.Push(new ErrorEvent($"{Api} error {(int)response.StatusCode}: {errorBody}"));
+                state.Fail(FormatHttpError(response, errorBody));
                 return;
             }
 
             await using var responseStream = await response.Content.ReadAsStreamAsync(requestTimeout.Token).ConfigureAwait(false);
-            var partial = new AssistantMessage
-            {
-                Api = Api,
-                Provider = model.Provider,
-                Model = model.Id,
-                Content = []
-            };
-            stream.Push(new StartEvent(partial));
-
-            var toolCallAccumulators = new Dictionary<int, OpenAiStreamParser.ToolCallAccumulator>();
-            var contentIndex = 0;
-            var completed = false;
+            state.Start();
             await foreach (var sse in SseParser.ParseAsync(responseStream, requestTimeout.Token))
             {
-                if (sse.Data == "[DONE]")
-                {
-                    break;
-                }
-
-                ApplyMistralMetadata(sse.Data, ref partial);
-                completed = OpenAiStreamParser.ParseChunk(
-                    sse.Data,
-                    stream,
-                    ref partial,
-                    ref toolCallAccumulators,
-                    ref contentIndex);
-                if (completed)
-                {
-                    break;
-                }
+                if (sse.Data == "[DONE]") break;
+                await StreamOptionHelpers.InvokeProviderStreamEventAsync(options, model, sse.Data).ConfigureAwait(false);
+                requestTimeout.Token.ThrowIfCancellationRequested();
+                using var document = JsonDocument.Parse(sse.Data);
+                state.Process(document.RootElement);
             }
-
-            if (!completed)
-            {
-                OpenAiStreamParser.Complete(
-                    stream,
-                    ref partial,
-                    toolCallAccumulators,
-                    model.Compat?.SupportsFinishReason == true);
-            }
+            requestTimeout.Token.ThrowIfCancellationRequested();
+            state.Complete();
         }
         catch (OperationCanceledException ex) when (requestTimeout.IsTimeoutCancellation)
         {
-            throw requestTimeout.CreateTimeoutException(ex);
+            state.Fail(requestTimeout.CreateTimeoutException(ex).Message);
+        }
+        catch (OperationCanceledException) when (options.Signal.IsCancellationRequested)
+        {
+            state.Fail(StreamOptionHelpers.AbortedErrorMessage, StopReason.Aborted);
+        }
+        catch (Exception error)
+        {
+            state.Fail(error.Message);
         }
     }
 
-    private static void ApplyMistralMetadata(string json, ref AssistantMessage partial)
-    {
-        using var doc = JsonDocument.Parse(json);
-        var root = doc.RootElement;
-        if (root.TryGetProperty("id", out var id) && id.ValueKind == JsonValueKind.String && partial.ResponseId is null)
-        {
-            partial = partial with { ResponseId = id.GetString() };
-        }
-
-        if (root.TryGetProperty("usage", out var usage))
-        {
-            var input = GetInt(usage, "prompt_tokens") ?? 0;
-            var output = GetInt(usage, "completion_tokens") ?? 0;
-            partial = partial with { Usage = new Usage(input, output) };
-        }
-    }
-
+    /// <summary>【Mistral】【请求转换】按系统消息能力转换会话，并发送当前完整工具集合。</summary>
+    /// <param name="model">模型及兼容能力。</param>
+    /// <param name="context">包含旧字段或原生声明的上下文。</param>
+    /// <param name="options">请求选项。</param>
+    /// <returns>Mistral 请求报文。</returns>
     private static Dictionary<string, object> BuildRequestBody(Model model, LlmContext context, StreamOptions options)
     {
+        // 1. 【Mistral】【会话声明】仅显式启用时保留中途声明，否则重放成开场基线
+        context = Transcript.ResolveTranscript(context, model.Compat?.SupportsMidConvoSystemMessages == true);
         context = MessageTransformer.DowngradeUnsupportedImages(context, model);
         var normalizer = new MistralToolCallIdNormalizer();
+        context = context with { Messages = MessageTransformer.TransformMessages(context.Messages, model, (id, _, _) => normalizer.Normalize(id)) };
         var body = new Dictionary<string, object>
         {
             ["model"] = model.Id,
             ["stream"] = true,
-            ["messages"] = ConvertMessages(model, context, normalizer)
+            ["messages"] = ConvertMessages(context)
         };
 
-        var tools = ConvertTools(context.Tools);
+        // 2. 【Mistral】【工具声明】上游协议始终发送最终工具集合，不发送位置锚定的工具增量
+        var tools = ConvertTools(Transcript.GetCurrentTools(context.Messages));
         if (tools.Count > 0)
         {
             body["tools"] = tools;
@@ -220,6 +193,7 @@ public sealed class MistralProvider : IStreamProvider
         }
 
         StreamOptionHelpers.ApplySamplingParams(body, model, options);
+        if (UsesPromptCaching(options)) body["prompt_cache_key"] = options.SessionId!;
 
         if (options is MistralOptions mistralOptions)
         {
@@ -259,116 +233,8 @@ public sealed class MistralProvider : IStreamProvider
         return choice.Kind;
     }
 
-    private static List<object> ConvertMessages(Model model, LlmContext context, MistralToolCallIdNormalizer normalizer)
-    {
-        var messages = new List<object>();
-        var toolCallIdMap = new Dictionary<string, string>(StringComparer.Ordinal);
-        if (!string.IsNullOrWhiteSpace(context.SystemPrompt))
-        {
-            messages.Add(new Dictionary<string, object>
-            {
-                ["role"] = "system",
-                ["content"] = SanitizeText(context.SystemPrompt!)
-            });
-        }
-
-        foreach (var message in context.Messages)
-        {
-            switch (message)
-            {
-                case UserMessage user:
-                    messages.Add(ConvertUserMessage(user, model));
-                    break;
-                case AssistantMessage assistant:
-                    var assistantMessage = ConvertAssistantMessage(assistant, normalizer, toolCallIdMap);
-                    if (assistantMessage.Count > 1)
-                    {
-                        messages.Add(assistantMessage);
-                    }
-                    break;
-                case ToolResultMessage toolResult:
-                    var toolCallId = toolCallIdMap.TryGetValue(toolResult.ToolCallId, out var mappedId)
-                        ? mappedId
-                        : normalizer.Normalize(toolResult.ToolCallId);
-                    messages.Add(new Dictionary<string, object>
-                    {
-                        ["role"] = "tool",
-                        ["tool_call_id"] = toolCallId,
-                        ["content"] = GetText(toolResult.Content, toolResult.IsError)
-                    });
-                    break;
-            }
-        }
-
-        return messages;
-    }
-
-    private static Dictionary<string, object> ConvertUserMessage(UserMessage message, Model model)
-    {
-        var text = SanitizeText(string.Join(string.Empty, message.Content.OfType<TextContent>().Select(block => block.Text)));
-        var hasImages = message.Content.Any(block => block is ImageContent);
-        if (hasImages && !model.InputModalities.Contains("image", StringComparer.OrdinalIgnoreCase))
-        {
-            text = string.IsNullOrWhiteSpace(text)
-                ? "(image omitted: model does not support images)"
-                : $"{text}\n(image omitted: model does not support images)";
-        }
-
-        return new Dictionary<string, object>
-        {
-            ["role"] = "user",
-            ["content"] = text
-        };
-    }
-
-    private static Dictionary<string, object> ConvertAssistantMessage(
-        AssistantMessage message,
-        MistralToolCallIdNormalizer normalizer,
-        IDictionary<string, string> toolCallIdMap)
-    {
-        var result = new Dictionary<string, object> { ["role"] = "assistant" };
-        var content = new StringBuilder();
-        var toolCalls = new List<object>();
-        foreach (var block in message.Content)
-        {
-            switch (block)
-            {
-                case TextContent text:
-                    content.Append(SanitizeText(text.Text));
-                    break;
-                case ThinkingContent thinking when !string.IsNullOrWhiteSpace(thinking.Thinking):
-                    content.Append(SanitizeText(thinking.Thinking));
-                    break;
-                case ToolCallContent toolCall:
-                    var normalizedId = normalizer.Normalize(toolCall.Id);
-                    toolCallIdMap[toolCall.Id] = normalizedId;
-                    toolCalls.Add(new Dictionary<string, object>
-                    {
-                        ["id"] = normalizedId,
-                        ["type"] = "function",
-                        ["function"] = new Dictionary<string, object>
-                        {
-                            ["name"] = toolCall.Name,
-                            ["arguments"] = toolCall.Arguments
-                        }
-                    });
-                    break;
-            }
-        }
-
-        if (content.Length > 0)
-        {
-            result["content"] = content.ToString();
-        }
-
-        if (toolCalls.Count > 0)
-        {
-            result["tool_calls"] = toolCalls;
-        }
-
-        return result;
-    }
-
+    /// <summary>【Mistral】【工具声明】解析工具严格采样要求并生成对应的参数 Schema。</summary>
+    /// <param name="tools">当前工具列表。</param><returns>协议函数工具数组。</returns>
     private static List<object> ConvertTools(IReadOnlyList<Tool>? tools)
     {
         var result = new List<object>();
@@ -379,6 +245,7 @@ public sealed class MistralProvider : IStreamProvider
 
         foreach (var tool in tools)
         {
+            var strict = ConstrainedSampling.ResolveJsonSchemaStrictSampling(tool, supportsStrictMode: true);
             result.Add(new Dictionary<string, object>
             {
                 ["type"] = "function",
@@ -386,24 +253,13 @@ public sealed class MistralProvider : IStreamProvider
                 {
                     ["name"] = tool.Name,
                     ["description"] = tool.Description,
-                    ["parameters"] = tool.ParameterSchema,
-                    ["strict"] = false
+                    ["parameters"] = ConstrainedSampling.GetJsonSchemaToolParameters(tool, strict),
+                    ["strict"] = strict ?? false
                 }
             });
         }
 
         return result;
-    }
-
-    private static string GetText(IReadOnlyList<ContentBlock> content, bool isError)
-    {
-        var text = SanitizeText(string.Join("\n", content.OfType<TextContent>().Select(block => block.Text))).Trim();
-        if (text.Length == 0)
-        {
-            text = "(no tool output)";
-        }
-
-        return isError ? $"[tool error] {text}" : text;
     }
 
     private static string SanitizeText(string text) =>
@@ -419,36 +275,15 @@ public sealed class MistralProvider : IStreamProvider
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
     }
 
-    private static void ApplyHeaders(HttpRequestMessage request, IDictionary<string, string>? headers)
-    {
-        if (headers is null)
-        {
-            return;
-        }
 
-        foreach (var (key, value) in headers)
-        {
-            request.Headers.Remove(key);
-            request.Headers.TryAddWithoutValidation(key, value);
-        }
-    }
-
-    private static bool UsesReasoningEffort(Model model) =>
-        model.Id.Equals("mistral-small-2603", StringComparison.OrdinalIgnoreCase) ||
-        model.Id.Equals("mistral-small-latest", StringComparison.OrdinalIgnoreCase);
-
-    private static int? GetInt(JsonElement element, string name) =>
-        element.ValueKind == JsonValueKind.Object &&
-        element.TryGetProperty(name, out var value) &&
-        value.ValueKind == JsonValueKind.Number
-            ? value.GetInt32()
-            : null;
 
     private sealed class MistralToolCallIdNormalizer
     {
         private readonly Dictionary<string, string> _idMap = new(StringComparer.Ordinal);
         private readonly Dictionary<string, string> _reverseMap = new(StringComparer.Ordinal);
 
+        /// <summary>【Mistral】【标识映射】每次请求保持确定性，并为规范化碰撞分配不同标识。</summary>
+        /// <param name="id">原始标识。</param><returns>映射后的调用 ID。</returns>
         public string Normalize(string id)
         {
             if (_idMap.TryGetValue(id, out var existing))
@@ -471,7 +306,9 @@ public sealed class MistralProvider : IStreamProvider
             }
         }
 
-        private static string Derive(string id, int attempt)
+        /// <summary>【Mistral】【标识派生】使用主线短摘要与规范化种子派生九字符 ID。</summary>
+        /// <param name="id">原始标识。</param><param name="attempt">碰撞重试序号。</param><returns>派生 ID。</returns>
+        internal static string Derive(string id, int attempt)
         {
             var normalized = new string(id.Where(char.IsAsciiLetterOrDigit).ToArray());
             if (attempt == 0 && normalized.Length == MistralToolCallIdLength)
@@ -479,12 +316,11 @@ public sealed class MistralProvider : IStreamProvider
                 return normalized;
             }
 
-            var seed = attempt == 0 ? (normalized.Length == 0 ? id : normalized) : $"{id}:{attempt}";
-            var hash = SHA256.HashData(Encoding.UTF8.GetBytes(seed));
-            return new string(Convert.ToHexString(hash)
+            var seedBase = normalized.Length == 0 ? id : normalized;
+            var seed = attempt == 0 ? seedBase : $"{seedBase}:{attempt}";
+            return new string(ShortHash.Compute(seed)
                 .Where(char.IsAsciiLetterOrDigit)
                 .Take(MistralToolCallIdLength)
-                .Select(char.ToLowerInvariant)
                 .ToArray());
         }
     }

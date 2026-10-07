@@ -53,6 +53,8 @@ public sealed class AnthropicProviderTests
         Assert.Equal("interleaved-thinking-2025-05-14", Assert.Single(betaValues));
     }
 
+    /// <summary>显式自适应能力启用 effort，并避免发送旧式交错思考 beta。</summary>
+    /// <returns>测试任务。</returns>
     [Fact]
     public async Task Stream_AddsAdaptiveThinkingEffortForSupportedModel()
     {
@@ -64,7 +66,7 @@ public sealed class AnthropicProviderTests
         var provider = new AnthropicProvider(client);
 
         await OpenAiResponsesProviderTests.CollectAsync(provider.Stream(
-            BuildModel("claude-opus-4-7-20260101", reasoning: true),
+            BuildModel("claude-opus-4-7-20260101", reasoning: true) with { Compat = new ModelCompatibility { ForceAdaptiveThinking = true } },
             new LlmContext { Messages = [new UserMessage("think")] },
             new AnthropicOptions
             {
@@ -336,7 +338,8 @@ public sealed class AnthropicProviderTests
                 Messages =
                 [
                     new UserMessage("first"),
-                    new AssistantMessage([new ThinkingContent("internal reasoning") { ThinkingSignature = " " }]),
+                    new AssistantMessage([new ThinkingContent("internal reasoning") { ThinkingSignature = " " }])
+                    { Provider = model.Provider, Api = model.Api, Model = model.Id },
                     new UserMessage("second")
                 ]
             },

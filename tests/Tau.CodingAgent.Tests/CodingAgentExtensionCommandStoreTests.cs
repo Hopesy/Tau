@@ -39,7 +39,7 @@ public class CodingAgentExtensionCommandStoreTests
 
         try
         {
-            var store = new CodingAgentExtensionCommandStore(cwd: directory);
+            using var store = new CodingAgentExtensionCommandStore(cwd: directory);
             var commands = store.Load();
 
             Assert.Equal(2, commands.Count);
@@ -87,7 +87,7 @@ public class CodingAgentExtensionCommandStoreTests
 
         try
         {
-            var store = new CodingAgentExtensionCommandStore(cwd: directory);
+            using var store = new CodingAgentExtensionCommandStore(cwd: directory);
 
             var handled = store.TryInvoke("/hello \"Ada Lovelace\" Grace Hopper", out var invocation);
 
@@ -122,7 +122,7 @@ public class CodingAgentExtensionCommandStoreTests
 
         try
         {
-            var store = new CodingAgentExtensionCommandStore(cwd: directory);
+            using var store = new CodingAgentExtensionCommandStore(cwd: directory);
 
             var handled = store.TryInvoke("/review src/app.cs carefully", out var invocation);
 
@@ -160,7 +160,7 @@ public class CodingAgentExtensionCommandStoreTests
 
         try
         {
-            var store = new CodingAgentExtensionCommandStore(cwd: directory);
+            using var store = new CodingAgentExtensionCommandStore(cwd: directory);
 
             var resources = store.LoadResources();
 
@@ -199,7 +199,7 @@ public class CodingAgentExtensionCommandStoreTests
 
         try
         {
-            var store = new CodingAgentExtensionCommandStore(
+            using var store = new CodingAgentExtensionCommandStore(
                 cwd: directory,
                 userExtensionsDirectory: Path.Combine(directory, "missing-user-extensions"));
 
@@ -260,7 +260,7 @@ public class CodingAgentExtensionCommandStoreTests
 
         try
         {
-            var store = CreateTypeScriptStore(directory);
+            using var store = CreateTypeScriptStore(directory);
 
             var status = store.LoadStatus();
 
@@ -311,7 +311,7 @@ public class CodingAgentExtensionCommandStoreTests
 
         try
         {
-            var store = CreateTypeScriptStore(directory);
+            using var store = CreateTypeScriptStore(directory);
 
             var handled = store.TryInvoke("/hello-ts Ada Lovelace", out var invocation);
 
@@ -348,7 +348,7 @@ public class CodingAgentExtensionCommandStoreTests
         try
         {
             Assert.True(IsNodeTypeScriptRuntimeAvailable(), "node with TypeScript stripping hooks is required for typescript extension runtime tests");
-            var store = new CodingAgentExtensionCommandStore(
+            using var store = new CodingAgentExtensionCommandStore(
                 cwd: directory,
                 userExtensionsDirectory: Path.Combine(directory, "missing-user-extensions"),
                 explicitPaths: [extensionDirectory],
@@ -391,7 +391,7 @@ public class CodingAgentExtensionCommandStoreTests
 
         try
         {
-            var store = CreateTypeScriptStore(directory);
+            using var store = CreateTypeScriptStore(directory);
 
             var status = store.LoadStatus();
 
@@ -434,7 +434,7 @@ public class CodingAgentExtensionCommandStoreTests
 
         try
         {
-            var store = CreateJavaScriptStore(directory);
+            using var store = CreateJavaScriptStore(directory);
 
             var status = store.LoadStatus();
 
@@ -459,8 +459,13 @@ public class CodingAgentExtensionCommandStoreTests
         }
     }
 
-    [Fact]
-    public async Task LoadStatus_LoadsJavascriptExtensionWithVirtualPackageImports()
+    /// <summary>【CodingAgent】【扩展导入】验证新旧包命名空间能加载工具并共享同一模型及认证注册表。</summary>
+    /// <param name="useCurrentNamespace">是否使用当前上游的包名。</param>
+    /// <returns>异步测试任务。</returns>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task LoadStatus_LoadsJavascriptExtensionWithVirtualPackageImports(bool useCurrentNamespace)
     {
         Assert.True(IsNodeTypeScriptRuntimeAvailable(), "node module hooks are required for virtual extension package imports");
         var directory = Path.Combine(Path.GetTempPath(), "tau-extensions-js-virtual-imports-" + Guid.NewGuid().ToString("N"));
@@ -474,8 +479,13 @@ public class CodingAgentExtensionCommandStoreTests
             import { ToolExecutionMode } from "@mariozechner/pi-agent-core";
             import { defineTool } from "@mariozechner/pi-coding-agent";
             import { Text } from "@mariozechner/pi-tui";
+            import { Type as CurrentType } from "typebox";
+            import { Type as LegacyType } from "@sinclair/typebox";
+            import { getModels as legacyModels } from "@mariozechner/pi-ai";
+            import { getModels as currentModels } from "@earendil-works/pi-ai";
 
             export default function(pi) {
+              if (CurrentType !== LegacyType || legacyModels !== currentModels) throw Error("Duplicated package state");
               registerModel("tau", { id: "tau-model", cost: { input: 1000000, output: 0 } });
               registerOAuthProvider({ id: "tau-oauth", name: "Tau OAuth" });
               const text = new Text("Tau").render().join("");
@@ -502,16 +512,18 @@ public class CodingAgentExtensionCommandStoreTests
                 name: "virtual_tool",
                 label: "Virtual Tool",
                 description: "Exercise virtual package imports",
+                promptSnippet: "Virtual greeting",
+                promptGuidelines: ["Ask for a name"],
                 parameters,
                 executionMode: ToolExecutionMode.Sequential,
                 execute: async (_toolCallId, params) => `virtual ${params.name}`
               }));
             }
-            """);
+            """.Replace(useCurrentNamespace ? "@mariozechner/pi-" : "__unused__", "@earendil-works/pi-", StringComparison.Ordinal));
 
         try
         {
-            var store = CreateJavaScriptStore(directory);
+            using var store = CreateJavaScriptStore(directory);
 
             var status = store.LoadStatus();
 
@@ -520,6 +532,8 @@ public class CodingAgentExtensionCommandStoreTests
             Assert.Equal("virtual-info", command.Name);
             var toolDefinition = Assert.Single(status.Tools);
             Assert.Equal("virtual_tool", toolDefinition.Name);
+            Assert.Equal("Virtual greeting", toolDefinition.PromptSnippet);
+            Assert.Equal(["Ask for a name"], toolDefinition.PromptGuidelines);
             Assert.Equal("object", toolDefinition.ParameterSchema.GetProperty("type").GetString());
             Assert.Equal(
                 ["name"],
@@ -535,6 +549,8 @@ public class CodingAgentExtensionCommandStoreTests
             Assert.Equal("name:tau-model:tau-oauth:2:Tau", invocation.Message);
 
             var tool = Assert.Single(store.LoadTools());
+            Assert.Equal("Virtual greeting", tool.PromptSnippet);
+            Assert.Equal(["Ask for a name"], tool.PromptGuidelines);
             using var args = JsonDocument.Parse("""{"name":"Ada"}""");
             var result = await tool.ExecuteAsync("tool-call-1", args.RootElement);
 
@@ -579,7 +595,7 @@ public class CodingAgentExtensionCommandStoreTests
 
         try
         {
-            var store = CreateJavaScriptStore(directory);
+            using var store = CreateJavaScriptStore(directory);
 
             var status = store.LoadStatus();
 
@@ -628,7 +644,7 @@ public class CodingAgentExtensionCommandStoreTests
 
         try
         {
-            var store = CreateJavaScriptStore(directory);
+            using var store = CreateJavaScriptStore(directory);
             var message = new AgentCustomMessage("status-update", "deployed", true);
 
             Assert.False(store.TryRenderCustomMessage(message, out var rendered));
@@ -669,7 +685,7 @@ public class CodingAgentExtensionCommandStoreTests
 
         try
         {
-            var store = CreateJavaScriptStore(directory);
+            using var store = CreateJavaScriptStore(directory);
 
             var handled = store.TryInvoke("/hello Ada Lovelace", out var invocation);
 
@@ -705,7 +721,7 @@ public class CodingAgentExtensionCommandStoreTests
 
         try
         {
-            var store = CreateJavaScriptStore(directory);
+            using var store = CreateJavaScriptStore(directory);
 
             var handled = store.TryInvoke("/status ready", out var invocation);
 
@@ -757,7 +773,7 @@ public class CodingAgentExtensionCommandStoreTests
 
         try
         {
-            var store = CreateJavaScriptStore(directory);
+            using var store = CreateJavaScriptStore(directory);
 
             var handled = store.TryInvoke("/status deployed", out var invocation);
 
@@ -801,7 +817,7 @@ public class CodingAgentExtensionCommandStoreTests
 
         try
         {
-            var store = CreateJavaScriptStore(directory);
+            using var store = CreateJavaScriptStore(directory);
 
             var handled = store.TryInvoke("/plain", out var invocation);
 
@@ -850,7 +866,7 @@ public class CodingAgentExtensionCommandStoreTests
 
         try
         {
-            var store = CreateJavaScriptStore(directory);
+            using var store = CreateJavaScriptStore(directory);
 
             var handled = store.TryInvoke("/hidden", out var invocation);
 
@@ -895,7 +911,7 @@ public class CodingAgentExtensionCommandStoreTests
 
         try
         {
-            var store = CreateJavaScriptStore(directory);
+            using var store = CreateJavaScriptStore(directory);
 
             var handled = store.TryInvoke("/trigger", out var invocation);
 
@@ -947,7 +963,7 @@ public class CodingAgentExtensionCommandStoreTests
 
         try
         {
-            var store = CreateJavaScriptStore(directory);
+            using var store = CreateJavaScriptStore(directory);
 
             var status = store.LoadStatus();
 
@@ -1014,7 +1030,7 @@ public class CodingAgentExtensionCommandStoreTests
 
         try
         {
-            var store = CreateJavaScriptStore(directory);
+            using var store = CreateJavaScriptStore(directory);
 
             var diagnostics = store.ApplyExtensionFlagValues(new Dictionary<string, string?>(StringComparer.Ordinal)
             {
@@ -1055,7 +1071,7 @@ public class CodingAgentExtensionCommandStoreTests
 
         try
         {
-            var store = CreateJavaScriptStore(directory);
+            using var store = CreateJavaScriptStore(directory);
 
             var diagnostics = store.ApplyExtensionFlagValues(new Dictionary<string, string?>(StringComparer.Ordinal)
             {
@@ -1096,7 +1112,7 @@ public class CodingAgentExtensionCommandStoreTests
 
         try
         {
-            var store = CreateJavaScriptStore(directory);
+            using var store = CreateJavaScriptStore(directory);
 
             var status = store.LoadStatus();
 
@@ -1138,7 +1154,7 @@ public class CodingAgentExtensionCommandStoreTests
 
         try
         {
-            var store = CreateJavaScriptStore(directory);
+            using var store = CreateJavaScriptStore(directory);
             var shortcut = Assert.Single(store.LoadStatus().Shortcuts);
 
             Assert.True(store.TryInvokeShortcut(shortcut, out var invocation));
@@ -1188,7 +1204,7 @@ public class CodingAgentExtensionCommandStoreTests
 
         try
         {
-            var store = CreateJavaScriptStore(directory);
+            using var store = CreateJavaScriptStore(directory);
             var shortcut = Assert.Single(store.LoadStatus().Shortcuts);
 
             Assert.True(store.TryInvokeShortcut(shortcut, out var invocation));
@@ -1226,7 +1242,7 @@ public class CodingAgentExtensionCommandStoreTests
 
         try
         {
-            var store = CreateJavaScriptStore(directory);
+            using var store = CreateJavaScriptStore(directory);
 
             var status = store.LoadStatus(KeyBindingMap.Default);
 
@@ -1260,7 +1276,7 @@ public class CodingAgentExtensionCommandStoreTests
 
         try
         {
-            var store = CreateJavaScriptStore(directory);
+            using var store = CreateJavaScriptStore(directory);
 
             var status = store.LoadStatus(KeyBindingMap.Default);
 
@@ -1307,7 +1323,7 @@ public class CodingAgentExtensionCommandStoreTests
 
         try
         {
-            var store = CreateJavaScriptStore(directory);
+            using var store = CreateJavaScriptStore(directory);
 
             var status = store.LoadStatus();
 
@@ -1366,7 +1382,7 @@ public class CodingAgentExtensionCommandStoreTests
 
         try
         {
-            var store = CreateJavaScriptStore(directory);
+            using var store = CreateJavaScriptStore(directory);
             var tool = Assert.Single(store.LoadTools());
             using var args = JsonDocument.Parse("""{"name":"Ada"}""");
 
@@ -1419,7 +1435,7 @@ public class CodingAgentExtensionCommandStoreTests
 
         try
         {
-            var store = CreateJavaScriptStore(directory);
+            using var store = CreateJavaScriptStore(directory);
             var definition = Assert.Single(store.LoadToolDefinitions());
             Assert.True(definition.HasPrepareArguments);
             var tool = Assert.Single(store.LoadTools());
@@ -1459,7 +1475,7 @@ public class CodingAgentExtensionCommandStoreTests
 
         try
         {
-            var store = CreateJavaScriptStore(directory);
+            using var store = CreateJavaScriptStore(directory);
             var status = store.LoadStatus();
 
             Assert.Empty(status.Diagnostics);
@@ -1514,7 +1530,7 @@ public class CodingAgentExtensionCommandStoreTests
 
         try
         {
-            var store = CreateJavaScriptStore(directory);
+            using var store = CreateJavaScriptStore(directory);
             var status = store.LoadStatus();
 
             Assert.Empty(status.Diagnostics);
@@ -1561,7 +1577,7 @@ public class CodingAgentExtensionCommandStoreTests
 
         try
         {
-            var store = CreateJavaScriptStore(directory);
+            using var store = CreateJavaScriptStore(directory);
             var status = store.LoadStatus();
 
             Assert.Empty(status.Diagnostics);
@@ -1612,7 +1628,7 @@ public class CodingAgentExtensionCommandStoreTests
 
         try
         {
-            var store = CreateJavaScriptStore(directory);
+            using var store = CreateJavaScriptStore(directory);
             var status = store.LoadStatus();
 
             Assert.Empty(status.Diagnostics);
@@ -1654,7 +1670,7 @@ public class CodingAgentExtensionCommandStoreTests
 
         try
         {
-            var store = CreateJavaScriptStore(directory);
+            using var store = CreateJavaScriptStore(directory);
             var status = store.LoadStatus();
 
             Assert.Empty(status.Diagnostics);
@@ -1704,7 +1720,7 @@ public class CodingAgentExtensionCommandStoreTests
 
         try
         {
-            var store = CreateJavaScriptStore(directory);
+            using var store = CreateJavaScriptStore(directory);
             var sink = store.LoadLifecycleEventSink();
             Assert.NotNull(sink);
 
@@ -1754,7 +1770,7 @@ public class CodingAgentExtensionCommandStoreTests
 
         try
         {
-            var store = CreateTypeScriptStore(directory);
+            using var store = CreateTypeScriptStore(directory);
 
             var status = store.LoadStatus();
 
@@ -1798,7 +1814,7 @@ public class CodingAgentExtensionCommandStoreTests
 
         try
         {
-            var store = CreateTypeScriptStore(directory);
+            using var store = CreateTypeScriptStore(directory);
 
             var status = store.LoadStatus();
 
@@ -1864,7 +1880,7 @@ public class CodingAgentExtensionCommandStoreTests
 
         try
         {
-            var store = CreateTypeScriptStore(directory);
+            using var store = CreateTypeScriptStore(directory);
             var definition = Assert.Single(store.LoadToolDefinitions());
             Assert.True(definition.HasPrepareArguments);
             var tool = Assert.Single(store.LoadTools());
@@ -1921,7 +1937,7 @@ public class CodingAgentExtensionCommandStoreTests
 
         try
         {
-            var store = CreateJavaScriptStore(directory);
+            using var store = CreateJavaScriptStore(directory);
 
             var status = store.LoadStatus();
 
@@ -1957,7 +1973,7 @@ public class CodingAgentExtensionCommandStoreTests
 
         try
         {
-            var store = CreateJavaScriptStore(directory);
+            using var store = CreateJavaScriptStore(directory);
 
             var status = store.LoadStatus();
 
@@ -2014,7 +2030,7 @@ public class CodingAgentExtensionCommandStoreTests
 
         try
         {
-            var store = new CodingAgentExtensionCommandStore(cwd: directory);
+            using var store = new CodingAgentExtensionCommandStore(cwd: directory);
 
             var status = store.LoadStatus();
 

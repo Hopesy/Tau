@@ -11,8 +11,10 @@ namespace Tau.Ai.Providers;
 public class ProviderDefinition
 {
     private readonly Func<CancellationToken, Task<IReadOnlyList<Model>>>? _refreshModels;
+    private readonly Func<RefreshModelsContext, Task>? _refreshWithContext;
     private readonly Func<IReadOnlyList<Model>, IReadOnlyList<Model>>? _filterModels;
     private readonly Func<IReadOnlyList<Model>, ProviderCredential?, IReadOnlyList<Model>>? _filterModelsWithCredential;
+    private readonly Func<IReadOnlyList<Model>, ProviderCredential?, IReadOnlyList<Model>>? _filterAllModels;
     private IReadOnlyList<Model> _models;
 
     /// <summary>
@@ -28,9 +30,13 @@ public class ProviderDefinition
     /// <param name="baseUrl">provider 默认请求地址；模型未提供地址时使用。</param>
     /// <param name="headers">provider 默认请求头；模型和请求级请求头可以覆盖。</param>
     /// <param name="filterModelsWithCredential">可选按具体凭据过滤模型委托。</param>
+    /// <param name="images">按协议标识注册的图像实现。</param>
+    /// <param name="classifiers">按协议标识注册的分类实现。</param>
+    /// <param name="filterAllModels">可选跨能力类型的凭据过滤委托。</param>
+    /// <param name="refreshWithContext">原生分阶段刷新委托，支持缓存恢复、认证及受保护的发布。</param>
     public ProviderDefinition(
         string id,
-        IStreamProvider provider,
+        IStreamProvider? provider = null,
         IEnumerable<Model>? models = null,
         string? name = null,
         Func<CancellationToken, Task<IReadOnlyList<Model>>>? refreshModels = null,
@@ -38,14 +44,24 @@ public class ProviderDefinition
         ProviderAuthDefinition? auth = null,
         string? baseUrl = null,
         IReadOnlyDictionary<string, string>? headers = null,
-        Func<IReadOnlyList<Model>, ProviderCredential?, IReadOnlyList<Model>>? filterModelsWithCredential = null)
+        Func<IReadOnlyList<Model>, ProviderCredential?, IReadOnlyList<Model>>? filterModelsWithCredential = null,
+        IReadOnlyDictionary<string, IImagesProvider>? images = null,
+        IReadOnlyDictionary<string, IClassifierProvider>? classifiers = null,
+        Func<IReadOnlyList<Model>, ProviderCredential?, IReadOnlyList<Model>>? filterAllModels = null,
+        Func<RefreshModelsContext, Task>? refreshWithContext = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(id);
         Id = id;
         Name = string.IsNullOrWhiteSpace(name) ? id : name;
-        Provider = provider ?? throw new ArgumentNullException(nameof(provider));
-        _models = models?.ToArray() ?? [];
+        if (provider is null && images?.Count is not > 0 && classifiers?.Count is not > 0 && auth is null && refreshWithContext is null)
+            throw new ArgumentException("At least one chat, image, classifier or authentication implementation is required.");
+        Provider = provider;
+        Images = images?.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal) ?? [];
+        Classifiers = classifiers?.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal) ?? [];
+        _filterAllModels = filterAllModels;
+        _models = models?.Where(ModelTypes.IsKnown).ToArray() ?? [];
         _refreshModels = refreshModels;
+        _refreshWithContext = refreshWithContext;
         _filterModels = filterModels;
         _filterModelsWithCredential = filterModelsWithCredential;
         Auth = auth;
@@ -59,8 +75,14 @@ public class ProviderDefinition
     /// <summary>provider 显示名称。</summary>
     public string Name { get; }
 
-    /// <summary>底层流式 provider 实现。</summary>
-    public IStreamProvider Provider { get; }
+    /// <summary>底层聊天实现；只注册图像或分类能力时为空。</summary>
+    public IStreamProvider? Provider { get; }
+
+    /// <summary>图像协议实现。</summary>
+    public IReadOnlyDictionary<string, IImagesProvider> Images { get; }
+
+    /// <summary>分类协议实现。</summary>
+    public IReadOnlyDictionary<string, IClassifierProvider> Classifiers { get; }
 
     /// <summary>provider 自有认证定义；为空时由统一兼容解析器处理。</summary>
     public ProviderAuthDefinition? Auth { get; }
@@ -71,11 +93,40 @@ public class ProviderDefinition
     /// <summary>provider 默认请求头。</summary>
     public IReadOnlyDictionary<string, string>? Headers { get; }
 
-    /// <summary>读取当前模型快照。</summary>
-    public virtual IReadOnlyList<Model> GetModels() => _models;
+    /// <summary>读取当前聊天模型快照。</summary>
+    /// <returns>聊天模型列表。</returns>
+    public virtual IReadOnlyList<Model> GetModels() => _models.Where(model => ModelTypes.GetModelType(model) == ModelTypes.Chat).ToArray();
+
+    /// <summary>【AI】【模型目录】读取全部能力类型，并兼容只重写聊天查询的旧实现。</summary>
+    /// <returns>聊天、图像和分类模型快照。</returns>
+    public virtual IReadOnlyList<Model> GetAllModels()
+    {
+        // 1. 【AI】【模型目录】保留混合快照的原始顺序
+        var snapshot = _models;
+        var chat = GetModels();
+        if (chat.SequenceEqual(snapshot.Where(model => ModelTypes.GetModelType(model) == ModelTypes.Chat))) return snapshot;
+
+        // 2. 【AI】【模型目录】旧子类可通过虚拟聊天查询提供自己的模型
+        return chat.Concat(snapshot.Where(model => ModelTypes.GetModelType(model) != ModelTypes.Chat))
+            .Where(ModelTypes.IsKnown).ToArray();
+    }
 
     /// <summary>读取当前 provider 的动态刷新委托是否存在。</summary>
-    public bool IsDynamic => _refreshModels is not null;
+    public bool IsDynamic => _refreshModels is not null || _refreshWithContext is not null;
+
+    internal bool HasContextRefresh => _refreshWithContext is not null;
+
+    /// <summary>【AI】【动态目录快照】同步替换提供方公开目录，可在发布回调中使用。</summary>
+    /// <param name="models">新目录，未知能力类型会被过滤。</param>
+    public void SetModels(IEnumerable<Model> models) => _models = models.Where(ModelTypes.IsKnown).ToArray();
+
+    /// <summary>【AI】【原生目录刷新】执行传入阶段，由 Models 管理上下文与发布代次。</summary>
+    /// <param name="context">本次刷新阶段。</param><returns>阶段完成任务。</returns>
+    public Task RefreshModelsAsync(RefreshModelsContext context) => _refreshWithContext?.Invoke(context) ?? RefreshModelsAsync(context.Signal);
+
+    /// <summary>【AI】【兼容目录刷新】获取旧委托的新目录，提交由调用方另行校验刷新代次。</summary>
+    /// <param name="token">取消信号。</param><returns>候选目录。</returns>
+    internal Task<IReadOnlyList<Model>> FetchLegacyModelsAsync(CancellationToken token) => _refreshModels?.Invoke(token) ?? Task.FromResult(GetAllModels());
 
     /// <summary>
     /// 刷新 provider 模型快照。
@@ -90,21 +141,22 @@ public class ProviderDefinition
         }
 
         // 1. 执行 provider 自有网络/缓存逻辑
-        var refreshed = await _refreshModels(cancellationToken).ConfigureAwait(false);
+        var refreshed = await _refreshModels(cancellationToken).WaitAsync(cancellationToken).ConfigureAwait(false);
         cancellationToken.ThrowIfCancellationRequested();
         // 2. 只在完整刷新成功后替换快照，失败时保留旧列表
-        _models = refreshed?.ToArray() ?? [];
+        _models = refreshed?.Where(ModelTypes.IsKnown).ToArray() ?? [];
     }
 
     /// <summary>根据凭据过滤当前模型列表。</summary>
     /// <param name="credentialConfigured">是否已配置凭据。</param>
+    /// <param name="credential">当前凭据。</param>
     /// <returns>可用模型列表。</returns>
     public IReadOnlyList<Model> FilterModels(bool credentialConfigured, ProviderCredential? credential = null)
     {
         var models = GetModels();
         if (!credentialConfigured)
         {
-            return models;
+            return [];
         }
 
         if (_filterModelsWithCredential is not null)
@@ -113,6 +165,20 @@ public class ProviderDefinition
         }
 
         return _filterModels is null ? models : _filterModels(models);
+    }
+
+    /// <summary>【AI】【模型目录】按凭据过滤全部类型；旧过滤器只影响聊天模型。</summary>
+    /// <param name="credential">当前凭据。</param>
+    /// <returns>过滤后的全部能力模型。</returns>
+    public IReadOnlyList<Model> FilterAllModels(ProviderCredential? credential = null)
+    {
+        var models = GetAllModels().Where(ModelTypes.IsKnown).ToArray();
+        if (_filterAllModels is not null) return _filterAllModels(models, credential).Where(ModelTypes.IsKnown).ToArray();
+        if (_filterModels is null && _filterModelsWithCredential is null) return models;
+        var chat = models.Where(model => ModelTypes.GetModelType(model) == ModelTypes.Chat).ToArray();
+        var allowed = (_filterModelsWithCredential?.Invoke(chat, credential) ?? _filterModels?.Invoke(chat) ?? chat)
+            .Select(model => model.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return models.Where(model => ModelTypes.GetModelType(model) != ModelTypes.Chat || allowed.Contains(model.Id)).ToArray();
     }
 }
 
@@ -124,22 +190,33 @@ public sealed record ModelsRefreshResult(
 /// <summary>
 /// 统一管理 provider、模型目录、认证和流式请求的运行时集合。
 /// </summary>
-public sealed class Models
+public sealed partial class Models
 {
     private readonly Dictionary<string, ProviderDefinition> _providers = new(StringComparer.OrdinalIgnoreCase);
     private readonly ProviderAuthResolver _authResolver;
     private readonly IProviderCredentialStore _credentialStore;
+    private readonly ModelConfigurationStore? _configurationStore;
     private readonly object _gate = new();
+
+    /// <summary>【AI】【OAuth 刷新】上游规定的单次刷新时限；测试可缩短以验证非协作任务。</summary>
+    internal TimeSpan OAuthRefreshTimeout { get; init; } = TimeSpan.FromSeconds(15);
 
     /// <summary>创建模型集合。</summary>
     /// <param name="providers">初始 provider 定义。</param>
     /// <param name="authResolver">认证解析器。</param>
+    /// <param name="credentialStore">可选凭据存储。</param>
+    /// <param name="configurationStore">可选非聊天请求配置来源。</param>
+    /// <param name="modelsStore">可选动态目录持久化存储。</param>
     public Models(
         IEnumerable<ProviderDefinition>? providers = null,
         ProviderAuthResolver? authResolver = null,
-        IProviderCredentialStore? credentialStore = null)
+        IProviderCredentialStore? credentialStore = null,
+        ModelConfigurationStore? configurationStore = null,
+        Registry.ModelsStore? modelsStore = null)
     {
-        _authResolver = authResolver ?? new ProviderAuthResolver();
+        _modelsStore = modelsStore ?? new Registry.InMemoryModelsStore();
+        _configurationStore = configurationStore;
+        _authResolver = authResolver ?? new ProviderAuthResolver(configurationStore: configurationStore);
         _credentialStore = credentialStore ?? new InMemoryProviderCredentialStore();
         if (providers is not null)
         {
@@ -155,7 +232,11 @@ public sealed class Models
     public void SetProvider(ProviderDefinition provider)
     {
         ArgumentNullException.ThrowIfNull(provider);
-        lock (_gate) _providers[provider.Id] = provider;
+        lock (_gate)
+        {
+            SupersedeRefreshLocked(provider.Id);
+            _providers[provider.Id] = provider;
+        }
     }
 
     /// <summary>按 id 删除 provider。</summary>
@@ -163,13 +244,21 @@ public sealed class Models
     public void DeleteProvider(string id)
     {
         if (string.IsNullOrWhiteSpace(id)) return;
-        lock (_gate) _providers.Remove(id);
+        lock (_gate)
+        {
+            SupersedeRefreshLocked(id);
+            _providers.Remove(id);
+        }
     }
 
     /// <summary>清空全部 provider。</summary>
     public void ClearProviders()
     {
-        lock (_gate) _providers.Clear();
+        lock (_gate)
+        {
+            foreach (var id in _providers.Keys.Concat(_refreshCalls.Keys).Distinct(StringComparer.OrdinalIgnoreCase).ToArray()) SupersedeRefreshLocked(id);
+            _providers.Clear();
+        }
     }
 
     /// <summary>读取 provider 定义快照。</summary>
@@ -190,7 +279,12 @@ public sealed class Models
     /// <summary>读取一个 provider 或全部 provider 的模型快照。</summary>
     /// <param name="providerId">可选 provider id。</param>
     /// <returns>模型快照；单个 provider 读取失败时返回空列表。</returns>
-    public IReadOnlyList<Model> GetModels(string? providerId = null)
+    public IReadOnlyList<Model> GetModels(string? providerId = null) => GetModelsOfType(ModelTypes.Chat, providerId);
+
+    /// <summary>【AI】【模型目录】读取全部能力类型，单个 provider 的故障不影响其他目录。</summary>
+    /// <param name="providerId">可选 provider 标识。</param>
+    /// <returns>全部已知类型模型。</returns>
+    public IReadOnlyList<Model> GetAllModels(string? providerId = null)
     {
         var providers = providerId is null
             ? GetProviders()
@@ -200,7 +294,7 @@ public sealed class Models
         {
             try
             {
-                result.AddRange(provider.GetModels());
+                result.AddRange(provider.GetAllModels().Where(ModelTypes.IsKnown));
             }
             catch
             {
@@ -216,7 +310,7 @@ public sealed class Models
     /// <param name="modelId">模型 id。</param>
     /// <returns>找到的模型，找不到时为 null。</returns>
     public Model? GetModel(string providerId, string modelId) =>
-        GetProvider(providerId)?.GetModels().FirstOrDefault(model => model.Id.Equals(modelId, StringComparison.OrdinalIgnoreCase));
+        GetModelOfType(ModelTypes.Chat, providerId, modelId);
 
     /// <summary>检查 provider 认证状态。</summary>
     /// <param name="providerId">provider id。</param>
@@ -253,6 +347,7 @@ public sealed class Models
         IReadOnlyDictionary<string, string>? env = null,
         CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         var provider = GetProvider(providerId);
         if (provider is null) return null;
         if (provider.Auth is null)
@@ -263,35 +358,17 @@ public sealed class Models
 
         try
         {
-            if (!string.IsNullOrWhiteSpace(apiKey))
-            {
-                return new ProviderAuthStatus(providerId, true, "explicit", false, false, "API key provided explicitly for this request.");
-            }
-
-            var credential = await _credentialStore.ReadAsync(providerId, cancellationToken).ConfigureAwait(false);
-            if (credential is ProviderCredential.OAuth && provider.Auth.OAuth is not null)
-            {
-                return new ProviderAuthStatus(providerId, true, "OAuth", true, true, "OAuth credentials found in the provider credential store.");
-            }
-
-            if (provider.Auth.ApiKey is null) return null;
-            var apiCredential = credential is ProviderCredential.ApiKey api ? api.Value : null;
-            if (provider.Auth.ApiKey.CheckAsync is not null)
-            {
-                return await provider.Auth.ApiKey.CheckAsync(
-                    new ProviderAuthCheckContext(providerId, apiCredential, env, cancellationToken)).ConfigureAwait(false);
-            }
-
-            var resolved = await provider.Auth.ApiKey.ResolveAsync(
-                new ProviderAuthResolveContext(providerId, apiCredential, env, cancellationToken)).ConfigureAwait(false);
-            return resolved is null
-                ? new ProviderAuthStatus(providerId, false, "none", false, provider.Auth.ApiKey.LoginAsync is not null, "No credentials found.")
-                : new ProviderAuthStatus(providerId, true, resolved.Source ?? provider.Auth.ApiKey.Name, false, provider.Auth.ApiKey.LoginAsync is not null, "Credentials are available.");
+            // 1. 【AI】【认证检查】显式密钥只对具备密钥处理器的提供方生效，空字符串仍交由处理器判断
+            var explicitKey = apiKey is not null && provider.Auth.ApiKey is not null;
+            var credential = explicitKey ? new ProviderCredential.ApiKey(new(apiKey, env))
+                : await ReadCredentialForCheckAsync(providerId, cancellationToken).ConfigureAwait(false);
+            return await CheckProviderAuthStatusAsync(provider, credential, env, cancellationToken, explicitKey ? apiKey : null).ConfigureAwait(false);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
         }
+        catch (ModelsError) { throw; }
         catch (Exception ex)
         {
             throw new ModelsError("auth", $"Authentication check failed for provider '{providerId}'.", ex);
@@ -305,14 +382,17 @@ public sealed class Models
     /// <param name="apiKey">可选本次请求显式 key。</param>
     /// <param name="env">可选环境覆盖。</param>
     /// <param name="cancellationToken">取消令牌。</param>
+    /// <param name="minimumOAuthValidity">可选的最低剩余有效期；不会低于默认五分钟，显式指定时刷新后也校验。</param>
     /// <returns>解析后的认证；provider 未配置或未知时返回 null。</returns>
     public async Task<ProviderAuthResult?> ResolveAuthAsync(
         Model model,
         string? apiKey = null,
         IReadOnlyDictionary<string, string>? env = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        TimeSpan? minimumOAuthValidity = null)
     {
         ArgumentNullException.ThrowIfNull(model);
+        cancellationToken.ThrowIfCancellationRequested();
         var provider = GetProvider(model.Provider) ?? GetProvider(model.Api);
         if (provider is null) return null;
         try
@@ -320,23 +400,31 @@ public sealed class Models
             ProviderAuthResult? result;
             if (provider.Auth is null)
             {
-                var resolvedKey = _authResolver.ResolveApiKey(model.Provider, apiKey, env) ?? apiKey;
-                result = string.IsNullOrWhiteSpace(resolvedKey)
-                    ? null
-                    : new ProviderAuthResult(resolvedKey, Source: "legacy");
+                var resolved = _authResolver.ResolveRequestAuth(model.Provider, apiKey, env, cancellationToken);
+                result = resolved.ApiKey is null && resolved.Headers is null && resolved.BaseUrl is null && resolved.Env is null
+                    ? null : resolved;
             }
             else
             {
-                result = await ResolveProviderAuthAsync(provider, apiKey, env, cancellationToken).ConfigureAwait(false);
+                result = await ResolveProviderAuthAsync(provider, apiKey, env, cancellationToken, minimumOAuthValidity)
+                    .WaitAsync(cancellationToken).ConfigureAwait(false);
             }
 
+            cancellationToken.ThrowIfCancellationRequested();
             if (result is null) return null;
             return result with
             {
                 Headers = MergeHeaders(model.Headers, result.Headers),
                 BaseUrl = result.BaseUrl ?? model.BaseUrl,
-                Env = MergeEnvironment(result.Env, env)
+                // 1. 【AI】【Cloudflare 认证】已解析账户包含凭据优先级，不能被原始环境覆盖
+                Env = model.Provider.Equals("cloudflare-workers-ai", StringComparison.OrdinalIgnoreCase)
+                    ? MergeEnvironment(env, result.Env)
+                    : MergeEnvironment(result.Env, env)
             };
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch (ModelsError)
         {
@@ -354,13 +442,16 @@ public sealed class Models
     /// <param name="providerId">provider id。</param>
     /// <param name="type">登录类型，api_key 或 oauth。</param>
     /// <param name="interaction">登录交互回调。</param>
+    /// <param name="options">可选安装标识配置。</param>
     /// <returns>登录后保存的凭据。</returns>
     public async Task<ProviderCredential> LoginAsync(
         string providerId,
         string type,
-        AuthInteraction interaction)
+        AuthInteraction interaction,
+        OAuthLoginOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(interaction);
+        interaction.CancellationToken.ThrowIfCancellationRequested();
         var provider = GetProvider(providerId) ?? throw new ModelsError("provider", $"Unknown provider: {providerId}");
         try
         {
@@ -369,12 +460,14 @@ public sealed class Models
                 "api_key" or "apikey" when provider.Auth?.ApiKey?.LoginAsync is not null =>
                     new ProviderCredential.ApiKey(await provider.Auth.ApiKey.LoginAsync(interaction).ConfigureAwait(false)),
                 "oauth" when provider.Auth?.OAuth is not null =>
-                    new ProviderCredential.OAuth(await provider.Auth.OAuth.LoginAsync(interaction).ConfigureAwait(false)),
+                    new ProviderCredential.OAuth(await provider.Auth.OAuth.LoginWithOptionsAsync(interaction, options).ConfigureAwait(false)),
                 _ => throw new ModelsError("auth", $"Provider '{providerId}' does not support {type} login.")
             };
+            interaction.CancellationToken.ThrowIfCancellationRequested();
             var saved = await _credentialStore.ModifyAsync(providerId, _ => Task.FromResult<ProviderCredential?>(credential), interaction.CancellationToken).ConfigureAwait(false);
             return saved ?? credential;
         }
+        catch (OperationCanceledException) { throw; }
         catch (ModelsError)
         {
             throw;
@@ -389,7 +482,12 @@ public sealed class Models
     /// <summary>返回已配置认证的模型。</summary>
     /// <param name="providerId">可选 provider id。</param>
     /// <returns>可用模型列表。</returns>
-    public IReadOnlyList<Model> GetAvailable(string? providerId = null)
+    public IReadOnlyList<Model> GetAvailable(string? providerId = null) => GetAvailableOfType(ModelTypes.Chat, providerId);
+
+    /// <summary>【AI】【模型目录】同步读取已配置认证的全部类型模型。</summary>
+    /// <param name="providerId">可选 provider 标识。</param>
+    /// <returns>认证可用模型。</returns>
+    public IReadOnlyList<Model> GetAllAvailable(string? providerId = null)
     {
         var providers = providerId is null
             ? GetProviders()
@@ -411,7 +509,7 @@ public sealed class Models
                 continue;
             }
 
-            result.AddRange(provider.FilterModels(status.IsConfigured, credential));
+            if (status.IsConfigured) result.AddRange(provider.FilterAllModels(credential));
         }
 
         return result;
@@ -423,68 +521,58 @@ public sealed class Models
     /// <param name="providerId">可选 provider id。</param>
     /// <param name="cancellationToken">取消令牌。</param>
     /// <returns>认证可用模型列表。</returns>
-    public async Task<IReadOnlyList<Model>> GetAvailableAsync(
+    public Task<IReadOnlyList<Model>> GetAvailableAsync(
+        string? providerId = null,
+        CancellationToken cancellationToken = default) => GetAvailableOfTypeAsync(ModelTypes.Chat, providerId, cancellationToken);
+
+    /// <summary>【AI】【模型目录】异步读取已配置认证的全部类型模型。</summary>
+    /// <param name="providerId">可选 provider 标识。</param>
+    /// <param name="cancellationToken">取消信号。</param>
+    /// <returns>认证可用模型。</returns>
+    public async Task<IReadOnlyList<Model>> GetAllAvailableAsync(
         string? providerId = null,
         CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         var providers = providerId is null
             ? GetProviders()
             : GetProvider(providerId) is { } singleProvider ? [singleProvider] : [];
-        var result = new List<Model>();
-        foreach (var provider in providers)
+        // 1. 【AI】【可用目录】并行检查各提供方，凭据过滤复用最初读取的快照
+        var failure = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var checks = providers.Select(async provider =>
         {
-            var status = await CheckAuthAsync(provider.Id, cancellationToken: cancellationToken).ConfigureAwait(false);
-            if (status?.IsConfigured != true) continue;
-            var credential = await _credentialStore.ReadAsync(provider.Id, cancellationToken).ConfigureAwait(false);
-            result.AddRange(provider.FilterModels(true, credential));
-        }
-
-        return result;
+            try
+            {
+                var credential = await ReadCredentialForCheckAsync(provider.Id, cancellationToken).ConfigureAwait(false);
+                var status = await CheckProviderAuthStatusAsync(provider, credential, null, cancellationToken).ConfigureAwait(false);
+                return (Provider: provider, Credential: credential, Status: status);
+            }
+            catch (Exception error) { failure.TrySetResult(error); throw; }
+        }).ToArray();
+        var all = Task.WhenAll(checks);
+        // 2. 【AI】【可用目录】任一检查失败立即返回，继续观察迟到的聚合错误而不等待其他非协作操作
+        _ = all.ContinueWith(completed => _ = completed.Exception, CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+        if (await Task.WhenAny(all, failure.Task).WaitAsync(cancellationToken).ConfigureAwait(false) == failure.Task)
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(await failure.Task.ConfigureAwait(false)).Throw();
+        var results = await all.WaitAsync(cancellationToken).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+        // 3. 【AI】【可用目录】所有检查成功后按注册顺序应用过滤，错误不返回半份目录
+        return results.Where(result => result.Status?.IsConfigured == true)
+            .SelectMany(result => result.Provider.FilterAllModels(result.Credential)).ToArray();
     }
 
     /// <summary>并行刷新所有或指定动态 provider。</summary>
     /// <param name="providerIds">可选 provider id 集合。</param>
     /// <param name="allowNetwork">是否允许动态 provider 访问网络。</param>
     /// <param name="cancellationToken">取消信号。</param>
+    /// <param name="force">可选联网阶段强制获取策略。</param>
     /// <returns>包含取消状态和各 provider 错误的结果。</returns>
-    public async Task<ModelsRefreshResult> RefreshAsync(
+    public Task<ModelsRefreshResult> RefreshAsync(
         IEnumerable<string>? providerIds = null,
         bool allowNetwork = true,
-        CancellationToken cancellationToken = default)
-    {
-        var selected = providerIds is null
-            ? null
-            : providerIds.ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var errors = new Dictionary<string, Exception>(StringComparer.OrdinalIgnoreCase);
-        var tasks = GetProviders()
-            .Where(provider => provider.IsDynamic && (selected is null || selected.Contains(provider.Id)))
-            .Select(async provider =>
-            {
-                if (!allowNetwork) return;
-                try
-                {
-                    await provider.RefreshModelsAsync(cancellationToken).ConfigureAwait(false);
-                }
-                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-                {
-                }
-                catch (Exception ex)
-                {
-                    lock (errors) errors[provider.Id] = ex;
-                }
-            })
-            .ToArray();
-
-        try
-        {
-            await Task.WhenAll(tasks).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-        }
-
-        return new ModelsRefreshResult(cancellationToken.IsCancellationRequested, errors);
-    }
+        CancellationToken cancellationToken = default,
+        bool? force = null) => RefreshCoreAsync(providerIds, allowNetwork, cancellationToken, force);
 
     /// <summary>解析认证并启动 provider 流。</summary>
     /// <param name="model">目标模型。</param>
@@ -493,6 +581,8 @@ public sealed class Models
     /// <returns>异步消息流。</returns>
     public AssistantMessageStream Stream(Model model, LlmContext context, StreamOptions options)
     {
+        if (ModelTypes.GetModelType(model) != ModelTypes.Chat)
+            return ErrorStream(model, $"Model '{model.Provider}/{model.Id}' is not a chat model.");
         var provider = GetProvider(model.Provider) ?? GetProvider(model.Api);
         if (provider is null)
         {
@@ -509,6 +599,8 @@ public sealed class Models
     /// <returns>异步消息流。</returns>
     public AssistantMessageStream StreamSimple(Model model, LlmContext context, SimpleStreamOptions options)
     {
+        if (ModelTypes.GetModelType(model) != ModelTypes.Chat)
+            return ErrorStream(model, $"Model '{model.Provider}/{model.Id}' is not a chat model.");
         var provider = GetProvider(model.Provider) ?? GetProvider(model.Api);
         if (provider is null)
         {
@@ -571,12 +663,15 @@ public sealed class Models
     /// <param name="providerId">provider id。</param>
     /// <param name="callbacks">登录交互回调。</param>
     /// <param name="cancellationToken">取消信号。</param>
+    /// <param name="options">可选安装标识配置。</param>
     /// <returns>保存后的 OAuth 凭据。</returns>
     public async Task<OAuthCredentials> LoginAsync(
         string providerId,
         IOAuthLoginCallbacks callbacks,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        OAuthLoginOptions? options = null)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         if (GetProvider(providerId) is null)
         {
             throw new ModelsError("provider", $"Unknown provider: {providerId}");
@@ -586,10 +681,12 @@ public sealed class Models
             ?? throw new ModelsError("auth", $"Provider '{providerId}' does not support OAuth login.");
         try
         {
-            var credentials = await oauthProvider.LoginAsync(callbacks, cancellationToken).ConfigureAwait(false);
+            var credentials = await oauthProvider.LoginAsync(callbacks, options, cancellationToken).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
             _authResolver.SaveOAuthCredentials(providerId, credentials);
             return credentials;
         }
+        catch (OperationCanceledException) { throw; }
         catch (Exception ex) when (ex is not ModelsError)
         {
             throw new ModelsError("oauth", $"OAuth login failed for {providerId}.", ex);
@@ -625,8 +722,10 @@ public sealed class Models
     /// <returns>最终 assistant message。</returns>
     public async Task<AssistantMessage> FetchDeferredAsync(Model model, DeferredHandle handle, DeferredFetchOptions? options = null)
     {
+        if (ModelTypes.GetModelType(model) != ModelTypes.Chat)
+            return await ErrorStream(model, "Deferred requests require a chat model.").ResultAsync.ConfigureAwait(false);
         var provider = GetProvider(model.Provider) ?? GetProvider(model.Api);
-        if (provider is null)
+        if (provider?.Provider is null)
         {
             return await ErrorStream(model, new ModelsError("provider", $"Provider '{model.Provider}' is not registered.")).ResultAsync.ConfigureAwait(false);
         }
@@ -668,8 +767,12 @@ public sealed class Models
     /// <returns>取消完成任务。</returns>
     public async Task CancelDeferredAsync(Model model, DeferredHandle handle, DeferredCancelOptions? options = null)
     {
-            var provider = GetProvider(model.Provider) ?? GetProvider(model.Api)
-                ?? throw new ModelsError("provider", $"Provider '{model.Provider}' is not registered.");
+        if (ModelTypes.GetModelType(model) != ModelTypes.Chat)
+            throw new ModelsError("provider", "Deferred requests require a chat model.");
+        var provider = GetProvider(model.Provider) ?? GetProvider(model.Api)
+            ?? throw new ModelsError("provider", $"Provider '{model.Provider}' is not registered.");
+        if (provider.Provider is null)
+            throw new ModelsError("provider", $"Provider '{model.Provider}' does not support chat models.");
         try
         {
             var resolvedOptions = options ?? new DeferredCancelOptions();
@@ -776,6 +879,8 @@ public sealed class Models
         {
             try
             {
+                if (provider.Provider is null)
+                    throw new ModelsError("provider", $"Provider '{provider.Id}' does not support chat models.");
                 var auth = await ResolveAuthAsync(model, options.ApiKey, options.Env, options.Signal).ConfigureAwait(false);
                 if (provider.Auth is not null && auth is null)
                 {
@@ -788,9 +893,11 @@ public sealed class Models
                     Headers = MergeHeaders(auth?.Headers, options.Headers)?.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.OrdinalIgnoreCase),
                     Env = MergeEnvironment(options.Env, auth?.Env)
                 };
+                var requestContext = provider.Provider.SupportsTranscriptContext
+                    ? Transcript.NormalizeContext(context) : Transcript.ResolveContext(context);
                 var inner = simple && requestOptions is SimpleStreamOptions simpleOptions
-                    ? provider.Provider.StreamSimple(requestModel, context, simpleOptions)
-                    : provider.Provider.Stream(requestModel, context, requestOptions);
+                    ? provider.Provider.StreamSimple(requestModel, requestContext, simpleOptions)
+                    : provider.Provider.Stream(requestModel, requestContext, requestOptions);
                 await foreach (var item in inner.ConfigureAwait(false)) outer.Push(item);
             }
             catch (OperationCanceledException) when (options.Signal.IsCancellationRequested)
@@ -820,13 +927,16 @@ public sealed class Models
     /// <param name="explicitApiKey">显式 API key。</param>
     /// <param name="environment">环境覆盖。</param>
     /// <param name="cancellationToken">取消令牌。</param>
+    /// <param name="minimumOAuthValidity">可选的请求最低有效期。</param>
     /// <returns>请求认证结果。</returns>
     private async Task<ProviderAuthResult?> ResolveProviderAuthAsync(
         ProviderDefinition provider,
         string? explicitApiKey,
         IReadOnlyDictionary<string, string>? environment,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        TimeSpan? minimumOAuthValidity)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         var definition = provider.Auth!;
         if (explicitApiKey is not null && definition.ApiKey is not null)
         {
@@ -834,32 +944,58 @@ public sealed class Models
                 new ProviderAuthResolveContext(provider.Id, new ApiKeyCredential(explicitApiKey, environment), environment, cancellationToken)).ConfigureAwait(false);
         }
 
-        var stored = await _credentialStore.ReadAsync(provider.Id, cancellationToken).ConfigureAwait(false);
+        var stored = await _credentialStore.ReadAsync(provider.Id, cancellationToken).WaitAsync(cancellationToken).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
         if (stored is ProviderCredential.OAuth oauthCredential && definition.OAuth is not null)
         {
+            var validity = minimumOAuthValidity > TimeSpan.FromMinutes(5) ? minimumOAuthValidity.Value : TimeSpan.FromMinutes(5);
             var current = oauthCredential.Value;
-            if (DateTimeOffset.UtcNow >= current.ExpiresAt - TimeSpan.FromMinutes(5))
+            if (current.ToOAuth().IsExpired(validity))
             {
+                // 1. 【AI】【OAuth 刷新】在存储互斥区重新检查当前凭据，避免复活已退出或已替换的凭据
                 var refreshed = await _credentialStore.ModifyAsync(provider.Id, async existing =>
                 {
-                    if (existing is not ProviderCredential.OAuth existingOAuth) return existing;
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (existing is not ProviderCredential.OAuth existingOAuth) return null;
                     var candidate = existingOAuth.Value;
-                    if (DateTimeOffset.UtcNow < candidate.ExpiresAt - TimeSpan.FromMinutes(5)) return existing;
-                    var next = await definition.OAuth.RefreshAsync(candidate, cancellationToken).ConfigureAwait(false);
-                    return new ProviderCredential.OAuth(next);
-                }, cancellationToken).ConfigureAwait(false);
-                if (refreshed is ProviderCredential.OAuth refreshedOAuth)
+                    if (!candidate.ToOAuth().IsExpired(validity)) return null;
+                    // 2. 【AI】【OAuth 刷新】独立刷新时限也约束不响应取消的扩展，迟到结果不会提交
+                    using var refresh = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                    refresh.CancelAfter(OAuthRefreshTimeout);
+                    try
+                    {
+                        var next = await definition.OAuth.RefreshAsync(candidate, refresh.Token).WaitAsync(refresh.Token).ConfigureAwait(false);
+                        refresh.Token.ThrowIfCancellationRequested();
+                        return new ProviderCredential.OAuth(next);
+                    }
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+                    catch (Exception error) { throw new ModelsError("oauth", $"OAuth refresh failed for {provider.Id}.", error); }
+                }, cancellationToken).WaitAsync(cancellationToken).ConfigureAwait(false);
+                cancellationToken.ThrowIfCancellationRequested();
+                if (refreshed is not ProviderCredential.OAuth refreshedOAuth) return null;
+                current = refreshedOAuth.Value;
+                if (minimumOAuthValidity is not null && current.ToOAuth().IsExpired(validity))
                 {
-                    current = refreshedOAuth.Value;
+                    throw new ModelsError("oauth", $"OAuth refresh returned a token that expires too soon for {provider.Id}.");
                 }
             }
 
-            var auth = await definition.OAuth.ToAuthAsync(current).ConfigureAwait(false);
-            return auth with { Source = auth.Source ?? "OAuth" };
+            try
+            {
+                var auth = await definition.OAuth.ToAuthAsync(current).WaitAsync(cancellationToken).ConfigureAwait(false);
+                cancellationToken.ThrowIfCancellationRequested();
+                return auth with { Source = auth.Source ?? "OAuth" };
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+            catch (Exception error) { throw new ModelsError("oauth", $"OAuth auth derivation failed for {provider.Id}.", error); }
         }
 
+        // 3. 【AI】【凭据归属】存在不受支持的凭据类型时不得退回环境或其他登录方式
+        if (stored is not null && stored is not ProviderCredential.ApiKey) return null;
         if (definition.ApiKey is null) return null;
         var apiCredential = stored is ProviderCredential.ApiKey api ? api.Value : null;
+        if (apiCredential is not null && environment is not null)
+            apiCredential = apiCredential with { Env = MergeEnvironment(apiCredential.Env, environment) };
         return await definition.ApiKey.ResolveAsync(
             new ProviderAuthResolveContext(provider.Id, apiCredential, environment, cancellationToken)).ConfigureAwait(false);
     }

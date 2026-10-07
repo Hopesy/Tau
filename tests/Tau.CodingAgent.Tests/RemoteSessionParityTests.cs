@@ -147,12 +147,17 @@ public sealed class RemoteSessionParityTests
         await transport.WriteServerMessageAsync(Response(initialAttach, "attach", Snapshot("session-1", "idle")));
         var session = await opening;
 
+        var removed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var subscription = session.Subscribe(state =>
+        {
+            if (state.Lifecycle == RemoteSessionLifecycle.Unbound) removed.TrySetResult();
+        });
         await transport.WriteServerMessageAsync(Event(new Dictionary<string, object?>
         {
             ["type"] = "session_removed",
             ["sessionId"] = "session-1"
         }));
-        await Task.Delay(50);
+        await removed.Task.WaitAsync(TimeSpan.FromSeconds(10));
 
         Assert.Equal(RemoteSessionLifecycle.Unbound, session.State.Lifecycle);
         Assert.Null(session.SessionId);

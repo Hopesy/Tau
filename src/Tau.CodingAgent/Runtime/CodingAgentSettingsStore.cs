@@ -35,9 +35,21 @@ public sealed record CodingAgentSettingsSnapshot(
     int? EditorPaddingX = null,
     int? AutocompleteMaxVisible = null,
     string? MarkdownCodeBlockIndent = null,
-    IReadOnlyList<CodingAgentPackageSource>? Packages = null);
+    IReadOnlyList<CodingAgentPackageSource>? Packages = null)
+{
+    internal JsonElement? SourceDocument { get; init; }
+    internal Dictionary<string, JsonElement>? TerminalAdditionalSettings { get; init; }
+    internal Dictionary<string, JsonElement>? ImageAdditionalSettings { get; init; }
+    internal Dictionary<string, JsonElement>? MarkdownAdditionalSettings { get; init; }
+    public IReadOnlyList<string>? DefaultTools { get; init; }
+    public bool? ShowCacheMissNotices { get; init; }
+    public JsonElement? Compaction { get; init; }
+    public JsonElement? Retry { get; init; }
+    public JsonElement? BranchSummary { get; init; }
+    public IReadOnlyDictionary<string, JsonElement>? AdditionalSettings { get; init; }
+}
 
-public sealed class CodingAgentSettingsStore
+public sealed partial class CodingAgentSettingsStore
 {
     private readonly string _path;
 
@@ -61,27 +73,26 @@ public sealed class CodingAgentSettingsStore
 
     public CodingAgentSettingsSnapshot Load()
     {
-        if (!File.Exists(_path))
-        {
-            return new CodingAgentSettingsSnapshot(null, null);
-        }
+        return LoadMergedSettings();
+    }
 
-        try
-        {
-            using var stream = File.OpenRead(_path);
-            var document = JsonSerializer.Deserialize(stream, CodingAgentSettingsJsonContext.Default.CodingAgentSettingsDocument);
-            return new CodingAgentSettingsSnapshot(
+    /// <summary>【CodingAgent】【设置投影】把合并后的 JSON 设置转换为类型化快照，保留原始字段用于差量保存。</summary>
+    /// <param name="source">合并后的设置对象。</param><returns>独立设置快照。</returns>
+    private static CodingAgentSettingsSnapshot ReadSnapshot(JsonElement source)
+    {
+        var document = source.Deserialize(CodingAgentSettingsJsonContext.Default.CodingAgentSettingsDocument);
+        return new CodingAgentSettingsSnapshot(
                 document?.DefaultProvider,
                 document?.DefaultModel,
                 document?.TreeFilterMode,
-                NormalizeNonNegative(document?.RetryMaxAttempts),
-                NormalizeNonNegative(document?.RetryBaseDelayMilliseconds),
+                CodingAgentNativeSettings.ReadRetryCount(document?.Retry, NormalizeNonNegative(document?.RetryMaxAttempts)),
+                CodingAgentNativeSettings.ReadInteger(document?.Retry, "baseDelayMs", "retry") ?? NormalizeNonNegative(document?.RetryBaseDelayMilliseconds),
                 document?.DefaultThinkingLevel,
                 NormalizeEnabledModels(document?.EnabledModels),
                 CodingAgentQueueModes.NormalizeOrNull(document?.SteeringMode)
                     ?? CodingAgentQueueModes.NormalizeOrNull(document?.QueueMode),
                 CodingAgentQueueModes.NormalizeOrNull(document?.FollowUpMode),
-                document?.AutoCompactionEnabled,
+                CodingAgentNativeSettings.ReadBoolean(document?.Compaction, "enabled", "compaction") ?? document?.AutoCompactionEnabled,
                 NormalizeTheme(document?.Theme),
                 NormalizeStringList(document?.TreeCollapsedEntryIds),
                 NormalizeOptionalString(document?.ShellPath),
@@ -101,20 +112,17 @@ public sealed class CodingAgentSettingsStore
                 NormalizeEditorPaddingX(document?.EditorPaddingX),
                 NormalizeAutocompleteMaxVisible(document?.AutocompleteMaxVisible),
                 document?.Markdown?.CodeBlockIndent,
-                NormalizePackages(document?.Packages));
-        }
-        catch (JsonException)
-        {
-            return new CodingAgentSettingsSnapshot(null, null);
-        }
-        catch (IOException)
-        {
-            return new CodingAgentSettingsSnapshot(null, null);
-        }
-        catch (UnauthorizedAccessException)
-        {
-            return new CodingAgentSettingsSnapshot(null, null);
-        }
+                NormalizePackages(document?.Packages))
+            {
+                SourceDocument = source.Clone(),
+                TerminalAdditionalSettings = document?.Terminal?.AdditionalSettings,
+                ImageAdditionalSettings = document?.Images?.AdditionalSettings,
+                MarkdownAdditionalSettings = document?.Markdown?.AdditionalSettings,
+                DefaultTools = document?.DefaultTools,
+                ShowCacheMissNotices = document?.ShowCacheMissNotices,
+                Compaction = document?.Compaction?.Clone(), Retry = document?.Retry?.Clone(), BranchSummary = document?.BranchSummary?.Clone(),
+                AdditionalSettings = document?.AdditionalSettings?.ToDictionary(pair => pair.Key, pair => pair.Value.Clone(), StringComparer.Ordinal)
+            };
     }
 
     public void SaveDefaultModel(Model model)
@@ -125,7 +133,12 @@ public sealed class CodingAgentSettingsStore
 
     public void Save(CodingAgentSettingsSnapshot snapshot)
     {
-        var document = new CodingAgentSettingsDocument
+        SaveSettings(snapshot);
+    }
+
+    /// <summary>【CodingAgent】【设置序列化】规范化可编辑字段，同时保留尚未识别的嵌套设置。</summary>
+    /// <param name="snapshot">待保存快照。</param><returns>文件序列化对象。</returns>
+    private static CodingAgentSettingsDocument CreateDocument(CodingAgentSettingsSnapshot snapshot) => new()
         {
             DefaultProvider = snapshot.DefaultProvider,
             DefaultModel = snapshot.DefaultModel,
@@ -134,6 +147,7 @@ public sealed class CodingAgentSettingsStore
             RetryBaseDelayMilliseconds = NormalizeNonNegative(snapshot.RetryBaseDelayMilliseconds),
             DefaultThinkingLevel = snapshot.DefaultThinkingLevel,
             EnabledModels = NormalizeEnabledModels(snapshot.EnabledModels),
+            DefaultTools = snapshot.DefaultTools?.ToArray(),
             SteeringMode = CodingAgentQueueModes.NormalizeOrNull(snapshot.SteeringMode),
             FollowUpMode = CodingAgentQueueModes.NormalizeOrNull(snapshot.FollowUpMode),
             AutoCompactionEnabled = snapshot.AutoCompactionEnabled,
@@ -148,6 +162,7 @@ public sealed class CodingAgentSettingsStore
             LastChangelogVersion = NormalizeOptionalString(snapshot.LastChangelogVersion),
             Terminal = CreateTerminalSettingsDocument(snapshot),
             HideThinkingBlock = snapshot.HideThinkingBlock,
+            ShowCacheMissNotices = snapshot.ShowCacheMissNotices,
             Images = CreateImageSettingsDocument(snapshot),
             ShowHardwareCursor = snapshot.ShowHardwareCursor,
             FullscreenCopyOnSelect = snapshot.FullscreenCopyOnSelect,
@@ -155,28 +170,12 @@ public sealed class CodingAgentSettingsStore
             AutocompleteMaxVisible = NormalizeAutocompleteMaxVisible(snapshot.AutocompleteMaxVisible),
             Markdown = CreateMarkdownSettingsDocument(snapshot),
             Packages = NormalizePackages(snapshot.Packages),
+            Compaction = CodingAgentNativeSettings.MergeCompaction(snapshot),
+            Retry = CodingAgentNativeSettings.MergeRetry(snapshot),
+            BranchSummary = snapshot.BranchSummary?.Clone(),
+            AdditionalSettings = snapshot.AdditionalSettings?.ToDictionary(pair => pair.Key, pair => pair.Value.Clone(), StringComparer.Ordinal),
             UpdatedAt = DateTimeOffset.UtcNow
         };
-
-        var directory = System.IO.Path.GetDirectoryName(_path);
-        if (!string.IsNullOrEmpty(directory))
-        {
-            Directory.CreateDirectory(directory);
-        }
-
-        var tempPath = _path + ".tmp";
-        using (var stream = File.Create(tempPath))
-        {
-            JsonSerializer.Serialize(stream, document, CodingAgentSettingsJsonContext.Default.CodingAgentSettingsDocument);
-        }
-
-        if (File.Exists(_path))
-        {
-            File.Delete(_path);
-        }
-
-        File.Move(tempPath, _path);
-    }
 
     private static int? NormalizeNonNegative(int? value) =>
         value is null ? null : Math.Max(0, value.Value);
@@ -228,27 +227,29 @@ public sealed class CodingAgentSettingsStore
         value is null ? null : Math.Clamp(value.Value, 3, 20);
 
     private static CodingAgentTerminalSettingsDocument? CreateTerminalSettingsDocument(CodingAgentSettingsSnapshot snapshot) =>
-        snapshot.TerminalShowImages is null && snapshot.TerminalClearOnShrink is null
+        snapshot.TerminalShowImages is null && snapshot.TerminalClearOnShrink is null && snapshot.TerminalAdditionalSettings is null
             ? null
             : new CodingAgentTerminalSettingsDocument
             {
                 ShowImages = snapshot.TerminalShowImages,
-                ClearOnShrink = snapshot.TerminalClearOnShrink
+                ClearOnShrink = snapshot.TerminalClearOnShrink,
+                AdditionalSettings = snapshot.TerminalAdditionalSettings
             };
 
     private static CodingAgentImageSettingsDocument? CreateImageSettingsDocument(CodingAgentSettingsSnapshot snapshot) =>
-        snapshot.ImagesAutoResize is null && snapshot.ImagesBlockImages is null
+        snapshot.ImagesAutoResize is null && snapshot.ImagesBlockImages is null && snapshot.ImageAdditionalSettings is null
             ? null
             : new CodingAgentImageSettingsDocument
             {
                 AutoResize = snapshot.ImagesAutoResize,
-                BlockImages = snapshot.ImagesBlockImages
+                BlockImages = snapshot.ImagesBlockImages,
+                AdditionalSettings = snapshot.ImageAdditionalSettings
             };
 
     private static CodingAgentMarkdownSettingsDocument? CreateMarkdownSettingsDocument(CodingAgentSettingsSnapshot snapshot) =>
-        snapshot.MarkdownCodeBlockIndent is null
+        snapshot.MarkdownCodeBlockIndent is null && snapshot.MarkdownAdditionalSettings is null
             ? null
-            : new CodingAgentMarkdownSettingsDocument { CodeBlockIndent = snapshot.MarkdownCodeBlockIndent };
+            : new CodingAgentMarkdownSettingsDocument { CodeBlockIndent = snapshot.MarkdownCodeBlockIndent, AdditionalSettings = snapshot.MarkdownAdditionalSettings };
 
     private static CodingAgentPackageSource[]? NormalizePackages(IReadOnlyList<CodingAgentPackageSource>? packages)
     {
@@ -301,6 +302,11 @@ public sealed class CodingAgentSettingsStore
 
 internal sealed class CodingAgentSettingsDocument
 {
+    public JsonElement? Compaction { get; init; }
+    public JsonElement? Retry { get; init; }
+    public JsonElement? BranchSummary { get; init; }
+    [JsonExtensionData]
+    public Dictionary<string, JsonElement>? AdditionalSettings { get; set; }
     public string? DefaultProvider { get; init; }
     public string? DefaultModel { get; init; }
     public string? TreeFilterMode { get; init; }
@@ -308,6 +314,7 @@ internal sealed class CodingAgentSettingsDocument
     public int? RetryBaseDelayMilliseconds { get; init; }
     public string? DefaultThinkingLevel { get; init; }
     public string[]? EnabledModels { get; init; }
+    public string[]? DefaultTools { get; init; }
     public string? SteeringMode { get; init; }
     public string? FollowUpMode { get; init; }
     public string? QueueMode { get; init; }
@@ -324,6 +331,7 @@ internal sealed class CodingAgentSettingsDocument
     public CodingAgentTerminalSettingsDocument? Terminal { get; init; }
     public CodingAgentImageSettingsDocument? Images { get; init; }
     public bool? HideThinkingBlock { get; init; }
+    public bool? ShowCacheMissNotices { get; init; }
     public bool? ShowHardwareCursor { get; init; }
     public bool? FullscreenCopyOnSelect { get; init; }
     public int? EditorPaddingX { get; init; }
@@ -335,18 +343,24 @@ internal sealed class CodingAgentSettingsDocument
 
 internal sealed class CodingAgentTerminalSettingsDocument
 {
+    [JsonExtensionData]
+    public Dictionary<string, JsonElement>? AdditionalSettings { get; set; }
     public bool? ShowImages { get; init; }
     public bool? ClearOnShrink { get; init; }
 }
 
 internal sealed class CodingAgentImageSettingsDocument
 {
+    [JsonExtensionData]
+    public Dictionary<string, JsonElement>? AdditionalSettings { get; set; }
     public bool? AutoResize { get; init; }
     public bool? BlockImages { get; init; }
 }
 
 internal sealed class CodingAgentMarkdownSettingsDocument
 {
+    [JsonExtensionData]
+    public Dictionary<string, JsonElement>? AdditionalSettings { get; set; }
     public string? CodeBlockIndent { get; init; }
 }
 

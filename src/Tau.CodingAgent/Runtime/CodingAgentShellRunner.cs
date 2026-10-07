@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using Tau.CodingAgent.Tools;
 using Tau.AgentCore.Harness;
 
 namespace Tau.CodingAgent.Runtime;
@@ -28,195 +28,107 @@ public sealed record CodingAgentShellResult(
     bool Truncated,
     string? FullOutputPath = null);
 
+/// <summary>【CodingAgent】【宿主命令】RPC 命令复用内置 Bash 的目录、输出与进程组取消行为。</summary>
 public sealed class SystemCodingAgentShellRunner : ICodingAgentShellRunner
 {
     private readonly object _gate = new();
+    private readonly string _cwd;
+    private readonly Func<CodingAgentShellToolOptions>? _options;
+    private readonly Func<IReadOnlyDictionary<string, string?>>? _environment;
     private CancellationTokenSource? _activeCts;
-    private Process? _activeProcess;
 
+    /// <summary>【CodingAgent】【异步命令输出】会话事件接收器，接收完成后再读取后续分片以提供背压。</summary>
+    internal Func<CodingAgentShellEvent, Task>? OnOutputAsync { get; init; }
+
+    /// <summary>【CodingAgent】【宿主命令】捕获所属会话的目录与动态配置来源。</summary>
+    /// <param name="workingDirectory">会话目录，空值捕获当前进程目录。</param>
+    /// <param name="options">动态执行设置。</param><param name="environment">当前会话元数据。</param>
+    public SystemCodingAgentShellRunner(string? workingDirectory = null, Func<CodingAgentShellToolOptions>? options = null,
+        Func<IReadOnlyDictionary<string, string?>>? environment = null)
+    {
+        _cwd = CodingAgentToolPaths.CaptureWorkingDirectory(workingDirectory);
+        _options = options;
+        _environment = environment;
+    }
+
+    /// <summary>【CodingAgent】【宿主命令】执行无需增量通知的 Bash 命令。</summary>
+    /// <param name="command">命令。</param><param name="cancellationToken">取消信号。</param><returns>输出及退出状态。</returns>
     public Task<CodingAgentShellResult> ExecuteAsync(string command, CancellationToken cancellationToken = default) =>
         ExecuteAsync(command, progress: null, cancellationToken);
 
-    public async Task<CodingAgentShellResult> ExecuteAsync(
-        string command,
-        IProgress<CodingAgentShellEvent>? progress,
+    /// <summary>【CodingAgent】【宿主命令】执行单个命令并保留原始输出流标签，拒绝并发占用同一执行器。</summary>
+    /// <param name="command">命令。</param><param name="progress">增量输出接收器。</param>
+    /// <param name="cancellationToken">取消信号。</param><returns>有界尾部及可选完整输出文件。</returns>
+    public async Task<CodingAgentShellResult> ExecuteAsync(string command, IProgress<CodingAgentShellEvent>? progress,
         CancellationToken cancellationToken = default)
     {
-        if (string.IsNullOrWhiteSpace(command))
-        {
-            throw new ArgumentException("Shell command cannot be empty.", nameof(command));
-        }
-
+        if (string.IsNullOrWhiteSpace(command)) throw new ArgumentException("Shell command cannot be empty.", nameof(command));
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        var process = CreateProcess(command);
         lock (_gate)
         {
-            if (_activeProcess is not null)
-            {
-                throw new InvalidOperationException("A bash command is already running.");
-            }
-
+            if (_activeCts is not null) throw new InvalidOperationException("A bash command is already running.");
             _activeCts = cts;
-            _activeProcess = process;
         }
-
+        using var output = new CodingAgentShellOutput("tau-bash");
+        var receiveGate = new SemaphoreSlim(1, 1);
+        var accepting = true;
         try
         {
-            if (!process.Start())
+            var options = _options?.Invoke() ?? new();
+            var context = new CodingAgentShellSpawnContext(string.IsNullOrEmpty(options.CommandPrefix) ? command : options.CommandPrefix + "\n" + command,
+                _cwd, ShellTool.CreateEnvironment(options.ExposeSessionEnvironment ? _environment?.Invoke() : null));
+            context = options.SpawnHook?.Invoke(context) ?? context;
+            /// <summary>【CodingAgent】【宿主输出】串行保存双管道内容并等待异步订阅，结束后忽略迟到数据。</summary>
+            /// <param name="stream">输出流标签。</param><param name="text">输出片段。</param><returns>接收完成的任务。</returns>
+            async Task ReceiveAsync(string stream, string text)
             {
-                throw new InvalidOperationException("Failed to start shell process.");
+                await receiveGate.WaitAsync().ConfigureAwait(false);
+                try
+                {
+                    CodingAgentShellEvent update;
+                    lock (output)
+                    {
+                        if (!accepting) return;
+                        output.Append(text);
+                        update = new(stream, text, DateTimeOffset.UtcNow);
+                        progress?.Report(update);
+                    }
+                    if (OnOutputAsync is { } receive) await receive(update).ConfigureAwait(false);
+                }
+                finally { receiveGate.Release(); }
             }
-
-            var capture = new ShellOutputCapture();
-            var stdoutTask = ReadStreamAsync(process.StandardOutput, "stdout", capture, progress, cts.Token);
-            var stderrTask = ReadStreamAsync(process.StandardError, "stderr", capture, progress, cts.Token);
+            int? exitCode = null;
             try
             {
-                await process.WaitForExitAsync(cts.Token).ConfigureAwait(false);
+                exitCode = options.Operations is { } custom
+                    ? await custom.ExecuteAsync(context, text => ReceiveAsync("stdout", text), cts.Token).ConfigureAwait(false)
+                    : await new LocalCodingAgentShellOperations(false, options.ShellPath).ExecuteWithStreamsAsync(context, ReceiveAsync, cts.Token).ConfigureAwait(false);
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException) when (cts.IsCancellationRequested) { }
+            // 1. 【CodingAgent】【输出收尾】等待已接收分片完成发布，再返回最终结果
+            await receiveGate.WaitAsync().ConfigureAwait(false);
+            try
             {
-                KillProcessTree(process);
+                lock (output)
+                {
+                    accepting = false;
+                    output.Dispose();
+                    var snapshot = output.Snapshot();
+                    return new(snapshot.Content, cts.IsCancellationRequested ? null : exitCode, cts.IsCancellationRequested, snapshot.Truncated, output.FullOutputPath);
+                }
             }
-
-            var cancelled = cts.IsCancellationRequested;
-            await WaitForReaderAsync(stdoutTask).ConfigureAwait(false);
-            await WaitForReaderAsync(stderrTask).ConfigureAwait(false);
-            var captured = capture.Complete(cancelled ? null : process.ExitCode, cancelled);
-            return new CodingAgentShellResult(
-                captured.Output,
-                captured.ExitCode,
-                captured.Cancelled,
-                captured.Truncated,
-                captured.FullOutputPath);
+            finally { receiveGate.Release(); }
         }
         finally
         {
-            lock (_gate)
-            {
-                if (ReferenceEquals(_activeProcess, process))
-                {
-                    _activeProcess = null;
-                    _activeCts = null;
-                }
-            }
-
-            process.Dispose();
+            lock (output) accepting = false;
+            lock (_gate) if (ReferenceEquals(_activeCts, cts)) _activeCts = null;
         }
     }
 
+    /// <summary>【CodingAgent】【宿主取消】取消当前命令，实际执行管线负责结束并排空进程组。</summary>
     public void Abort()
     {
-        lock (_gate)
-        {
-            _activeCts?.Cancel();
-            if (_activeProcess is { HasExited: false } process)
-            {
-                KillProcessTree(process);
-            }
-        }
-    }
-
-    private static Process CreateProcess(string command)
-    {
-        var startInfo = new ProcessStartInfo
-        {
-            FileName = OperatingSystem.IsWindows() ? "cmd.exe" : "/bin/bash",
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            WorkingDirectory = Directory.GetCurrentDirectory()
-        };
-
-        if (OperatingSystem.IsWindows())
-        {
-            startInfo.ArgumentList.Add("/d");
-            startInfo.ArgumentList.Add("/s");
-            startInfo.ArgumentList.Add("/c");
-            startInfo.ArgumentList.Add(command);
-        }
-        else
-        {
-            startInfo.ArgumentList.Add("-lc");
-            startInfo.ArgumentList.Add(command);
-        }
-
-        return new Process { StartInfo = startInfo };
-    }
-
-    private static async Task ReadStreamAsync(
-        StreamReader reader,
-        string stream,
-        ShellOutputCapture capture,
-        IProgress<CodingAgentShellEvent>? progress,
-        CancellationToken cancellationToken)
-    {
-        var buffer = new char[4096];
-        while (true)
-        {
-            int read;
-            try
-            {
-                read = await reader.ReadAsync(buffer.AsMemory(0, buffer.Length), cancellationToken)
-                    .ConfigureAwait(false);
-            }
-            catch (OperationCanceledException)
-            {
-                break;
-            }
-            catch (ObjectDisposedException)
-            {
-                break;
-            }
-            catch (InvalidOperationException)
-            {
-                break;
-            }
-
-            if (read == 0)
-            {
-                break;
-            }
-
-            var text = capture.AppendChunk(new string(buffer, 0, read));
-            if (text.Length == 0)
-            {
-                continue;
-            }
-
-            progress?.Report(new CodingAgentShellEvent(stream, text, DateTimeOffset.UtcNow));
-        }
-    }
-
-    private static async Task WaitForReaderAsync(Task task)
-    {
-        try
-        {
-            await task.ConfigureAwait(false);
-        }
-        catch (OperationCanceledException)
-        {
-        }
-        catch (InvalidOperationException)
-        {
-        }
-    }
-
-    private static void KillProcessTree(Process process)
-    {
-        try
-        {
-            if (!process.HasExited)
-            {
-                process.Kill(entireProcessTree: true);
-            }
-        }
-        catch (InvalidOperationException)
-        {
-        }
-        catch (System.ComponentModel.Win32Exception)
-        {
-        }
+        lock (_gate) _activeCts?.Cancel();
     }
 }

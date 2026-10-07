@@ -14,6 +14,9 @@ public sealed record ThinkingBudgets
 
 public record StreamOptions
 {
+    /// <summary>【AI】【扩展参数】保留自定义协议选项，跨运行时转发时不丢失未知字段。</summary>
+    [JsonExtensionData]
+    public IDictionary<string, System.Text.Json.JsonElement>? AdditionalOptions { get; init; }
     private readonly StreamTransport _transport = StreamTransport.Sse;
     private readonly CacheRetention _cacheRetention = CacheRetention.None;
     private readonly bool _transportWasSet;
@@ -29,6 +32,12 @@ public record StreamOptions
     public Func<ProviderResponse, Model, ValueTask>? OnResponse { get; init; }
     [JsonIgnore]
     public Func<object, Model, ValueTask<object?>>? OnPayload { get; init; }
+    /// <summary>【AI】【请求头转换】发送前转换已组装请求头；空值删除字段，返回 null 保留原位修改。</summary>
+    [JsonIgnore]
+    public Func<IDictionary<string, string?>, Model, ValueTask<IDictionary<string, string?>?>>? TransformHeaders { get; init; }
+    /// <summary>【AI】【协议事件】在归一化前观察解析后的提供方 JSON；观察器应将数据视为只读。</summary>
+    [JsonIgnore]
+    public Func<System.Text.Json.JsonElement, Model, ValueTask>? OnProviderStreamEvent { get; init; }
     public StreamTransport Transport
     {
         get => _transport;
@@ -61,7 +70,9 @@ public record StreamOptions
     public object? Deferred { get; init; }
 
     internal bool HasExplicitTransport => _transportWasSet;
-    internal bool HasExplicitCacheRetention => _cacheRetentionWasSet;
+    /// <summary>【AI】【缓存选项】区分调用方明确关闭缓存与尚未设置保留策略。</summary>
+    [JsonIgnore]
+    public bool HasExplicitCacheRetention => _cacheRetentionWasSet;
 }
 
 public record SimpleStreamOptions : StreamOptions
@@ -118,5 +129,6 @@ public enum ThinkingLevel
     Low,
     Medium,
     High,
-    ExtraHigh
+    ExtraHigh,
+    Max
 }

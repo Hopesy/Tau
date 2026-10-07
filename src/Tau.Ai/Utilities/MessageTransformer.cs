@@ -1,6 +1,6 @@
 namespace Tau.Ai.Utilities;
 
-public static class MessageTransformer
+public static partial class MessageTransformer
 {
     public const string NonVisionUserImagePlaceholder = "(image omitted: model does not support images)";
     public const string NonVisionToolImagePlaceholder = "(tool image omitted: model does not support images)";
@@ -17,6 +17,7 @@ public static class MessageTransformer
         IReadOnlyList<ChatMessage> messages,
         Model model)
     {
+        messages = NormalizeMissingContent(messages);
         if (SupportsImages(model))
         {
             return messages;

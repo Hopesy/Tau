@@ -22,7 +22,7 @@ internal static class CodingAgentMigrations
     private const string ExtensionsDocumentationUrl =
         "https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/docs/extensions.md";
 
-    private static readonly IReadOnlyDictionary<string, string> KeybindingNameMigrations =
+    internal static readonly IReadOnlyDictionary<string, string> KeybindingNameMigrations =
         new Dictionary<string, string>(StringComparer.Ordinal)
         {
             ["cursorUp"] = "tui.editor.cursorUp",

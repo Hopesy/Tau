@@ -201,13 +201,24 @@ public static class GeneratedBuiltInModels
             ("claude-haiku-4-5", "Claude Haiku 4.5", 200_000, 32_000, new[] { "text", "image" }, new ModelCost(1m, 5m, 0.1m, 1.25m))
         })
         {
-            Add("anthropic", id, name, "anthropic-messages", "https://api.anthropic.com", input: input, contextWindow: contextWindow, maxTokens: maxTokens, cost: cost);
+            // 1. 【AI】【模型目录】为手工补入的既有条目声明自适应能力，协议实现不再猜测模型名称
+            var adaptive = id != "claude-haiku-4-5";
+            var map = id switch
+            {
+                "claude-sonnet-4-6" => ThinkingMap(("max", "max")),
+                "claude-fable-5" => ThinkingMap(("off", null), ("xhigh", "xhigh"), ("max", "max")),
+                "claude-haiku-4-5" => null,
+                _ => ThinkingMap(("xhigh", "xhigh"), ("max", "max"))
+            };
+            Add("anthropic", id, name, "anthropic-messages", "https://api.anthropic.com", input: input, contextWindow: contextWindow, maxTokens: maxTokens, cost: cost,
+                compat: adaptive ? new ModelCompatibility { ForceAdaptiveThinking = true, SupportsTemperature = id is "claude-opus-4-7" or "claude-opus-4-8" ? false : null } : null,
+                thinkingLevelMap: map);
         }
 
         Add("mistral", "mistral-medium-3.5", "Mistral Medium 3.5", "mistral-conversations", "https://api.mistral.ai", input: ["text", "image"], contextWindow: 262_144, maxTokens: 262_144, cost: new ModelCost(1.5m, 7.5m, 0m, 0m));
         Add("mistral", "mistral-large-latest", "Mistral Large", "mistral-conversations", "https://api.mistral.ai", input: ["text", "image"], contextWindow: 262_144, maxTokens: 32_768, reasoning: false, cost: new ModelCost(0.5m, 1.5m, 0m, 0m));
-        Add("google", "gemini-3-flash-preview", "Gemini 3 Flash Preview", "google-generative-language", "https://generativelanguage.googleapis.com", input: ["text", "image"], contextWindow: 1_048_576, maxTokens: 65_536, cost: new ModelCost(0.5m, 3m, 0.05m, 0m));
-        Add("google", "gemini-3.1-pro-preview", "Gemini 3.1 Pro Preview", "google-generative-language", "https://generativelanguage.googleapis.com", input: ["text", "image"], contextWindow: 1_048_576, maxTokens: 65_536, cost: new ModelCost(2m, 12m, 0.2m, 0m));
+        Add("google", "gemini-3-flash-preview", "Gemini 3 Flash Preview", "google-generative-language", "https://generativelanguage.googleapis.com/v1beta", input: ["text", "image"], contextWindow: 1_048_576, maxTokens: 65_536, cost: new ModelCost(0.5m, 3m, 0.05m, 0m));
+        Add("google", "gemini-3.1-pro-preview", "Gemini 3.1 Pro Preview", "google-generative-language", "https://generativelanguage.googleapis.com/v1beta", input: ["text", "image"], contextWindow: 1_048_576, maxTokens: 65_536, cost: new ModelCost(2m, 12m, 0.2m, 0m));
         Add("deepseek", "deepseek-v4-flash-vision-exp", "DeepSeek V4 Flash Vision (Experimental)", "openai-chat-completions", "https://api.deepseek.com", input: ["text", "image"], contextWindow: 1_000_000, maxTokens: 64_000, cost: new ModelCost(0m, 0m, 0m, 0m), compat: OpenAiCompat(false, "deepseek", false), thinkingLevelMap: ThinkingMap(("off", "disabled"), ("minimal", null), ("low", null), ("medium", null), ("high", "high"), ("xhigh", null), ("max", null)));
         Add("google-vertex", "gemini-3-flash-preview", "Gemini 3 Flash Preview (Vertex)", "google-vertex", string.Empty, input: ["text", "image"], contextWindow: 1_048_576, maxTokens: 65_536, cost: new ModelCost(0.5m, 3m, 0.05m, 0m));
         Add("amazon-bedrock", "global.anthropic.claude-opus-4-6-v1", "Claude Opus 4.6 (Bedrock)", "bedrock-converse-stream", string.Empty, input: ["text", "image"], contextWindow: 200_000, maxTokens: 32_768, cost: new ModelCost(15m, 75m, 1.5m, 18.75m));
@@ -229,7 +240,8 @@ public static class GeneratedBuiltInModels
                 : id.Contains("opus", StringComparison.OrdinalIgnoreCase)
                     ? copilotAnthropicMap
                     : ThinkingMap(("off", "disabled"), ("minimal", "low"), ("low", "low"), ("medium", "medium"), ("high", "high"), ("max", "max"));
-            Add("github-copilot", id, name, "anthropic-messages", "https://api.individual.githubcopilot.com", input: ["text", "image"], contextWindow: contextWindow, maxTokens: 64_000, cost: new ModelCost(0m, 0m, 0m, 0m), thinkingLevelMap: map);
+            Add("github-copilot", id, name, "anthropic-messages", "https://api.individual.githubcopilot.com", input: ["text", "image"], contextWindow: contextWindow, maxTokens: 64_000, cost: new ModelCost(0m, 0m, 0m, 0m), thinkingLevelMap: map,
+                compat: id == "claude-haiku-4.5" ? null : new ModelCompatibility { ForceAdaptiveThinking = true });
         }
         foreach (var (id, name, contextWindow, maxTokens) in new[]
         {
@@ -299,6 +311,8 @@ public static class GeneratedBuiltInModels
             Reasoning = GetBool(element, "reasoning") ?? false,
             ThinkingLevelMap = ParseThinkingLevelMap(element),
             InputModalities = ParseStringArray(element, "inputModalities") ?? ParseStringArray(element, "input") ?? ["text"],
+            InputLimits = ModelConfigurationStore.ParseInputLimits(element),
+            PromptCache = ModelConfigurationStore.ParsePromptCache(element),
             Cost = ParseCost(element),
             ContextWindow = GetInt(element, "contextWindow"),
             MaxOutputTokens = GetInt(element, "maxOutputTokens") ?? GetInt(element, "maxTokens"),
@@ -339,7 +353,7 @@ public static class GeneratedBuiltInModels
         {
             if (tier.ValueKind != JsonValueKind.Object ||
                 !tier.TryGetProperty("inputTokensAbove", out var threshold) ||
-                !threshold.TryGetInt64(out var inputTokensAbove))
+                !threshold.TryGetDouble(out var inputTokensAbove) || !double.IsFinite(inputTokensAbove))
             {
                 continue;
             }
@@ -392,9 +406,12 @@ public static class GeneratedBuiltInModels
             SupportsStrictMode = GetBool(compat, "supportsStrictMode"),
             CacheControlFormat = GetString(compat, "cacheControlFormat"),
             SendSessionAffinityHeaders = GetBool(compat, "sendSessionAffinityHeaders"),
+            SessionAffinityFormat = GetString(compat, "sessionAffinityFormat"),
+            VllmPriority = GetDouble(compat, "vllmPriority"),
             SupportsLongCacheRetention = GetBool(compat, "supportsLongCacheRetention"),
             SupportsTemperature = GetBool(compat, "supportsTemperature"),
             ForceAdaptiveThinking = GetBool(compat, "forceAdaptiveThinking"),
+            SupportsMidConvoEffort = GetBool(compat, "supportsMidConvoEffort"),
             SupportsEagerToolInputStreaming = GetBool(compat, "supportsEagerToolInputStreaming"),
             SupportsCacheControlOnTools = GetBool(compat, "supportsCacheControlOnTools"),
             AllowEmptySignature = GetBool(compat, "allowEmptySignature"),
@@ -408,7 +425,9 @@ public static class GeneratedBuiltInModels
             SupportsStrictTools = GetBool(compat, "supportsStrictTools"),
             SupportsDeferredTools = GetBool(compat, "supportsDeferredTools"),
             ThinkingTokenBudgetField = GetString(compat, "thinkingTokenBudgetField"),
-            ChatTemplateArgs = ParseObjectDictionary(compat, "chatTemplateArgs")
+            SupportsThinkingTokenBudget = GetBool(compat, "supportsThinkingTokenBudget"),
+            ChatTemplateKwargs = ParseObjectDictionary(compat, "chatTemplateKwargs", preserveCase: true),
+            ChatTemplateArgs = ParseObjectDictionary(compat, "chatTemplateArgs", preserveCase: true)
         };
 
         return parsed;
@@ -500,14 +519,17 @@ public static class GeneratedBuiltInModels
         return result.Count == 0 ? null : result;
     }
 
-    private static IDictionary<string, object>? ParseObjectDictionary(JsonElement element, string propertyName)
+    /// <summary>【AI】【对象读取】复制对象字段，模板参数按区分大小写的 JSON 键语义保留。</summary>
+    /// <param name="element">父对象。</param><param name="propertyName">属性名。</param>
+    /// <param name="preserveCase">是否将不同大小写的键保留为独立参数。</param><returns>参数字典或空值。</returns>
+    private static IDictionary<string, object>? ParseObjectDictionary(JsonElement element, string propertyName, bool preserveCase = false)
     {
         if (!element.TryGetProperty(propertyName, out var value) || value.ValueKind != JsonValueKind.Object)
         {
             return null;
         }
 
-        var result = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+        var result = new Dictionary<string, object>(preserveCase ? StringComparer.Ordinal : StringComparer.OrdinalIgnoreCase);
         foreach (var property in value.EnumerateObject())
         {
             result[property.Name] = ConvertJsonValue(property.Value);
@@ -563,6 +585,12 @@ public static class GeneratedBuiltInModels
         element.TryGetProperty(propertyName, out var property) && property.ValueKind == JsonValueKind.Number
             ? property.GetInt32()
             : null;
+
+    /// <summary>【AI】【兼容数值】读取可表示的浮点值，保留显式零和小数优先级。</summary>
+    /// <param name="element">父对象。</param><param name="propertyName">属性名。</param><returns>有限数值或空值。</returns>
+    private static double? GetDouble(JsonElement element, string propertyName) =>
+        element.TryGetProperty(propertyName, out var property) && property.ValueKind == JsonValueKind.Number &&
+        property.TryGetDouble(out var value) && double.IsFinite(value) ? value : null;
 
     private static decimal? GetDecimal(JsonElement element, string propertyName) =>
         element.TryGetProperty(propertyName, out var property) && property.ValueKind == JsonValueKind.Number

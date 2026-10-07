@@ -1,3 +1,6 @@
+using System.Text.Json;
+using Tau.Ai.Auth.OAuth;
+
 namespace Tau.Ai.Auth;
 
 /// <summary>
@@ -13,7 +16,11 @@ public sealed record ProviderAuthResult(
     IReadOnlyDictionary<string, string>? Headers = null,
     string? BaseUrl = null,
     IReadOnlyDictionary<string, string>? Env = null,
-    string? Source = null);
+    string? Source = null)
+{
+    /// <summary>【AI】【认证归属】已有凭据或提供方自有认证已作出最终决定，后续配置合并不得补入其他密钥。</summary>
+    internal bool SuppressConfiguredApiKey { get; init; }
+}
 
 /// <summary>
 /// provider 持久化 API key 凭据。
@@ -35,7 +42,27 @@ public sealed record ProviderOAuthCredential(
     string Refresh,
     string Access,
     DateTimeOffset ExpiresAt,
-    IReadOnlyDictionary<string, string>? Metadata = null);
+    IReadOnlyDictionary<string, string>? Metadata = null)
+{
+    /// <summary>【AI】【OAuth 凭据】保留结构化提供方字段，不限于字符串元数据。</summary>
+    public IReadOnlyDictionary<string, JsonElement> Properties { get; init; } = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
+    /// <summary>【AI】【OAuth 凭据】保留超出 .NET 日期范围的原生毫秒期限。</summary>
+    public long? ExpiresUnixTimeMilliseconds { get; init; }
+
+    /// <summary>【AI】【OAuth 桥接】从兼容认证接口复制完整凭据快照。</summary>
+    /// <param name="credentials">兼容接口凭据。</param><returns>Models SDK 凭据。</returns>
+    public static ProviderOAuthCredential FromOAuth(OAuthCredentials credentials) => new(credentials.Refresh, credentials.Access, credentials.ExpiresAt,
+        new Dictionary<string, string>(credentials.Metadata, StringComparer.OrdinalIgnoreCase))
+    { Properties = credentials.Properties.ToDictionary(pair => pair.Key, pair => pair.Value.Clone(), StringComparer.Ordinal), ExpiresUnixTimeMilliseconds = credentials.ExpiresUnixTimeMilliseconds };
+
+    /// <summary>【AI】【OAuth 桥接】恢复兼容认证接口所需的完整凭据快照。</summary><returns>兼容接口凭据。</returns>
+    public OAuthCredentials ToOAuth() => new()
+    {
+        Refresh = Refresh, Access = Access, ExpiresAt = ExpiresAt, ExpiresUnixTimeMilliseconds = ExpiresUnixTimeMilliseconds,
+        Metadata = Metadata is null ? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) : new Dictionary<string, string>(Metadata, StringComparer.OrdinalIgnoreCase),
+        Properties = Properties.ToDictionary(pair => pair.Key, pair => pair.Value.Clone(), StringComparer.Ordinal)
+    };
+}
 
 /// <summary>
 /// provider 认证凭据的统一类型标记。
@@ -117,22 +144,30 @@ public sealed class ApiKeyAuthDefinition
 /// </summary>
 public sealed class OAuthAuthDefinition
 {
+    /// <summary>此 OAuth 方式是否由提供方订阅支持。</summary>
+    public bool IsSubscription { get; init; }
+    /// <summary>认证方式选择菜单中的可选自定义标签。</summary>
+    public string? LoginLabel { get; init; }
+
     /// <summary>创建 OAuth 认证实现。</summary>
     /// <param name="name">认证方式显示名称。</param>
     /// <param name="login">登录委托。</param>
     /// <param name="refresh">刷新委托。</param>
     /// <param name="toAuth">将 OAuth 凭据转换为请求认证的委托。</param>
+    /// <param name="loginWithOptions">可选的带安装标识配置的登录委托。</param>
     public OAuthAuthDefinition(
         string name,
         Func<AuthInteraction, Task<ProviderOAuthCredential>> login,
         Func<ProviderOAuthCredential, CancellationToken, Task<ProviderOAuthCredential>> refresh,
-        Func<ProviderOAuthCredential, Task<ProviderAuthResult>> toAuth)
+        Func<ProviderOAuthCredential, Task<ProviderAuthResult>> toAuth,
+        Func<AuthInteraction, OAuthLoginOptions?, Task<ProviderOAuthCredential>>? loginWithOptions = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(name);
         Name = name;
         LoginAsync = login ?? throw new ArgumentNullException(nameof(login));
         RefreshAsync = refresh ?? throw new ArgumentNullException(nameof(refresh));
         ToAuthAsync = toAuth ?? throw new ArgumentNullException(nameof(toAuth));
+        LoginWithOptionsAsync = loginWithOptions ?? ((interaction, _) => LoginAsync(interaction));
     }
 
     /// <summary>认证方式显示名称。</summary>
@@ -140,6 +175,9 @@ public sealed class OAuthAuthDefinition
 
     /// <summary>执行 OAuth 登录。</summary>
     public Func<AuthInteraction, Task<ProviderOAuthCredential>> LoginAsync { get; }
+
+    /// <summary>带可选安装标识配置的登录入口。</summary>
+    public Func<AuthInteraction, OAuthLoginOptions?, Task<ProviderOAuthCredential>> LoginWithOptionsAsync { get; }
 
     /// <summary>刷新 OAuth 令牌。</summary>
     public Func<ProviderOAuthCredential, CancellationToken, Task<ProviderOAuthCredential>> RefreshAsync { get; }
@@ -252,7 +290,8 @@ public sealed class InMemoryProviderCredentialStore : IProviderCredentialStore
             cancellationToken.ThrowIfCancellationRequested();
             ProviderCredential? current;
             lock (_gate) _values.TryGetValue(providerId, out current);
-            var next = await mutation(current).ConfigureAwait(false);
+            var next = await mutation(current).WaitAsync(cancellationToken).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
             if (next is not null)
             {
                 lock (_gate) _values[providerId] = next;
@@ -268,13 +307,21 @@ public sealed class InMemoryProviderCredentialStore : IProviderCredentialStore
     }
 
     /// <inheritdoc />
-    public Task DeleteAsync(string providerId, CancellationToken cancellationToken = default)
+    public async Task DeleteAsync(string providerId, CancellationToken cancellationToken = default)
     {
-        cancellationToken.ThrowIfCancellationRequested();
-        lock (_gate) _values.Remove(providerId);
-        return Task.CompletedTask;
+        // 1. 【AI】【凭据删除】与同一提供方的修改共用互斥锁，防止刷新完成后重新保存已删除凭据
+        var gate = GetLock(providerId);
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            lock (_gate) _values.Remove(providerId);
+        }
+        finally { gate.Release(); }
     }
 
+    /// <summary>【AI】【凭据互斥】为每个提供方复用一把读改写及删除锁。</summary>
+    /// <param name="providerId">提供方标识。</param><returns>提供方独占信号量。</returns>
     private SemaphoreSlim GetLock(string providerId)
     {
         lock (_gate)
@@ -300,7 +347,17 @@ public interface AuthInteraction
     /// <returns>用户输入。</returns>
     Task<string> PromptAsync(string prompt);
 
+    /// <summary>【AI】【登录交互】类型化提示；旧宿主默认支持普通文本，秘密输入需要显式实现。</summary>
+    /// <param name="prompt">输入类型及独立取消信号。</param><returns>输入结果。</returns>
+    Task<string> PromptAsync(ProviderAuthPrompt prompt) => prompt.Type == "secret"
+        ? throw new NotSupportedException("The auth interaction must implement secret input.")
+        : PromptAsync(prompt.Message).WaitAsync(prompt.Signal);
+
     /// <summary>发送登录过程通知。</summary>
     /// <param name="message">通知内容。</param>
     void Notify(string message);
+
+    /// <summary>【AI】【登录交互】展示类型化通知，兼容只接收文本的旧宿主。</summary>
+    /// <param name="notification">通知字段。</param>
+    void Notify(ProviderAuthNotification notification) => Notify(notification.ToDisplayText());
 }

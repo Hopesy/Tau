@@ -47,6 +47,8 @@ public sealed class OpenAiCodexResponsesProvider : IStreamProvider, IDisposable
 
     public string Api => "openai-codex-responses";
 
+    public bool SupportsTranscriptContext => true;
+
     public AssistantMessageStream Stream(Model model, LlmContext context, StreamOptions options)
     {
         var stream = new AssistantMessageStream();
@@ -70,6 +72,7 @@ public sealed class OpenAiCodexResponsesProvider : IStreamProvider, IDisposable
 
     public AssistantMessageStream StreamSimple(Model model, LlmContext context, SimpleStreamOptions options)
     {
+        options = SimpleTokenOptions.WithContextLimit(model, context, options);
         var reasoningEffort = OpenAiResponsesShared.MapReasoningEffort(options.Reasoning, model);
         var responseOptions = new OpenAiCodexResponsesOptions
         {
@@ -80,6 +83,8 @@ public sealed class OpenAiCodexResponsesProvider : IStreamProvider, IDisposable
             Signal = options.Signal,
             OnResponse = options.OnResponse,
             OnPayload = options.OnPayload,
+            TransformHeaders = options.TransformHeaders,
+            OnProviderStreamEvent = options.OnProviderStreamEvent,
             CacheRetention = options.CacheRetention,
             SessionId = options.SessionId,
             Headers = options.Headers,
@@ -97,6 +102,12 @@ public sealed class OpenAiCodexResponsesProvider : IStreamProvider, IDisposable
         return Stream(model, context, responseOptions);
     }
 
+    /// <summary>【AI】【Codex 语法请求】建立共享输入映射，供 HTTP 和 WebSocket 请求与响应使用。</summary>
+    /// <param name="model">目标模型。</param>
+    /// <param name="context">原始上下文。</param>
+    /// <param name="options">请求选项。</param>
+    /// <param name="stream">事件输出。</param>
+    /// <returns>请求处理任务。</returns>
     private async Task StreamInternalAsync(
         Model model,
         LlmContext context,
@@ -116,10 +127,11 @@ public sealed class OpenAiCodexResponsesProvider : IStreamProvider, IDisposable
 
         var accountId = OpenAiResponsesShared.ExtractAccountIdFromJwt(options.ApiKey!);
         var url = ResolveCodexUrl(model.BaseUrl);
+        var grammarInputs = OpenAiResponsesShared.CreateGrammarToolInputProperties(model, context);
         var body = await StreamOptionHelpers.ApplyPayloadCallbackAsync(
             options,
             model,
-            BuildRequestBody(model, context, options)).ConfigureAwait(false);
+            BuildRequestBody(model, context, options, grammarInputs)).ConfigureAwait(false);
         var bodyJson = JsonSerializer.Serialize(body, OpenAiResponsesJsonContext.Default.DictionaryStringObject);
         List<AssistantMessageDiagnostic>? diagnostics = null;
 
@@ -135,7 +147,8 @@ public sealed class OpenAiCodexResponsesProvider : IStreamProvider, IDisposable
                     accountId,
                     url,
                     body,
-                    () => webSocketStarted = true).ConfigureAwait(false);
+                    () => webSocketStarted = true,
+                    grammarInputs).ConfigureAwait(false);
                 return;
             }
             catch (Exception ex)
@@ -176,6 +189,7 @@ public sealed class OpenAiCodexResponsesProvider : IStreamProvider, IDisposable
                     Content = new StringContent(bodyJson, Encoding.UTF8, "application/json")
                 };
                 ApplyCodexHeaders(request, model, options, accountId);
+                await StreamOptionHelpers.ApplyHeadersCallbackAsync(options, model, request).ConfigureAwait(false);
                 response = await SendSseRequestAsync(request, options, requestTimeout).ConfigureAwait(false);
                 if (response.IsSuccessStatusCode)
                 {
@@ -220,7 +234,10 @@ public sealed class OpenAiCodexResponsesProvider : IStreamProvider, IDisposable
                     OpenAiResponsesShared.MapCodexEvent,
                     requestedServiceTier: (options as OpenAiCodexResponsesOptions)?.ServiceTier,
                     resolveServiceTier: ResolveCodexServiceTier,
-                    cancellationToken: requestTimeout.Token).ConfigureAwait(false);
+                    cancellationToken: requestTimeout.Token,
+                    grammarToolInputProperties: grammarInputs,
+                    mapCancellation: exception => requestTimeout.IsTimeoutCancellation ? requestTimeout.CreateTimeoutException(exception) : exception,
+                onProviderStreamEvent: json => StreamOptionHelpers.InvokeProviderStreamEventAsync(options, model, json)).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException ex) when (requestTimeout.IsTimeoutCancellation)
@@ -229,12 +246,21 @@ public sealed class OpenAiCodexResponsesProvider : IStreamProvider, IDisposable
         }
     }
 
-    private static Dictionary<string, object> BuildRequestBody(Model model, LlmContext context, StreamOptions options)
+    /// <summary>【AI】【Codex Responses】把开场提示写入 instructions，中途声明保留在 input。</summary>
+    /// <param name="model">请求模型。</param>
+    /// <param name="context">旧式或消息式上下文。</param>
+    /// <param name="options">生成选项。</param>
+    /// <param name="grammarInputs">折叠前的语法输入映射。</param>
+    /// <returns>Codex 请求报文。</returns>
+    private static Dictionary<string, object> BuildRequestBody(Model model, LlmContext context, StreamOptions options, IReadOnlyDictionary<string, string> grammarInputs)
     {
+        context = Transcript.ResolveTranscript(context, model.Compat?.SupportsMidConvoSystemMessages == true);
+        var transcriptTools = Transcript.ResolveTranscriptTools(context.Messages,
+            model.Compat?.SupportsAdditionalTools == true || model.Compat?.SupportsToolSearch == true);
         var body = new Dictionary<string, object>
         {
             ["model"] = model.Id,
-            ["input"] = OpenAiResponsesShared.ConvertResponsesMessages(model, context, includeSystemPrompt: false),
+            ["input"] = OpenAiResponsesShared.ConvertResponsesMessages(model, context, includeSystemPrompt: false, grammarInputs),
             ["stream"] = true,
             ["store"] = false,
             ["tool_choice"] = "auto",
@@ -243,12 +269,11 @@ public sealed class OpenAiCodexResponsesProvider : IStreamProvider, IDisposable
             ["include"] = new List<object> { "reasoning.encrypted_content" }
         };
 
-        if (!string.IsNullOrWhiteSpace(context.SystemPrompt))
-        {
-            body["instructions"] = context.SystemPrompt!;
-        }
+        var instructions = context.Messages.Count > 0 && context.Messages[0] is SystemMessage initial
+            ? Transcript.GetSystemMessageText(initial) : "";
+        body["instructions"] = instructions.Length > 0 ? instructions : "You are a helpful assistant.";
 
-        var tools = OpenAiResponsesShared.ConvertResponsesTools(context.Tools);
+        var tools = OpenAiResponsesShared.ConvertResponsesToolsForModel(transcriptTools.RequestTools, model);
         if (tools.Count > 0)
         {
             body["tools"] = tools;
@@ -339,6 +364,16 @@ public sealed class OpenAiCodexResponsesProvider : IStreamProvider, IDisposable
         }
     }
 
+    /// <summary>【AI】【Codex WebSocket】发送请求并按原始工具声明还原语法输入。</summary>
+    /// <param name="model">目标模型。</param>
+    /// <param name="options">请求选项。</param>
+    /// <param name="stream">事件输出。</param>
+    /// <param name="accountId">账号标识。</param>
+    /// <param name="sseUrl">用于派生 WebSocket 地址的 HTTP 地址。</param>
+    /// <param name="body">已生成的请求体。</param>
+    /// <param name="onStarted">请求发送后的通知。</param>
+    /// <param name="grammarInputs">原始语法输入映射。</param>
+    /// <returns>WebSocket 请求任务。</returns>
     private async Task StreamWebSocketAsync(
         Model model,
         StreamOptions options,
@@ -346,12 +381,20 @@ public sealed class OpenAiCodexResponsesProvider : IStreamProvider, IDisposable
         string accountId,
         string sseUrl,
         Dictionary<string, object> body,
-        Action onStarted)
+        Action onStarted,
+        IReadOnlyDictionary<string, string> grammarInputs)
     {
         var requestId = string.IsNullOrWhiteSpace(options.SessionId)
             ? CreateCodexRequestId()
             : options.SessionId!;
         var headers = BuildWebSocketHeaders(model, options, accountId, requestId);
+        if (options.TransformHeaders is not null)
+        {
+            using var headerRequest = new HttpRequestMessage();
+            foreach (var pair in headers) headerRequest.Headers.TryAddWithoutValidation(pair.Key, pair.Value);
+            await StreamOptionHelpers.ApplyHeadersCallbackAsync(options, model, headerRequest).ConfigureAwait(false);
+            headers = headerRequest.Headers.ToDictionary(pair => pair.Key, pair => string.Join(", ", pair.Value), StringComparer.OrdinalIgnoreCase);
+        }
         var webSocketUrl = ResolveCodexWebSocketUrl(sseUrl);
         var lease = await AcquireWebSocketAsync(
             webSocketUrl,
@@ -399,7 +442,9 @@ public sealed class OpenAiCodexResponsesProvider : IStreamProvider, IDisposable
                 beforeDone: () => Release(keep: true),
                 requestedServiceTier: (options as OpenAiCodexResponsesOptions)?.ServiceTier,
                 resolveServiceTier: ResolveCodexServiceTier,
-                cancellationToken: options.Signal).ConfigureAwait(false);
+                cancellationToken: options.Signal,
+                grammarToolInputProperties: grammarInputs,
+                onProviderStreamEvent: json => StreamOptionHelpers.InvokeProviderStreamEventAsync(options, model, json)).ConfigureAwait(false);
             if (!completed)
             {
                 keepConnection = false;

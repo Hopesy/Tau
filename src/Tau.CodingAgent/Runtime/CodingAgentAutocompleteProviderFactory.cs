@@ -1,14 +1,19 @@
 using Tau.Tui.Runtime;
+using Tau.CodingAgent.Runtime.Mcp;
 
 namespace Tau.CodingAgent.Runtime;
 
-public static class CodingAgentAutocompleteProviderFactory
+public static partial class CodingAgentAutocompleteProviderFactory
 {
+    /// <summary>【CodingAgent】【命令补全】合并内置命令、项目资源与扩展命令，并动态读取 MCP 服务器。</summary>
+    /// <param name="promptTemplateStore">提示模板来源。</param><param name="skillStore">技能来源。</param><param name="extensionCommandStore">扩展命令来源。</param>
+    /// <param name="basePath">路径补全基准目录。</param><param name="mcpService">可选 MCP 会话服务。</param><returns>组合补全提供方。</returns>
     public static ITuiAutocompleteProvider Create(
         CodingAgentPromptTemplateStore? promptTemplateStore = null,
         CodingAgentSkillStore? skillStore = null,
         CodingAgentExtensionCommandStore? extensionCommandStore = null,
-        string? basePath = null)
+        string? basePath = null,
+        CodingAgentMcpService? mcpService = null)
     {
         var commands = new List<TuiSlashCommand>();
         var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -20,7 +25,8 @@ public static class CodingAgentAutocompleteProviderFactory
                 names,
                 command.Name.TrimStart('/'),
                 command.Description,
-                ExtractArgumentHint(command.Usage));
+                ExtractArgumentHint(command.Usage),
+                command.Name == "/mcp" ? (prefix, token) => McpCompletions(mcpService, prefix, token) : null);
         }
 
         foreach (var prompt in LoadOrEmpty(promptTemplateStore))
@@ -46,19 +52,23 @@ public static class CodingAgentAutocompleteProviderFactory
         return new TuiCombinedAutocompleteProvider(commands, basePath);
     }
 
+    /// <summary>【CodingAgent】【命令目录】按名称去重，保留优先来源和可选参数补全。</summary>
+    /// <param name="commands">输出列表。</param><param name="names">已使用名称。</param><param name="name">命令名称。</param><param name="description">说明。</param>
+    /// <param name="argumentHint">参数提示。</param><param name="complete">动态参数补全。</param>
     private static void AddCommand(
         List<TuiSlashCommand> commands,
         HashSet<string> names,
         string name,
         string? description,
-        string? argumentHint)
+        string? argumentHint,
+        Func<string, CancellationToken, ValueTask<IReadOnlyList<TuiAutocompleteItem>?>>? complete = null)
     {
         if (string.IsNullOrWhiteSpace(name) || !names.Add(name))
         {
             return;
         }
 
-        commands.Add(new TuiSlashCommand(name.Trim(), description, argumentHint));
+        commands.Add(new TuiSlashCommand(name.Trim(), description, argumentHint, complete));
     }
 
     private static string? ExtractArgumentHint(string usage)

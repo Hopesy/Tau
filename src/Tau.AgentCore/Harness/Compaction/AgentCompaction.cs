@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using Tau.AgentCore.Harness.Session;
 using Tau.Ai;
+using Tau.Ai.Serialization;
 
 namespace Tau.AgentCore.Harness;
 
@@ -57,15 +58,22 @@ public static class AgentCompaction
 
     public static AgentFileOperations CreateFileOperations() => new();
 
+    /// <summary>【AgentCore】【文件摘要】提取助手直接调用及工具嵌套调用中的文件操作。</summary>
+    /// <param name="message">待分析的会话消息。</param>
+    /// <param name="fileOperations">汇总文件集合。</param>
     public static void ExtractFileOperationsFromMessage(ChatMessage message, AgentFileOperations fileOperations)
     {
         ArgumentNullException.ThrowIfNull(message);
         ArgumentNullException.ThrowIfNull(fileOperations);
 
-        if (message is not AssistantMessage assistant)
-            return;
-
-        foreach (var toolCall in assistant.Content.OfType<ToolCallContent>())
+        var calls = message switch
+        {
+            AssistantMessage assistant => assistant.Content.OfType<ToolCallContent>(),
+            ToolResultMessage { NestedCalls: { } nested } => nested.Calls.Where(call => call.Arguments.HasValue)
+                .Select(call => new ToolCallContent(call.Id, call.Name, call.Arguments!.Value.GetRawText())),
+            _ => []
+        };
+        foreach (var toolCall in calls)
         {
             if (!TryGetFileOperation(toolCall.Name, out var operation) ||
                 !TryGetToolCallPath(toolCall.Arguments, out var path))
@@ -180,7 +188,10 @@ public static class AgentCompaction
         return string.Join("\n\n", parts);
     }
 
-    public static int CalculateContextTokens(Usage usage) =>
+    /// <summary>【AgentCore】【上下文计数】优先使用提供方总量，缺少或为零时合计各 token 分量。</summary>
+    /// <param name="usage">提供方用量。</param>
+    /// <returns>上下文 token 数。</returns>
+    public static int CalculateContextTokens(Usage usage) => usage.TotalTokens is > 0 ? usage.TotalTokens.Value :
         usage.InputTokens +
         usage.OutputTokens +
         (usage.CacheReadTokens ?? 0) +
@@ -202,6 +213,9 @@ public static class AgentCompaction
         return null;
     }
 
+    /// <summary>【AgentCore】【上下文估算】使用最近 usage 或估算当前有效声明与对话的 token 数。</summary>
+    /// <param name="messages">按会话顺序排列的消息。</param>
+    /// <returns>总量、已有 usage 和尾部估算。</returns>
     public static AgentContextUsageEstimate EstimateContextTokens(IReadOnlyList<ChatMessage> messages)
     {
         ArgumentNullException.ThrowIfNull(messages);
@@ -209,7 +223,9 @@ public static class AgentCompaction
         var usageInfo = GetLastAssistantUsageInfo(messages);
         if (usageInfo is null)
         {
-            var estimated = messages.Sum(EstimateTokens);
+            var system = Transcript.GetCurrentSystemMessage(messages);
+            var estimated = messages.Where(message => message is not SystemMessage).Sum(EstimateTokens)
+                + (system is null ? 0 : EstimateTokens(system));
             return new AgentContextUsageEstimate(estimated, 0, estimated, null);
         }
 
@@ -234,12 +250,16 @@ public static class AgentCompaction
         return resolved.Enabled && contextTokens > contextWindow - resolved.ReserveTokens;
     }
 
+    /// <summary>【AgentCore】【上下文估算】估算单条消息的 token 数，系统消息包含分节和工具 schema。</summary>
+    /// <param name="message">待估算的消息。</param>
+    /// <returns>按四字符约一 token 计算的上取整数。</returns>
     public static int EstimateTokens(ChatMessage message)
     {
         ArgumentNullException.ThrowIfNull(message);
 
         var characters = message switch
         {
+            SystemMessage system => EstimateSystemMessageCharacters(system),
             UserMessage user => EstimateTextAndImageContentCharacters(user.Content),
             AssistantMessage assistant => EstimateAssistantCharacters(assistant),
             ToolResultMessage toolResult => EstimateTextAndImageContentCharacters(toolResult.Content),
@@ -254,6 +274,13 @@ public static class AgentCompaction
             ? 0
             : (int)Math.Ceiling(characters / 4.0);
     }
+
+    /// <summary>【AgentCore】【上下文估算】计算系统正文、有效分节和工具声明的字符数。</summary>
+    /// <param name="system">待估算的系统消息。</param>
+    /// <returns>参与 token 估算的字符数。</returns>
+    public static int EstimateSystemMessageCharacters(SystemMessage system) =>
+        system.Content.Length + (system.Sections?.Values.Sum(value => value?.Length ?? 0) ?? 0)
+        + (system.ToolsAdded is null ? 0 : SystemMessageJson.ToElement(system).GetProperty("toolsAdded").GetRawText().Length);
 
     public static int FindTurnStartIndex(
         IReadOnlyList<SessionTreeEntry> entries,
@@ -279,6 +306,12 @@ public static class AgentCompaction
         return -1;
     }
 
+    /// <summary>【AgentCore】【压缩边界】按普通消息的预算寻找保留起点。</summary>
+    /// <param name="entries">分支条目。</param>
+    /// <param name="startIndex">扫描起点。</param>
+    /// <param name="endIndex">不包含在内的扫描终点。</param>
+    /// <param name="keepRecentTokens">保留尾部预算，不包含系统基线。</param>
+    /// <returns>起点及是否拆分回合。</returns>
     public static AgentCutPointResult FindCutPoint(
         IReadOnlyList<SessionTreeEntry> entries,
         int startIndex,
@@ -297,7 +330,7 @@ public static class AgentCompaction
         var cutIndex = cutPoints[0];
         for (var i = end - 1; i >= start; i--)
         {
-            if (entries[i] is not MessageSessionEntry messageEntry)
+            if (entries[i] is not MessageSessionEntry messageEntry || messageEntry.Message is SystemMessage)
                 continue;
 
             accumulatedTokens += EstimateTokens(messageEntry.Message);
@@ -335,13 +368,18 @@ public static class AgentCompaction
             !isUserMessage && turnStartIndex != -1);
     }
 
+    /// <summary>【AgentCore】【压缩准备】计算摘要输入和尾部边界，只有系统声明时无需压缩。</summary>
+    /// <param name="pathEntries">当前分支路径。</param>
+    /// <param name="settings">压缩预算设置。</param>
+    /// <returns>压缩准备结果；无对话或已压缩时为空。</returns>
     public static AgentCompactionPreparation? PrepareCompaction(
         IReadOnlyList<SessionTreeEntry> pathEntries,
         AgentCompactionSettings? settings = null)
     {
         ArgumentNullException.ThrowIfNull(pathEntries);
 
-        if (pathEntries.Count == 0 || pathEntries[^1] is CompactionSessionEntry)
+        if (pathEntries.Count == 0 || pathEntries[^1] is CompactionSessionEntry ||
+            !pathEntries.Any(entry => GetMessageFromEntryForCompaction(entry) is not null))
             return null;
 
         var resolvedSettings = settings ?? AgentCompactionSettings.Default;
@@ -448,8 +486,11 @@ public static class AgentCompaction
         return fileOperations;
     }
 
+    /// <summary>【AgentCore】【摘要输入】忽略压缩记录与系统声明，提取需要总结的普通消息。</summary>
+    /// <param name="entry">会话条目。</param>
+    /// <returns>普通消息；不参与摘要的条目返回空。</returns>
     private static ChatMessage? GetMessageFromEntryForCompaction(SessionTreeEntry entry) =>
-        entry is CompactionSessionEntry
+        entry is CompactionSessionEntry or MessageSessionEntry { Message: SystemMessage }
             ? null
             : GetMessageFromEntry(entry);
 

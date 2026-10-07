@@ -17,7 +17,11 @@ public record ToolCallContext(
     string ToolCallId,
     string ToolName,
     System.Text.Json.JsonElement Arguments,
-    IReadOnlyList<Ai.ChatMessage> ConversationHistory);
+    IReadOnlyList<Ai.ChatMessage> ConversationHistory)
+{
+    /// <summary>【AgentCore】【嵌套调用】发起本次调用的父工具标识，模型直接调用时为空。</summary>
+    public string? ParentToolCallId { get; init; }
+}
 
 public record struct ToolCallDecision(
     bool Blocked,

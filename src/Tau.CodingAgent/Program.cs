@@ -7,9 +7,24 @@ using Tau.Tui.Components;
 using Tau.Tui.Rendering;
 using Tau.Tui.Runtime;
 
-if (await CodingAgentAuthCli.TryHandleAsync(args, Console.In, Console.Out, Console.Error).ConfigureAwait(false) is { } authCommandExitCode)
+// 1. 【CodingAgent】【MCP 命令】配置和登录管理在模型会话启动前独立执行
+if (args.Length > 0 && args[0] == "mcp")
 {
-    return authCommandExitCode;
+    using var mcpCancellation = new CancellationTokenSource();
+    ConsoleCancelEventHandler cancelMcp = (_, interrupt) => { interrupt.Cancel = true; mcpCancellation.Cancel(); };
+    Console.CancelKeyPress += cancelMcp;
+    try { return await CodingAgentMcpCli.TryHandleAsync(args, Console.Out, Console.Error, token: mcpCancellation.Token).ConfigureAwait(false) ?? 1; }
+    finally { Console.CancelKeyPress -= cancelMcp; }
+}
+
+// 2. 【CodingAgent】【认证命令取消】独立 CLI 也响应 Ctrl+C，不等待认证网络任务自然结束
+if (args.Length > 0 && (args[0].Equals("auth", StringComparison.OrdinalIgnoreCase) || args[0].Equals("login", StringComparison.OrdinalIgnoreCase)))
+{
+    using var authCancellation = new CancellationTokenSource();
+    ConsoleCancelEventHandler cancelAuth = (_, interrupt) => { interrupt.Cancel = true; authCancellation.Cancel(); };
+    Console.CancelKeyPress += cancelAuth;
+    try { return await CodingAgentAuthCli.TryHandleAsync(args, Console.In, Console.Out, Console.Error, cancellationToken: authCancellation.Token).ConfigureAwait(false) ?? 1; }
+    finally { Console.CancelKeyPress -= cancelAuth; }
 }
 
 var packageManager = new CodingAgentPackageManager();
@@ -202,7 +217,7 @@ static InteractiveInputEditor? CreateInteractiveEditorIfAttached(
         ? new InputHistory(new FileInputHistoryStore(historyPath))
         : new InputHistory();
 
-    var bindings = KeyBindingFileStore.LoadOrDefault(ResolveKeyBindingsPath());
+    var bindings = CodingAgentKeybindings.LoadEditorOrDefault(ResolveKeyBindingsPath());
 
     return new InteractiveInputEditor(
         keyReader,
@@ -225,6 +240,8 @@ static string? ResolveHistoryPath()
     return string.IsNullOrWhiteSpace(home) ? null : Path.Combine(home, ".tau", "coding-agent-history");
 }
 
+/// <summary>【CodingAgent】【快捷键路径】优先使用显式路径及原生动作配置，兼容已有 Tau 快捷键文件。</summary>
+/// <returns>当前配置路径，无法确定用户目录时为空。</returns>
 static string? ResolveKeyBindingsPath()
 {
     var explicitPath = Environment.GetEnvironmentVariable("TAU_CODING_AGENT_KEYBINDINGS_FILE");
@@ -234,7 +251,9 @@ static string? ResolveKeyBindingsPath()
     }
 
     var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-    return string.IsNullOrWhiteSpace(home) ? null : Path.Combine(home, ".tau", "coding-agent-keybindings.json");
+    if (string.IsNullOrWhiteSpace(home)) return null;
+    var nativePath = Path.Combine(home, ".tau", "keybindings.json");
+    return File.Exists(nativePath) ? nativePath : Path.Combine(home, ".tau", "coding-agent-keybindings.json");
 }
 
 static IReadOnlyList<string> CombineResourcePaths(
@@ -252,62 +271,6 @@ static IReadOnlyList<string> CombineResourcePaths(
     }
 
     return first.Concat(second).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-}
-
-// Mirrors upstream resolvePromptInput (core/resource-loader.ts): if the value names an existing
-// file, read its contents; otherwise treat it as literal prompt text.
-static string? ResolvePromptInput(string? input)
-{
-    if (string.IsNullOrWhiteSpace(input))
-    {
-        return null;
-    }
-
-    try
-    {
-        if (File.Exists(input))
-        {
-            return File.ReadAllText(input);
-        }
-    }
-    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-    {
-        Console.Error.WriteLine($"warning: could not read prompt file {input}: {ex.Message}");
-        return input;
-    }
-
-    return input;
-}
-
-// Mirrors upstream append-system-prompt resolution: each --append-system-prompt value is resolved
-// as a file path or literal, then non-empty results are joined with a blank line.
-static string? CombineAppendSystemPrompt(IReadOnlyList<string> values)
-{
-    if (values.Count == 0)
-    {
-        return null;
-    }
-
-    var resolved = values
-        .Select(ResolvePromptInput)
-        .Where(static text => !string.IsNullOrWhiteSpace(text))
-        .Select(static text => text!)
-        .ToArray();
-
-    return resolved.Length == 0 ? null : string.Join("\n\n", resolved);
-}
-
-// Mirrors upstream --tools / --no-tools selection (main.ts): a null result keeps Tau's full default
-// built-in tool set; an explicit (possibly empty) list enables only the named built-ins. Extension
-// tools always load regardless of this selection.
-static IReadOnlyList<string>? ResolveSelectedBuiltInToolNames(CodingAgentCliArguments cli)
-{
-    if (cli.NoTools)
-    {
-        return cli.Tools ?? [];
-    }
-
-    return cli.Tools;
 }
 
 // Mirrors upstream --export (core/export-html/index.ts exportFromFile): read a JSONL session file,
@@ -484,12 +447,43 @@ catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or I
 }
 var sessionStore = sessionTarget.SessionStore;
 var treeSessionController = sessionTarget.TreeSessionController;
-var settingsStore = new CodingAgentSettingsStore();
+var settingsStore = CodingAgentSettingsStore.CreateLayered(packageManager.UserSettingsPath, packageManager.ProjectSettingsPath, projectTrusted: false);
+packageManager.IsProjectTrusted = false;
 var packageResourceState = new CodingAgentPackageResourceState(packageManager.ResolveResources());
-var extensionCommandStore = new CodingAgentExtensionCommandStore(
+using var extensionCommandStore = new CodingAgentExtensionCommandStore(
     explicitPaths: explicitExtensionPaths.Count == 0 ? null : explicitExtensionPaths,
     additionalPathsProvider: () => packageResourceState.ExtensionPaths,
-    includeDefaults: !noExtensions);
+    includeDefaults: !noExtensions,
+    sourceInfosProvider: () => packageResourceState.SourceInfos)
+{
+    IsProjectTrusted = false,
+    AutoResourceFilterProvider = () => packageManager.CreateAutomaticResourceFilter("extensions"),
+    RefreshResourcePaths = () => packageResourceState.Update(packageManager.ResolveResources())
+};
+extensionCommandStore.ConfigureModelCatalog(modelCatalog, new Tau.Ai.Registry.FileModelsStore(Path.Combine(packageManager.UserInstallDirectory, "models-store.json")));
+extensionCommandStore.SetExtensionUiBridge(null, rpcMode ? "rpc" : printMode ? "print" : "tui");
+try
+{
+await CodingAgentProjectTrustBootstrap.ResolveAsync(Environment.CurrentDirectory, packageManager.UserInstallDirectory,
+    settingsStore, packageManager, packageResourceState, extensionCommandStore, cli.ProjectTrustOverride,
+    editor is null || cli.Help ? null : async (title, options, token) =>
+    {
+        Console.Out.WriteLine(title);
+        var selector = new TuiSelectList(options.Select(option => new TuiSelectItem(option, option)), maxVisible: 6,
+            layout: new TuiSelectListLayout(MinPrimaryColumnWidth: 20, MaxPrimaryColumnWidth: 100));
+        var result = compositionSession is null
+            ? await new TuiSelectorSession(selector, keyReader, TuiAnsiRenderSurface.ForConsole()).RunAsync(token).ConfigureAwait(false)
+            : await TuiCompositionOverlaySessions.RunAsync(selector, compositionSession, token).ConfigureAwait(false);
+        return result.HasSelection ? result.SelectedItem?.Value : null;
+    }, error => Console.Error.WriteLine(error),
+    input: (title, placeholder, token) => ui.ReadInputAsync(title + " " + placeholder + "> ", ConsoleColor.Yellow, token),
+    notify: message => Console.Out.WriteLine(message), mode: rpcMode ? "rpc" : printMode ? "print" : "tui").ConfigureAwait(false);
+}
+catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidDataException or System.Text.Json.JsonException)
+{
+    Console.Error.WriteLine($"error: {error.Message}");
+    return 1;
+}
 if (cli.Help)
 {
     Console.Out.WriteLine(CodingAgentCliHelp.BuildHelpText(
@@ -520,23 +514,26 @@ if (cli.ExtensionFlags.Count > 0)
     }
 }
 var extensionResourceState = new CodingAgentExtensionResourceState(extensionCommandStore.LoadResources());
+await extensionCommandStore.InitializeProviderModelsAsync(CancellationToken.None).ConfigureAwait(false);
 var promptTemplateStore = new CodingAgentPromptTemplateStore(
     explicitPaths: explicitPromptTemplatePaths.Count == 0 ? null : explicitPromptTemplatePaths,
     additionalPathsProvider: () => CombineResourcePaths(packageResourceState.PromptPaths, extensionResourceState.PromptPaths),
-    includeDefaults: !noPromptTemplates);
+    includeDefaults: !noPromptTemplates) { IsProjectTrusted = settingsStore.IsProjectTrusted };
 var skillStore = new CodingAgentSkillStore(
     explicitPaths: explicitSkillPaths.Count == 0 ? null : explicitSkillPaths,
     additionalPathsProvider: () => CombineResourcePaths(packageResourceState.SkillPaths, extensionResourceState.SkillPaths),
-    includeDefaults: !noSkills);
+    includeDefaults: !noSkills) { IsProjectTrusted = settingsStore.IsProjectTrusted };
 var contextFileStore = new CodingAgentContextFileStore(includeDefaults: !noContextFiles);
 var themeStore = new CodingAgentThemeStore(
     explicitPaths: explicitThemePaths.Count == 0 ? null : explicitThemePaths,
     additionalPathsProvider: () => CombineResourcePaths(packageResourceState.ThemePaths, extensionResourceState.ThemePaths),
-    includeDefaults: !noThemes);
-editor?.SetAutocompleteProvider(CodingAgentAutocompleteProviderFactory.Create(
-    promptTemplateStore,
-    skillStore,
-    extensionCommandStore));
+    includeDefaults: !noThemes) { IsProjectTrusted = settingsStore.IsProjectTrusted };
+promptTemplateStore.SourceInfosProvider = () => CodingAgentSourceInfo.Combine(packageResourceState.SourceInfos, extensionResourceState.SourceInfos);
+skillStore.SourceInfosProvider = () => CodingAgentSourceInfo.Combine(packageResourceState.SourceInfos, extensionResourceState.SourceInfos);
+themeStore.SourceInfosProvider = () => CodingAgentSourceInfo.Combine(packageResourceState.SourceInfos, extensionResourceState.SourceInfos);
+promptTemplateStore.AutoResourceFilterProvider = () => packageManager.CreateAutomaticResourceFilter("prompts");
+skillStore.AutoResourceFilterProvider = () => packageManager.CreateAutomaticResourceFilter("skills");
+themeStore.AutoResourceFilterProvider = () => packageManager.CreateAutomaticResourceFilter("themes");
 var session = sessionTarget.LoadInitialSnapshot();
 var settings = settingsStore.Load();
 var changelogStore = new CodingAgentChangelogStore();
@@ -559,11 +556,12 @@ catch (Exception ex) when (ex is FileNotFoundException or IOException or Unautho
     return 1;
 }
 
-var providerId = cli.Provider ?? Environment.GetEnvironmentVariable("TAU_PROVIDER") ?? session.Provider ?? settings.DefaultProvider;
+var sessionSelection = CodingAgentBranchModelSelection.Resolve(session, modelCatalog);
+var providerId = cli.Provider ?? Environment.GetEnvironmentVariable("TAU_PROVIDER") ?? sessionSelection.Provider ?? settings.DefaultProvider;
 var modelId = cli.Model ?? Environment.GetEnvironmentVariable("TAU_MODEL")
-              ?? (string.Equals(providerId, session.Provider, StringComparison.OrdinalIgnoreCase) ? session.Model : null)
+              ?? (string.Equals(providerId, sessionSelection.Provider, StringComparison.OrdinalIgnoreCase) ? sessionSelection.Model : null)
               ?? (string.Equals(providerId, settings.DefaultProvider, StringComparison.OrdinalIgnoreCase) ? settings.DefaultModel : null);
-var startupThinkingLevel = cli.Thinking ?? settings.DefaultThinkingLevel;
+var startupThinkingLevel = cli.Thinking;
 if (cliScopedModels.Count > 0)
 {
     var startupModel = TryResolveStartupModel(modelCatalog, providerId, modelId);
@@ -582,20 +580,23 @@ if (cliScopedModels.Count > 0)
     }
 }
 
-var selectedBuiltInToolNames = ResolveSelectedBuiltInToolNames(cli);
-var runnerTools = RuntimeCodingAgentRunner.CreateDefaultTools(
+var allRunnerTools = RuntimeCodingAgentRunner.CreateDefaultTools(
     settings.ImagesAutoResize ?? true,
-    extensionCommandStore.LoadTools(),
-    selectedBuiltInToolNames);
+    extensionCommandStore.LoadTools());
+var toolSelection = CodingAgentToolSelection.Create(allRunnerTools, cli.Tools, cli.ExcludeTools, settings.DefaultTools,
+    cli.NoTools ? CodingAgentSdkNoToolsMode.All : cli.NoBuiltInTools ? CodingAgentSdkNoToolsMode.BuiltIn : CodingAgentSdkNoToolsMode.None);
 var runnerInterceptors = extensionCommandStore.LoadToolInterceptors();
 var runnerExtensionLifecycleEvents = extensionCommandStore.LoadLifecycleEventSink();
-var resolvedSystemPrompt = ResolvePromptInput(cli.SystemPrompt);
-var resolvedAppendSystemPrompt = CombineAppendSystemPrompt(cli.AppendSystemPrompt);
+var systemPromptFiles = new CodingAgentSystemPromptFiles(Environment.CurrentDirectory, packageManager.UserInstallDirectory,
+    () => settingsStore.IsProjectTrusted, cli.SystemPrompt, cli.AppendSystemPrompt.Count == 0 ? null : cli.AppendSystemPrompt);
+var loadedSystemPromptFiles = systemPromptFiles.Load();
+var resolvedSystemPrompt = loadedSystemPromptFiles.SystemPrompt;
+var resolvedAppendSystemPrompt = loadedSystemPromptFiles.AppendSystemPrompt;
 var runner = RuntimeCodingAgentRunner.Create(
     providerId,
     modelId,
     session.Messages,
-    toolsOverride: runnerTools,
+    toolsOverride: toolSelection.Registered,
     systemPromptOverride: resolvedSystemPrompt,
     skills: skillStore.Load(),
     contextFiles: contextFileStore.Load(),
@@ -605,27 +606,52 @@ var runner = RuntimeCodingAgentRunner.Create(
     extensionLifecycleEventSink: runnerExtensionLifecycleEvents,
     appendSystemPrompt: resolvedAppendSystemPrompt,
     apiKey: cli.ApiKey,
-    modelCatalogOverride: modelCatalog);
+    modelCatalogOverride: modelCatalog,
+    initialActiveToolNames: cli.Tools is null && !cli.NoTools && !cli.NoBuiltInTools && session.Messages.Any(message => message is SystemMessage)
+        ? null : toolSelection.Active);
 runner.SessionName = session.Name;
+runner.ConfigureSessionSettings(settingsStore);
+runner.ConfigureToolSelection(toolSelection);
+runner.ConfigureScopedModelPatterns(scopedModelsOverride);
+runner.ConfigureInputResources(skillStore, promptTemplateStore);
+runner.ConfigureResourceReload(() => runner.RefreshSystemPromptResources(skillStore.Load(), contextFileStore.Load(), systemPromptFiles.Load()));
+extensionCommandStore.ResourcesChanged += resources =>
+{
+    extensionResourceState.Update(resources);
+    runner.RefreshSystemPromptResources(skillStore.Load(), contextFileStore.Load(), systemPromptFiles.Load());
+};
 runner.SteeringMode = CodingAgentQueueModes.ToAgentQueueMode(settings.SteeringMode);
 runner.FollowUpMode = CodingAgentQueueModes.ToAgentQueueMode(settings.FollowUpMode);
 runner.InstallTelemetryEnabled = CodingAgentTelemetry.IsInstallTelemetryEnabled(
     settings,
     Environment.GetEnvironmentVariable("PI_TELEMETRY"));
 var autoCompaction = CodingAgentAutoCompactionOptions.FromEnvironment();
-// An explicit --thinking flag overrides the persisted defaultThinkingLevel, mirroring upstream
-// main.ts where parsed.thinking takes precedence over saved/scoped thinking levels.
-if (!string.IsNullOrWhiteSpace(startupThinkingLevel))
-{
-    runner.ThinkingLevel = CodingAgentThinkingLevels.ClampForModel(
-        runner.Model,
-        CodingAgentThinkingLevels.ParseOrNull(startupThinkingLevel));
-}
+// 1. 【CodingAgent】【思考恢复】显式及范围参数优先，随后恢复会话，缺少记录才使用设置和默认值
+runner.ThinkingLevel = CodingAgentThinkingLevels.ResolveStartup(
+    runner.Model, startupThinkingLevel, session.ThinkingLevel, settings.DefaultThinkingLevel);
+extensionCommandStore.BindSession(runner, treeSessionController, sessionStore);
+// 1. 【CodingAgent】【MCP 会话】CLI 默认加载服务器配置，连接失败由服务状态记录，退出时统一释放
+await using var mcpService = new Tau.CodingAgent.Runtime.Mcp.CodingAgentMcpService(
+    packageManager.UserInstallDirectory, Environment.CurrentDirectory, () => settingsStore.IsProjectTrusted, extensionCommandStore.McpServers,
+    new() { ProviderToken = runner.ResolveMcpProviderTokenAsync });
+await mcpService.ReloadAsync(cts.Token).ConfigureAwait(false);
+runner.AttachMcpService(mcpService);
+runner.EnableToolSearch();
+runner.EnableCodeMode(extensionCommandStore);
+editor?.SetAutocompleteProvider(CodingAgentAutocompleteProviderFactory.Create(
+    promptTemplateStore, skillStore, extensionCommandStore, mcpService: mcpService));
 
 if (printMode)
 {
-    var printRunner = new CodingAgentPrintMode(runner, Console.Out, Console.Error, jsonMode: jsonMode);
-    if (initialPrompt is null)
+    extensionCommandStore.SetExtensionUiBridge(null, jsonMode ? "json" : "print");
+    foreach (var error in await extensionCommandStore.EnsureSessionStartedAsync(cts.Token).ConfigureAwait(false))
+        Console.Error.WriteLine($"【CodingAgent】【扩展启动】{error.FilePath}: {error.Error}");
+    var printRunner = new CodingAgentPrintMode(
+        runner, Console.Out, Console.Error, jsonMode: jsonMode,
+        sessionStore: sessionStore, treeSessionController: treeSessionController);
+    // 1. 【CodingAgent】【提示序列】初始提示已消费第一个位置参数，其余参数逐轮执行
+    var remainingMessages = cli.Messages.Skip(1).ToArray();
+    if (initialPrompt is null && remainingMessages.Length == 0)
     {
         Console.Error.WriteLine("error: --print requires a prompt, stdin, or @file argument");
         return 1;
@@ -645,7 +671,7 @@ if (printMode)
         }
     }
 
-    return await printRunner.RunAsync(initialPrompt, cts.Token).ConfigureAwait(false);
+    return await printRunner.RunAsync(initialPrompt, remainingMessages, cts.Token).ConfigureAwait(false);
 }
 
 if (rpcMode)
@@ -698,7 +724,7 @@ var host = new CodingAgentHost(
         ? null
         : compositionSession is null
             ? new SystemConsoleCodingAgentTurnInputSource()
-            : new CompositionCodingAgentTurnInputSource(keyReader, compositionSession, editor.KeyBindings),
+            : new CompositionCodingAgentTurnInputSource(keyReader, compositionSession, keyBindingsProvider: () => editor.KeyBindings, sharedEditor: editor),
     historySnapshotProvider: editor is null ? null : limit => editor.History.Snapshot(limit),
     treeNavigator: editor is null || treeSessionController is null
         ? null
@@ -721,8 +747,8 @@ var host = new CodingAgentHost(
     authSelector: editor is null
         ? null
         : compositionSession is null
-            ? CodingAgentAuthSelector.CreateConsoleSelector(keyReader)
-            : CodingAgentAuthSelector.CreateCompositionSelector(compositionSession),
+            ? CodingAgentAuthSelector.CreateConsoleSelector(keyReader, themeProvider: () => themeStore.Find(settingsStore.Load().Theme))
+            : CodingAgentAuthSelector.CreateCompositionSelector(compositionSession, () => themeStore.Find(settingsStore.Load().Theme)),
     thinkingSelector: editor is null
         ? null
         : compositionSession is null
@@ -742,7 +768,12 @@ var host = new CodingAgentHost(
         ? null
         : (snapshot, cancellationToken) =>
             CodingAgentCompositionMetadataViewer.RunAsync(snapshot, compositionSession, cancellationToken),
-    oauthLoginCallbacksFactory: () => new InteractiveOAuthLoginCallbacks(ui),
+    oauthLoginCallbacksFactory: () => new InteractiveOAuthLoginCallbacks(ui, editor is null ? null : compositionSession is null
+        ? CodingAgentOAuthPromptSelector.CreateConsoleSelector(keyReader, () => themeStore.Find(settingsStore.Load().Theme), () => CodingAgentKeybindings.LoadOrDefault(ResolveKeyBindingsPath()))
+        : CodingAgentOAuthPromptSelector.CreateCompositionSelector(compositionSession, () => themeStore.Find(settingsStore.Load().Theme), () => CodingAgentKeybindings.LoadOrDefault(ResolveKeyBindingsPath()))),
+    mcpMenuSelector: editor is null ? null : compositionSession is null
+        ? CodingAgentMcpMenuSelector.CreateConsoleSelector(keyReader)
+        : CodingAgentMcpMenuSelector.CreateCompositionSelector(compositionSession),
     keyBindings: editor?.KeyBindings,
     extensionResourceState: extensionResourceState,
     compositionSession: compositionSession,
@@ -755,12 +786,12 @@ var host = new CodingAgentHost(
         ? null
         : () =>
         {
-            var bindings = KeyBindingFileStore.LoadOrDefault(ResolveKeyBindingsPath());
+            var bindings = CodingAgentKeybindings.LoadEditorOrDefault(ResolveKeyBindingsPath());
             editor.SetKeyBindings(bindings);
             editor.SetAutocompleteProvider(CodingAgentAutocompleteProviderFactory.Create(
                 promptTemplateStore,
                 skillStore,
-                extensionCommandStore));
+                extensionCommandStore, mcpService: mcpService));
             return editor.KeyBindings;
         },
     initialPrompt: initialPrompt,

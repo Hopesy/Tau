@@ -40,7 +40,7 @@ public sealed class GoogleVertexProviderTests
         Assert.Contains("\"contents\"", request.Body, StringComparison.Ordinal);
         Assert.Contains(events, evt => evt is TextDeltaEvent { Delta: "hello" });
         var done = Assert.Single(events.OfType<DoneEvent>());
-        Assert.Equal(new Usage(2, 3), done.Message.Usage);
+        Assert.Equal(new Usage(2, 3, 0, 0, Cost: default(UsageCost)), done.Message.Usage);
         Assert.Equal(StopReason.EndTurn, done.Message.StopReason);
     }
 

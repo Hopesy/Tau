@@ -9,16 +9,16 @@ public sealed class CodingAgentProviderDisplayNamesTests
     [InlineData("amazon-bedrock", "Amazon Bedrock")]
     [InlineData("openai", "OpenAI")]
     [InlineData("openrouter", "OpenRouter")]
-    [InlineData("google", "Google Gemini")]
+    [InlineData("google", "Google")]
     [InlineData("google-vertex", "Google Vertex AI")]
-    [InlineData("nvidia", "NVIDIA NIM")]
+    [InlineData("nvidia", "NVIDIA")]
     [InlineData("opencode", "OpenCode Zen")]
     [InlineData("opencode-go", "OpenCode Go")]
     [InlineData("xai", "xAI")]
-    [InlineData("zai", "ZAI Coding Plan (Global)")]
-    [InlineData("zai-coding-cn", "ZAI Coding Plan (China)")]
-    [InlineData("minimax-cn", "MiniMax (China)")]
-    [InlineData("xiaomi-token-plan-sgp", "Xiaomi MiMo Token Plan (Singapore)")]
+    [InlineData("zai", "Z.AI")]
+    [InlineData("zai-coding-cn", "Z.AI Coding CN")]
+    [InlineData("minimax-cn", "MiniMax CN")]
+    [InlineData("xiaomi-token-plan-sgp", "Xiaomi Token Plan SGP")]
     public void Resolve_KnownProvider_ReturnsUpstreamDisplayName(string providerId, string expected)
     {
         Assert.Equal(expected, CodingAgentProviderDisplayNames.Resolve(providerId));

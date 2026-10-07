@@ -1,0 +1,170 @@
+{
+  "schemaVersion": 1,
+  "sources": {
+    "pi": {
+      "path": "packages/ai/scripts/generate-models.ts",
+      "sha256": "9ec0f4df04bb1829bc03296786e0c58e265d9b9a4c82848e33fa1f62b9ec34a8",
+      "snapshot": "local pi-main; package version 1.0.0 with Unreleased changes",
+      "notes": "Static Cloudflare/OpenCode entries follow the generator. TypeSafe name/context use packages/ai/test/fireworks-model-generation.test.ts and classifier-models.test.ts; direct-provider pricing is zero in the generator."
+    },
+    "vercel": {
+      "url": "https://ai-gateway.vercel.sh/v1/models",
+      "retrievedAt": "2026-10-03T10:01:26.7421202\u002B00:00",
+      "responseSha256": "9ff24b810d6f6a3810beba6a0c06ad26edafb79ffdacb898dc5392dc9115d5b1"
+    }
+  },
+  "staticModels": [
+    {
+      "type": "classifier",
+      "id": "jev-latest",
+      "name": "Jev",
+      "api": "typesafe-system-one",
+      "provider": "typesafe",
+      "baseUrl": "https://api.typesafe.ai/v1/",
+      "inputModalities": [
+        "text"
+      ],
+      "contextWindow": 64000,
+      "cost": {
+        "inputPerMillion": 0,
+        "outputPerMillion": 0,
+        "cacheReadPerMillion": 0,
+        "cacheWritePerMillion": 0
+      }
+    },
+    {
+      "type": "classifier",
+      "id": "jev-1.13",
+      "name": "Jev 1.13",
+      "api": "typesafe-system-one",
+      "provider": "opencode",
+      "baseUrl": "https://opencode.ai/zen/v1",
+      "inputModalities": [
+        "text"
+      ],
+      "contextWindow": 32000,
+      "cost": {
+        "inputPerMillion": 0.042,
+        "outputPerMillion": 0,
+        "cacheReadPerMillion": 0,
+        "cacheWritePerMillion": 0
+      }
+    },
+    {
+      "type": "classifier",
+      "id": "jev-1.13-free",
+      "name": "Jev 1.13 Free",
+      "api": "typesafe-system-one",
+      "provider": "opencode",
+      "baseUrl": "https://opencode.ai/zen/v1",
+      "inputModalities": [
+        "text"
+      ],
+      "contextWindow": 32000,
+      "cost": {
+        "inputPerMillion": 0,
+        "outputPerMillion": 0,
+        "cacheReadPerMillion": 0,
+        "cacheWritePerMillion": 0
+      }
+    },
+    {
+      "type": "classifier",
+      "id": "@cf/cloudflare/clef",
+      "name": "Clef",
+      "api": "cloudflare-workers-ai-system-one",
+      "provider": "cloudflare-workers-ai",
+      "baseUrl": "https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai",
+      "inputModalities": [
+        "text"
+      ],
+      "contextWindow": 65536,
+      "cost": {
+        "inputPerMillion": 0.24,
+        "outputPerMillion": 0,
+        "cacheReadPerMillion": 0,
+        "cacheWritePerMillion": 0
+      }
+    },
+    {
+      "type": "classifier",
+      "id": "@cf/cloudflare/clef-flash",
+      "name": "Clef Flash",
+      "api": "cloudflare-workers-ai-system-one",
+      "provider": "cloudflare-workers-ai",
+      "baseUrl": "https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai",
+      "inputModalities": [
+        "text"
+      ],
+      "contextWindow": 65536,
+      "cost": {
+        "inputPerMillion": 0.09,
+        "outputPerMillion": 0,
+        "cacheReadPerMillion": 0,
+        "cacheWritePerMillion": 0
+      }
+    },
+    {
+      "type": "classifier",
+      "id": "typesafe/jev",
+      "name": "Jev",
+      "api": "cloudflare-workers-ai-system-one",
+      "provider": "cloudflare-workers-ai",
+      "baseUrl": "https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai",
+      "inputModalities": [
+        "text"
+      ],
+      "contextWindow": 32000,
+      "cost": {
+        "inputPerMillion": 0,
+        "outputPerMillion": 0,
+        "cacheReadPerMillion": 0,
+        "cacheWritePerMillion": 0
+      }
+    }
+  ],
+  "vercel": {
+    "data": [
+      {
+        "id": "convaiinnovations/laya",
+        "name": "Laya",
+        "type": "evaluation",
+        "context_window": 8192,
+        "pricing": {
+          "input": "0",
+          "output": "0"
+        }
+      },
+      {
+        "id": "convaiinnovations/laya-free",
+        "name": "Laya (Free)",
+        "type": "evaluation",
+        "context_window": 8192,
+        "pricing": {
+          "input": "0",
+          "output": "0"
+        }
+      },
+      {
+        "id": "liquid/d1",
+        "name": "Liquid d1",
+        "type": "evaluation",
+        "context_window": 65536,
+        "pricing": {
+          "input": "0.00000004",
+          "output": "0"
+        }
+      },
+      {
+        "id": "typesafe-ai/jev",
+        "name": "Jev",
+        "type": "evaluation",
+        "context_window": 32000,
+        "pricing": {
+          "input": "0.000000042",
+          "output": "0"
+        }
+      }
+    ]
+  }
+}

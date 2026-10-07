@@ -784,7 +784,7 @@ public static class TuiKeyDecoder
 
         if (parsed.BaseLayoutKey == expectedCodepoint)
         {
-            return !IsLatinLetter(normalizedCodepoint) && !IsKnownSymbol(normalizedCodepoint);
+            return !IsLatinLetter(normalizedCodepoint) && !IsDigit(normalizedCodepoint) && !IsKnownSymbol(normalizedCodepoint);
         }
 
         return false;

@@ -48,6 +48,7 @@ internal static partial class CodingAgentCliHelp
         builder.AppendLine($"  {commandName} [options] [@files...] [messages...]");
         builder.AppendLine();
         builder.AppendLine("Commands:");
+        builder.AppendLine($"  {commandName} mcp <command>             Configure, inspect, and sign in to MCP servers (mcp --help)");
         builder.AppendLine($"  {commandName} install <source> [-l]     Install extension source and add to settings");
         builder.AppendLine($"  {commandName} remove <source> [-l]      Remove extension source from settings");
         builder.AppendLine($"  {commandName} uninstall <source> [-l]   Alias for remove");
@@ -70,9 +71,13 @@ internal static partial class CodingAgentCliHelp
         builder.AppendLine("  --session-dir <dir>            Directory for session storage and lookup");
         builder.AppendLine("  --no-session                   Don't save session (ephemeral)");
         builder.AppendLine("  --models <patterns>            Comma-separated model patterns for Ctrl+P cycling");
-        builder.AppendLine("  --no-tools                     Disable all built-in tools");
-        builder.AppendLine("  --tools <tools>                Comma-separated list of tools to enable (default: read,bash,edit,write)");
-        builder.AppendLine("  --thinking <level>             Set thinking level: off, minimal, low, medium, high, xhigh");
+        builder.AppendLine("  --no-tools, -nt                Disable all tools by default (built-in and extension)");
+        builder.AppendLine("  --no-builtin-tools, -nbt       Disable built-in tools by default, retaining extension/custom tools");
+        builder.AppendLine("  --approve, -a                 Trust project settings and resources for this session");
+        builder.AppendLine("  --no-approve, -na             Skip project settings and resources for this session");
+        builder.AppendLine("  --tools, -t <tools>            Comma-separated allowlist of built-in, extension and custom tools");
+        builder.AppendLine("  --exclude-tools, -xt <tools>   Comma-separated list of tools to exclude");
+        builder.AppendLine("  --thinking <level>             Set thinking level: off, minimal, low, medium, high, xhigh, max");
         builder.AppendLine("  --extension, -e <path>         Load an extension file (repeatable)");
         builder.AppendLine("  --no-extensions, -ne           Disable extension discovery (explicit -e paths still work)");
         builder.AppendLine("  --skill <path>                 Load a skill file or directory (repeatable)");

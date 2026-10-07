@@ -11,6 +11,41 @@ namespace Tau.AgentCore.Tests;
 
 public sealed class ProxyStreamProviderTests
 {
+    /// <summary>【AgentCore】【代理工具终态】最终调用覆盖部分参数，命名空间通过请求和响应双向保留。</summary>
+    /// <param name="stringArguments">兼容字符串参数。</param><param name="toolNamespace">服务端空间。</param><returns>异步测试任务。</returns>
+    [Theory]
+    [InlineData(false, "files")]
+    [InlineData(true, "")]
+    public async Task FinalToolCallReplacesPartialAndPreservesNamespace(bool stringArguments, string toolNamespace)
+    {
+        var finalArguments = stringArguments ? "\"{\\\"final\\\":true}\"" : "{\"final\":true}";
+        using var handler = new RecordingHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(BuildSse(
+                """{"type":"start"}""",
+                """{"type":"toolcall_start","contentIndex":0,"id":"partial","toolName":"partial"}""",
+                """{"type":"toolcall_delta","contentIndex":0,"delta":"{"}""",
+                "{\"type\":\"toolcall_end\",\"contentIndex\":0,\"toolCall\":{\"id\":\"final\",\"name\":\"read\",\"arguments\":" + finalArguments +
+                    ",\"thoughtSignature\":\"signature\",\"namespace\":\"" + toolNamespace + "\"}}",
+                """{"type":"done","reason":"toolUse"}"""), Encoding.UTF8, "text/event-stream")
+        });
+        using var client = new HttpClient(handler);
+        var provider = new ProxyStreamProvider(client, api: "proxy-stream");
+        var model = new Model { Id = "model", Name = "Model", Api = provider.Api, Provider = "test", BaseUrl = "https://example.invalid" };
+        var stream = provider.StreamSimple(model, new() { Messages = [new AssistantMessage([new ToolCallContent("old", "read", "{}") { Namespace = "request" }])] },
+            new ProxyStreamOptions { ApiKey = "synthetic" });
+        var events = await CollectAsync(stream);
+        var call = Assert.IsType<ToolCallContent>(Assert.Single((await stream.ResultAsync).Content));
+        Assert.Equal("final", call.Id);
+        Assert.Equal("read", call.Name);
+        Assert.Equal("{\"final\":true}", call.Arguments);
+        Assert.Equal("signature", call.ThoughtSignature);
+        Assert.Equal(toolNamespace, call.Namespace);
+        Assert.Equal(call, Assert.Single(events.OfType<ToolCallEndEvent>()).ToolCall);
+        using var body = JsonDocument.Parse(handler.LastBody!);
+        Assert.Equal("request", body.RootElement.GetProperty("context").GetProperty("messages")[0].GetProperty("content")[0].GetProperty("namespace").GetString());
+    }
+
     [Fact]
     public async Task StreamSimple_RoundTripsThroughLoopbackProxyServer()
     {

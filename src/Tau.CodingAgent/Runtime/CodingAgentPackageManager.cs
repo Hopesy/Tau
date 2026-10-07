@@ -39,6 +39,8 @@ public sealed record CodingAgentPackageResources(
     IReadOnlyList<string> ThemePaths,
     IReadOnlyList<CodingAgentPackageDiagnostic> Diagnostics)
 {
+    /// <summary>按资源路径索引的包来源元数据，目录资源覆盖其内部文件。</summary>
+    public IReadOnlyDictionary<string, CodingAgentSourceInfo> SourceInfos { get; init; } = new Dictionary<string, CodingAgentSourceInfo>();
     public IReadOnlyList<CodingAgentResourceDiagnostic> ResourceDiagnostics =>
         CodingAgentResourceDiagnostics.FromPackages(Diagnostics);
 }
@@ -108,6 +110,7 @@ public sealed class CodingAgentPackageResourceState
     }
 
     public IReadOnlyList<string> ExtensionPaths => _resources.ExtensionPaths;
+    public IReadOnlyDictionary<string, CodingAgentSourceInfo> SourceInfos => _resources.SourceInfos;
     public IReadOnlyList<string> SkillPaths => _resources.SkillPaths;
     public IReadOnlyList<string> PromptPaths => _resources.PromptPaths;
     public IReadOnlyList<string> ThemePaths => _resources.ThemePaths;
@@ -119,7 +122,7 @@ public sealed class CodingAgentPackageResourceState
     }
 }
 
-public sealed class CodingAgentPackageManager
+public sealed partial class CodingAgentPackageManager
 {
     private const string ProjectConfigDirectoryName = ".tau";
 
@@ -150,6 +153,14 @@ public sealed class CodingAgentPackageManager
     public string ProjectSettingsPath { get; }
 
     public string UserInstallDirectory { get; }
+    public bool IsProjectTrusted { get; set; } = true;
+
+    /// <summary>【CodingAgent】【包信任】未信任项目不能安装、删除或修改项目包配置。</summary>
+    /// <param name="local">是否操作项目作用域。</param>
+    private void AssertProjectTrusted(bool local)
+    {
+        if (local && !IsProjectTrusted) throw new InvalidOperationException("Project is not trusted. Trust the project before modifying project packages.");
+    }
 
     public static string GetDefaultUserSettingsPath()
     {
@@ -164,7 +175,7 @@ public sealed class CodingAgentPackageManager
         var packages = new List<CodingAgentConfiguredPackage>();
         AddConfiguredPackages(packages, "user", UserSettingsPath);
 
-        if (!PathsEqual(UserSettingsPath, ProjectSettingsPath))
+        if (IsProjectTrusted && !PathsEqual(UserSettingsPath, ProjectSettingsPath))
         {
             AddConfiguredPackages(packages, "project", ProjectSettingsPath);
         }
@@ -180,6 +191,7 @@ public sealed class CodingAgentPackageManager
 
     public void Install(string source, bool local)
     {
+        AssertProjectTrusted(local);
         var normalized = NormalizeSource(source) ?? throw new ArgumentException("Package source is required.", nameof(source));
         var parsed = ParseSource(normalized);
         var scope = local ? "project" : "user";
@@ -207,6 +219,7 @@ public sealed class CodingAgentPackageManager
 
     public bool AddSource(string source, bool local)
     {
+        AssertProjectTrusted(local);
         var normalized = NormalizeSource(source);
         if (normalized is null)
         {
@@ -235,6 +248,7 @@ public sealed class CodingAgentPackageManager
 
     public void Remove(string source, bool local)
     {
+        AssertProjectTrusted(local);
         var normalized = NormalizeSource(source) ?? throw new ArgumentException("Package source is required.", nameof(source));
         var parsed = ParseSource(normalized);
         var scope = local ? "project" : "user";
@@ -256,6 +270,7 @@ public sealed class CodingAgentPackageManager
 
     public bool RemoveSource(string source, bool local)
     {
+        AssertProjectTrusted(local);
         var normalized = NormalizeSource(source);
         if (normalized is null)
         {
@@ -321,6 +336,7 @@ public sealed class CodingAgentPackageManager
         var prompts = new List<string>();
         var themes = new List<string>();
         var diagnostics = new List<CodingAgentPackageDiagnostic>();
+        var sourceInfos = new Dictionary<string, CodingAgentSourceInfo>(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
 
         foreach (var configured in EnumerateConfiguredSources())
         {
@@ -344,15 +360,20 @@ public sealed class CodingAgentPackageManager
                 continue;
             }
 
+            var previous = (extensions.Count, skills.Count, prompts.Count, themes.Count);
             AddPackageResources(configured.Source, root, configured.Scope, extensions, skills, prompts, themes, diagnostics);
+            // 1. 【CodingAgent】【包来源】为本次发现的资源记录原始包地址与作用域，重复路径保留先发现的来源
+            foreach (var path in extensions.Skip(previous.Item1).Concat(skills.Skip(previous.Item2)).Concat(prompts.Skip(previous.Item3)).Concat(themes.Skip(previous.Item4)))
+                sourceInfos.TryAdd(Path.GetFullPath(path), new(path, configured.Source.Source, configured.Scope, "package", root));
         }
 
+        AddSettingsResources(extensions, skills, prompts, themes, sourceInfos);
         return new CodingAgentPackageResources(
             DistinctPaths(extensions),
             DistinctPaths(skills),
             DistinctPaths(prompts),
             DistinctPaths(themes),
-            diagnostics.ToArray());
+            diagnostics.ToArray()) { SourceInfos = sourceInfos };
     }
 
     private void AddConfiguredPackages(ICollection<CodingAgentConfiguredPackage> packages, string scope, string settingsPath)
@@ -377,7 +398,7 @@ public sealed class CodingAgentPackageManager
             yield return (source, "user");
         }
 
-        if (PathsEqual(UserSettingsPath, ProjectSettingsPath))
+        if (!IsProjectTrusted || PathsEqual(UserSettingsPath, ProjectSettingsPath))
         {
             yield break;
         }

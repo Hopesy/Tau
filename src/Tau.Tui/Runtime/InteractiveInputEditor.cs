@@ -11,6 +11,9 @@ public sealed class InteractiveInputEditor
     private readonly InputBuffer _buffer;
     private readonly KillRing _killRing = new();
     private IKeyBindingMap _bindings;
+    private IConsoleKeyReader? _inputReaderOverride;
+    private IKeyBindingMap? _inputBindingsOverride;
+    private IKeyBindingMap ActiveBindings => _inputBindingsOverride ?? _bindings;
     private ITuiAutocompleteProvider? _autocompleteProvider;
     private AutocompleteSession? _autocompleteSession;
     private Func<ConsoleKeyInfo, CancellationToken, Task<bool>>? _shortcutHandler;
@@ -19,6 +22,9 @@ public sealed class InteractiveInputEditor
     private string _lastYankedText = string.Empty;
     private readonly Dictionary<int, string> _pastes = new();
     private int _pasteCounter;
+    private UndoStack _undoStack = new();
+    private string _cursorDraft = string.Empty;
+    private int _cursorIndex;
 
     public InteractiveInputEditor(
         IConsoleKeyReader reader,
@@ -44,6 +50,70 @@ public sealed class InteractiveInputEditor
 
     public string GetExpandedDraft() => ExpandPasteMarkers(_buffer.Draft);
 
+    /// <summary>【Tui】【草稿交接】用完整文本替换草稿，并清除旧粘贴引用，避免再次展开旧标记。</summary>
+    /// <param name="text">完整文本，空引用表示清空。</param><param name="cursorIndex">可选完整文本光标，默认位于末尾。</param>
+    public void SetExpandedDraft(string? text, int? cursorIndex = null)
+    {
+        var normalized = NormalizeEditorText(text ?? string.Empty);
+        if (!string.Equals(GetExpandedDraft(), normalized, StringComparison.Ordinal))
+            _undoStack.Push(CaptureUndoState(new(_buffer.Draft), GetCollapsedCursorIndex()));
+        _pastes.Clear();
+        _pasteCounter = 0;
+        StoreDraft(normalized, cursorIndex ?? normalized.Length);
+        ResetTransientEditAction();
+    }
+
+    /// <summary>【Tui】【光标查询】返回展开草稿中的 UTF-16 偏移，用于应用层插入前后分隔符。</summary>
+    /// <returns>完整文本中的插入位置。</returns>
+    public int GetExpandedCursorIndex() => ExpandPasteMarkers(_buffer.Draft[..GetCollapsedCursorIndex()]).Length;
+
+    /// <summary>【Tui】【程序插入】在当前光标插入完整文本，规范化换行与制表符，并形成一次可撤销操作。</summary>
+    /// <param name="text">待插入文本；空文本不改变状态。</param>
+    public void InsertTextAtCursor(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return;
+        var cursor = GetCollapsedCursorIndex();
+        var previous = CaptureUndoState(new(_buffer.Draft), cursor);
+        var normalized = NormalizeEditorText(text);
+        var updated = _buffer.Draft.Insert(cursor, normalized);
+        cursor += normalized.Length;
+        _undoStack.PushIfChanged(previous, updated, cursor);
+        StoreDraft(updated, cursor);
+        ResetTransientEditAction();
+    }
+
+    /// <summary>【Tui】【草稿转移】取走完整草稿，同时释放本编辑器的粘贴、光标和撤销状态。</summary>
+    /// <returns>转移前的完整文本。</returns>
+    public string TakeDraft()
+    {
+        var text = GetExpandedDraft();
+        _pastes.Clear();
+        _pasteCounter = 0;
+        _undoStack = new();
+        StoreDraft(string.Empty, 0);
+        ResetTransientEditAction();
+        return text;
+    }
+
+    /// <summary>【Tui】【光标连续性】直接替换底层缓冲时回退末尾，正常应用动作保留原位置。</summary>
+    /// <returns>折叠缓冲中的 UTF-16 偏移。</returns>
+    private int GetCollapsedCursorIndex() => string.Equals(_cursorDraft, _buffer.Draft, StringComparison.Ordinal)
+        ? Math.Clamp(_cursorIndex, 0, _buffer.Draft.Length) : _buffer.Draft.Length;
+
+    /// <summary>【Tui】【编辑状态】同时保存文本与光标，供下次输入循环继续编辑。</summary>
+    /// <param name="text">折叠文本。</param><param name="cursor">光标位置。</param>
+    private void StoreDraft(string text, int cursor)
+    {
+        _buffer.SetDraft(text);
+        _cursorDraft = text;
+        _cursorIndex = Math.Clamp(cursor, 0, text.Length);
+    }
+
+    /// <summary>【Tui】【程序文本规范化】保持内容，仅统一换行和制表符，与程序设置及插入共用。</summary>
+    /// <param name="text">原始文本。</param><returns>规范化文本。</returns>
+    private static string NormalizeEditorText(string text) => text.Replace("\r\n", "\n", StringComparison.Ordinal)
+        .Replace('\r', '\n').Replace("\t", "    ", StringComparison.Ordinal);
+
     public void SetKeyBindings(IKeyBindingMap bindings)
     {
         _bindings = bindings;
@@ -60,6 +130,29 @@ public sealed class InteractiveInputEditor
         _shortcutHandler = shortcutHandler;
     }
 
+    /// <summary>【Tui】【输入阶段】临时使用阶段读取器和键位，保留当前编辑器的历史、撤销、剪切及光标状态。</summary>
+    /// <param name="reader">当前阶段读取器。</param><param name="bindings">当前阶段键位。</param>
+    /// <param name="prompt">提示符。</param><param name="promptColor">提示颜色。</param><param name="cancellationToken">阶段取消信号。</param>
+    /// <returns>当前输入结果，结束时恢复此前的读取器和键位。</returns>
+    public async Task<InputResult> ReadLineWithInputAsync(IConsoleKeyReader reader, IKeyBindingMap bindings,
+        string prompt, ConsoleColor? promptColor = null, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(reader); ArgumentNullException.ThrowIfNull(bindings);
+        var previousReader = _inputReaderOverride; var previousBindings = _inputBindingsOverride;
+        _inputReaderOverride = reader; _inputBindingsOverride = bindings;
+        try { return await ReadLineAsync(prompt, promptColor, cancellationToken).ConfigureAwait(false); }
+        finally { _inputReaderOverride = previousReader; _inputBindingsOverride = previousBindings; }
+    }
+
+    /// <summary>【Tui】【临时询问】用独立状态读取模态问题，不把草稿、撤销或临时回答混入主编辑器。</summary>
+    /// <param name="prompt">询问提示符。</param><param name="promptColor">提示颜色。</param><param name="cancellationToken">询问取消信号。</param>
+    /// <returns>询问结果。</returns>
+    public Task<InputResult> ReadPromptAsync(string prompt, ConsoleColor? promptColor = null, CancellationToken cancellationToken = default) =>
+        new InteractiveInputEditor(_reader, _renderer, bindings: _bindings).ReadLineAsync(prompt, promptColor, cancellationToken);
+
+    /// <summary>【Tui】【输入循环】编辑当前草稿直到提交、取消或应用动作，跨动作返回保留折叠粘贴引用。</summary>
+    /// <param name="prompt">提示符。</param><param name="promptColor">提示颜色。</param>
+    /// <param name="cancellationToken">读取取消信号。</param><returns>输入结果或应用动作。</returns>
     public async Task<InputResult> ReadLineAsync(
         string prompt,
         ConsoleColor? promptColor = null,
@@ -67,12 +160,10 @@ public sealed class InteractiveInputEditor
     {
         _renderer.WritePrompt(prompt, promptColor);
         var chars = new List<char>(_buffer.Draft);
-        var cursor = chars.Count;
+        var cursor = GetCollapsedCursorIndex();
         var historyOffset = -1;
         int? preferredVerticalColumn = null;
-        var undoStack = new UndoStack();
-        _pastes.Clear();
-        _pasteCounter = 0;
+        var undoStack = _undoStack;
         ResetTransientEditAction();
         RenderDraft(chars, cursor);
 
@@ -103,7 +194,14 @@ public sealed class InteractiveInputEditor
                 continue;
             }
 
-            var action = _bindings.Resolve(key);
+            var action = ActiveBindings.ResolveInput(inputEvent, chars.Count > 0);
+            // 1. 【Tui】【补全退出】中断键优先关闭补全，保留输入文本，不触发应用层退出或双击动作
+            if (action == EditorAction.Interrupt && _autocompleteSession is not null)
+            {
+                _autocompleteSession = null;
+                RenderDraft(chars, cursor);
+                continue;
+            }
 
             if (ShouldInsertNewLine(key, action))
             {
@@ -117,7 +215,8 @@ public sealed class InteractiveInputEditor
                 continue;
             }
 
-            if (action == EditorAction.None && TryHandleUndoShortcut(key, undoStack, ref chars, ref cursor))
+            if ((action == EditorAction.Undo || action == EditorAction.None && ActiveBindings.UseLegacyShortcuts && IsUndoKey(key)) &&
+                TryApplyUndo(undoStack, ref chars, ref cursor))
             {
                 historyOffset = -1;
                 preferredVerticalColumn = null;
@@ -126,10 +225,12 @@ public sealed class InteractiveInputEditor
                 continue;
             }
 
-            if (action == EditorAction.None)
+            if (action is EditorAction.Yank or EditorAction.YankPop || action == EditorAction.None && ActiveBindings.UseLegacyShortcuts)
             {
                 var undoState = CaptureUndoState(chars, cursor);
-                if (TryHandleYankShortcut(key, chars, ref cursor))
+                var yank = action == EditorAction.Yank || action == EditorAction.None && IsYankKey(key);
+                var yankPop = action == EditorAction.YankPop || action == EditorAction.None && IsYankPopKey(key);
+                if (TryHandleYankAction(yank, yankPop, chars, ref cursor))
                 {
                     PushUndoIfChanged(undoStack, undoState, chars, cursor);
                     historyOffset = -1;
@@ -141,7 +242,10 @@ public sealed class InteractiveInputEditor
 
             switch (action)
             {
+                case EditorAction.Ignore:
+                    break;
                 case EditorAction.Cancel:
+                case EditorAction.ExitIfEmpty:
                     _renderer.Cancel();
                     _buffer.SetDraft(ExpandPasteMarkers(new string(chars.ToArray())));
                     _pastes.Clear();
@@ -178,6 +282,7 @@ public sealed class InteractiveInputEditor
                     _renderer.Commit();
                     _buffer.SetDraft(committed);
                     _buffer.Commit();
+                    _undoStack = new();
                     _pastes.Clear();
                     _pasteCounter = 0;
                     ResetTransientEditAction();
@@ -197,10 +302,11 @@ public sealed class InteractiveInputEditor
                     ResetTransientEditAction();
                     if (searchOutcome.Submit)
                     {
-                        var committed = new string(chars.ToArray());
+                        var committed = ExpandPasteMarkers(new string(chars.ToArray()));
                         _renderer.Commit();
-                        _buffer.SetDraft(committed);
+                        SetExpandedDraft(committed);
                         _buffer.Commit();
+                        _undoStack = new();
                         ResetTransientEditAction();
                         if (!string.IsNullOrWhiteSpace(committed))
                         {
@@ -248,6 +354,14 @@ public sealed class InteractiveInputEditor
                 case EditorAction.OpenExternalEditor:
                 case EditorAction.QueueFollowUpMessage:
                 case EditorAction.RestoreQueuedMessages:
+                case EditorAction.ClearEditor:
+                case EditorAction.Interrupt:
+                case EditorAction.CycleThinkingLevel:
+                case EditorAction.CopyLastMessage:
+                case EditorAction.NewSession:
+                case EditorAction.OpenSessionTree:
+                case EditorAction.ForkSession:
+                case EditorAction.ResumeSession:
                 {
                     var draft = new string(chars.ToArray());
                     _renderer.Commit();
@@ -414,9 +528,10 @@ public sealed class InteractiveInputEditor
                     cursor = FindLineEnd(chars, cursor);
                     break;
                 case EditorAction.HistoryPrev:
+                case EditorAction.PromptHistoryPrevious:
                 {
                     ResetTransientEditAction();
-                    if (ContainsLineBreak(chars))
+                    if (action == EditorAction.HistoryPrev && ContainsLineBreak(chars))
                     {
                         if (TryMoveCursorVertically(chars, cursor, -1, ref preferredVerticalColumn, out var verticalCursor))
                         {
@@ -439,9 +554,10 @@ public sealed class InteractiveInputEditor
                     break;
                 }
                 case EditorAction.HistoryNext:
+                case EditorAction.PromptHistoryNext:
                 {
                     ResetTransientEditAction();
-                    if (ContainsLineBreak(chars))
+                    if (action == EditorAction.HistoryNext && ContainsLineBreak(chars))
                     {
                         if (TryMoveCursorVertically(chars, cursor, 1, ref preferredVerticalColumn, out var verticalCursor))
                         {
@@ -476,14 +592,15 @@ public sealed class InteractiveInputEditor
                     break;
                 }
                 default:
-                    if (key.KeyChar != '\0' && !char.IsControl(key.KeyChar) &&
-                        (key.Modifiers & ConsoleModifiers.Control) == 0)
+                    var insertedText = inputEvent.Text ?? (key.KeyChar != '\0' && !char.IsControl(key.KeyChar) &&
+                        (key.Modifiers & ConsoleModifiers.Control) == 0 ? key.KeyChar.ToString() : null);
+                    if (!string.IsNullOrEmpty(insertedText))
                     {
                         preferredVerticalColumn = null;
                         ResetTransientEditAction();
                         var undoState = CaptureUndoState(chars, cursor);
-                        chars.Insert(cursor, key.KeyChar);
-                        cursor++;
+                        chars.InsertRange(cursor, insertedText);
+                        cursor += insertedText.Length;
                         PushUndoIfChanged(undoStack, undoState, chars, cursor);
                     }
                     break;
@@ -496,7 +613,7 @@ public sealed class InteractiveInputEditor
     private void RenderDraft(IReadOnlyList<char> chars, int cursor)
     {
         var collapsed = new string(chars.ToArray());
-        _buffer.SetDraft(collapsed);
+        StoreDraft(collapsed, cursor);
         var batch = (_renderer as IInteractiveRenderBatch)?.BeginRenderBatch();
         try
         {
@@ -516,21 +633,20 @@ public sealed class InteractiveInputEditor
         }
     }
 
-    private static bool TryHandleUndoShortcut(
-        ConsoleKeyInfo key,
+    /// <summary>【Tui】【撤销动作】恢复上一编辑状态，没有历史时仍消费撤销动作。</summary>
+    /// <param name="undoStack">撤销栈。</param><param name="chars">可替换的当前文本。</param><param name="cursor">恢复后的光标。</param><returns>动作已处理。</returns>
+    private bool TryApplyUndo(
         UndoStack undoStack,
         ref List<char> chars,
         ref int cursor)
     {
-        if (!IsUndoKey(key))
-        {
-            return false;
-        }
-
         if (undoStack.TryPop(out var state) && state is not null)
         {
             chars = new List<char>(state.Text);
             cursor = Math.Clamp(state.Cursor, 0, chars.Count);
+            _pastes.Clear();
+            foreach (var (id, text) in state.Pastes) _pastes.Add(id, text);
+            _pasteCounter = state.PasteCounter;
         }
 
         return true;
@@ -620,8 +736,10 @@ public sealed class InteractiveInputEditor
             modifiers == (ConsoleModifiers.Control | ConsoleModifiers.Shift);
     }
 
-    private static InputEditorState CaptureUndoState(List<char> chars, int cursor) =>
-        new(new string(chars.ToArray()), Math.Clamp(cursor, 0, chars.Count));
+    /// <summary>【Tui】【撤销快照】同时捕获文本、光标和粘贴表，程序替换后仍能恢复完整原文。</summary>
+    /// <param name="chars">当前文本。</param><param name="cursor">当前光标。</param><returns>独立编辑快照。</returns>
+    private InputEditorState CaptureUndoState(List<char> chars, int cursor) =>
+        new(new string(chars.ToArray()), Math.Clamp(cursor, 0, chars.Count), new Dictionary<int, string>(_pastes), _pasteCounter);
 
     private static void PushUndoIfChanged(
         UndoStack undoStack,
@@ -634,12 +752,13 @@ public sealed class InteractiveInputEditor
 
     private async ValueTask<ConsoleInputEvent> ReadInputEventAsync(CancellationToken cancellationToken)
     {
-        if (_reader is IConsoleInputEventReader eventReader)
+        var reader = _inputReaderOverride ?? _reader;
+        if (reader is IConsoleInputEventReader eventReader)
         {
             return await eventReader.ReadInputEventAsync(cancellationToken).ConfigureAwait(false);
         }
 
-        var key = await _reader.ReadKeyAsync(cancellationToken).ConfigureAwait(false);
+        var key = await reader.ReadKeyAsync(cancellationToken).ConfigureAwait(false);
         return ConsoleInputEvent.KeyPress(key);
     }
 
@@ -784,21 +903,23 @@ public sealed class InteractiveInputEditor
         return text;
     }
 
-    private bool TryHandleYankShortcut(ConsoleKeyInfo key, List<char> chars, ref int cursor)
+    /// <summary>【Tui】【取回动作】取回最近删除内容，或轮换前一次取回使用的删除环条目。</summary>
+    /// <param name="yank">是否普通取回。</param><param name="yankPop">是否轮换取回。</param><param name="chars">当前文本。</param><param name="cursor">插入光标。</param><returns>是否处理动作。</returns>
+    private bool TryHandleYankAction(bool yank, bool yankPop, List<char> chars, ref int cursor)
     {
-        if (IsYankKey(key))
+        if (yank)
         {
             var text = _killRing.Peek();
             if (text is null)
             {
-                return false;
+                return true;
             }
 
             InsertYankedText(chars, ref cursor, text);
             return true;
         }
 
-        if (!IsYankPopKey(key))
+        if (!yankPop)
         {
             return false;
         }
@@ -901,7 +1022,7 @@ public sealed class InteractiveInputEditor
             return false;
         }
 
-        return _bindings.Resolve(new ConsoleKeyInfo('\0', ConsoleKey.Enter, shift: false, alt: false, control: false))
+        return ActiveBindings.Resolve(new ConsoleKeyInfo('\0', ConsoleKey.Enter, shift: false, alt: false, control: false))
             == EditorAction.Submit;
     }
 
@@ -1120,7 +1241,8 @@ public sealed class InteractiveInputEditor
         while (true)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var key = await _reader.ReadKeyAsync(cancellationToken).ConfigureAwait(false);
+            var input = await ReadInputEventAsync(cancellationToken).ConfigureAwait(false);
+            var key = input.Key;
 
             if ((key.Modifiers & ConsoleModifiers.Control) != 0 && key.Key == ConsoleKey.G)
             {
@@ -1152,16 +1274,18 @@ public sealed class InteractiveInputEditor
             {
                 if (pattern.Count > 0)
                 {
-                    pattern.RemoveAt(pattern.Count - 1);
+                    var start = FindPreviousTextElementStart(pattern, pattern.Count);
+                    pattern.RemoveRange(start, pattern.Count - start);
                 }
                 offset = 0;
                 ApplyMatch();
                 continue;
             }
 
-            if (key.KeyChar != '\0' && !char.IsControl(key.KeyChar))
+            var searchText = input.Text ?? (key.KeyChar != '\0' && !char.IsControl(key.KeyChar) ? key.KeyChar.ToString() : null);
+            if (!string.IsNullOrEmpty(searchText))
             {
-                pattern.Add(key.KeyChar);
+                pattern.AddRange(searchText);
                 offset = 0;
                 ApplyMatch();
                 continue;
@@ -1202,11 +1326,15 @@ public sealed class InteractiveInputEditor
         IReadOnlyList<TuiAutocompleteItem> Items,
         int SelectedIndex);
 
-    private sealed record InputEditorState(string Text, int Cursor);
+    private sealed record InputEditorState(string Text, int Cursor, IReadOnlyDictionary<int, string> Pastes, int PasteCounter);
 
     private sealed class UndoStack
     {
         private readonly List<InputEditorState> _entries = [];
+
+        /// <summary>【Tui】【程序撤销】直接保存已确认内容发生变化的快照，允许展开内容与标记文字不同但显示相同。</summary>
+        /// <param name="state">需要恢复的完整状态。</param>
+        public void Push(InputEditorState state) => _entries.Add(state);
 
         public void PushIfChanged(InputEditorState previous, string currentText, int currentCursor)
         {
@@ -1711,6 +1839,10 @@ public sealed class InputHistory
     public int Count => _entries.Count;
 
     public void Add(string entry) => AddInternal(entry, persist: true);
+
+    /// <summary>【TUI】【会话历史】恢复当前会话的输入，只加入内存回看列表，不重复写入全局历史文件。</summary>
+    /// <param name="entry">历史用户输入。</param>
+    public void AddRestored(string entry) => AddInternal(entry, persist: false);
 
     private void AddInternal(string entry, bool persist)
     {

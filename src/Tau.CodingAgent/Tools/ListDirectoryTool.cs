@@ -8,8 +8,16 @@ namespace Tau.CodingAgent.Tools;
 public sealed class ListDirectoryTool : IAgentTool
 {
     private const int DefaultLimit = 500;
+    private readonly string _workingDirectory;
+
+    /// <summary>【CodingAgent】【工具目录】创建绑定会话目录的目录列表工具</summary>
+    /// <param name="workingDirectory">会话目录；为空时捕获当前进程目录</param>
+    public ListDirectoryTool(string? workingDirectory = null) =>
+        _workingDirectory = CodingAgentToolPaths.CaptureWorkingDirectory(workingDirectory);
 
     public string Name => "ls";
+    /// <summary>工具在系统提示中的一行简介。</summary>
+    public string PromptSnippet => "List directory contents";
     public string Label => "List Directory";
     public string Description => "List directory contents. Returns entries sorted alphabetically, with '/' suffix for directories. Includes dotfiles. Output is truncated to 500 entries or 50KB.";
 
@@ -23,11 +31,16 @@ public sealed class ListDirectoryTool : IAgentTool
         }
         """).RootElement.Clone();
 
+    /// <summary>【CodingAgent】【工具执行】在所属会话目录中执行工具请求</summary>
+    /// <param name="toolCallId">工具调用标识</param>
+    /// <param name="args">工具参数</param>
+    /// <param name="ct">取消信号</param>
+    /// <param name="onUpdate">增量结果回调</param>
+    /// <returns>工具执行结果</returns>
     public Task<ToolResult> ExecuteAsync(
         string toolCallId, JsonElement args, CancellationToken ct, Func<ToolUpdate, Task>? onUpdate)
     {
-        var path = args.TryGetProperty("path", out var p) ? p.GetString() : ".";
-        path ??= ".";
+        var path = CodingAgentToolPaths.Resolve(args.TryGetProperty("path", out var p) ? p.GetString() : null, _workingDirectory);
         var limit = args.TryGetProperty("limit", out var limitElement) && limitElement.ValueKind == JsonValueKind.Number
             ? Math.Max(0, limitElement.GetInt32())
             : DefaultLimit;

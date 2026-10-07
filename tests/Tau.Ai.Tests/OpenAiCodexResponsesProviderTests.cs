@@ -9,6 +9,36 @@ namespace Tau.Ai.Tests;
 
 public sealed class OpenAiCodexResponsesProviderTests
 {
+    /// <summary>【AI】【Codex观察】WebSocket 使用转换后的连接头，观察器看到事件重映射之前的原始类型。</summary>
+    /// <returns>异步测试任务。</returns>
+    [Fact]
+    public async Task WebSocket_TransformsHandshakeHeadersAndObservesOriginalEvents()
+    {
+        var connection = new FakeCodexWebSocketConnection(_ => ["""{"type":"response.done","response":{"status":"completed"}}"""]);
+        var transport = new FakeCodexWebSocketTransport(connection);
+        using var handler = new OpenAiResponsesProviderTests.StubHandler(_ => throw new InvalidOperationException("Unexpected HTTP fallback."));
+        using var client = new HttpClient(handler);
+        using var provider = new OpenAiCodexResponsesProvider(client, transport);
+        var seen = new List<JsonElement>();
+        var result = await provider.StreamSimple(BuildCodexModel(), new() { Messages = [new UserMessage("hi")] }, new()
+        {
+            ApiKey = OpenAiResponsesSharedTests.BuildFakeJwt("synthetic"),
+            Transport = StreamTransport.WebSocket,
+            TransformHeaders = (headers, _) =>
+            {
+                headers["X-Synthetic"] = "trace";
+                headers["originator"] = null;
+                return ValueTask.FromResult<IDictionary<string, string?>?>(headers);
+            },
+            OnProviderStreamEvent = (data, _) => { seen.Add(data); return ValueTask.CompletedTask; }
+        }).ResultAsync;
+        Assert.True(result.StopReason != StopReason.Error, result.ErrorMessage);
+        var connect = Assert.Single(transport.Connects);
+        Assert.Equal("trace", connect.Headers["X-Synthetic"]);
+        Assert.False(connect.Headers.ContainsKey("originator"));
+        Assert.Equal("response.done", Assert.Single(seen).GetProperty("type").GetString());
+    }
+
     [Fact]
     public async Task Stream_AddsCodexHeadersFromJwt()
     {
@@ -181,7 +211,7 @@ public sealed class OpenAiCodexResponsesProviderTests
     {
         using var handler = new OpenAiResponsesProviderTests.StubHandler(_ => OpenAiResponsesProviderTests.SseResponse(
             """
-            data: {"type":"response.incomplete","response":{"id":"resp_1","status":"incomplete","usage":{"input_tokens":1,"output_tokens":2}}}
+            data: {"type":"response.incomplete","response":{"id":"resp_1","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":1,"output_tokens":2}}}
 
             """));
         using var client = new HttpClient(handler);
